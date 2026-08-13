@@ -15,23 +15,24 @@ this file when they ship.
 This file ranks by what a program would prove; it is not the build order. That
 lives in Phase 5 of [`USERSPACE-ROADMAP.md`](USERSPACE-ROADMAP.md), ranked by
 what someone else's first hour with the ISO runs into. The two agreed on the
-file manager, which is still the first entry here, and disagreed on the
-settings panel, which Phase 5 split: runtime keyboard layout went first on its
-own and has shipped as `keymap`, ahead of the panel that would house it.
+file manager, which was the first entry here and has shipped as `edos-files`,
+and disagreed on the settings panel, which Phase 5 split: runtime keyboard
+layout went first on its own and has shipped as `keymap`, ahead of the panel
+that would house it.
 
-## The one to write first
+## The one to write next
 
-**A file manager.** The obvious hole in the desktop, and it lands on the parts
-of the VFS with the least coverage. Drag-to-move is `rename`, which almost
-nothing exercises; symbolic links now resolve across mounts and no graphical
-program has ever walked `/tmp` and `/var` in one view. It needs no new kernel
-surface at all.
+**A graphical editor.** What is left of "a desktop that is not a terminal
+launcher": `edos-files` can now reach a file without a shell but nothing
+graphical can change one, so every edit is still `edos-vi` in a PTY. It is also
+the third consumer of `widgets::text_input`, and the second one is what found
+the two defects that had been in that widget since it was written, so a third
+is worth having for the same reason.
 
 ## GUI
 
 | Program | What it exercises that nothing does today |
 |---|---|
-| File manager | `rename`, readdir at scale, symbolic links across mounts, the dentry cache under someone clicking fast |
 | System monitor with sparklines | The *rate* gap: every procfs counter is cumulative, so plotting forces differencing. Would pull on `/proc/ahci_stats`, `/proc/block_cache` and per-CPU load |
 | Paint | Damage rectangles and shm compositing harder than anything else: small, frequent, scattered dirty rects, the opposite of the window-drag case already measured in `WORKING-NOTES.md` |
 | Minesweeper | Right-click. Nothing in the system uses a non-left mouse button, so that path is entirely untested |

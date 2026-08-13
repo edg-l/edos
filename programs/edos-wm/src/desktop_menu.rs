@@ -29,6 +29,7 @@ const PAD: i64 = 5;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Item {
     NewTerminal,
+    Files,
     Widgets,
     NextBackground,
 }
@@ -44,6 +45,11 @@ const ROWS: &[Row] = &[
         item: Item::NewTerminal,
         label: "New terminal",
         icon: &icons::TERMINAL,
+    },
+    Row {
+        item: Item::Files,
+        label: "Files",
+        icon: &icons::FOLDER,
     },
     Row {
         item: Item::Widgets,
@@ -130,6 +136,10 @@ impl DesktopMenu {
         match ROWS[index].item {
             Item::NewTerminal => {
                 let _ = spawn("/bin/edos-terminal", &[], 0, 1, 2);
+                Some(Outcome::Done)
+            }
+            Item::Files => {
+                let _ = spawn("/bin/edos-files", &[], 0, 1, 2);
                 Some(Outcome::Done)
             }
             Item::Widgets => {

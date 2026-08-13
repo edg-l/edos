@@ -32,10 +32,12 @@ pub struct Modifiers {
 }
 
 // KeyCode numeric values (pc_keyboard repr(u8) enum order).
-// Only the ones we need for the layout mapping.
+// The keys a layout maps, plus the function keys programs bind actions to.
 pub mod keycode {
     pub const ESCAPE: u32 = 0;
+    pub const F2: u32 = 2;
     pub const F4: u32 = 4;
+    pub const F5: u32 = 5;
     pub const OEM8: u32 = 17;
     pub const KEY1: u32 = 18;
     pub const KEY2: u32 = 19;
@@ -137,22 +139,46 @@ pub struct Key {
 
 /// A key with a shifted level and no AltGr.
 const fn k(code: u32, base: char, shift: char) -> Key {
-    Key { code, base, shift, altgr: '\0', caps: false }
+    Key {
+        code,
+        base,
+        shift,
+        altgr: '\0',
+        caps: false,
+    }
 }
 
 /// A key with a shifted level and an AltGr level.
 const fn ka(code: u32, base: char, shift: char, altgr: char) -> Key {
-    Key { code, base, shift, altgr, caps: false }
+    Key {
+        code,
+        base,
+        shift,
+        altgr,
+        caps: false,
+    }
 }
 
 /// A letter, so Caps Lock applies as well as Shift.
 const fn l(code: u32, lower: char, upper: char) -> Key {
-    Key { code, base: lower, shift: upper, altgr: '\0', caps: true }
+    Key {
+        code,
+        base: lower,
+        shift: upper,
+        altgr: '\0',
+        caps: true,
+    }
 }
 
 /// A letter carrying an AltGr level.
 const fn la(code: u32, lower: char, upper: char, altgr: char) -> Key {
-    Key { code, base: lower, shift: upper, altgr, caps: true }
+    Key {
+        code,
+        base: lower,
+        shift: upper,
+        altgr,
+        caps: true,
+    }
 }
 
 /// The 26 letters, identical on every QWERTY layout. A layout that moves one

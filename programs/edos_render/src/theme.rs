@@ -66,6 +66,21 @@ pub struct Theme {
     pub slider_thumb_hover: Color,
     pub label_text: Color,
 
+    // Listings
+    /// Name of a directory.
+    pub entry_dir: Color,
+    /// Name of a symbolic link.
+    pub entry_link: Color,
+    /// Name of a device node, or of anything else that is neither a file nor a
+    /// directory.
+    pub entry_special: Color,
+    /// Fill behind the selected row.
+    pub list_selected: Color,
+    /// The bar that shows a size against the largest one in view.
+    pub size_gauge: Color,
+    /// Text reporting that something failed or is about to be destroyed.
+    pub warning: Color,
+
     // Terminal
     pub terminal_bg: Color,
     pub terminal_fg: Color,
@@ -131,6 +146,17 @@ impl Theme {
         slider_thumb: Color::from_rgb(0x39, 0xBA, 0xE6),
         slider_thumb_hover: Color::from_rgb(0x59, 0xCA, 0xF6),
         label_text: Color::from_rgb(0xCB, 0xCC, 0xC6),
+
+        // Listings. One hue per kind, all from the Ayu palette, so a listing
+        // says what each name is before its icon is read.
+        entry_dir: Color::from_rgb(0x59, 0xC2, 0xFF),
+        entry_link: Color::from_rgb(0x95, 0xE6, 0xCB),
+        entry_special: Color::from_rgb(0xD2, 0xA6, 0xFF),
+        list_selected: Color::from_rgb(0x1C, 0x27, 0x36),
+        // The accent, dimmed to where it reads as a measurement rather than as
+        // something to click.
+        size_gauge: Color::from_rgb(0x6B, 0x58, 0x36),
+        warning: Color::from_rgb(0xF0, 0x71, 0x78),
 
         // Terminal (Ayu Dark)
         terminal_bg: Color::from_rgb(0x0B, 0x0E, 0x14),

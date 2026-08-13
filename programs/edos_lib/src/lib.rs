@@ -3,6 +3,7 @@ pub mod config;
 pub mod io;
 pub mod keymap;
 pub mod mem;
+pub mod mounts;
 pub mod net;
 pub mod process;
 pub mod procinfo;

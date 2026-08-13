@@ -1,13 +1,13 @@
 # Userspace Roadmap
 
-110 programs and 2 libraries, all in the `programs/` cargo workspace.
+111 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
 | Area | Programs |
 |---|---|
 | Init | `edos-init` (the only process the kernel starts; supervises the GUI session and `sshd`, from compiled-in defaults plus `/etc/services/*.conf`), `svc` (start, stop and inspect them at runtime) |
-| GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-procview`, `wintest` |
+| GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-files` (file manager), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `mkfifo`, `touch`, `stat`, `find`, `du`, `diff`, `dd` |
@@ -187,6 +187,10 @@ death happens at the syscall return boundary, and a wait that re-parks on a
 predicate no peer will ever satisfy never reaches that boundary. See
 `WaitQueue::wait_until_killable`.
 
+**`edos-files`** (Phase 5). The file manager: a places rail, a listing, a
+details pane and a status strip. It is described where it closes a gap, under
+Phase 5 item 4 below.
+
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
 
@@ -302,13 +306,36 @@ than derived. Two separate pieces of work; neither is persistence.
 
 The window system is genuinely a desktop: edge and corner resize, maximize and
 minimize, Alt+Tab, scrollback, drag selection with double-click word snapping.
-What it can start is Terminal, Widget demo, Change background, Shut down. So
-everything real still happens through a PTY, and the GUI is a way to get to one.
+What it could start was Terminal, Widget demo, Change background, Shut down, so
+everything real still happened through a PTY.
 
-A file manager is the single program that changes that, and it is already the
-first entry in [`PROGRAMS.md`](PROGRAMS.md) on the independent ground that it
-lands on the least covered part of the VFS. A graphical editor is second:
-`widgets::text_input` exists and its only consumer is the `wintest` demo.
+**`edos-files` closes the first half of this.** Browsing, opening, renaming,
+deleting and making folders are all reachable without a shell, and a picture
+opens in `imgview` from a double-click. Three things in it are worth knowing:
+
+- **The places rail is the kernel's mount table**, read through
+  `edos_lib::mounts` rather than a list of favourites, so the rail says what is
+  mounted and the meter under it says how full the volume under the current
+  directory is. `df` and `mount` were converted onto the same decoder, which is
+  where the packed reply buffers of `SYS_LIST_MOUNTS` and `SYS_STATFS` now live
+  once instead of three times.
+- **The size column carries a bar per file**, measured logarithmically across
+  the range of sizes present rather than from zero. Measured from zero it says
+  nothing: a directory of binaries between 60K and 160K comes out as 111
+  identical bars, which was the first version and was rejected on the
+  screenshot.
+- **It found two defects in `widgets::text_input`**, both of which had been
+  there since it was written and neither of which `wintest` could show. Its key
+  constants were PS/2 set-1 scancodes while window events carry
+  `pc_keyboard` keycodes, so Enter, the arrows, Home, End and Delete did
+  nothing and the keys those numbers actually name (`M`, `Z`, `C` and `-`)
+  fired the wrong action instead; and the cursor was placed at
+  `cursor_pos * char_width()` in a field drawn in the proportional face, so it
+  drifted from the text it was supposed to sit in. A second consumer is what
+  surfaced both.
+
+A graphical editor is what is left: `widgets::text_input` now works, and
+`wintest` and `edos-files` are its only consumers.
 
 ### 5. A way to get software onto the machine
 

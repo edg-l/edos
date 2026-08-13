@@ -4,56 +4,27 @@
 //!   mount                                    # list current mounts
 //!   mount <device_id> <partition_idx> <path> <fstype>  # mount a partition
 
-use edos_lib::sys::{SYS_LIST_MOUNTS, SYS_LIST_PARTITIONS, SYS_MOUNT, syscall2, syscall4};
+use edos_lib::mounts;
+use edos_lib::sys::{SYS_LIST_PARTITIONS, SYS_MOUNT, syscall2, syscall4};
 use std::env;
 use std::process;
 
 fn list_mounts() {
-    let mut buf = vec![0u8; 4096];
-    let ret = unsafe { syscall2(SYS_LIST_MOUNTS, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    let ret = ret as i64;
-    if ret < 0 {
-        eprintln!("mount: failed to list mounts");
-        process::exit(1);
-    }
-
-    let len = ret as usize;
-    if len == 0 {
+    let mounts = mounts::list();
+    if mounts.is_empty() {
         println!("No filesystems mounted.");
         return;
     }
 
-    let mut offset = 0;
-    while offset + 24 <= len {
-        let path_len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
-        let fs_code = u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().unwrap());
-        let device_id = u64::from_le_bytes(buf[offset + 8..offset + 16].try_into().unwrap());
-        let part_idx = u64::from_le_bytes(buf[offset + 16..offset + 24].try_into().unwrap());
-        offset += 24;
-
-        if offset + path_len > len {
-            break;
-        }
-        let path = std::str::from_utf8(&buf[offset..offset + path_len]).unwrap_or("???");
-        offset += path_len;
-
-        let fs_name = match fs_code {
-            3 => "fat32",
-            6 => "memfs",
-            7 => "devfs",
-            8 => "procfs",
-            9 => "efs",
-            _ => "unknown",
-        };
-
-        let device = match fs_code {
-            6 => "memfs".to_string(),
-            7 => "devfs".to_string(),
-            8 => "procfs".to_string(),
-            _ => format!("dev{}p{}", device_id, part_idx),
-        };
-
-        println!("{} on {} type {}", device, path, fs_name);
+    for mount in mounts {
+        println!(
+            "{} on {} type {}",
+            mount
+                .filesystem
+                .device_label(mount.device_id, mount.partition),
+            mount.path,
+            mount.filesystem.name()
+        );
     }
 }
 

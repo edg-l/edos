@@ -1,8 +1,10 @@
 //! Single-line text input widget.
 
+use edos_lib::keymap::keycode;
+
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_focus_ring, draw_rect,
-    draw_rect_outline, draw_text, text_height,
+    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+    draw_text, text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, TEXT_PAD_X};
 
@@ -26,15 +28,6 @@ pub struct TextInput {
     cursor_visible: bool,
     cursor_blink_counter: u32,
 }
-
-// Scancodes
-const SCANCODE_BACKSPACE: u32 = 14;
-const SCANCODE_ENTER: u32 = 28;
-const SCANCODE_DELETE: u32 = 83;
-const SCANCODE_LEFT: u32 = 75;
-const SCANCODE_RIGHT: u32 = 77;
-const SCANCODE_HOME: u32 = 71;
-const SCANCODE_END: u32 = 79;
 
 impl TextInput {
     /// Create a new text input.
@@ -93,6 +86,29 @@ impl TextInput {
             .char_indices()
             .nth(self.cursor_pos)
             .map_or(self.text.len(), |(offset, _)| offset)
+    }
+
+    /// The character position closest to `offset` pixels from the first glyph.
+    ///
+    /// Rounds to the nearer edge of the character it lands in, so clicking the
+    /// right half of a glyph puts the cursor after it.
+    fn char_at_offset(&self, offset: u32) -> usize {
+        let mut previous = 0;
+        for (index, (at, _)) in self.text.char_indices().enumerate() {
+            let advance = text_width(&self.text[..at]);
+            if advance > offset {
+                let midpoint = previous + (advance - previous) / 2;
+                return if offset < midpoint { index - 1 } else { index };
+            }
+            previous = advance;
+        }
+        let full = text_width(&self.text);
+        let midpoint = previous + (full - previous) / 2;
+        if self.char_len() > 0 && offset < midpoint {
+            self.char_len() - 1
+        } else {
+            self.char_len()
+        }
     }
 
     /// Get the placeholder text.
@@ -253,7 +269,7 @@ impl Widget for TextInput {
 
         // Draw cursor if focused and visible
         if self.focused && self.cursor_visible {
-            let cursor_x = text_x + (self.cursor_pos as u32 * char_width()) as i32;
+            let cursor_x = text_x + text_width(&self.text[..self.cursor_byte()]) as i32;
             draw_rect(
                 buffer,
                 buffer_width,
@@ -276,11 +292,12 @@ impl Widget for TextInput {
             return None;
         }
         if !pressed && self.bounds().contains(x, y) {
-            // Click to position cursor
+            // Click to position cursor. The field is set in the proportional
+            // face, so the character under the pointer is found by measuring
+            // prefixes rather than by dividing by a cell width.
             let text_x = self.x + TEXT_PAD_X as i32;
-            let relative_x = (x - text_x).max(0) as u32;
-            let char_pos = (relative_x / char_width()) as usize;
-            self.cursor_pos = char_pos.min(self.char_len());
+            let target = (x - text_x).max(0) as u32;
+            self.cursor_pos = self.char_at_offset(target);
             self.reset_cursor_blink();
         }
         None
@@ -322,28 +339,28 @@ impl Widget for TextInput {
         self.reset_cursor_blink();
 
         match scancode {
-            SCANCODE_BACKSPACE => {
+            keycode::BACKSPACE => {
                 self.delete_before();
                 Some(WidgetEvent::TextChanged(self.text.clone()))
             }
-            SCANCODE_DELETE => {
+            keycode::DELETE => {
                 self.delete_at();
                 Some(WidgetEvent::TextChanged(self.text.clone()))
             }
-            SCANCODE_ENTER => Some(WidgetEvent::Submit(self.text.clone())),
-            SCANCODE_LEFT => {
+            keycode::RETURN | keycode::NUMPAD_ENTER => Some(WidgetEvent::Submit(self.text.clone())),
+            keycode::ARROW_LEFT => {
                 self.move_left();
                 None
             }
-            SCANCODE_RIGHT => {
+            keycode::ARROW_RIGHT => {
                 self.move_right();
                 None
             }
-            SCANCODE_HOME => {
+            keycode::HOME => {
                 self.move_home();
                 None
             }
-            SCANCODE_END => {
+            keycode::END => {
                 self.move_end();
                 None
             }

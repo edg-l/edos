@@ -3,27 +3,8 @@
 //! Usage: df [path]
 //!   With no args, shows all mounted filesystems.
 
-use edos_lib::sys::{SYS_LIST_MOUNTS, SYS_STATFS, syscall2, syscall3};
+use edos_lib::mounts::{self, Mount, StatFs};
 use std::env;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawStatFs {
-    fs_type: [u8; 16],
-    block_size: u64,
-    total_blocks: u64,
-    free_blocks: u64,
-    total_inodes: u64,
-    free_inodes: u64,
-    volume_name: [u8; 64],
-    version: u32,
-    block_groups: u16,
-    _pad: [u8; 2],
-}
-
-struct MountInfo {
-    path: String,
-}
 
 fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
@@ -37,92 +18,27 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn statfs(path: &str) -> Option<RawStatFs> {
-    let path_c = format!("{}\0", path);
-    let mut buf = [0u8; core::mem::size_of::<RawStatFs>()];
-
-    let ret = unsafe {
-        syscall3(
-            SYS_STATFS,
-            path_c.as_ptr() as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-
-    if ret as i64 == -1 {
-        return None;
-    }
-
-    Some(unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const RawStatFs) })
-}
-
-fn str_from_padded(buf: &[u8]) -> &str {
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    std::str::from_utf8(&buf[..len]).unwrap_or("???")
-}
-
-fn get_mounts() -> Vec<MountInfo> {
-    let mut buf = vec![0u8; 4096];
-    let ret = unsafe { syscall2(SYS_LIST_MOUNTS, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    if ret as i64 <= 0 {
-        return Vec::new();
-    }
-
-    // Return value is total bytes written, not entry count.
-    let total_bytes = ret as usize;
-    let mut mounts = Vec::new();
-    let mut offset = 0;
-
-    while offset + 24 <= total_bytes {
-        let path_len = u32::from_le_bytes([
-            buf[offset],
-            buf[offset + 1],
-            buf[offset + 2],
-            buf[offset + 3],
-        ]) as usize;
-        // skip fs_code(u32) + device_id(u64) + partition_index(u64)
-        offset += 24;
-        if offset + path_len > total_bytes {
-            break;
-        }
-        let path = std::str::from_utf8(&buf[offset..offset + path_len])
-            .unwrap_or("")
-            .to_string();
-        let path = if path.is_empty() {
-            "/".to_string()
-        } else {
-            path
-        };
-        mounts.push(MountInfo { path });
-        offset += path_len;
-    }
-    mounts
-}
-
-fn print_table(mounts: &[MountInfo]) {
-    // Header
+fn print_table(mounts: &[Mount]) {
     println!(
         "{:<12} {:<8} {:>8} {:>8} {:>8} {:>5} {}",
         "Filesystem", "Type", "Size", "Used", "Avail", "Use%", "Mounted on"
     );
 
     for mount in mounts {
-        let Some(stat) = statfs(&mount.path) else {
+        let Some(stat) = mounts::statfs(&mount.path) else {
             continue;
         };
-        let fs_type = str_from_padded(&stat.fs_type);
-        let total = stat.total_blocks * stat.block_size;
-        let free = stat.free_blocks * stat.block_size;
-        let used = total.saturating_sub(free);
-        let pct = if total > 0 {
-            format!("{:.0}%", (used as f64 / total as f64) * 100.0)
-        } else {
-            "-".to_string()
+        let total = stat.total_bytes();
+        let pct = match stat.used_percent() {
+            Some(pct) => format!("{pct}%"),
+            None => "-".to_string(),
         };
 
-        let vol = str_from_padded(&stat.volume_name);
-        let name = if vol.is_empty() { fs_type } else { vol };
+        let name = if stat.volume_name.is_empty() {
+            stat.fs_type.as_str()
+        } else {
+            stat.volume_name.as_str()
+        };
 
         let size_str = if total > 0 {
             format_size(total)
@@ -130,48 +46,43 @@ fn print_table(mounts: &[MountInfo]) {
             "-".to_string()
         };
         let used_str = if total > 0 {
-            format_size(used)
+            format_size(stat.used_bytes())
         } else {
             "-".to_string()
         };
         let avail_str = if total > 0 {
-            format_size(free)
+            format_size(stat.free_bytes())
         } else {
             "-".to_string()
         };
 
         println!(
             "{:<12} {:<8} {:>8} {:>8} {:>8} {:>5} {}",
-            name, fs_type, size_str, used_str, avail_str, pct, mount.path
+            name, stat.fs_type, size_str, used_str, avail_str, pct, mount.path
         );
     }
 }
 
-fn print_verbose(path: &str, stat: &RawStatFs) {
-    let fs_type = str_from_padded(&stat.fs_type);
-    let vol_name = str_from_padded(&stat.volume_name);
-
+fn print_verbose(path: &str, stat: &StatFs) {
     println!("Filesystem: {}", path);
-    println!("Type:       {}", fs_type);
-    if !vol_name.is_empty() {
-        println!("Label:      {}", vol_name);
+    println!("Type:       {}", stat.fs_type);
+    if !stat.volume_name.is_empty() {
+        println!("Label:      {}", stat.volume_name);
     }
     if stat.block_size > 0 {
         println!("Block size: {} bytes", stat.block_size);
     }
 
-    if fs_type == "efs" {
+    if stat.fs_type == "efs" {
         println!("Version:    {}", stat.version);
         if stat.block_groups > 0 {
             println!("Groups:     {}", stat.block_groups);
         }
     }
 
-    let total = stat.total_blocks * stat.block_size;
-    let free = stat.free_blocks * stat.block_size;
-    let used = total.saturating_sub(free);
-
+    let total = stat.total_bytes();
     if total > 0 {
+        let used = stat.used_bytes();
         let pct = (used as f64 / total as f64) * 100.0;
         println!();
         println!(
@@ -184,7 +95,7 @@ fn print_verbose(path: &str, stat: &RawStatFs) {
         println!(
             "Space:      {} total, {} free",
             format_size(total),
-            format_size(free)
+            format_size(stat.free_bytes())
         );
     }
     if stat.total_inodes > 0 {
@@ -207,7 +118,7 @@ fn main() {
     if args.len() > 1 {
         // Verbose single-path mode
         let path = &args[1];
-        match statfs(path) {
+        match mounts::statfs(path) {
             Some(stat) => print_verbose(path, &stat),
             None => {
                 eprintln!("df: cannot get filesystem info for {}", path);
@@ -216,7 +127,7 @@ fn main() {
         }
     } else {
         // Table mode: all mounted filesystems
-        let mounts = get_mounts();
+        let mounts = mounts::list();
         if mounts.is_empty() {
             eprintln!("df: no filesystems mounted");
             std::process::exit(1);

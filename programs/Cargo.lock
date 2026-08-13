@@ -218,6 +218,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "edos-files"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+ "edos_render",
+]
+
+[[package]]
 name = "edos-init"
 version = "0.1.0"
 dependencies = [

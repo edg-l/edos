@@ -1045,8 +1045,8 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 113 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 113 — a mismatch is the bug |
-| userspace programs | 110 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | 112 rows = 110 + the 2 libraries | diff the table against the workspace, below |
+| userspace programs | 111 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | 113 rows = 111 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
