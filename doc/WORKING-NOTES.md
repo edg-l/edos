@@ -6,6 +6,54 @@ session.
 
 ---
 
+## `fork` under memory pressure panicked the kernel, and the unwind is the work
+
+`clone_user_page_tables_cow` (`kernel/src/memory/cow.rs`) allocated four levels
+of child page tables with `expect`, so a `fork` that ran the allocator dry took
+the machine down instead of failing the syscall. It returns `Option<PhysFrame>`
+now and `sys_fork` answers `ENOMEM`.
+
+The grep pass is the small half. What makes it a real change is that a failed
+walk has already taken frames and already edited the *parent*: intermediate
+tables allocated, and one refcount bump plus a `WRITABLE`-to-`COW_BIT` rewrite
+per leaf PTE. So the walk is split in two — `clone_user_half` builds and
+`free_child_user_half` gives back — and three things make the unwind correct:
+
+- A child entry is only written after the table it points at is allocated and
+  zeroed, so a partial tree is walkable by exactly the same descent, with the
+  unbuilt entries reading as not present.
+- Leaf frames get `dec_refcount`, not `deallocate_frame`. The parent still holds
+  every one of them; the decrement is the exact inverse of the walk's
+  `inc_refcount`, and it is also what keeps an MMIO frame (refcount 0 until the
+  walk touched it) from being freed out from under a mapping.
+- The parent's PTEs keep the COW flags the partial walk gave them, deliberately.
+  With the child's reference gone the frame is solely owned again, so the
+  parent's next write takes one fault and `handle_cow_fault`'s `rc <= 1` branch
+  makes it writable in place. Reverting the flags by hand would be a second walk
+  that can also be interrupted.
+
+The TLB shootdown runs on the failure path too: a partial walk made just as many
+parent PTEs read-only, and a CPU holding a stale writable entry is the same
+hazard either way.
+
+`sys_fork` now clones the page tables *before* deep-cloning the VmaSet. The
+order is load-bearing: the VmaSet clone bumps an SHM refcount per shared VMA,
+and doing it second means a failed clone has nothing but its own tree to give
+back.
+
+`handle_cow_fault`'s allocation failure is the other half. A fault that cannot
+copy a shared page now logs and returns `false`, which routes to the page-fault
+handler's KILL path — the faulting process dies, not the kernel. It is a
+user-mode fault by construction: `idt.rs` only calls it when the error code
+carries `USER_MODE`.
+
+Exercised in the guest with `forktest`, which forks, writes through the COW
+mapping in the child, spawns a grandchild and checks the parent's copy is
+untouched. The out-of-frames path itself is reasoned, not observed: nothing in
+the tree can exhaust the allocator on demand.
+
+---
+
 ## `/bin/fsck` is the host checker, not a second one
 
 `tools/efs-fsck` is a library plus a six-line binary, and `programs/fsck` links
@@ -1296,10 +1344,10 @@ does not have to invent them.
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
 | Rust | 101,849 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,305 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,308 | `git rev-list --count HEAD` |
+| commits | 1,309 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 187, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 182, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,

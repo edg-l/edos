@@ -2893,6 +2893,24 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let parent_tls = parent_user_read.tls.clone();
     let parent_fs_base = parent_thread.tls_base.load(Ordering::Acquire);
 
+    // Clone COW page tables using the parent's VmaSet.
+    // Must be called with parent's CR3 active.
+    // tlb_shootdown_all() inside flushes all CPUs' stale writable entries.
+    // This runs before anything else the child owns is built, so a clone that
+    // runs out of frames has nothing but its own partial tree to give back.
+    let child_pml4_frame = {
+        let parent_vmas = ranked_lock!(RANK_VMAS, "user.vmas", parent_user_read.vmas);
+        match unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_vmas) } {
+            Some(frame) => frame,
+            None => {
+                drop(parent_vmas);
+                drop(parent_user_read);
+                current_thread_info().lock().errno = Errno::ENOMEM;
+                return -1;
+            }
+        }
+    };
+
     // Deep-clone the VmaSet: each VMA is cloned, SHM entries get inc_ref.
     // FileBacked VMAs get a fresh empty pages vec — the child re-faults lazily.
     let child_vma_set = {
@@ -2936,14 +2954,6 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             }
         }
         cloned
-    };
-
-    // Clone COW page tables using the parent's VmaSet.
-    // Must be called with parent's CR3 active.
-    // tlb_shootdown_all() inside flushes all CPUs' stale writable entries.
-    let child_pml4_frame = {
-        let parent_vmas = ranked_lock!(RANK_VMAS, "user.vmas", parent_user_read.vmas);
-        unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_vmas) }
     };
 
     drop(parent_user_read);

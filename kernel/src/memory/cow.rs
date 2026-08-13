@@ -13,6 +13,12 @@ use crate::{
     },
 };
 
+/// A `&mut PageTable` over the frame's physical-memory-offset mapping.
+fn pt_from_frame(frame: PhysFrame) -> &'static mut PageTable {
+    let virt = boot_info().physical_memory_offset + frame.start_address().as_u64();
+    unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
+}
+
 /// Walk the parent's user-space page tables and build a COW copy for the child.
 ///
 /// - Kernel half (entries 256..512) is copied from the kernel PML4 (shared).
@@ -22,6 +28,9 @@ use crate::{
 /// - All intermediate page table frames (PML3/PML2/PML1) are newly allocated
 ///   for the child; the page-table structure is not shared.
 ///
+/// Returns `None` when the allocator runs out of frames; everything the walk
+/// took is given back first, so the parent is left as usable as it was.
+///
 /// Flushes the local TLB after modifying parent PTEs.
 ///
 /// # Safety
@@ -30,19 +39,12 @@ use crate::{
 /// CR3 is active or the parent's page tables are otherwise accessible via the
 /// physical memory offset). The caller must ensure no other thread is
 /// concurrently modifying the parent's page tables.
-pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &VmaSet) -> PhysFrame {
-    let phys_offset = boot_info().physical_memory_offset;
-
-    // Helper: get a &mut PageTable from a physical frame.
-    let pt_from_frame = |frame: PhysFrame| -> &'static mut PageTable {
-        let virt = phys_offset + frame.start_address().as_u64();
-        unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
-    };
-
+pub unsafe fn clone_user_page_tables_cow(
+    parent_cr3: PhysFrame,
+    parent_vmas: &VmaSet,
+) -> Option<PhysFrame> {
     // Allocate new PML4 for the child.
-    let child_pml4_frame = frame_allocator()
-        .allocate_frame()
-        .expect("COW: failed to allocate child PML4");
+    let child_pml4_frame = frame_allocator().allocate_frame()?;
 
     let child_pml4 = pt_from_frame(child_pml4_frame);
     child_pml4.zero();
@@ -55,6 +57,38 @@ pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &Vm
         child_pml4[i] = kernel_pml4[i].clone();
     }
 
+    let built = unsafe { clone_user_half(parent_cr3, parent_vmas, child_pml4) };
+
+    // Flush TLB on all CPUs: parent PTEs were changed from writable to
+    // read-only (COW). Any CPU with a cached writable entry could write
+    // through it without triggering a COW fault. The partial walk of a
+    // failed clone changed just as many, so this runs on both paths.
+    crate::memory::tlb::tlb_shootdown_all();
+
+    if built.is_none() {
+        unsafe { free_child_user_half(child_pml4) };
+        unsafe { frame_allocator().deallocate_frame(child_pml4_frame) };
+        return None;
+    }
+
+    Some(child_pml4_frame)
+}
+
+/// Build the child's user half (PML4 entries 0..256) from the parent's.
+///
+/// `None` means an intermediate table could not be allocated. What has been
+/// built by then is a walkable tree, since a child entry is only written after
+/// the table it points at is allocated and zeroed, so the caller can hand it
+/// to [`free_child_user_half`].
+///
+/// # Safety
+///
+/// Same contract as [`clone_user_page_tables_cow`].
+unsafe fn clone_user_half(
+    parent_cr3: PhysFrame,
+    parent_vmas: &VmaSet,
+    child_pml4: &mut PageTable,
+) -> Option<()> {
     let parent_pml4 = pt_from_frame(parent_cr3);
 
     // Walk the user half (entries 0..256).
@@ -65,9 +99,7 @@ pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &Vm
         }
 
         // Allocate a child PML3 frame.
-        let child_pml3_frame = frame_allocator()
-            .allocate_frame()
-            .expect("COW: failed to allocate child PML3");
+        let child_pml3_frame = frame_allocator().allocate_frame()?;
         let child_pml3 = pt_from_frame(child_pml3_frame);
         child_pml3.zero();
 
@@ -83,9 +115,7 @@ pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &Vm
             }
 
             // Allocate a child PML2 frame.
-            let child_pml2_frame = frame_allocator()
-                .allocate_frame()
-                .expect("COW: failed to allocate child PML2");
+            let child_pml2_frame = frame_allocator().allocate_frame()?;
             let child_pml2 = pt_from_frame(child_pml2_frame);
             child_pml2.zero();
 
@@ -100,9 +130,7 @@ pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &Vm
                 }
 
                 // Allocate a child PML1 (page table) frame.
-                let child_pml1_frame = frame_allocator()
-                    .allocate_frame()
-                    .expect("COW: failed to allocate child PML1");
+                let child_pml1_frame = frame_allocator().allocate_frame()?;
                 let child_pml1 = pt_from_frame(child_pml1_frame);
                 child_pml1.zero();
 
@@ -148,12 +176,61 @@ pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &Vm
         }
     }
 
-    // Flush TLB on all CPUs: parent PTEs were changed from writable to
-    // read-only (COW). Any CPU with a cached writable entry could write
-    // through it without triggering a COW fault.
-    crate::memory::tlb::tlb_shootdown_all();
+    Some(())
+}
 
-    child_pml4_frame
+/// Give back everything [`clone_user_half`] took, leaf frames included.
+///
+/// The parent's own PTEs keep the COW flags the walk gave them: with the
+/// child's reference dropped the frame is solely owned again, so the parent's
+/// first write to one faults once and [`handle_cow_fault`] makes it writable
+/// in place.
+///
+/// # Safety
+///
+/// `child_pml4` must be a child table built by [`clone_user_half`] and
+/// unreachable from any CR3.
+unsafe fn free_child_user_half(child_pml4: &mut PageTable) {
+    let mut alloc = frame_allocator();
+
+    for pml4_idx in 0..256usize {
+        if !child_pml4[pml4_idx]
+            .flags()
+            .contains(PageTableFlags::PRESENT)
+        {
+            continue;
+        }
+        let pml3_frame = PhysFrame::containing_address(child_pml4[pml4_idx].addr());
+        let pml3 = pt_from_frame(pml3_frame);
+
+        for pml3_idx in 0..512usize {
+            if !pml3[pml3_idx].flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            let pml2_frame = PhysFrame::containing_address(pml3[pml3_idx].addr());
+            let pml2 = pt_from_frame(pml2_frame);
+
+            for pml2_idx in 0..512usize {
+                if !pml2[pml2_idx].flags().contains(PageTableFlags::PRESENT) {
+                    continue;
+                }
+                let pml1_frame = PhysFrame::containing_address(pml2[pml2_idx].addr());
+                let pml1 = pt_from_frame(pml1_frame);
+
+                for pml1_idx in 0..512usize {
+                    if !pml1[pml1_idx].flags().contains(PageTableFlags::PRESENT) {
+                        continue;
+                    }
+                    // The exact inverse of the walk's inc_refcount: the parent
+                    // still holds this frame, so it must not be freed here.
+                    alloc.dec_refcount(PhysFrame::containing_address(pml1[pml1_idx].addr()));
+                }
+                unsafe { alloc.deallocate_frame(pml1_frame) };
+            }
+            unsafe { alloc.deallocate_frame(pml2_frame) };
+        }
+        unsafe { alloc.deallocate_frame(pml3_frame) };
+    }
 }
 
 /// Returns true if `virt` falls within a SHM, Physical, or MAP_SHARED FileBacked mapping.
@@ -181,11 +258,6 @@ fn is_special_mapping(virt: VirtAddr, vmas: &VmaSet) -> bool {
 /// address space active in CR3. Interrupts may be enabled.
 pub unsafe fn handle_cow_fault(fault_addr: VirtAddr) -> bool {
     let phys_offset = boot_info().physical_memory_offset;
-
-    let pt_from_frame = |frame: PhysFrame| -> &'static mut PageTable {
-        let virt = phys_offset + frame.start_address().as_u64();
-        unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
-    };
 
     let (cr3_frame, _) = Cr3::read();
     let pml4 = pt_from_frame(cr3_frame);
@@ -238,9 +310,16 @@ pub unsafe fn handle_cow_fault(fault_addr: VirtAddr) -> bool {
         x86_64::instructions::tlb::flush(fault_addr);
     } else {
         // Shared: copy the frame, point PTE to new frame.
-        let new_frame = alloc
-            .allocate_frame()
-            .expect("handle_cow_fault: frame allocation failed");
+        let Some(new_frame) = alloc.allocate_frame() else {
+            // Out of frames. The fault is real and unresolvable, so report it
+            // unhandled: the fault handler kills the faulting process rather
+            // than the machine.
+            crate::emergency_println!(
+                "COW fault at {:p}: out of frames, cannot copy shared page",
+                fault_addr
+            );
+            return false;
+        };
 
         let src_ptr = (phys_offset + old_frame.start_address().as_u64()).as_ptr::<u8>();
         let dst_ptr = (phys_offset + new_frame.start_address().as_u64()).as_mut_ptr::<u8>();
