@@ -220,10 +220,7 @@ def cmd_start(args):
         "-device", "ide-hd,drive=sata0,bus=ide.1",
         # blob=on needs udmabuf and a local display; plain virtio-vga renders
         # into a buffer QEMU itself owns, which is what VNC and screendump read.
-        "-vga", "none",
-        # The mode comes from limine.conf, which the guest boots with; these
-        # only bound what the device will offer.
-        "-device", "virtio-vga,xres=1920,yres=1080",
+        "-vga", "std" if args.vga == "std" else "none",
         # usb-tablet reports absolute positions, which the guest reads out of
         # the device's own HID report descriptor. usb-mouse is kept for testing
         # the relative path, and is what a guest older than that parser needs.
@@ -243,6 +240,13 @@ def cmd_start(args):
         "-pidfile", PIDFILE,
         "-daemonize",
     ]
+
+    # The mode comes from limine.conf, which the guest boots with; this only
+    # bounds what the device will offer. `--vga std` swaps it for the Bochs VBE
+    # adapter, which has no cursor plane, and is the only way to reach the
+    # guest's software-cursor path.
+    if args.vga != "std":
+        qemu += ["-device", "virtio-vga,xres=1920,yres=1080"]
 
     # SPICE streams damage as the guest produces it and lets the client draw
     # the cursor; QEMU's VNC server instead polls the display on a ~30ms timer,
@@ -771,6 +775,9 @@ def main():
                         "for moving regions, JPEG and zlib elsewhere")
     s.add_argument("--spice-streaming", default="off", choices=["off", "filter", "all"],
                    help="SPICE lossy video detection; off keeps text sharp")
+    s.add_argument("--vga", default="virtio", choices=["virtio", "std"],
+                   help="display adapter; std is Bochs VBE, which has no cursor "
+                        "plane and so exercises the software cursor")
     s.add_argument("--pointer", default="tablet", choices=["tablet", "mouse"],
                    help="absolute (tablet) or relative (mouse) pointing device")
     s.add_argument("--smp", type=int, default=4)

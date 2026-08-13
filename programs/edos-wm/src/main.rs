@@ -527,6 +527,7 @@ fn main() {
     let mut previous_frame_start: Option<Instant> = None;
     let mut previous_cursor = (0i32, 0i32);
     let mut previously_hovered_close: Option<u64> = None;
+    let mut previous_menu_origin: Option<(i32, i32)> = None;
     let mut uploaded_shape = cursor.shape();
 
     // Window list buffer
@@ -839,6 +840,7 @@ fn main() {
         }
 
         // Update cursor shape
+        let previous_shape = cursor.shape();
         cursor.set_shape(determine_cursor_shape(
             windows,
             &drag_state,
@@ -851,6 +853,38 @@ fn main() {
         if hw_cursor && cursor.shape() != uploaded_shape {
             hw_cursor = upload_cursor(&screen, &cursor);
             uploaded_shape = cursor.shape();
+        }
+        // A software cursor is composited instead, so the shape is part of the
+        // picture and a change to it is damage the pointer's own motion does
+        // not cover. Reachable with the pointer perfectly still: releasing the
+        // button at the end of a drag while over a resize edge, or a window
+        // moving or resizing under it.
+        if !hw_cursor && cursor.shape() != previous_shape {
+            if let Some(r) = DirtyRect::new(cursor.x, cursor.y, CURSOR_SIZE, CURSOR_SIZE)
+                .clipped(screen_w, screen_h)
+            {
+                dirty.mark_dirty(r);
+            }
+        }
+
+        // The desktop menu is compositor-owned too. While it is open its
+        // rectangle joins the dirty set every frame, but the frame it closes or
+        // moves on has nothing else to report it, so the rows stayed on the
+        // ground until unrelated damage happened to cover them.
+        let menu_origin = desktop_menu.origin();
+        if menu_origin != previous_menu_origin {
+            for (ox, oy) in [menu_origin, previous_menu_origin].into_iter().flatten() {
+                let rect = DirtyRect::new(
+                    ox,
+                    oy,
+                    desktop_menu::WIDTH as u32,
+                    desktop_menu::height() as u32,
+                );
+                if let Some(r) = rect.clipped(screen_w, screen_h) {
+                    dirty.mark_dirty(r);
+                }
+            }
+            previous_menu_origin = menu_origin;
         }
 
         // Nothing changed and no menu is painted over the top, so the image

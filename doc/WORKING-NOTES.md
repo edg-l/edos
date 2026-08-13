@@ -1124,6 +1124,28 @@ tab character, while Alt+F4 still closes the window -- so the claimed chord
 reaches the window manager and not the application, and an unclaimed one still
 reaches the application.
 
+## A display with no cursor plane accepted the cursor anyway, so it had none
+
+`FB_IOCTL_SET_CURSOR` returned `Ok(0)` on the VBE path, where `Display::set_cursor`
+was an empty match arm with a comment saying VBE has no hardware cursor. The
+userspace wrapper reports success as `is_ok()`, so `edos-wm` set `hw_cursor =
+true`, and `composite()` draws the software cursor only when that is false. A
+Bochs VBE guest therefore ran with **no pointer drawn at all** -- not a stale
+one, none -- and every `move_cursor` after it was a syscall into an empty arm.
+
+The fix is at the layer that knows: `Display::set_cursor` and `move_cursor`
+return whether the display took it, and the ioctl reports `Unsupported` when it
+did not. `has_hardware_cursor()` was deleted rather than kept, since the return
+value now answers the same question at the only place that asks.
+
+That path had no way to be booted, which is why it went unnoticed:
+`scripts/edos-vm` always passed `-device virtio-vga`. It takes `--vga std` now,
+which is the Bochs adapter and the only way to exercise the software cursor.
+
+The compositor-owned damage rule this uncovered is in `doc/design/wm-damage.md`;
+the two instances fixed in the same commit are the cursor's own shape and the
+desktop menu's rectangle on the frame it closes.
+
 ## Counts, remeasured 2026-08-13
 
 Every number a doc states about the size of the tree, taken rather than carried

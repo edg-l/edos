@@ -180,6 +180,48 @@ that scrolled in, which is where 538 us becomes 159 us. It saves client CPU
 and nothing else: every pixel on screen really is different, so the transfer
 is the same size either way.
 
+## Compositor-owned damage
+
+Damage arrives from two places, and only one of them is a protocol. A client
+reports the rectangle it drew; everything the compositor paints from **its own**
+state has to declare its own, because nothing else can. The triggers the
+compositor already tests -- a client repaint, a focus change, a move or resize --
+are all properties of a window, and none of them sees a change that lives only in
+the compositor.
+
+The rule: **when a value the compositor draws from changes, mark the rectangle it
+is drawn into dirty in the same place the value changes.** Comparing against the
+previous frame's copy of that value is the mechanism; there are three of them in
+`main.rs` and they all look alike.
+
+The failure is not a blank region, which is why it survives casual use: the stale
+pixels stay until some unrelated damage happens to overlap them, so the state
+looks merely ragged or intermittent rather than broken. The close button's hover
+came out in patches of old and new colour, because in practice the only thing
+overlapping it was the moving cursor's own rectangle.
+
+Audited, with what each one turned out to be:
+
+- **Close-button hover.** Had the bug; fixed by damaging the title bar when
+  `hovered_close_window` changes.
+- **The cursor's shape.** Had the bug on the software-cursor path, where the
+  shape is part of the composited picture: only *motion* marked the cursor
+  rectangle dirty, so a shape change under a still pointer showed the old image.
+  Reachable with no pointer motion at all -- releasing a drag while over a resize
+  edge, or a window moving or resizing under the pointer. A hardware cursor is
+  unaffected: the shape is an upload, not a composite.
+- **The desktop menu.** Had the bug on the frame it closes or moves on. While it
+  is open its rectangle joins the dirty set every frame, which covers hover and
+  drawing, but the frame it disappears on has nothing to report it and the rows
+  stayed on the ground.
+- **Minimize and maximize buttons.** No hover paint: `compositor.rs` draws the
+  same glyph whether or not the pointer is on them, and only the close button
+  has a hover field and a hover glyph in the theme. Nothing to damage, so there
+  is nothing to fix here — recorded so the next reader does not go looking, and
+  so that whoever gives them a hover state knows it has to bring damage with it.
+- **The desktop ground.** A wallpaper change sets `full_screen` where the change
+  is made, which is this rule applied.
+
 ## Traps
 
 - **`WindowListEntry` is mirrored field for field** in `kernel/src/syscalls/window.rs`

@@ -149,23 +149,30 @@ impl Display {
         }
     }
 
-    pub fn set_cursor(&mut self, pixels: &[u32], hot_x: u32, hot_y: u32) {
+    /// Hand the display a cursor image, reporting whether it has a plane to
+    /// hold one.
+    ///
+    /// A caller that is told nothing has to composite the cursor itself, so
+    /// accepting the upload on a display without a cursor plane leaves the
+    /// screen with no pointer at all.
+    pub fn set_cursor(&mut self, pixels: &[u32], hot_x: u32, hot_y: u32) -> bool {
         match self {
-            Display::Vbe(_) => {} // VBE has no hardware cursor
-            Display::VirtioGpu(vg) => vg.gpu.setup_cursor(pixels, hot_x, hot_y),
+            Display::Vbe(_) => false,
+            Display::VirtioGpu(vg) => {
+                vg.gpu.setup_cursor(pixels, hot_x, hot_y);
+                true
+            }
         }
     }
 
-    pub fn move_cursor(&mut self, x: u32, y: u32) {
+    pub fn move_cursor(&mut self, x: u32, y: u32) -> bool {
         match self {
-            Display::Vbe(_) => {} // VBE has no hardware cursor
-            Display::VirtioGpu(vg) => vg.gpu.move_cursor(x, y),
+            Display::Vbe(_) => false,
+            Display::VirtioGpu(vg) => {
+                vg.gpu.move_cursor(x, y);
+                true
+            }
         }
-    }
-
-    #[expect(unused)]
-    pub fn has_hardware_cursor(&self) -> bool {
-        matches!(self, Display::VirtioGpu(_))
     }
 }
 

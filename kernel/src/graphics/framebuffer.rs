@@ -210,9 +210,12 @@ impl DevFsDevice for FramebufferDevice {
                     core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
                 };
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
-                display
+                if !display
                     .lock()
-                    .set_cursor(pixels, header.hot_x, header.hot_y);
+                    .set_cursor(pixels, header.hot_x, header.hot_y)
+                {
+                    return Err(DevFsError::Unsupported);
+                }
                 Ok(0)
             }
             FB_IOCTL_MOVE_CURSOR => {
@@ -221,7 +224,9 @@ impl DevFsDevice for FramebufferDevice {
                 }
                 let pos = unsafe { *(arg as *const FramebufferMoveCursor) };
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
-                display.lock().move_cursor(pos.x, pos.y);
+                if !display.lock().move_cursor(pos.x, pos.y) {
+                    return Err(DevFsError::Unsupported);
+                }
                 Ok(0)
             }
             _ => Err(DevFsError::Unsupported),
