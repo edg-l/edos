@@ -5641,18 +5641,87 @@ structurally impossible rather than latent panics, and are now explicit byte
 indexing anyway. And the `search` guard was not dead code covering FAT32 too: it
 could only ever have fired for FAT12.
 
-### Not exercised in the guest, and what it would take
+### Exercised in the guest, and the recipe that works
 
-The fix is reasoned and builds; no FAT12 volume has ever been mounted by this
-kernel. Building one to prove it is fiddly and the attempt is worth recording:
-FAT12 caps at 4084 clusters, so a 16 MiB image at one sector per cluster is
-*too large* to format (`mkfs.fat: Not enough or too many clusters`) -- 2 MiB is
-about right, and it must hold a file larger than 175 KB for its chain to cross
-cluster 341. `mkfs.fat --offset` also did not produce a mountable partition in
-an `sfdisk`-partitioned image on the first two tries, and a raw unpartitioned
-image gets no `/dev` node at all, since the kernel enumerates partitions and
-synthesises nothing for a bare volume. `scripts/edos-vm start --extra-disk
-<img>` is the way to attach one once it exists.
+The read side is now proven on a real volume: the guest mounted a FAT12
+partition and `sha256sum /mnt/BIG.TXT` on a 256000-byte file (500 clusters,
+2..501, so its chain walks straight through the straddling entry for cluster
+341) returned the same digest as the host, and `wc -c` returned 256000.
+
+Building the image is fiddly and the working recipe is worth keeping. Format the
+**partition** standalone and `dd` it into a partitioned disk afterwards; do not
+try to format in place:
+
+```
+dd if=/dev/zero of=fat12.part bs=1M count=2
+mkfs.fat -F 12 -S 512 -s 1 -n FAT12TEST fat12.part      # 4039 clusters
+mcopy -i fat12.part big.txt ::/BIG.TXT                  # >175 KB, no mount needed
+dd if=/dev/zero of=fat12disk.img bs=1M count=4
+printf 'label: dos\nstart=2048, size=4096, type=1\n' | sfdisk fat12disk.img
+dd if=fat12.part of=fat12disk.img bs=512 seek=2048 conv=notrunc
+scripts/edos-vm start --extra-disk /abs/path/fat12disk.img
+```
+
+MBR type `1` is what `kernel/src/fs/mbr.rs` maps to `PartitionType::Fat12`. The
+extra disk enumerates as block device 2, so the guest mounts it with
+`mount 2 0 /mnt fat32` — the `fat32` driver serves all three widths.
+
+Four things that cost time. FAT12 caps at 4084 clusters, so a 16 MiB image at
+one sector per cluster is *too large* to format (`mkfs.fat: Not enough or too
+many clusters`); 2 MiB is right. `mkfs.fat --offset` did not produce a mountable
+partition inside an already-partitioned image in two tries, which is why the
+recipe above formats first and places second. A raw unpartitioned image gets no
+`/dev` node at all, since the kernel enumerates partitions and synthesises
+nothing for a bare volume. And `make test-headless` leaves a `sched-test` ISO in
+the tree, which boots, runs 51 tests and exits — check `run_log.txt` for a
+desktop rather than a test suite before concluding a guest failed to come up,
+and `make all` to get an ordinary ISO back.
+
+## Creating a file on a FAT12/FAT16 volume overwrites its boot sector (2026-08-14)
+
+Found while exercising the FAT12 straddle fix above, on the same volume.
+Reads are correct; **creating** anything in the root directory of a FAT12 or
+FAT16 volume writes the 32-byte directory entry over the boot sector, and the
+file is invisible from that moment on.
+
+`traverse.rs` uses **cluster 0 as the marker for the FAT12/16 root directory**
+(`root_dir_cluster`, line 32) because that root is a fixed region ahead of the
+data area and has no cluster chain. Every write-side function instead takes a
+cluster number and turns it into an LBA with `cluster_to_lba`, whose guard is:
+
+```rust
+if cluster < 2 {
+    return self.partition.starting_lba; // Fallback to partition start
+}
+```
+
+The partition's starting LBA is its boot sector. So `append_dir_entry(0, ..)`
+reads the boot sector, finds "free" 32-byte slots in it (everything past the
+BPB looks free), writes the entry there and writes the sector back.
+
+Measured, not argued: after four creates the guest's volume differed from the
+pristine image at partition offsets 0x20-0x3f, 0xc0-0x159 and nowhere else --
+all inside sector 0. `xxd -s 32` on the result reads `COPY    TXT`, sitting on
+top of `BPB_TotSec32`, `BS_VolID`, `BS_VolLab` and `BS_FilSysType`. Host
+`fsck.fat` then reports "Volume label 'FAT12TEST' stored in root directory and
+label '' stored in boot sector and different". The volume survived only by luck:
+this image uses `BPB_TotSec16`, so the zeroed `BPB_TotSec32` changed nothing.
+
+It is silent from userspace. `openat(..., O_CREAT)` returns a valid fd and
+`touch` exits 0; `ls` simply never shows the file. `cp` reports the *source* as
+"entity not found" because `programs/cp` prints `src` whatever step of
+`fs::copy` failed. FAT32 is unaffected — its root is an ordinary chain starting
+at `BPB_RootClus`, which is >= 2.
+
+The fix is a root-region branch in every write-side function that takes a
+directory cluster: `append_dir_entry`, `patch_dir_entry_at`,
+`mark_entry_deleted`, `delete_long_name_sequence` and `generate_short_name` in
+`fat32/write.rs`. For FAT12/16 with cluster 0 they must address the fixed root
+region (`root_entry_count * 32` bytes at the root-dir LBA `cluster_to_lba`
+already computes for reads) and return "directory full" rather than allocating
+and linking a cluster, since that root cannot be extended. Making
+`cluster_to_lba` reject cluster 0 instead would only turn silent corruption into
+an error on a path that is meant to work, so it is not the fix.
 
 ### Note: FAT32 assumes 512-byte sectors in two different ways
 
