@@ -108,6 +108,8 @@ pub fn execve(path: &str, args: &[&str], env: &[&str]) -> i64 {
 pub const F_DUPFD: u64 = 0;
 pub const F_GETFD: u64 = 1;
 pub const F_SETFD: u64 = 2;
+pub const F_GETFL: u64 = 3;
+pub const F_SETFL: u64 = 4;
 pub const F_DUPFD_CLOEXEC: u64 = 1030;
 pub const FD_CLOEXEC: u64 = 1;
 
@@ -119,6 +121,26 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
 /// Mark or unmark a descriptor close-on-exec.
 pub fn set_cloexec(fd: u64, on: bool) -> i64 {
     fcntl(fd, F_SETFD, if on { FD_CLOEXEC } else { 0 })
+}
+
+/// Put a descriptor in or out of non-blocking mode, so a read with nothing to
+/// read and a write with nowhere to put it fail with `EAGAIN` instead of
+/// waiting.
+///
+/// `O_NONBLOCK` is the only status flag `F_SETFL` can change, so the read back
+/// costs nothing but keeps this from clearing one that is later added.
+pub fn set_nonblocking(fd: u64, on: bool) -> i64 {
+    let flags = fcntl(fd, F_GETFL, 0);
+    if flags < 0 {
+        return flags;
+    }
+    let flags = flags as u64;
+    let new = if on {
+        flags | crate::io::O_NONBLOCK
+    } else {
+        flags & !crate::io::O_NONBLOCK
+    };
+    fcntl(fd, F_SETFL, new)
 }
 
 /// Real user id of the calling process.

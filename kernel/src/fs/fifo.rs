@@ -18,12 +18,11 @@
 //! other side of it. `O_NONBLOCK` turns the reader's wait into an immediate
 //! success and the writer's into `ENXIO`, as POSIX.1-2024 specifies.
 //!
-//! `O_NONBLOCK` governs the open and nothing after it. The flag is not recorded
-//! on the descriptor, so a later `read` or `write` on a FIFO blocks the way it
-//! would on any pipe; making it stick would mean an fd flag threaded through
-//! both syscalls and an `F_SETFL` to change it. What it does cover is the case
-//! it exists for here: a control client that must not wait forever for a
-//! listener that is not running.
+//! `O_NONBLOCK` is recorded on the descriptor the open returns, so it governs
+//! the transfer as well: a `read` with an empty pipe still open at the other
+//! end, or a `write` with no room, fails with `EAGAIN` rather than parking.
+//! `F_SETFL` changes it afterwards. The open is the half this module decides;
+//! the rest is in `sys_read` and `sys_write`.
 //!
 //! A waiter is waiting for its peer to *have arrived*, not to still be there: a
 //! peer that opened and closed while the waiter was asleep has satisfied the

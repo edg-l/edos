@@ -64,11 +64,21 @@ fn send(command: &str, name: &str) -> Result<(), String> {
     }
     let fd = fd as u64;
 
+    // The flag governs the write too, so a control FIFO that init has stopped
+    // draining reports EAGAIN rather than parking here. A short write is the
+    // same case seen from the other side and is worth saying so: half a command
+    // line reaches init as a command it cannot parse.
     let line = format!("{command} {name}\n");
     let written = io::sys_write(fd, line.as_bytes());
     io::close(fd);
     if written < 0 {
         return Err(format!("{CONTROL_FIFO}: {:?}", io::last_errno()));
+    }
+    if written as usize != line.len() {
+        return Err(format!(
+            "{CONTROL_FIFO}: wrote {written} of {} bytes; is init reading?",
+            line.len()
+        ));
     }
     Ok(())
 }

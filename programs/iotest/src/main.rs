@@ -1754,6 +1754,131 @@ fn test22(dir: &str) {
     pass(22, "a named pipe rendezvous carried a message end to end");
 }
 
+/// `O_NONBLOCK` is a property of the descriptor, not just of the open: a read
+/// with nothing to read and a write with nowhere to put it report `EAGAIN`
+/// rather than waiting, and `F_SETFL` turns that off and on again afterwards.
+///
+/// A FIFO opened `O_RDWR` is the vehicle because it needs no peer: the same
+/// descriptor holds both ends, so nothing here can reach end of file and every
+/// answer is about the flag rather than about a writer that went away.
+fn test23(dir: &str) {
+    let path = format!("{}/iotest_t23.fifo", dir);
+    let _ = fs::remove_file(&path);
+    if edos_lib::io::mkfifo(&path) < 0 {
+        fail(23, &format!("mkfifo: {:?}", edos_lib::io::last_errno()));
+    }
+
+    let fd = open(&path, edos_lib::io::O_RDWR | edos_lib::io::O_NONBLOCK);
+    if fd < 0 {
+        fail(
+            23,
+            &format!("open O_RDWR|O_NONBLOCK: {:?}", edos_lib::io::last_errno()),
+        );
+    }
+    let fd = fd as u64;
+
+    // The open reported the flag, so a program that inherited the descriptor
+    // can find out how it behaves rather than having to be told.
+    let flags = process::fcntl(fd, process::F_GETFL, 0);
+    if flags < 0 || flags as u64 & edos_lib::io::O_NONBLOCK == 0 {
+        fail(
+            23,
+            &format!("F_GETFL reported {} after a non-blocking open", flags),
+        );
+    }
+
+    let mut buf = [0u8; 64];
+    let empty = edos_lib::io::sys_read(fd, &mut buf);
+    if empty >= 0 {
+        fail(
+            23,
+            &format!("a non-blocking read of an empty pipe returned {}", empty),
+        );
+    }
+    if edos_lib::io::last_errno() != edos_lib::sys::Errno::EAGAIN {
+        fail(
+            23,
+            &format!(
+                "read reported {:?}, want EAGAIN",
+                edos_lib::io::last_errno()
+            ),
+        );
+    }
+
+    // With something in it the same read succeeds, so EAGAIN above was about
+    // the pipe being empty and not about the descriptor being unusable.
+    const MESSAGE: &[u8] = b"not waiting\n";
+    if process::write(fd, MESSAGE) != MESSAGE.len() as isize {
+        fail(23, "the non-blocking write of a short message was short");
+    }
+    let n = edos_lib::io::sys_read(fd, &mut buf);
+    if n != MESSAGE.len() as isize || &buf[..n as usize] != MESSAGE {
+        fail(
+            23,
+            &format!("read back {} bytes, want {}", n, MESSAGE.len()),
+        );
+    }
+
+    // A full pipe is the write half: it reports what it managed to move, and
+    // only a write that moved nothing at all is EAGAIN.
+    const PIPE_CAPACITY: usize = 64 * 1024;
+    let block = [b'x'; 4096];
+    let mut filled = 0usize;
+    loop {
+        let written = process::write(fd, &block);
+        if written < 0 {
+            break;
+        }
+        filled += written as usize;
+        if filled > 4 * PIPE_CAPACITY {
+            fail(
+                23,
+                &format!("a pipe took {} bytes, so it is unbounded", filled),
+            );
+        }
+    }
+    if edos_lib::io::last_errno() != edos_lib::sys::Errno::EAGAIN {
+        fail(
+            23,
+            &format!(
+                "a full pipe reported {:?}, want EAGAIN",
+                edos_lib::io::last_errno()
+            ),
+        );
+    }
+    if filled != PIPE_CAPACITY {
+        fail(
+            23,
+            &format!("a pipe took {} bytes, want {}", filled, PIPE_CAPACITY),
+        );
+    }
+
+    // Clearing the flag has to take effect on the descriptor already open, or
+    // it is only an open-time argument under another name.
+    if process::set_nonblocking(fd, false) < 0 {
+        fail(23, "F_SETFL could not clear O_NONBLOCK");
+    }
+    let flags = process::fcntl(fd, process::F_GETFL, 0);
+    if flags < 0 || flags as u64 & edos_lib::io::O_NONBLOCK != 0 {
+        fail(
+            23,
+            &format!("F_GETFL still reports {} after clearing", flags),
+        );
+    }
+    // Blocking again, and there are 64 KiB waiting, so this cannot park.
+    let mut sink = [0u8; 4096];
+    if edos_lib::io::sys_read(fd, &mut sink) <= 0 {
+        fail(23, "a blocking read of a full pipe returned nothing");
+    }
+
+    close(fd);
+    let _ = fs::remove_file(&path);
+    pass(
+        23,
+        "O_NONBLOCK governs reads and writes, and F_SETFL changes it",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -1781,6 +1906,7 @@ fn main() {
     test20(dir);
     test21();
     test22(dir);
+    test23(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

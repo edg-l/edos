@@ -40,8 +40,8 @@ use crate::{
             sys_symlink, sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
         },
         io::{
-            SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_poll,
-            sys_read, sys_write,
+            O_NONBLOCK, SelectFd, descriptor_open_flags, sys_chdir, sys_close, sys_getcwd,
+            sys_getrandom, sys_list_dir, sys_poll, sys_read, sys_write,
         },
         memory::{sys_mmap, sys_msync, sys_munmap},
     },
@@ -1672,7 +1672,13 @@ fn sys_dup(oldfd: u64) -> u64 {
     };
 
     old_fd_descriptor.inc_refcount();
-    table.allocate_fd(old_fd_descriptor)
+    let nonblock = table.is_nonblock(oldfd);
+    let new_fd = table.allocate_fd(old_fd_descriptor);
+    // POSIX has both descriptors share one open file description and so one set
+    // of status flags. Copying is as close as a table that has no such object
+    // gets: the two agree until something calls F_SETFL on one of them.
+    table.set_nonblock(new_fd, nonblock);
+    new_fd
 }
 
 // fcntl commands (values match Linux).
@@ -1688,10 +1694,11 @@ const FD_CLOEXEC: u64 = 1;
 
 /// `fcntl(fd, cmd, arg)`.
 ///
-/// Supports the descriptor-flag and duplication commands. `F_GETFL`/`F_SETFL`
-/// return EINVAL rather than a plausible-looking zero: there is no
-/// `O_NONBLOCK` in this kernel, so a caller that "successfully" sets it would
-/// be told a lie it then relies on.
+/// Supports the descriptor-flag, status-flag and duplication commands.
+/// `O_NONBLOCK` is the only status flag that can be changed, which is all
+/// POSIX.1-2024 requires of `F_SETFL` beyond `O_APPEND`; the access mode and
+/// the creation flags are ignored there rather than refused, since a caller
+/// that reads flags with `F_GETFL` and writes them back must not fail.
 fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -1724,14 +1731,27 @@ fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                 return -1;
             };
             desc.inc_refcount();
+            let nonblock = table.is_nonblock(fd);
             let new_fd = table.allocate_fd_from(desc, arg);
             table.set_cloexec(new_fd, cmd == F_DUPFD_CLOEXEC);
+            table.set_nonblock(new_fd, nonblock);
             new_fd as i64
         }
-        F_GETFL | F_SETFL => {
-            drop(table);
-            info.lock().errno = Errno::EINVAL;
-            -1
+        F_GETFL => {
+            let Some(desc) = table.get_fd(fd) else {
+                drop(table);
+                info.lock().errno = Errno::EBADF;
+                return -1;
+            };
+            let mut flags = descriptor_open_flags(desc);
+            if table.is_nonblock(fd) {
+                flags |= O_NONBLOCK;
+            }
+            flags as i64
+        }
+        F_SETFL => {
+            table.set_nonblock(fd, arg & O_NONBLOCK != 0);
+            0
         }
         _ => {
             drop(table);
@@ -1762,9 +1782,13 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
         close_fd_refcount(old_desc);
     }
 
-    // Insert the duplicated descriptor at newfd
+    // Insert the duplicated descriptor at newfd, carrying the status flags
+    // across for the reason `sys_dup` gives.
     old_fd_descriptor.inc_refcount();
-    fd_table.lock().insert_fd(newfd, old_fd_descriptor);
+    let mut table = fd_table.lock();
+    let nonblock = table.is_nonblock(oldfd);
+    table.insert_fd(newfd, old_fd_descriptor);
+    table.set_nonblock(newfd, nonblock);
 
     newfd // Success - return the new fd number
 }
@@ -1953,14 +1977,17 @@ fn do_spawn(
 
     // Clone parent FD entries while interrupts are still enabled (BlockingMutex
     // requires interrupts for contention handling).
+    // The status flags come across with each descriptor: a child handed a
+    // non-blocking pipe end must find it behaving as its spawner's did.
     let parent_stdin = {
         let fd_table = info.lock().fd_table.clone();
         let fds = fd_table.lock();
-        (
-            fds.get_fd(stdin_fd).cloned(),
-            fds.get_fd(stdout_fd).cloned(),
-            fds.get_fd(stderr_fd).cloned(),
-        )
+        let carry = |fd: u64| {
+            fds.get_fd(fd)
+                .cloned()
+                .map(|desc| (desc, fds.is_nonblock(fd)))
+        };
+        (carry(stdin_fd), carry(stdout_fd), carry(stderr_fd))
     };
 
     let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|arg| arg.as_slice()).collect();
@@ -1992,19 +2019,14 @@ fn do_spawn(
         let user_thread_info = child_info.lock();
         let (stdin_desc, stdout_desc, stderr_desc) = parent_stdin;
 
-        if let Some(desc) = stdin_desc {
+        for (fd, entry) in [(0, stdin_desc), (1, stdout_desc), (2, stderr_desc)] {
+            let Some((desc, nonblock)) = entry else {
+                continue;
+            };
             desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(0, desc);
-        }
-
-        if let Some(desc) = stdout_desc {
-            desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(1, desc);
-        }
-
-        if let Some(desc) = stderr_desc {
-            desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(2, desc);
+            let mut table = user_thread_info.fd_table.lock();
+            table.insert_fd(fd, desc);
+            table.set_nonblock(fd, nonblock);
         }
     }
 
@@ -2794,13 +2816,10 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     use core::sync::atomic::AtomicUsize;
     use x86_64::structures::paging::OffsetPageTable;
 
-    use crate::{
-        memory::{
-            cow::clone_user_page_tables_cow,
-            mapper::{MemoryManager, get_level_4_table},
-            shared::SharedMemory,
-        },
-        thread::fd::FileDescriptorTable,
+    use crate::memory::{
+        cow::clone_user_page_tables_cow,
+        mapper::{MemoryManager, get_level_4_table},
+        shared::SharedMemory,
     };
 
     let parent_thread = match current_thread() {
@@ -2899,16 +2918,12 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         parent_cwd_clone = guard.cwd.lock().clone();
     }
 
-    // Deep-clone the fd_table: new table with cloned entries, refcounts bumped.
+    // Deep-clone the fd_table: new table with cloned entries and their flags,
+    // refcounts bumped.
     let child_fd_table = {
         let guard = parent_info.lock();
         let parent_fds = guard.fd_table.lock();
-        let mut new_table = FileDescriptorTable::new_empty();
-        for (fd_num, desc) in parent_fds.iter_all() {
-            desc.inc_refcount();
-            new_table.insert_fd(fd_num, desc.clone());
-        }
-        Arc::new(BlockingMutex::new(new_table))
+        Arc::new(BlockingMutex::new(parent_fds.deep_clone()))
     };
 
     // Switch to kernel page table for the remaining setup.

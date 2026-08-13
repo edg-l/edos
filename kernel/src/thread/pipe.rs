@@ -143,8 +143,9 @@ impl Pipe {
     /// Whether a write of `len` can proceed at all right now.
     ///
     /// A write up to `PIPE_BUF` waits for room for all of it, because POSIX
-    /// requires it to be atomic. A larger one proceeds as soon as there is any
-    /// room and takes what fits.
+    /// requires it to be atomic. A larger one waits for `PIPE_BUF` of room and
+    /// then takes what fits, so it goes in in chunks another writer's small
+    /// write can land between — which is what POSIX permits above `PIPE_BUF`.
     pub fn write_ready(&self, len: usize) -> bool {
         if self.readers == 0 {
             return true; // not room, but the write is about to fail
@@ -190,13 +191,16 @@ impl Pipe {
         if self.readers == 0 {
             return (None, self.notify_ends());
         }
-        let room = self.space();
-        if room == 0 {
+        // The atomicity rule is enforced here rather than only in the caller's
+        // wait predicate, or the first attempt at a write of at most `PIPE_BUF`
+        // would push whatever fitted and wait for the rest, which is exactly
+        // the interleaving with another writer that POSIX forbids.
+        if !self.write_ready(data.len()) {
             // Nothing moved, so nothing to tell anyone: the caller waits on
             // `writer_wq` and a reader wakes it when it frees room.
             return (Some(0), PipeNotifications::EMPTY);
         }
-        let take = data.len().min(room);
+        let take = data.len().min(self.space());
         self.buffer.push(&data[..take]);
         (Some(take), self.notify_ends())
     }

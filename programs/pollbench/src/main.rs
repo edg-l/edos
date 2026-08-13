@@ -17,6 +17,11 @@
 //! registers and unregisters without needing a peer, so it is what covers the
 //! socket path here rather than a networked test.
 //!
+//! One case is a check rather than a measurement: a pipe filled to capacity
+//! must stop reporting its write end writable, and start again once a reader
+//! takes some. That is the writable half of `poll`, which nothing else here
+//! exercises.
+//!
 //! It also times a clock read and a context switch, because both turned out to
 //! cost more than everything above.
 //!
@@ -27,7 +32,7 @@ use std::time::Instant;
 
 use edos_lib::io::{PollState, SelectFd, close, poll};
 use edos_lib::net::{self, SockAddrIn};
-use edos_lib::process::{pipe, sched_yield, write};
+use edos_lib::process::{pipe, read, sched_yield, set_nonblocking, write};
 
 const COUNTS: [usize; 5] = [1, 2, 4, 16, 64];
 
@@ -58,9 +63,21 @@ impl Out {
     }
 }
 
+/// What a pipe holds before a writer has to wait, from
+/// `kernel/src/thread/pipe.rs`. The fill loop below asserts against it, so a
+/// change to one without the other is a failure rather than a silent drift.
+const PIPE_CAPACITY: usize = 64 * 1024;
+
 fn readable() -> PollState {
     PollState {
         readable: true,
+        ..PollState::default()
+    }
+}
+
+fn writable() -> PollState {
+    PollState {
+        writable: true,
         ..PollState::default()
     }
 }
@@ -200,6 +217,71 @@ fn main() {
             net::close(sock);
         }
         Err(()) => out.line("pollbench: could not create a UDP socket"),
+    }
+
+    // A full pipe is the writable case: `poll` must stop reporting the write
+    // end writable once the ring has no room, and start again the moment a
+    // reader takes some. Without that a program that waits for POLLOUT spins,
+    // and one that trusts it writes into a pipe that will block.
+    //
+    // Filling it needs the write end non-blocking, so this covers the fd flag
+    // as well: the write that finds no room reports EAGAIN rather than parking
+    // forever against a reader that is this same thread.
+    {
+        let (r, w) = pipe().expect("pipe");
+        if set_nonblocking(w, true) < 0 {
+            out.line("pollbench: could not set O_NONBLOCK on a pipe write end");
+            std::process::exit(1);
+        }
+        let block = [b'x'; 4096];
+        let mut filled = 0usize;
+        loop {
+            let n = write(w, &block);
+            if n < 0 {
+                break;
+            }
+            filled += n as usize;
+            if filled > 1 << 20 {
+                out.line("pollbench: a pipe took more than a megabyte, so it is unbounded");
+                std::process::exit(1);
+            }
+        }
+        if filled != PIPE_CAPACITY {
+            out.line(&format!(
+                "pollbench: a pipe took {filled} bytes, expected {PIPE_CAPACITY}"
+            ));
+            std::process::exit(1);
+        }
+
+        let mut full = [SelectFd {
+            fd: w,
+            interests: writable(),
+            result: PollState::default(),
+        }];
+        let full_ns = time_poll(&mut full, iters);
+        if full[0].result.writable {
+            out.line("pollbench: a full pipe reported writable");
+            std::process::exit(1);
+        }
+        out.line(&format!(
+            "pollbench 1 full pipe {full_ns:.0} ns, not writable at {filled} bytes"
+        ));
+
+        let mut drain = [0u8; 4096];
+        if read(r, &mut drain) <= 0 {
+            out.line("pollbench: could not drain a full pipe");
+            std::process::exit(1);
+        }
+        full[0].result = PollState::default();
+        poll(&mut full, 0);
+        if !full[0].result.writable {
+            out.line("pollbench: a drained pipe did not report writable");
+            std::process::exit(1);
+        }
+        out.line("pollbench pipe POLLOUT ok: full is not writable, drained is");
+
+        close(r);
+        close(w);
     }
 
     let max = *COUNTS.iter().max().unwrap();

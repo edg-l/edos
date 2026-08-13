@@ -2,13 +2,24 @@ use alloc::collections::BTreeMap;
 
 use crate::thread::pipe::{FileDescriptor, StandardStream};
 
-/// A descriptor plus the per-descriptor flags that belong to the table entry
-/// rather than to the open file: today that is only close-on-exec.
+/// A descriptor plus its flags.
+///
+/// POSIX splits these in two: `FD_CLOEXEC` belongs to the table entry, while
+/// the status flags belong to the open file description and are therefore
+/// shared by every `dup` of it. This kernel has no open-file-description object
+/// to hang the second kind on — `FsFile` carries its offset inside the
+/// descriptor, so a `dup`ed file already advances independently — so status
+/// flags live here too and `dup` copies them rather than sharing them. Giving
+/// the two ends of a `dup` divergent `O_NONBLOCK` is the one case that
+/// behaves differently from POSIX, and it takes a deliberate `F_SETFL` on one
+/// of them to reach.
 #[derive(Debug, Clone)]
 struct FdEntry {
     desc: FileDescriptor,
     /// Closed by `execve` instead of being carried into the new image.
     cloexec: bool,
+    /// `O_NONBLOCK`: a read or write that would wait fails with `EAGAIN`.
+    nonblock: bool,
 }
 
 #[allow(unused)]
@@ -84,8 +95,26 @@ impl FileDescriptorTable {
             FdEntry {
                 desc: descriptor,
                 cloexec: false,
+                nonblock: false,
             },
         );
+    }
+
+    /// A fresh table holding every descriptor of this one, with the flags and
+    /// with each descriptor's refcount bumped: what `fork` gives the child.
+    ///
+    /// A method rather than a loop at the call site because the flags are the
+    /// part that is easy to leave behind — the entries carry `FD_CLOEXEC`,
+    /// which `fork` preserves and only `execve` acts on, and `O_NONBLOCK`,
+    /// which a child inheriting a descriptor must see behave as its parent's
+    /// did.
+    pub fn deep_clone(&self) -> Self {
+        for entry in self.fds.values() {
+            entry.desc.inc_refcount();
+        }
+        Self {
+            fds: self.fds.clone(),
+        }
     }
 
     /// Whether `fd` is marked close-on-exec. Unknown descriptors report false.
@@ -98,6 +127,24 @@ impl FileDescriptorTable {
         match self.fds.get_mut(&fd) {
             Some(entry) => {
                 entry.cloexec = cloexec;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `fd` was opened, or later set, `O_NONBLOCK`. Unknown descriptors
+    /// report false, which is what a read or write on one does anyway before it
+    /// fails with `EBADF`.
+    pub fn is_nonblock(&self, fd: u64) -> bool {
+        self.fds.get(&fd).is_some_and(|e| e.nonblock)
+    }
+
+    /// Set or clear `O_NONBLOCK`. Returns false if the descriptor is not open.
+    pub fn set_nonblock(&mut self, fd: u64, nonblock: bool) -> bool {
+        match self.fds.get_mut(&fd) {
+            Some(entry) => {
+                entry.nonblock = nonblock;
                 true
             }
             None => false,

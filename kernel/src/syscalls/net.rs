@@ -467,7 +467,11 @@ pub fn sys_recvfrom(
     }
 
     let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+    let (desc, nonblock) = {
+        let table = fd_table.lock();
+        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
+    };
+    let sock_arc = match desc {
         Some(FileDescriptor::Socket(s)) => s,
         _ => {
             info.lock().errno = Errno::EBADF;
@@ -500,7 +504,9 @@ pub fn sys_recvfrom(
         if ready() {
             break;
         }
-        if flags & MSG_DONTWAIT != 0 {
+        // MSG_DONTWAIT is this call asking not to wait; O_NONBLOCK is the
+        // descriptor having asked once for every call on it.
+        if flags & MSG_DONTWAIT != 0 || nonblock {
             info.lock().errno = Errno::EAGAIN;
             return !0u64;
         }
@@ -626,7 +632,11 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+    let (desc, nonblock) = {
+        let table = fd_table.lock();
+        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
+    };
+    let sock_arc = match desc {
         Some(FileDescriptor::Socket(s)) => s,
         _ => {
             info.lock().errno = Errno::EBADF;
@@ -662,6 +672,11 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
         };
         if ready() {
             break;
+        }
+        // An idle listener is the wait a non-blocking accept declined.
+        if nonblock {
+            info.lock().errno = Errno::EAGAIN;
+            return !0u64;
         }
         // Killable: a listener with no client coming is waiting on something
         // no amount of local progress supplies, so this is where a killed

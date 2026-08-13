@@ -305,8 +305,9 @@ process and handed it exactly three descriptors, `fork` copied the whole table
 (which is what fork is for and not what CLOEXEC governs), and there was no
 `O_NONBLOCK` for `F_SETFL` to set. `FD_CLOEXEC` would have been a bit nothing
 could observe. `execve` (59) is what gave it something to govern, and `fcntl`
-(72) with `FD_CLOEXEC` shipped alongside it. `O_NONBLOCK` still does not exist,
-so `F_SETFL` remains unimplemented on purpose.
+(72) with `FD_CLOEXEC` shipped alongside it. `O_NONBLOCK` is real now too — it
+is recorded on the descriptor and honoured by `read`, `write`, `recvfrom` and
+`accept` — so `F_GETFL` and `F_SETFL` are implemented as well.
 
 `pread`/`pwrite` (audit-shipped, syscalls 17/18) and `getuid`/`getgid`
 (102/104) were the two worth doing, and are in. `setuid` was deliberately **not**

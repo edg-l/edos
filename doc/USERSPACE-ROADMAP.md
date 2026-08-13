@@ -242,6 +242,7 @@ syscalls had landed without the fork moving; `edos_rt` 0.0.42 and the shims in
 | `ReadDir` | one `SYS_LIST_DIR` call sized to the whole directory | `SYS_GETDENTS` 78, a chunk at a time |
 | `Path::try_exists` | a full `stat` | `SYS_ACCESS` 21 with `F_OK` |
 | `OpenOptions::open` | allocated a `CString` per open | `SYS_OPENAT` 257 takes pointer+length |
+| `TcpStream`/`TcpListener`/`UdpSocket::set_nonblocking` | `unsupported()` | `SYS_FCNTL` 72 with `F_SETFL`, honoured by `read`, `recvfrom` and `accept` |
 
 `futimens` is new kernel work rather than a wrapper: `SYS_UTIMENSAT` took a path
 and a `File` has only a descriptor, so a null path now means "the file this
@@ -273,49 +274,33 @@ correctness, locking, perf hot spots and missing syscalls — see
 5. **Rapid spawn and exit.** `xargs` in loop mode hammers the reaper and zombie
    collection.
 6. **CPU count.** Not exposed to userspace at all today.
-7. **Named FIFOs.** There is no `mkfifo` and no `S_IFIFO`, and no `AF_UNIX`
-   either, so two programs with no common parent cannot make a pipe between
-   them at all: the only shared channels are shared memory, a TCP socket over
-   loopback, or a regular file. `mkfifo f; prog > f & other < f` is ordinary
-   Unix that cannot be expressed here. It is cheaper than it sounds, because a
-   FIFO is the `Pipe` that already exists plus a name in the filesystem; what
-   is missing is an inode type the VFS understands and an `open` that
-   rendezvouses a reader with a writer. memfs is the natural first filesystem
-   to carry it.
+7. **Named FIFOs.** Closed at eb4dd2f: `SYS_MKFIFOAT` 283 and `/bin/mkfifo`,
+   a `FileKind::Fifo` both EFS and memfs store, and an `open` that rendezvouses
+   a reader with a writer. `mkfifo f; prog > f & other < f` works. The buffer is
+   the `Pipe` that already existed, keyed by inode rather than by path;
+   `kernel/src/fs/fifo.rs` has the semantics and `doc/services.md` the use it
+   was built for. `AF_UNIX` still does not exist, so a FIFO is the only channel
+   between two programs with no common parent.
 
-## Service management, and why it waits on a FIFO
+## Service management, and why it waited on a FIFO
 
-`edos-init` supervises a **hardcoded array**. Adding a service means
-recompiling, and there is no runtime control of any kind: no start, stop or
-restart, and no status. The only knobs are `requires`, which waits for device
-nodes, and `enabled_by`, which skips a service whose configuration file is
-absent. That is enough for a session whose membership never changes, and it
-stops being enough the moment anything wants to turn a service off without
-rebooting.
+Closed at eb4dd2f; `doc/services.md` is the reference. `edos-init` supervised a
+**hardcoded array** with no runtime control of any kind. Both halves shipped:
+`/etc/services/*.conf` declares a service in keyword-value lines
+(`command`, `args`, `essential`, `shell`, `requires`, `enabled_by`) with the
+desktop session still compiled in as the default, and `svc` starts, stops,
+restarts and inspects one through a control FIFO at `/var/run/svc.ctl`, with
+init publishing `/var/run/svc.status` as the answer.
 
-Two phases, deliberately separable:
-
-**Config files, no IPC.** `/etc/services/*.conf`, keyword-value lines in the
-shape of `/etc/sshd.conf`: `command`, `args`, `essential`, `shell`, `requires`,
-`enabled_by`. The desktop session stays compiled in as the default, so a system
-with no `/etc/services` boots exactly as it does now and config files only add
-to it. This is the half that removes the recompile, and it needs nothing new
-from the kernel.
-
-**A control channel, which is where the FIFO comes in.** Every established
-supervisor is controlled through one: SysV init's `/dev/initctl`, daemontools'
-`supervise/control`, runit's `sv` writing a single byte, s6 the same. So `svc`
-should write a command into a FIFO that `init` holds open, and the reason that
-cannot be built today is the gap above, not anything about init.
-
-Three alternatives were considered and rejected. Shared memory plus a signal
-works with today's primitives, but nothing does it that way and a request can
-be observed half-written. A TCP listener on loopback needs no new machinery and
-puts init on the network stack's critical path, which is the wrong dependency
-for the first process. OpenRC's model — no daemon at all, state on disk, and
-the control program does the work itself — is a real design rather than a
-dodge, but it fits badly when something must own `waitpid` and the restart
-backoff, which is exactly what init is for.
+The shape is daemontools' and runit's, and the alternatives were considered and
+rejected rather than overlooked. Shared memory plus a signal works with today's
+primitives, but nothing does it that way and a request can be observed
+half-written. A TCP listener on loopback needs no new machinery and puts init on
+the network stack's critical path, which is the wrong dependency for the first
+process. OpenRC's model — no daemon at all, state on disk, and the control
+program does the work itself — is a real design rather than a dodge, but it fits
+badly when something must own `waitpid` and the restart backoff, which is
+exactly what init is for.
 
 No dependency graph and no runlevels. runit does without them, and EDOS has one
 real ordering constraint — device nodes — that `requires` already covers.

@@ -286,7 +286,10 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     interrupts::enable();
 
-    let fdinfo = fd_table.lock().get_fd(fd).cloned();
+    let (fdinfo, nonblock) = {
+        let table = fd_table.lock();
+        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
+    };
 
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
@@ -343,6 +346,18 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 sent += n;
                 if sent == data.len() {
                     break Some(sent);
+                }
+
+                // POSIX: a non-blocking write reports what it managed to move,
+                // and only one that moved nothing at all is EAGAIN. A write of
+                // at most PIPE_BUF is still all or nothing, since `Pipe::write`
+                // is what enforces that and it refuses rather than splitting.
+                if nonblock {
+                    if sent > 0 {
+                        break Some(sent);
+                    }
+                    info.lock().errno = Errno::EAGAIN;
+                    return !0u64;
                 }
 
                 // Room for what is left, or a reader going away so the write
@@ -423,6 +438,16 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 sent += n;
                 if sent == data.len() {
                     break Some(sent);
+                }
+
+                // As for a pipe: report what went in, and only a write that
+                // moved nothing is EAGAIN.
+                if nonblock {
+                    if sent > 0 {
+                        break Some(sent);
+                    }
+                    info.lock().errno = Errno::EAGAIN;
+                    return !0u64;
                 }
 
                 // Killable: a full terminal whose master never reads is a wait
@@ -686,13 +711,16 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     // UserThreadInfo IrqSpinlock: threads of one process share the table, and a
     // contended acquisition with interrupts off spins without answering IPIs.
     interrupts::enable();
-    let fd_info = fd_table.lock().get_fd(fd).cloned();
+    let (fd_info, nonblock) = {
+        let table = fd_table.lock();
+        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
+    };
 
     match fd_info {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdin => {
                 // Stdin reads from keyboard - still needs intermediate buffer
-                let kernel_data = match read_from_stdin(count) {
+                let kernel_data = match read_from_stdin(count, nonblock) {
                     Ok(data) => data,
                     Err(code) => return code,
                 };
@@ -745,6 +773,12 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 if at_eof {
                     break 0; // EOF: no data and all writers closed
                 }
+                // An empty pipe with a writer still on it is the wait a
+                // non-blocking reader asked not to take.
+                if nonblock {
+                    info.lock().errno = Errno::EAGAIN;
+                    break -1;
+                }
                 // No data but writer still open: park until woken by write/close.
                 // The predicate runs with interrupts off, so it probes the lock
                 // rather than taking it and treats a contended pipe as ready --
@@ -781,7 +815,15 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             notif.flush();
 
             if taken == 0 {
-                return 0; // EOF, or no data yet
+                // Nothing to read. A descriptor that asked for O_NONBLOCK is
+                // told so as EAGAIN; the default answer stays 0, which is what
+                // the terminal's poll loop has always read, and which conflates
+                // no-data-yet with end of file.
+                if nonblock {
+                    info.lock().errno = Errno::EAGAIN;
+                    return -1;
+                }
+                return 0;
             }
             if !copy_out(buffer_ptr, &data[..taken]) {
                 info.lock().errno = Errno::EFAULT;
@@ -818,6 +860,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 }
                 if hangup {
                     break 0;
+                }
+                if nonblock {
+                    info.lock().errno = Errno::EAGAIN;
+                    break -1;
                 }
                 // Ctrl+C on a terminal read is the ordinary case for this:
                 // the thread is killed and nothing else will ever make the
@@ -921,6 +967,12 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     if ready() {
                         break conn.lock();
                     }
+                    // An established connection with an empty receive buffer is
+                    // the wait; a closed one falls through to the EOF below.
+                    if nonblock {
+                        info.lock().errno = Errno::EAGAIN;
+                        return -1;
+                    }
                     if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
                         info.lock().errno = Errno::EINTR;
                         return -1;
@@ -950,6 +1002,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     };
                     if ready() {
                         break;
+                    }
+                    if nonblock {
+                        info.lock().errno = Errno::EAGAIN;
+                        return -1;
                     }
                     if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
                         info.lock().errno = Errno::EINTR;
@@ -1015,7 +1071,7 @@ pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
     kernel_buffer.len() as i64
 }
 
-fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+fn read_from_stdin(max_count: usize, nonblock: bool) -> Result<alloc::vec::Vec<u8>, i64> {
     use alloc::vec::Vec;
     use pc_keyboard::{KeyCode, KeyState};
 
@@ -1025,7 +1081,24 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     // Simple keycode→ASCII for raw stdin (no layout, no modifiers).
     // This is a fallback path; the terminal handles real keyboard input.
     while kernel_buffer.len() < max_count {
-        let event = rx.recv();
+        // A non-blocking read takes what has been typed and stops there;
+        // finding nothing at all is EAGAIN. Note this returns without waiting
+        // for the Return the blocking path stops at, so a caller gets a line in
+        // pieces.
+        let event = if nonblock {
+            match rx.try_recv() {
+                Some(event) => event,
+                None => {
+                    if kernel_buffer.is_empty() {
+                        current_thread_info().lock().errno = Errno::EAGAIN;
+                        return Err(-1);
+                    }
+                    break;
+                }
+            }
+        } else {
+            rx.recv()
+        };
         if event.state != KeyState::Down {
             continue;
         }
@@ -1111,13 +1184,45 @@ pub fn sys_openat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) 
     open_resolved(&info, path, flags)
 }
 
-/// Open without waiting for a peer. Only meaningful on a named pipe, where
-/// opening is a rendezvous; see [`crate::fs::fifo`].
-const O_NONBLOCK: u64 = 0x800;
+/// Open without waiting, and read and write without waiting afterwards.
+///
+/// On a named pipe it also decides the open itself, which is a rendezvous
+/// there; see [`crate::fs::fifo`]. Recorded on the descriptor either way, so a
+/// later read or write that would block fails with `EAGAIN` instead.
+pub const O_NONBLOCK: u64 = 0x800;
+
+/// Writes are placed at the end of the file, resolved per write rather than at
+/// open time.
+pub const O_APPEND: u64 = 0x400;
 
 /// Every `open` flag this kernel implements: the access mode plus O_CREAT,
 /// O_TRUNC, O_APPEND and O_NONBLOCK.
-const OPEN_FLAGS_SUPPORTED: u64 = 0x3 | 0x40 | 0x200 | 0x400 | O_NONBLOCK;
+const OPEN_FLAGS_SUPPORTED: u64 = 0x3 | 0x40 | 0x200 | O_APPEND | O_NONBLOCK;
+
+/// The access mode and `O_APPEND` a descriptor was opened with, as `F_GETFL`
+/// reports them. Status flags that can be changed afterwards are not here:
+/// they live on the descriptor table entry, not on the open file.
+pub fn descriptor_open_flags(desc: &FileDescriptor) -> u64 {
+    let mode = |m: OpenMode| match m {
+        OpenMode::ReadOnly => 0,
+        OpenMode::WriteOnly => 1,
+        OpenMode::ReadWrite => 2,
+    };
+    match desc {
+        FileDescriptor::StandardStream(StandardStream::Stdin) => 0,
+        FileDescriptor::StandardStream(_) => 1,
+        FileDescriptor::PipeRead(_) => 0,
+        FileDescriptor::PipeWrite(_) => 1,
+        // Both ends on one descriptor, a PTY and a socket are all read-write by
+        // construction: none of them has an access mode to have been opened
+        // with.
+        FileDescriptor::PipeReadWrite(_)
+        | FileDescriptor::PtyMaster(_)
+        | FileDescriptor::PtySlave(_)
+        | FileDescriptor::Socket(_) => 2,
+        FileDescriptor::FsFile(file) => mode(file.mode) | if file.append { O_APPEND } else { 0 },
+    }
+}
 
 /// Open an already-resolved absolute path.
 fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64) -> i64 {
@@ -1132,7 +1237,7 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
 
     // Verify file exists; support create flag.
     // O_APPEND offset is determined per-write by vfs::write, not at open time.
-    let append = (flags & 0x400) != 0; // O_APPEND
+    let append = (flags & O_APPEND) != 0;
     let create = (flags & 0x40) != 0; // O_CREAT
     let truncate = (flags & 0x200) != 0; // O_TRUNC
     let offset = 0u64;
@@ -1189,16 +1294,6 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         }
     }
 
-    // O_NONBLOCK says what an open should do when there is no peer yet, which
-    // is a question only a named pipe has. Refused elsewhere rather than
-    // ignored, like every other flag this kernel does not implement: a
-    // descriptor whose semantics are not the ones asked for is worse than an
-    // error.
-    if nonblock && kind != FileKind::Fifo {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
     // Resolve VFS operation at open time. Cache fs, relative, mount_id, and
     // inode so subsequent read/write syscalls skip the mount-registry scan.
     let (cached_op, inode) = match vfs::resolve(&path) {
@@ -1217,7 +1312,13 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         // This blocks for the peer unless O_NONBLOCK, so it runs with no lock
         // held and with `info` unborrowed.
         return match fifo::open((mount_id, ino), open_mode, nonblock) {
-            Ok(desc) => info.lock().fd_table.lock().allocate_fd(desc) as i64,
+            Ok(desc) => {
+                let table = info.lock().fd_table.clone();
+                let mut table = table.lock();
+                let fd = table.allocate_fd(desc);
+                table.set_nonblock(fd, nonblock);
+                fd as i64
+            }
             Err(errno) => {
                 info.lock().errno = errno;
                 -1
@@ -1236,7 +1337,10 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         inode,
         ra: crate::fs::readahead::ReadaheadState::default(),
     });
-    let fd = info.lock().fd_table.lock().allocate_fd(desc);
+    let table = info.lock().fd_table.clone();
+    let mut table = table.lock();
+    let fd = table.allocate_fd(desc);
+    table.set_nonblock(fd, nonblock);
     fd as i64
 }
 

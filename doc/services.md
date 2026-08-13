@@ -146,6 +146,7 @@ Both EFS and memfs store them; see `doc/efs.md` for the on-disk type. The
 interesting semantics are in `open` rather than in the transfer, and they are
 documented at the top of `kernel/src/fs/fifo.rs`: opening one end waits for the
 other, `O_NONBLOCK` turns the reader's wait into an immediate success and the
-writer's into `ENXIO`, and `O_RDWR` is not a rendezvous at all. `O_NONBLOCK`
-governs the open and nothing after it; a later read or write blocks the way it
-would on any pipe.
+writer's into `ENXIO`, and `O_RDWR` is not a rendezvous at all. `O_NONBLOCK` is
+recorded on the descriptor the open returns, so it governs the transfer too: a
+read with nothing to read and a write with no room report `EAGAIN` rather than
+waiting, and `fcntl(F_SETFL)` changes it afterwards.

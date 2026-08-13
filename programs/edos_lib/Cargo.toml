@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 edos-trace-abi = { path = "../../libs/edos-trace-abi" }
-edos_rt = "0.0.46"
+edos_rt = "0.0.47"

@@ -1048,7 +1048,7 @@ does not have to invent them.
 | userspace programs | 109 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | 111 rows = 109 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
-| `iotest /var` | 22/22 | the syscall regression suite, run in the guest |
+| `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
@@ -1064,21 +1064,25 @@ sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | t
 comm -3 /tmp/members.txt /tmp/tabled.txt   # empty is correct
 ```
 
-Two numbers outside this repo are stale against the table above, all on the
-project site at `/usr/src/edos-web`:
+The project site at `/usr/src/edos-web` is a separate repo carrying the same
+numbers, and it drifts on its own. It agrees with the table above as of 896950d.
+The places to check, because a count lives in more than one of them:
 
-- `src/content/docs/introduction.md` and `src/content/docs/userspace.md` both say
-  96 programs, in a table row and in a page description; the workspace builds
-  105.
+- `src/pages/index.astro`, the `TREE` array: Rust lines and files, kernel lines,
+  program count, syscall count, commit count. The line figures are tokei CODE
+  lines, not totals.
+- `src/content/docs/architecture.md` ("There are N syscalls"),
+  `src/content/docs/userspace.md` (frontmatter description, body, and the
+  `syscallfuzz` sentence), `src/content/docs/introduction.md` (the table row and
+  the source link's line count).
+- `src/data/syscalls.ts`, which transcribes the whole table. Diff its `num:`
+  values against the kernel's rather than counting them: it was briefly at 111
+  entries while missing `mkfifoat` and still carrying `open`, which the kernel
+  had removed in favour of `openat` with `AT_FDCWD`, so the total was right and
+  the inventory was not.
 
-`src/content/docs/architecture.md` says "There are 110 syscalls"; `SYS_MKFIFOAT`
-took the kernel to 111, so that page is behind again. It was briefly accurate by
-coincidence rather than by an edit -- removing the plain `open` entry point
-(`SYS_OPEN`, superseded by `SYS_OPENAT` with `AT_FDCWD`) had brought the count
-back down to match it. Re-check it rather than trusting either number.
-
-Fixing any of them means a commit and an `npm run build` in that checkout, which
-is a separate repo and not something to do unattended.
+`npm run build` in that checkout IS the deploy -- nginx serves `dist/` directly,
+so the build publishes before any commit does. Commit and push the source too.
 
 The `unwrap` figure includes 11 in `thread/sched_test.rs`, which is test code and
 not worth converting. By file, the ones that would move the number are
@@ -2490,6 +2494,9 @@ remembering:
   builds a fresh process and gives it exactly three descriptors; `fork` copies
   the table, which is what fork does. No `O_NONBLOCK` exists either, so
   `F_SETFL` would set nothing. The flag becomes real the day `exec` lands.
+  Both halves have since landed: `execve` gave `FD_CLOEXEC` something to
+  govern, and `O_NONBLOCK` is recorded on the descriptor and honoured by
+  `read`, `write`, `recvfrom` and `accept`, so `F_GETFL`/`F_SETFL` are real.
 - **`setuid` without a permission model** is a privilege change that enforces
   nothing. `getuid`/`getgid` are in; the setter is not.
 
