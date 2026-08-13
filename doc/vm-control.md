@@ -165,6 +165,46 @@ host audio sink, which is what exercises `/dev/dsp`. `-audiodev pipewire`, as
 
 ---
 
+## Dragging a window looks bad over SPICE, and the guest is not why
+
+Measured 2026-08-13, dragging a text-filled terminal, same guest and same
+build, only the display protocol changed:
+
+| | SPICE | VNC |
+| --- | --- | --- |
+| pointer positions the guest was told about | 21-40 /s | 5-30 /s |
+| to the display | 33-53 MB/s | 118-124 MB/s |
+| how it looked | ~5 fps, heavy tearing | fine |
+
+The guest does **more** work over VNC and is told about the pointer **less**
+often, and it looks better. So neither the frame rate nor the input rate
+predicts what a viewer sees, and a drag that feels like 5 fps is not evidence
+of anything wrong inside the machine. Throughout all of the above the
+compositor reported 76.9 fps, an interval of 13010us p50 / 13016 p95, and zero
+stalls.
+
+What fits the numbers is SPICE's lossy video-stream detector: a large moving
+rectangle full of text is exactly what it reclassifies as video, and lossy
+video of text smears and lags. `scripts/edos-vm start --display spice
+--spice-streaming off` is the knob, and the option is documented as "off keeps
+text sharp".
+
+Tearing disappeared entirely at the same time. Two changes can account for
+that and this session cannot separate them: `0eb1650` gave the compositor a
+back buffer, so it stopped drawing into the live scanout the host reads, and
+VNC does not do lossy video of a moving region. The guest-side half was a real
+defect either way -- see `doc/design/wm-damage.md` -- but do not assume it was
+the whole of it.
+
+**Compare protocols before optimising the guest.** Four separate hypotheses
+about the compositor, the client, the flush pattern and the input path all
+survived their own measurements and were all wrong; a two-minute VNC
+comparison settled it. The instrument that makes this checkable is `moves=N`
+in the `wmfps` line -- how many frames in the second saw the pointer somewhere
+new. It is the only counter that distinguishes "the machine is slow" from "the
+machine was never told to move", and both look identical in every other
+number.
+
 ## Guest constraints
 
 Two properties of the guest shape everything that drives it. They are not
