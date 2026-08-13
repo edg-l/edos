@@ -443,9 +443,12 @@ Each step is independently useful and independently committable.
    `std::os::unix` and `libc`. The ustar header decoder moved from `tar`'s
    source into `libs/ustar` and is now shared, so an archive `tar` can read is
    one `grab` can install.
-5. **`edos-grab` GUI.**
+5. ~~**`edos-grab` GUI.**~~ **Shipped.** `programs/edos-grab` links the `grab`
+   lib, runs every network operation on a worker thread and reports back over a
+   channel, so the window keeps drawing through a download. Icons are fetched
+   from `/pkg/icons/` and rasterized by the worker, not by the list.
 6. **`edos-edit` leaves the image and becomes the first package**, plus the
-   `/software/` page on the website.
+   `/software/` page on the website. The first half is done; the page is not.
 
 ## Risks
 

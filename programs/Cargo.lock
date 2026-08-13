@@ -408,6 +408,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "edos-grab"
+version = "0.1.0"
+dependencies = [
+ "edos_http",
+ "edos_lib",
+ "edos_render",
+ "grab",
+ "grab-index",
+]
+
+[[package]]
 name = "edos-init"
 version = "0.1.0"
 dependencies = [

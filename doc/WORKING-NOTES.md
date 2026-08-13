@@ -1036,6 +1036,40 @@ above `update-manifest` in `GNUmakefile`). So the fix is not to rebuild it
 automatically. `scripts/edos-vm start` now compares its mtime against
 `filesystem/.manifest` and warns, naming `make sata-disk.img`.
 
+## `edos-grab`, and what a GUI over a network library costs
+
+`programs/edos-grab` is the package manager's window: search field, list with
+rendered SVG icons, detail pane, Install/Remove/Update, progress strip. It links
+the `grab` lib, so a failure arrives as an `Error` rather than as parsed CLI
+output. Verified in a headless guest: it lists the repository, installs
+`edos-edit` from `https://edos.edgl.dev/pkg`, and the row, the detail pane and
+the buttons all follow the install without a refresh.
+
+Three things worth knowing before touching it.
+
+**Every network call runs on a worker thread and reports over an `mpsc`
+channel.** `grab`'s API is blocking by construction, and `sys_connect` still
+ignores `O_NONBLOCK`, so anything on the GUI thread freezes the window for the
+length of a download -- and an unreachable repository would freeze it with no
+way out. One operation at a time: two installs at once would race over
+`/var/lib/grab/db`. The `Progress` trait is implemented by a struct holding the
+`Sender`, which is the whole of the plumbing.
+
+**A widget's text cannot be read back out of `WidgetContainer`.** `get`/`get_mut`
+hand back `&dyn Widget`, which has no downcast, so `TextInput::text()` is
+unreachable once the field is in a container. The filter therefore keeps its own
+copy of the query, updated from the field's own `TextChanged`. The same applies
+to `set_text`: a program that must clear a field has to own the `TextInput`
+directly and map keycodes itself.
+
+**`Weight` has no `Bold`.** The interface face runs Regular/Medium/Semibold;
+`Weight::Semibold` is what a heading uses.
+
+The icon path is `<repo>/<Package::icon>`, fetched with a 256 KiB cap and
+rasterized to 32x32 on the worker, so listing 100 packages downloads no
+packages. An empty catalogue -- which is what a failed fetch reports --
+deliberately does not clear the icons already rendered.
+
 ## Counts, remeasured 2026-08-13
 
 Every number a doc states about the size of the tree, taken rather than carried
