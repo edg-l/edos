@@ -103,6 +103,14 @@ pub struct Frame {
     pub full_screen: bool,
     /// Nothing changed, so the composite produced the image already on screen.
     pub idle_repaint: bool,
+    /// The pointer sat at a different place than the frame before.
+    ///
+    /// Counted separately from `in_motion` because it answers a different
+    /// question: not "was something moving" but "how often did this machine
+    /// learn that it was". A drag that steps ten times a second while the loop
+    /// runs at seventy-seven is an input problem wearing a rendering problem's
+    /// clothes.
+    pub pointer_moved: bool,
     /// The pointer moved or a drag was in progress, which is when smoothness
     /// is judged. Reported separately because an idle desktop and a window
     /// being dragged are different workloads and averaging them hides both.
@@ -119,6 +127,7 @@ pub struct FrameLog {
 
     frames: u32,
     motion_frames: u32,
+    pointer_moves: u32,
     idle_repaints: u32,
     full_screens: u32,
     stalls: u32,
@@ -144,6 +153,7 @@ impl FrameLog {
             motion_interval: Samples::new(),
             frames: 0,
             motion_frames: 0,
+            pointer_moves: 0,
             idle_repaints: 0,
             full_screens: 0,
             stalls: 0,
@@ -163,6 +173,9 @@ impl FrameLog {
         if frame.in_motion {
             self.motion_interval.push(frame.interval_us);
             self.motion_frames += 1;
+        }
+        if frame.pointer_moved {
+            self.pointer_moves += 1;
         }
 
         self.frames += 1;
@@ -204,6 +217,7 @@ impl FrameLog {
 
         self.frames = 0;
         self.motion_frames = 0;
+        self.pointer_moves = 0;
         self.idle_repaints = 0;
         self.full_screens = 0;
         self.stalls = 0;
@@ -222,7 +236,7 @@ impl FrameLog {
         format!(
             "wmfps fps={:.1} int_p50={} int_p95={} int_max={} motion_p50={} motion_p95={} \
              comp_p50={} comp_p95={} flip_p50={} flip_p95={} flip_max={} in_p50={} \
-             idle_repaint={}/{} full={} stalls={} KiBs={}",
+             idle_repaint={}/{} full={} stalls={} moves={} KiBs={}",
             self.fps(span),
             interval.p50,
             interval.p95,
@@ -239,6 +253,7 @@ impl FrameLog {
             self.frames,
             self.full_screens,
             self.stalls,
+            self.pointer_moves,
             self.sent_pixels * 4 / 1024,
         )
     }

@@ -889,14 +889,23 @@ fn main() {
                 sent_pixels = (screen.width() * screen.height()) as u64;
                 screen.flip();
             } else {
-                // One transfer per region rather than one over their bounding
-                // box. Regions that are cheaper together were already merged.
+                // One transfer for the whole frame, over the union of the
+                // regions.
+                //
+                // Each transfer is a separate display update, so sending the
+                // parts separately lets a viewer see the frame arrive in
+                // pieces: during a drag the window is erased at its old
+                // rectangle and drawn at its new one as two different updates,
+                // which reads as the window tearing into slices. Costs the
+                // pixels between the regions.
                 let (rects, count) = dirty.coalesced();
-                for rect in &rects[..count] {
-                    if let Some(c) = rect.clipped(screen_w, screen_h) {
-                        sent_pixels += c.area();
-                        screen.flip_rect(c.x as u32, c.y as u32, c.w, c.h);
-                    }
+                let union = rects[..count]
+                    .iter()
+                    .copied()
+                    .reduce(|acc, rect| acc.union(rect));
+                if let Some(c) = union.and_then(|u| u.clipped(screen_w, screen_h)) {
+                    sent_pixels += c.area();
+                    screen.flip_rect(c.x as u32, c.y as u32, c.w, c.h);
                 }
                 // Past the whole screen there is nothing left to save, and one
                 // ioctl beats several.
@@ -917,8 +926,8 @@ fn main() {
         previous_frame_start = Some(frame_start);
         // Motion is what smoothness is judged on, and an idle desktop averaged
         // together with a drag hides the behaviour of both.
-        let in_motion =
-            (mx, my) != previous_cursor || drag_state.is_some() || resize_state.is_some();
+        let pointer_moved = (mx, my) != previous_cursor;
+        let in_motion = pointer_moved || drag_state.is_some() || resize_state.is_some();
         previous_cursor = (mx, my);
 
         frame_log.record(&frametime::Frame {
@@ -927,6 +936,7 @@ fn main() {
             composite_us,
             flip_us,
             sent_pixels,
+            pointer_moved,
             full_screen: dirty.full_screen,
             idle_repaint: sent_pixels == 0,
             in_motion,
