@@ -332,6 +332,13 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
             );
         }
 
+        if line.changed {
+            canvas.fill(
+                Rect::new(layout.ribbon_x, y, RIBBON_W, layout.line_h),
+                theme.editor_change.raw(),
+            );
+        }
+
         // Line number, right-aligned in the gutter, one character at a time
         // so it lands on the grid the text does.
         let number = (line_index + 1).to_string();
@@ -395,7 +402,9 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
 }
 
 /// Draw the status strip: what the document is, where the cursor sits, and
-/// what it is stored on.
+/// what it is stored on. `note`, when set, replaces that with the result of
+/// the last command — save, undo, redo — drawn in `warning` when it is a
+/// failure.
 pub fn draw_status(
     canvas: &mut Canvas,
     layout: &Layout,
@@ -406,6 +415,7 @@ pub fn draw_status(
     indent: &str,
     encoding: &str,
     volume: &str,
+    note: Option<(&str, bool)>,
 ) {
     let theme = &Theme::DEFAULT;
     canvas.fill(layout.status, theme.taskbar_bg_bottom.raw());
@@ -417,12 +427,18 @@ pub fn draw_status(
     );
 
     let position = format!("Ln {line}, Col {col}");
-    let message = [name, language, position.as_str(), indent, encoding].join("   ");
+    let composed = [name, language, position.as_str(), indent, encoding].join("   ");
+    let (message, warning) = note.unwrap_or((composed.as_str(), false));
+    let ink = if warning {
+        theme.warning
+    } else {
+        theme.label_text
+    };
     canvas.text_in(
         layout.status.x + PAD as i32,
         layout.status,
-        &message,
-        sans_small(theme.label_text.raw()),
+        message,
+        sans_small(ink.raw()),
     );
     canvas.text_right(
         layout.status.x + layout.status.width as i32 - PAD as i32,

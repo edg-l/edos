@@ -11,10 +11,10 @@ mod view;
 
 use std::time::Duration;
 
-use edos_lib::keymap::{Modifiers, keycode, update_modifiers};
+use edos_lib::keymap::{Modifiers, keycode, map_keycode, update_modifiers};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
-use buffer::{Buffer, Position};
+use buffer::{Buffer, Edit, Position};
 
 /// Opening size.
 const WIN_W: u32 = 1000;
@@ -23,12 +23,19 @@ const WIN_H: u32 = 680;
 /// Rows moved per notch of the wheel.
 const SCROLL_STEP: usize = 3;
 
+/// What Tab inserts. The spec's language table replaces this with the open
+/// file's own indent.
+const TAB_INDENT: &str = "    ";
+
 struct App {
     window: Window,
     buffer: Buffer,
     layout: view::Layout,
     mods: Modifiers,
     sidebar_open: bool,
+    /// What the last save, undo or redo reported, shown in the status strip
+    /// until the next edit. `true` marks a failure.
+    status: Option<(String, bool)>,
 }
 
 impl App {
@@ -41,10 +48,23 @@ impl App {
             layout,
             mods: Modifiers::default(),
             sidebar_open: true,
+            status: None,
         };
         app.buffer.clamp_cursor();
-        let _ = app.window.set_title(buffer_name(&app.buffer));
+        app.update_title();
         app
+    }
+
+    /// The window title: the buffer's name, with a trailing dot when it
+    /// carries changes the disk does not have.
+    fn update_title(&mut self) {
+        let name = buffer_name(&self.buffer);
+        let title = if self.buffer.dirty {
+            format!("{name} \u{2022}")
+        } else {
+            name.to_string()
+        };
+        let _ = self.window.set_title(&title);
     }
 
     // --- Cursor movement ------------------------------------------------
@@ -68,6 +88,7 @@ impl App {
             }
         }
         self.buffer.cursor = pos;
+        self.buffer.break_coalesce();
         self.scroll_into_view();
     }
 
@@ -76,13 +97,131 @@ impl App {
         let line = (self.buffer.cursor.line as i32 + delta).clamp(0, last.max(0)) as usize;
         self.buffer.cursor.line = line;
         self.buffer.clamp_cursor();
+        self.buffer.break_coalesce();
         self.scroll_into_view();
     }
 
     fn set_cursor(&mut self, pos: Position) {
         self.buffer.cursor = pos;
         self.buffer.clamp_cursor();
+        self.buffer.break_coalesce();
         self.scroll_into_view();
+    }
+
+    // --- Editing ----------------------------------------------------------
+
+    /// Insert `text` at the cursor as one log entry, and move the cursor
+    /// past it. Consecutive single-character calls coalesce in the log
+    /// unless `text` is `"\n"`, which always starts a fresh entry.
+    fn insert_str(&mut self, text: &str) {
+        self.status = None;
+        let cursor_before = self.buffer.cursor;
+        let end = self.buffer.insert_text(cursor_before, text);
+        self.buffer.push_edit(
+            Edit::Insert {
+                at: cursor_before,
+                text: text.to_string(),
+            },
+            cursor_before,
+        );
+        self.buffer.cursor = end;
+        if text == "\n" {
+            self.buffer.break_coalesce();
+        }
+        self.scroll_into_view();
+        self.update_title();
+    }
+
+    /// Delete the character before the cursor, joining with the previous
+    /// line at column 0.
+    fn backspace(&mut self) {
+        self.status = None;
+        let cursor = self.buffer.cursor;
+        let from = if cursor.col > 0 {
+            Position {
+                line: cursor.line,
+                col: cursor.col - 1,
+            }
+        } else if cursor.line > 0 {
+            Position {
+                line: cursor.line - 1,
+                col: self.buffer.line_chars(cursor.line - 1),
+            }
+        } else {
+            return;
+        };
+        let removed = self.buffer.delete_range(from, cursor);
+        self.buffer.push_edit(
+            Edit::Delete {
+                at: from,
+                text: removed,
+            },
+            cursor,
+        );
+        self.buffer.cursor = from;
+        self.buffer.break_coalesce();
+        self.scroll_into_view();
+        self.update_title();
+    }
+
+    /// Delete the character after the cursor, joining with the next line at
+    /// its end.
+    fn delete_forward(&mut self) {
+        self.status = None;
+        let cursor = self.buffer.cursor;
+        let last_line = self.buffer.lines.len() - 1;
+        let to = if cursor.col < self.buffer.line_chars(cursor.line) {
+            Position {
+                line: cursor.line,
+                col: cursor.col + 1,
+            }
+        } else if cursor.line < last_line {
+            Position {
+                line: cursor.line + 1,
+                col: 0,
+            }
+        } else {
+            return;
+        };
+        let removed = self.buffer.delete_range(cursor, to);
+        self.buffer.push_edit(
+            Edit::Delete {
+                at: cursor,
+                text: removed,
+            },
+            cursor,
+        );
+        self.buffer.break_coalesce();
+        self.scroll_into_view();
+        self.update_title();
+    }
+
+    fn save(&mut self) {
+        self.status = Some(match self.buffer.save() {
+            Ok(()) => ("Saved.".to_string(), false),
+            Err(err) => (err, true),
+        });
+        self.update_title();
+    }
+
+    fn undo(&mut self) {
+        self.buffer.undo();
+        self.scroll_into_view();
+        self.update_title();
+    }
+
+    fn redo(&mut self) {
+        self.buffer.redo();
+        self.scroll_into_view();
+        self.update_title();
+    }
+
+    /// Replace the document with an empty, unsaved one.
+    fn new_buffer(&mut self) {
+        self.buffer = Buffer::empty();
+        self.buffer.clamp_cursor();
+        self.status = None;
+        self.update_title();
     }
 
     /// Keep the cursor inside the visible rows and columns, exactly as
@@ -186,6 +325,21 @@ impl App {
                 let col = self.buffer.line_chars(line);
                 self.set_cursor(Position { line, col });
             }
+            keycode::S if self.mods.ctrl => self.save(),
+            keycode::Z if self.mods.ctrl => self.undo(),
+            keycode::Y if self.mods.ctrl => self.redo(),
+            keycode::N if self.mods.ctrl => self.new_buffer(),
+            keycode::RETURN | keycode::NUMPAD_ENTER if !self.mods.ctrl => self.insert_str("\n"),
+            keycode::BACKSPACE if !self.mods.ctrl => self.backspace(),
+            keycode::DELETE if !self.mods.ctrl => self.delete_forward(),
+            keycode::TAB if !self.mods.ctrl => self.insert_str(TAB_INDENT),
+            _ if !self.mods.ctrl => {
+                if let Some(ch) = map_keycode(code, &self.mods)
+                    && !ch.is_control()
+                {
+                    self.insert_str(&ch.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -229,6 +383,10 @@ impl App {
             view::draw_sidebar(&mut canvas, rect, &root);
         }
         view::draw_pane(&mut canvas, &self.layout, &self.buffer);
+        let note = self
+            .status
+            .as_ref()
+            .map(|(message, warning)| (message.as_str(), *warning));
         view::draw_status(
             &mut canvas,
             &self.layout,
@@ -239,6 +397,7 @@ impl App {
             "4 spaces",
             encoding,
             &volume,
+            note,
         );
 
         self.window.swap_buffers();

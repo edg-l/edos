@@ -11,6 +11,8 @@ use std::fs;
 /// One line of text, without its terminator.
 pub struct Line {
     pub text: String,
+    /// Differs from what was read off the disk.
+    pub changed: bool,
 }
 
 /// A place in the document, in characters rather than bytes. `text_input`
@@ -49,17 +51,63 @@ pub struct Buffer {
     pub scroll_line: usize,
     pub scroll_col: usize,
     /// Read on save, to write the file back in the ending it was found with.
-    #[allow(dead_code)]
     pub eol: Eol,
     /// Whether the file on disk ended with a newline. Read on save, to decide
     /// whether to put the terminator back.
-    #[allow(dead_code)]
     pub trailing_newline: bool,
     /// Whether opening this file needed lossy UTF-8 repair.
     pub repaired: bool,
-    /// Read once the buffer can be edited.
-    #[allow(dead_code)]
+    /// Whether the buffer differs from what is on disk.
     pub dirty: bool,
+    /// Every edit made since the buffer was opened, in order.
+    pub log: Vec<LogEntry>,
+    /// Position in `log`: undo pops the entry before it, redo pushes the
+    /// entry at it. Entries at or past this point are what redo can still
+    /// reach.
+    pub log_at: usize,
+    /// `log_at` as of the last save. Undo or redo landing back on this value
+    /// means the buffer is exactly the file on disk again, which is the
+    /// change ribbon's rule for clearing every flag at once.
+    pub saved_log_at: usize,
+    /// Whether the next single-character insert may merge into the log's
+    /// last entry instead of becoming its own, so a run of typing undoes as
+    /// one word rather than one letter at a time.
+    coalescing: bool,
+}
+
+/// One reversible change to the document. Each is its own inverse with the
+/// variant swapped: undoing an insert is deleting what it inserted, and
+/// undoing a delete is putting back what it removed.
+#[derive(Clone)]
+pub enum Edit {
+    Insert { at: Position, text: String },
+    Delete { at: Position, text: String },
+}
+
+/// One entry in the undo log: the edit, and where the cursor sat just before
+/// it. An undo that only reversed the text and left the cursor wherever the
+/// edit happened to leave it would make the next keystroke land in the wrong
+/// place.
+pub struct LogEntry {
+    pub edit: Edit,
+    pub cursor_before: Position,
+}
+
+/// Where `at` lands once `text` — which may itself contain `\n` — has been
+/// inserted there. Shared by `insert_text`, which returns this as the
+/// caret's new position, and `apply`'s `Delete` arm, which needs it to turn
+/// an edit's `(at, text)` into the range `delete_range` takes.
+fn end_position(at: Position, text: &str) -> Position {
+    let mut pos = at;
+    for (i, part) in text.split('\n').enumerate() {
+        if i == 0 {
+            pos.col += part.chars().count();
+        } else {
+            pos.line += 1;
+            pos.col = part.chars().count();
+        }
+    }
+    pos
 }
 
 impl Buffer {
@@ -69,6 +117,7 @@ impl Buffer {
             path: None,
             lines: vec![Line {
                 text: String::new(),
+                changed: false,
             }],
             cursor: Position::default(),
             anchor: None,
@@ -78,6 +127,10 @@ impl Buffer {
             trailing_newline: true,
             repaired: false,
             dirty: false,
+            log: Vec::new(),
+            log_at: 0,
+            saved_log_at: 0,
+            coalescing: false,
         }
     }
 
@@ -113,11 +166,13 @@ impl Buffer {
         let lines = if body.is_empty() {
             vec![Line {
                 text: String::new(),
+                changed: false,
             }]
         } else {
             body.split('\n')
                 .map(|text| Line {
                     text: text.to_string(),
+                    changed: false,
                 })
                 .collect()
         };
@@ -133,6 +188,10 @@ impl Buffer {
             trailing_newline,
             repaired,
             dirty: false,
+            log: Vec::new(),
+            log_at: 0,
+            saved_log_at: 0,
+            coalescing: false,
         })
     }
 
@@ -156,6 +215,243 @@ impl Buffer {
     pub fn clamp_cursor(&mut self) {
         self.cursor.line = self.cursor.line.min(self.lines.len().saturating_sub(1));
         self.cursor.col = self.cursor.col.min(self.line_chars(self.cursor.line));
+    }
+
+    // --- Mutation -----------------------------------------------------------
+    //
+    // Every public mutation routes through these two: inserting a character,
+    // pasting, undo and redo all end up here rather than poking `lines`
+    // directly.
+
+    /// Insert `text` at `at`, splitting into lines wherever it contains
+    /// `\n`. Returns the position immediately after the inserted text.
+    pub fn insert_text(&mut self, at: Position, text: &str) -> Position {
+        if text.is_empty() {
+            return at;
+        }
+        let chars: Vec<char> = self.lines[at.line].text.chars().collect();
+        let before: String = chars[..at.col].iter().collect();
+        let after: String = chars[at.col..].iter().collect();
+
+        let parts: Vec<&str> = text.split('\n').collect();
+        let last = parts.len() - 1;
+        let mut new_lines: Vec<Line> = parts
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| Line {
+                text: if i == 0 {
+                    format!("{before}{part}")
+                } else {
+                    part.to_string()
+                },
+                changed: true,
+            })
+            .collect();
+        new_lines[last].text.push_str(&after);
+
+        let end = end_position(at, text);
+        self.lines.splice(at.line..=at.line, new_lines);
+        self.dirty = true;
+        end
+    }
+
+    /// Remove the text between `from` and `to` (`from` must not come after
+    /// `to`), joining the lines the range spans into one. Returns the
+    /// removed text.
+    pub fn delete_range(&mut self, from: Position, to: Position) -> String {
+        if from == to {
+            return String::new();
+        }
+        let from_chars: Vec<char> = self.lines[from.line].text.chars().collect();
+        let before: String = from_chars[..from.col].iter().collect();
+        let to_chars: Vec<char> = self.lines[to.line].text.chars().collect();
+        let after: String = to_chars[to.col..].iter().collect();
+
+        let mut removed = String::new();
+        if from.line == to.line {
+            removed.extend(&from_chars[from.col..to.col]);
+        } else {
+            removed.extend(&from_chars[from.col..]);
+            for line in &self.lines[from.line + 1..to.line] {
+                removed.push('\n');
+                removed.push_str(&line.text);
+            }
+            removed.push('\n');
+            removed.extend(&to_chars[..to.col]);
+        }
+
+        self.lines.splice(
+            from.line..=to.line,
+            [Line {
+                text: format!("{before}{after}"),
+                changed: true,
+            }],
+        );
+        self.dirty = true;
+        removed
+    }
+
+    // --- Undo log -------------------------------------------------------
+
+    /// Apply `edit` to the buffer, returning where the cursor lands. The one
+    /// path a fresh edit, an undo (given `Buffer::invert` of the logged
+    /// edit) and a redo (given the logged edit itself) all run through.
+    pub fn apply(&mut self, edit: &Edit) -> Position {
+        match edit {
+            Edit::Insert { at, text } => self.insert_text(*at, text),
+            Edit::Delete { at, text } => {
+                self.delete_range(*at, end_position(*at, text));
+                *at
+            }
+        }
+    }
+
+    /// The edit that undoes `edit`.
+    pub fn invert(edit: &Edit) -> Edit {
+        match edit {
+            Edit::Insert { at, text } => Edit::Delete {
+                at: *at,
+                text: text.clone(),
+            },
+            Edit::Delete { at, text } => Edit::Insert {
+                at: *at,
+                text: text.clone(),
+            },
+        }
+    }
+
+    /// Record `edit` in the log, coalescing it into the previous entry when
+    /// both are single-character inserts that abut, so a run of typing
+    /// undoes as one word rather than one letter at a time. Anything already
+    /// undone past this point is dropped first: a fresh edit made after an
+    /// undo removes the redo branch rather than forking it.
+    pub fn push_edit(&mut self, edit: Edit, cursor_before: Position) {
+        self.log.truncate(self.log_at);
+
+        let merges_into_last = self.coalescing
+            && match (&edit, self.log.last()) {
+                (
+                    Edit::Insert { at, text },
+                    Some(LogEntry {
+                        edit:
+                            Edit::Insert {
+                                at: prev_at,
+                                text: prev_text,
+                            },
+                        ..
+                    }),
+                ) => text.chars().count() == 1 && *at == end_position(*prev_at, prev_text),
+                _ => false,
+            };
+
+        if merges_into_last {
+            let Edit::Insert { text, .. } = edit else {
+                unreachable!()
+            };
+            let Some(LogEntry {
+                edit: Edit::Insert {
+                    text: prev_text, ..
+                },
+                ..
+            }) = self.log.last_mut()
+            else {
+                unreachable!()
+            };
+            prev_text.push_str(&text);
+        } else {
+            self.log.push(LogEntry {
+                edit,
+                cursor_before,
+            });
+            self.log_at += 1;
+        }
+        self.coalescing = true;
+    }
+
+    /// Stop the next single-character insert from merging into the log's
+    /// last entry. Called on every cursor move, `\n` insert, delete, and
+    /// save.
+    pub fn break_coalesce(&mut self) {
+        self.coalescing = false;
+    }
+
+    /// Undo the most recent edit, restoring the cursor to where it sat just
+    /// before that edit. Does nothing at the start of the log.
+    pub fn undo(&mut self) -> bool {
+        if self.log_at == 0 {
+            return false;
+        }
+        self.log_at -= 1;
+        let entry_edit = self.log[self.log_at].edit.clone();
+        let cursor_before = self.log[self.log_at].cursor_before;
+        self.apply(&Self::invert(&entry_edit));
+        self.cursor = cursor_before;
+        self.clamp_cursor();
+        self.clear_ribbon_if_saved();
+        self.dirty = self.log_at != self.saved_log_at;
+        self.break_coalesce();
+        true
+    }
+
+    /// Redo the edit most recently undone. Does nothing once the log is
+    /// caught up.
+    pub fn redo(&mut self) -> bool {
+        if self.log_at >= self.log.len() {
+            return false;
+        }
+        let entry_edit = self.log[self.log_at].edit.clone();
+        let cursor = self.apply(&entry_edit);
+        self.log_at += 1;
+        self.cursor = cursor;
+        self.clamp_cursor();
+        self.clear_ribbon_if_saved();
+        self.dirty = self.log_at != self.saved_log_at;
+        self.break_coalesce();
+        true
+    }
+
+    /// A `bool` per line cannot tell on its own that an undo has walked the
+    /// log back past a save, so every flag clears at once whenever `log_at`
+    /// returns to `saved_log_at` — the point where the buffer is exactly the
+    /// file on disk again. Undoing only part of the way back leaves a line
+    /// marked even though it happens to match the disk again; that is left
+    /// over-reporting rather than checked against a second copy of the file.
+    fn clear_ribbon_if_saved(&mut self) {
+        if self.log_at == self.saved_log_at {
+            for line in &mut self.lines {
+                line.changed = false;
+            }
+        }
+    }
+
+    /// Write the buffer to `path` in the ending and trailing-newline shape
+    /// it was read with, then mark the result as matching the disk.
+    pub fn save(&mut self) -> Result<(), String> {
+        let Some(path) = self.path.clone() else {
+            return Err("No path to save to.".to_string());
+        };
+        let sep = match self.eol {
+            Eol::Lf => "\n",
+            Eol::CrLf => "\r\n",
+        };
+        let mut body = self
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join(sep);
+        if self.trailing_newline {
+            body.push_str(sep);
+        }
+        fs::write(&path, body.as_bytes()).map_err(|err| format!("{path}: {err}"))?;
+
+        for line in &mut self.lines {
+            line.changed = false;
+        }
+        self.dirty = false;
+        self.saved_log_at = self.log_at;
+        self.break_coalesce();
+        Ok(())
     }
 }
 
