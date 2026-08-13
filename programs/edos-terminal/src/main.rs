@@ -13,6 +13,13 @@ const TERMINAL_HEIGHT: u32 = 480;
 /// Shell path to spawn
 const SHELL_PATH: &str = "/bin/sh";
 
+/// How long a wait may last before the loop runs anyway.
+///
+/// The shell's output arrives on a pty, which the window wait cannot watch, so
+/// this is the ceiling on how long output waits to be shown. It is not the rate
+/// the loop runs at: input and frames wake it immediately.
+const PTY_POLL_MS: u64 = 16;
+
 fn main() {
     eprintln!("[terminal] starting");
     // Create terminal window
@@ -75,6 +82,9 @@ fn main() {
 
     // Event buffer
     let mut events = [WindowEvent::default(); 16];
+
+    // The presented-frame count this loop last saw, passed back to each wait.
+    let mut seen_frame = 0u64;
 
     // Main loop
     loop {
@@ -218,6 +228,17 @@ fn main() {
                 window.swap_buffers_damaged(rect.x, rect.y, rect.width, rect.height);
             }
         }
-        std::thread::sleep(Duration::from_millis(16));
+
+        // Block until there is something to do rather than sleeping a guessed
+        // interval: a keystroke that arrives just after a sleep begins used to
+        // wait out the rest of it. The timeout is still needed because the
+        // shell's output arrives on a pty this cannot wait on, and the cursor
+        // blink is a timer of its own; it is the ceiling on how long those go
+        // unnoticed, not the rate the loop runs at.
+        match edos_render::window::wait(window.id, seen_frame, PTY_POLL_MS) {
+            Ok(woke) => seen_frame = woke.frame_seq,
+            // Nothing to wait on: fall back to the timer rather than spinning.
+            Err(_) => std::thread::sleep(Duration::from_millis(PTY_POLL_MS)),
+        }
     }
 }

@@ -8,7 +8,10 @@ use crate::{
     util::uaccess::{access_ok, try_copy_from_user, try_copy_to_user, try_read_user},
     window::{
         WindowEvent, clipboard,
-        input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
+        input::{
+            frame_seq, get_or_create_event_queue, poll_events, present_frame, remove_event_queue,
+            send_event,
+        },
         registry::{DamageBox, Frame, ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
         shell,
     },
@@ -16,6 +19,7 @@ use crate::{
 
 use super::Errno;
 use crate::thread::scheduler::current_thread_info;
+use core::time::Duration;
 
 /// Create a new window.
 ///
@@ -673,6 +677,78 @@ pub fn sys_window_damage(window_id: WindowId, x: u32, y: u32, w: u32, h: u32) ->
         Some(existing) => existing.union(reported),
         None => reported,
     });
+    0
+}
+
+/// Bits returned by [`sys_window_wait`].
+pub mod wait_reason {
+    /// Events are queued for the window.
+    pub const EVENTS: u64 = 1;
+    /// The compositor presented a frame since the caller last saw one.
+    pub const FRAME: u64 = 2;
+}
+
+/// Block until the window has something to do.
+///
+/// Arguments:
+/// - rdi: window ID
+/// - rsi: the frame count the caller last acted on, from a previous return
+/// - rdx: milliseconds to wait, or 0 to wait indefinitely
+///
+/// Returns: `wait_reason` bits in the low 32 and the current frame count in the
+/// high 32, or 0 if the wait timed out with nothing to report.
+///
+/// A client with no way to block guesses an interval and sleeps: it either
+/// wakes with nothing to do or leaves an event sitting for the rest of that
+/// interval. `SYS_WINDOW_POLL` cannot block, which is why this exists
+/// alongside it rather than replacing it -- the caller still polls to collect
+/// the events once this says there are some.
+///
+/// The caller passes back the frame count rather than the kernel remembering
+/// one per window: a window can be waited on from more than one thread, and a
+/// count held in the kernel would let whichever called first consume the
+/// signal, which is the same defect damage reporting had.
+pub fn sys_window_wait(window_id: WindowId, seen_frame: u64, timeout_ms: u64) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    // The queue is created on demand, the same way polling does, so a client
+    // may wait before anything has ever been sent to it.
+    let queue = get_or_create_event_queue(window_id);
+
+    // Compared in 32 bits because that is how many the return value carries
+    // back; a full-width comparison against a truncated argument would report
+    // every wait as a new frame once the counter passed 2^32.
+    let frames = || frame_seq() & 0xFFFF_FFFF;
+    let seen_frame = seen_frame & 0xFFFF_FFFF;
+
+    let ready = || !queue.is_empty() || frames() != seen_frame;
+    let timeout = (timeout_ms != 0).then(|| Duration::from_millis(timeout_ms));
+    queue.waiters.wait_until_timeout(ready, timeout);
+
+    let mut reason = 0u64;
+    if !queue.is_empty() {
+        reason |= wait_reason::EVENTS;
+    }
+    let now = frames();
+    if now != seen_frame {
+        reason |= wait_reason::FRAME;
+    }
+    reason | (now << 32)
+}
+
+/// Report that a frame has been put on the display.
+///
+/// Takes no arguments and always succeeds. Called by whatever owns the screen,
+/// once per presented frame; it wakes every client blocked in
+/// [`sys_window_wait`] so they can draw into the frame after this one instead
+/// of guessing when it happened.
+///
+/// Deliberately not a side effect of consuming damage: that happens before the
+/// frame is drawn, and a client woken then would be racing the compositor it
+/// is trying to keep step with.
+pub fn sys_window_present() -> u64 {
+    present_frame();
     0
 }
 

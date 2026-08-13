@@ -3,6 +3,7 @@
 use crate::debug::lock_order::{RANK_MOUSE_BUTTONS, RANK_WINDOW_EVENTS, RANK_WINDOW_REGISTRY};
 use crate::{ranked_lock, ranked_read, ranked_write};
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU64, Ordering};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{KeyEvent, KeyState};
 
@@ -16,6 +17,7 @@ use crate::{
         broadcast::Subscriber,
         preempt::{PreemptRwLock, PreemptSpinlock},
         util::queue_spawn_kthread_named,
+        waitqueue::WaitQueue,
     },
 };
 
@@ -181,9 +183,42 @@ impl WindowEvent {
     }
 }
 
+/// Presented frames, counted since boot.
+///
+/// A client waiting for work compares this against the value it last acted on,
+/// which is what lets "a frame was presented" be a wake-up reason without the
+/// kernel tracking a subscription per window.
+static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Note that the compositor has put a frame on the display, and wake everyone
+/// waiting for one.
+pub fn present_frame() {
+    FRAME_SEQ.fetch_add(1, Ordering::Release);
+    // Snapshot the queues and wake outside the lock: waking takes the
+    // scheduler's, and the two must not be co-held.
+    let waiters: Vec<Arc<WindowEventQueue>> = {
+        let queues = ranked_read!(RANK_WINDOW_EVENTS, "window::present_frame", WINDOW_EVENTS);
+        queues.values().cloned().collect()
+    };
+    for queue in waiters {
+        queue.waiters.wake_all();
+    }
+}
+
+/// How many frames have been presented since boot.
+pub fn frame_seq() -> u64 {
+    FRAME_SEQ.load(Ordering::Acquire)
+}
+
 /// Per-window event queue.
 pub struct WindowEventQueue {
     queue: ArrayQueue<WindowEvent>,
+    /// Threads blocked in `sys_window_wait` on this window.
+    ///
+    /// A client that sleeps on a timer either wakes with nothing to do or
+    /// leaves an event sitting for the rest of its interval. Parking here
+    /// instead means the wake and the reason for it are the same event.
+    pub waiters: WaitQueue,
 }
 
 #[allow(dead_code)]
@@ -192,6 +227,7 @@ impl WindowEventQueue {
     pub fn new() -> Self {
         Self {
             queue: ArrayQueue::new(EVENT_QUEUE_SIZE),
+            waiters: WaitQueue::new(),
         }
     }
 
@@ -271,9 +307,15 @@ pub fn poll_events(window_id: WindowId, max: usize) -> Vec<WindowEvent> {
 
 /// Send an event to a specific window.
 pub fn send_event(window_id: WindowId, event: WindowEvent) {
-    let queues = ranked_read!(RANK_WINDOW_EVENTS, "window::send_event", WINDOW_EVENTS);
-    if let Some(queue) = queues.get(&window_id) {
+    // Cloned out of the map so the wake happens without the queue lock held:
+    // waking takes the scheduler's lock, and the two must not be co-held.
+    let queue = {
+        let queues = ranked_read!(RANK_WINDOW_EVENTS, "window::send_event", WINDOW_EVENTS);
+        queues.get(&window_id).cloned()
+    };
+    if let Some(queue) = queue {
         let _ = queue.push(event);
+        queue.waiters.wake_all();
     }
 }
 

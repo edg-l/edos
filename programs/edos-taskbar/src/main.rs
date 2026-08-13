@@ -22,6 +22,13 @@ use panel::{Action, Hit};
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 32;
 
+/// How long a wait may last before the panel looks around anyway.
+///
+/// The clock and the window list are polls, not events, so this is how stale
+/// either may be. Everything the pointer does wakes the loop at once, so this
+/// is not the rate it runs at.
+const IDLE_POLL_MS: u64 = 250;
+
 /// Prefix on every line of a panel dump, so a host-side reader can pick the
 /// block out of an interleaved serial log.
 const PANEL_DUMP_TAG: &str = "panel|";
@@ -269,6 +276,8 @@ fn main() {
     let mut popups = status::StatusPopups::new();
     let mut published: Vec<String> = Vec::new();
     let mut painted: [Option<PanelState>; 2] = [None, None];
+    // The presented-frame count this loop last saw, passed back to each wait.
+    let mut seen_frame = 0u64;
 
     loop {
         let window_count = match window_list(&mut entries) {
@@ -511,7 +520,16 @@ fn main() {
                 None => window.swap_buffers(),
             }
         }
-        std::thread::sleep(Duration::from_millis(50));
+
+        // Block until something happens rather than waking twenty times a
+        // second to find the same clock. The timeout is what the clock and the
+        // window list are polled at, since neither can be waited on; pointer
+        // and click both wake immediately, which is what makes hover feel
+        // attached to the pointer rather than sampled.
+        match edos_render::window::wait(window.id, seen_frame, IDLE_POLL_MS) {
+            Ok(woke) => seen_frame = woke.frame_seq,
+            Err(_) => std::thread::sleep(Duration::from_millis(IDLE_POLL_MS)),
+        }
     }
 }
 

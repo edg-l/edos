@@ -278,6 +278,8 @@ const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
 const SYS_WINDOW_DAMAGE: u64 = 232;
+const SYS_WINDOW_WAIT: u64 = 286;
+const SYS_WINDOW_PRESENT: u64 = 287;
 
 // Re-export SHM functions and constants from edos_lib
 pub use edos_lib::shm::{
@@ -422,6 +424,51 @@ pub fn window_damage_rect(id: WindowId, x: u32, y: u32, w: u32, h: u32) -> Resul
 ///
 /// # Returns
 /// Total number of windows (may be more than buffer size).
+/// What a [`wait`] returned for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Woke {
+    /// Events are queued: poll to collect them.
+    pub events: bool,
+    /// A frame was presented since the count that was passed in.
+    pub frame: bool,
+    /// The presented-frame count to pass to the next wait.
+    pub frame_seq: u64,
+}
+
+impl Woke {
+    /// Whether the wait ended with nothing to do, which is a timeout.
+    pub fn idle(&self) -> bool {
+        !self.events && !self.frame
+    }
+}
+
+/// Block until the window has something to do, or `timeout_ms` elapses.
+///
+/// `seen_frame` is the `frame_seq` from the previous wait, or 0 to start. A
+/// timeout of 0 waits indefinitely.
+///
+/// This does not collect the events; [`window_poll`] still does that. It only
+/// replaces the sleep a client would otherwise guess the length of, which
+/// either wakes with nothing to do or leaves an event sitting for the rest of
+/// the interval.
+pub fn wait(id: WindowId, seen_frame: u64, timeout_ms: u64) -> Result<Woke, i64> {
+    let result = unsafe { syscall3(SYS_WINDOW_WAIT, id, seen_frame, timeout_ms) };
+    if result == u64::MAX {
+        return Err(result as i64);
+    }
+    Ok(Woke {
+        events: result & 1 != 0,
+        frame: result & 2 != 0,
+        frame_seq: result >> 32,
+    })
+}
+
+/// Report that a frame has been put on the display, waking clients waiting for
+/// one. Called by whatever owns the screen, once per presented frame.
+pub fn present() {
+    unsafe { syscall1(SYS_WINDOW_PRESENT, 0) };
+}
+
 pub fn window_list(buffer: &mut [WindowListEntry]) -> Result<usize, i64> {
     window_list_flags(buffer, 0)
 }

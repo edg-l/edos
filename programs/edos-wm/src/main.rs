@@ -905,6 +905,10 @@ fn main() {
                 }
             }
             flip_us = flip_start.elapsed().as_micros() as u64;
+            // After the frame is on the display, not before: a client woken by
+            // the damage being consumed would be racing the compositor it is
+            // trying to keep step with.
+            edos_render::window::present();
         }
 
         let interval_us = previous_frame_start

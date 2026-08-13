@@ -386,6 +386,8 @@ const SYS_WINDOW_DAMAGE: u64 = 232;
 /// Appoint another process as part of the shell. Init only; see
 /// `kernel/src/window/shell.rs`.
 const SYS_WINDOW_GRANT_SHELL: u64 = 234;
+const SYS_WINDOW_WAIT: u64 = 286;
+const SYS_WINDOW_PRESENT: u64 = 287;
 /// Read and write the session clipboard; see `kernel/src/window/clipboard.rs`.
 const SYS_CLIPBOARD_GET: u64 = 284;
 const SYS_CLIPBOARD_SET: u64 = 285;
@@ -914,6 +916,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let window_id = ctx.rdi;
             let event_ptr = ctx.rsi as *const crate::window::WindowEvent;
             ctx.rax = window::sys_window_send_event(window_id, event_ptr);
+        }
+        SYS_WINDOW_PRESENT => {
+            ctx.rax = window::sys_window_present();
+        }
+        SYS_WINDOW_WAIT => {
+            ctx.rax = window::sys_window_wait(ctx.rdi, ctx.rsi, ctx.rdx);
         }
         SYS_WINDOW_DAMAGE => {
             let window_id = ctx.rdi;

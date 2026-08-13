@@ -123,12 +123,39 @@ every frame.
    buffer being drawn already holds, repaints only the rows that differ, and
    returns the rectangle to report as damage. The panel does the same over the
    controls it draws.
-4. Frame callbacks, and clients converted from timers to callbacks. **Open.**
-   `SYS_WINDOW_POLL` cannot block, so this needs a per-window waitqueue woken
-   by event delivery and by the compositor after it presents.
+4. Frame callbacks, and clients converted from timers to callbacks. **Done.**
+   `sys_window_wait(id, seen_frame, timeout_ms)` blocks on a per-window
+   waitqueue woken by event delivery and by `sys_window_present`, which the
+   compositor calls after the frame is on the display. `SYS_WINDOW_POLL` still
+   collects the events; this only replaces the guessed sleep.
+
+   Both remaining timeouts are polls of something that cannot be waited on: the
+   terminal's shell output arrives on a pty (16 ms), and the panel's clock and
+   window list are reads (250 ms). Neither is the rate its loop runs at —
+   input wakes both at once.
+
+   The frame count is passed back by the caller rather than remembered per
+   window, because a window can be waited on from more than one thread and a
+   count held in the kernel would let whichever asked first consume the signal.
+   That is the same defect damage reporting had.
 
 Each stage is measurable on its own with the telemetry above: 1 and 3 move
-KiB/s, 2 moves composite p50, 4 moves both plus idle CPU.
+KiB/s, 2 moves composite p50, 4 moves idle CPU and input latency.
+
+## Where it ended up
+
+| | before | after |
+| --- | --- | --- |
+| to the display, idle | 263 MB/s | **0.085 MB/s** |
+| composite p95 | 1370 us | **19 us** |
+| desktop idle CPU | 14% | **0.36% of one core** |
+
+Stage 4 was worth the least of the four by the time it landed, and the earlier
+stages are why: with clients no longer drawing when nothing has changed, a
+wake-up that finds nothing to do costs almost nothing, and idle CPU had already
+fallen to 0.5%. What it buys is latency — a keystroke no longer waits out the
+rest of a sleep — and the panel, which had nothing else to wake it, going from
+20 wake-ups a second to 4.
 
 ## What the terminal costs, measured
 
