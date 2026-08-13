@@ -388,6 +388,7 @@ const SYS_WINDOW_DAMAGE: u64 = 232;
 const SYS_WINDOW_GRANT_SHELL: u64 = 234;
 const SYS_WINDOW_WAIT: u64 = 286;
 const SYS_WINDOW_PRESENT: u64 = 287;
+const SYS_WINDOW_GRAB_KEY: u64 = 288;
 /// Read and write the session clipboard; see `kernel/src/window/clipboard.rs`.
 const SYS_CLIPBOARD_GET: u64 = 284;
 const SYS_CLIPBOARD_SET: u64 = 285;
@@ -932,6 +933,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
                 ctx.r10 as u32,
                 ctx.r8 as u32,
             );
+        }
+        SYS_WINDOW_GRAB_KEY => {
+            ctx.rax = window::sys_window_grab_key(ctx.rdi, ctx.rsi, ctx.rdx);
         }
         SYS_WINDOW_GRANT_SHELL => {
             ctx.rax = window::sys_window_grant_shell(ctx.rdi);

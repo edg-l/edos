@@ -280,6 +280,7 @@ const SYS_WINDOW_SEND_EVENT: u64 = 225;
 const SYS_WINDOW_DAMAGE: u64 = 232;
 const SYS_WINDOW_WAIT: u64 = 286;
 const SYS_WINDOW_PRESENT: u64 = 287;
+const SYS_WINDOW_GRAB_KEY: u64 = 288;
 
 // Re-export SHM functions and constants from edos_lib
 pub use edos_lib::shm::{
@@ -510,6 +511,33 @@ pub fn window_send_event(id: WindowId, event: &WindowEvent) -> Result<(), i64> {
             event as *const WindowEvent as u64,
         )
     };
+    if is_error(result) { Err(-1) } else { Ok(()) }
+}
+
+/// Modifier bits for [`window_grab_key`]: Shift, either side.
+pub const GRAB_MOD_SHIFT: u32 = 1 << 0;
+/// Modifier bits for [`window_grab_key`]: Control, either side.
+pub const GRAB_MOD_CTRL: u32 = 1 << 1;
+/// Modifier bits for [`window_grab_key`]: Alt. AltGr is not Alt, since it
+/// selects a character rather than qualifying one.
+pub const GRAB_MOD_ALT: u32 = 1 << 2;
+
+/// Claim a key chord, so the focused window never sees it.
+///
+/// The caller keeps reading the chord from `/dev/kbd` as before; what changes
+/// is that the focused window stops receiving it. The modifier mask is matched
+/// exactly, so Alt+Tab and Ctrl+Alt+Tab are separate claims. Requires the
+/// window-shell privilege. Claims die with the process.
+///
+/// `code` is a `pc_keyboard` key code, the same encoding `/dev/kbd` carries.
+pub fn window_grab_key(code: u32, mods: u32) -> Result<(), i64> {
+    let result = unsafe { syscall3(SYS_WINDOW_GRAB_KEY, code as u64, mods as u64, 1) };
+    if is_error(result) { Err(-1) } else { Ok(()) }
+}
+
+/// Release a claim made by [`window_grab_key`].
+pub fn window_ungrab_key(code: u32, mods: u32) -> Result<(), i64> {
+    let result = unsafe { syscall3(SYS_WINDOW_GRAB_KEY, code as u64, mods as u64, 0) };
     if is_error(result) { Err(-1) } else { Ok(()) }
 }
 

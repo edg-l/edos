@@ -138,6 +138,12 @@ pub const RANK_TCP_CONN: u16 = 270;
 // all, and holding both would be two locks of one rank co-held, which the
 // tracker rejects.
 pub const RANK_WINDOW_SHELL: u16 = 275;
+// Claimed key chords, taken by the input thread before it looks up the focused
+// window and by the grab syscall after the shell table has settled the
+// caller's authority. Outside the registry for the same reason the shell table
+// is: routing asks whether a chord is claimed before it asks anything of the
+// registry, so the two are never co-held.
+pub const RANK_KEY_GRABS: u16 = 276;
 pub const RANK_WINDOW_REGISTRY: u16 = 280;
 pub const RANK_WINDOW_EVENTS: u16 = 290;
 // The clipboard is a leaf of the window band: its two syscalls hold nothing

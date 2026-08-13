@@ -2,7 +2,11 @@
 
 use std::io::Read;
 
-use edos_render::window::{WindowListEntry, flags::FLAG_DOCK, read_mouse_state};
+use edos_lib::io::klog_dump;
+use edos_render::window::{
+    GRAB_MOD_ALT, GRAB_MOD_CTRL, WindowListEntry, flags::FLAG_DOCK, read_mouse_state,
+    window_grab_key,
+};
 
 /// KeyCode for Left Alt (pc_keyboard::KeyCode::LAlt = 95).
 pub const RAW_LALT: u32 = 95;
@@ -37,6 +41,28 @@ pub enum InputAction {
     DumpWindows,
 }
 
+/// Ask the kernel to withhold the window manager's own chords from whichever
+/// window has focus. Without this both the focused window and this process see
+/// the same key, and the window has no way to tell the chord was consumed.
+fn claim_shortcuts() {
+    let mut claimed = String::new();
+    for (code, mods, name) in CLAIMED_CHORDS {
+        match window_grab_key(code, mods) {
+            Ok(()) => {
+                if !claimed.is_empty() {
+                    claimed.push_str(", ");
+                }
+                claimed.push_str(name);
+            }
+            Err(_) => {
+                klog_dump("edos-wm", [format!("key grab refused for {name}")].iter());
+                return;
+            }
+        }
+    }
+    klog_dump("edos-wm", [format!("key grabs: {claimed}")].iter());
+}
+
 /// Manages input device state (mouse + keyboard).
 pub struct InputState {
     mouse_file: std::fs::File,
@@ -46,9 +72,18 @@ pub struct InputState {
     last_mouse_buttons: u8,
 }
 
+/// The chords the window manager acts on, and therefore the ones the focused
+/// window must not also receive.
+const CLAIMED_CHORDS: [(u32, u32, &str); 3] = [
+    (RAW_F4, GRAB_MOD_ALT, "Alt+F4"),
+    (RAW_TAB, GRAB_MOD_ALT, "Alt+Tab"),
+    (RAW_W, GRAB_MOD_CTRL | GRAB_MOD_ALT, "Ctrl+Alt+W"),
+];
+
 impl InputState {
     /// Open input devices. Panics if /dev/mouse is unavailable.
     pub fn new() -> Self {
+        claim_shortcuts();
         Self {
             mouse_file: std::fs::File::open("/dev/mouse").expect("failed to open /dev/mouse"),
             kbd_file: std::fs::File::open("/dev/kbd").ok(),

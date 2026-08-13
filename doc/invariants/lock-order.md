@@ -84,6 +84,7 @@ sections, and wrapping them would recurse into the preemption counter.
 | 260 | `Socket` (per-socket) | `Arc<PreemptSpinlock<Socket>>` | `net/socket.rs` |
 | 270 | `TcpConnection` (per-conn) | `Arc<PreemptSpinlock<TcpConnection>>` | `net/tcp.rs` |
 | 275 | `SHELL_PIDS` | `PreemptRwLock<Vec<u64>>` | `window/shell.rs` |
+| 276 | `KEY_GRABS` | `PreemptSpinlock<Grabs>` | `window/grab.rs` |
 | 280 | `WINDOW_REGISTRY` | `PreemptRwLock<WindowRegistry>` | `window/registry.rs` |
 | 290 | `WINDOW_EVENTS` | `PreemptRwLock<BTreeMap>` | `window/input.rs` |
 | 295 | `BUFFERS` (clipboard) | `PreemptSpinlock<Buffers>` | `window/clipboard.rs` |
@@ -309,6 +310,13 @@ authority *before* it touches the registry, because the answer does not depend
 on the window, and because co-holding them would be two locks of one rank,
 which the tracker rejects. It caught exactly that the first time this was
 written.
+
+**276, `KEY_GRABS`.** The key chords the session shell has claimed, plus the
+modifier state routing decides against. `handle_keyboard_event` asks whether a
+chord is claimed *before* it looks up the focused window, and returns without
+touching the registry when it is, so the two are never co-held. The grab
+syscall settles the caller's authority through `SHELL_PIDS` (275) first, and
+that guard is gone by the time this one is taken.
 
 **280 to 300, window system.** The input thread holds the registry across event
 delivery (`handle_keyboard_event` sends key events while its read guard is

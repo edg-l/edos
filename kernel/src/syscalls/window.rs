@@ -7,7 +7,7 @@ use alloc::string::String;
 use crate::{
     util::uaccess::{access_ok, try_copy_from_user, try_copy_to_user, try_read_user},
     window::{
-        WindowEvent, clipboard,
+        WindowEvent, clipboard, grab,
         input::{
             frame_seq, get_or_create_event_queue, poll_events, present_frame, remove_event_queue,
             send_event,
@@ -622,6 +622,47 @@ pub fn sys_window_grant_shell(target_pid: u64) -> u64 {
     if target_pid == 0 || !shell::grant(target_pid) {
         info.lock().errno = Errno::EINVAL;
         return !0u64;
+    }
+    0
+}
+
+/// Claim or release a key chord, so the focused window does not see it.
+///
+/// Arguments:
+/// - rdi: `pc_keyboard` key code
+/// - rsi: modifier mask (`MOD_SHIFT` | `MOD_CTRL` | `MOD_ALT`)
+/// - rdx: non-zero to claim, zero to release
+///
+/// Returns: 0 on success, !0 on error (sets errno).
+///
+/// The mask is matched exactly, so Alt+Tab and Ctrl+Alt+Tab are different
+/// chords and claiming one leaves the other with the focused window.
+///
+/// Restricted to the session shell for the same reason window management is:
+/// a chord claimed by any process at all would let one program read another's
+/// keys by taking them away from it.
+pub fn sys_window_grab_key(code: u64, mods: u64, claim: u64) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+    let pid = info.lock().pid;
+
+    if !shell::is_shell(pid) {
+        info.lock().errno = Errno::EPERM;
+        return !0u64;
+    }
+    if code > u32::MAX as u64 || mods & !(grab::MOD_MASK as u64) != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    let (code, mods) = (code as u32, mods as u32);
+    if claim != 0 {
+        if !grab::grab(pid, code, mods) {
+            info.lock().errno = Errno::ENOMEM;
+            return !0u64;
+        }
+    } else {
+        grab::ungrab(pid, code, mods);
     }
     0
 }

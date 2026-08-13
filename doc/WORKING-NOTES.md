@@ -1070,6 +1070,60 @@ rasterized to 32x32 on the worker, so listing 100 packages downloads no
 packages. An empty catalogue -- which is what a failed fetch reports --
 deliberately does not clear the icons already rendered.
 
+## A chord the window manager acts on no longer reaches the focused window
+
+`/dev/kbd` is a broadcast and window events are a separate delivery, so
+`edos-wm` and the focused window both saw every key. The application half was
+patched first -- programs ignore what they did not bind -- but that is a
+convention, not a mechanism: Alt+Tab still arrived at whatever had focus as a
+plain Tab, and a program that merely echoes its input had no way to know
+something else had already consumed it.
+
+`SYS_WINDOW_GRAB_KEY` (288) is the mechanism. A claim is a key code plus a
+modifier mask; `handle_keyboard_event` asks `window::grab::intercept` before it
+looks up the focused window and returns without delivering when the chord is
+claimed. The broadcast is untouched, so the claimant reads the key exactly as
+before and needs no new delivery path. `edos-wm` claims Alt+F4, Alt+Tab and
+Ctrl+Alt+W in `InputState::new` and logs what it got.
+
+Four decisions that are not obvious from the code:
+
+**The mask is matched exactly**, so Alt+Tab and Ctrl+Alt+Tab are separate
+claims. A subset match would mean claiming Alt+Tab silently swallowed every
+chord built on top of it.
+
+**A withheld press withholds its release too.** `Grabs::swallowed` records the
+code, and the release clears it. A window that saw a release with no matching
+press would hold the key down forever in whatever state it keeps -- and this is
+reachable on the first chord after focus, not in some corner.
+
+**Modifiers are always delivered.** A window tracks its own modifier state from
+the same events, so withholding the Alt press that a chord is built from would
+desync it. Only the non-modifier key of a chord is withheld. AltGr is not Alt
+here for the same reason it is not in `edos_lib::keymap`: it selects a
+character rather than qualifying one.
+
+**Claims are restricted to the window shell and die with the process**, the
+same as the shell privilege itself (`window/shell.rs`) and for the same reason:
+a chord claimable by any process at all is a way to read another program's keys
+by taking them away from it. `cleanup_process_windows` calls
+`grab::release_pid`, so there is no reclaim path and none is needed.
+
+`KEY_GRABS` is rank 276, between `SHELL_PIDS` and `WINDOW_REGISTRY`. Routing
+asks about the grab before it touches the registry, so the two are never
+co-held; the grab syscall settles authority through the shell table first and
+drops that guard before taking this one.
+
+The application-side Alt guard from `6b5171d` stays. It is not redundant: it
+covers chords nothing has claimed, and a program should not depend on the shell
+having claimed the right things.
+
+Verified in the guest with `cat` running in the terminal: a plain Tab produces
+`a<TAB>b`, and Alt+Tab immediately after produces `c` on its own line with no
+tab character, while Alt+F4 still closes the window -- so the claimed chord
+reaches the window manager and not the application, and an unclaimed one still
+reaches the application.
+
 ## Counts, remeasured 2026-08-13
 
 Every number a doc states about the size of the tree, taken rather than carried
@@ -1078,9 +1132,9 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 113 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 113 — a mismatch is the bug |
-| userspace programs | 111 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | 113 rows = 111 + the 2 libraries | diff the table against the workspace, below |
+| syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
+| userspace programs | 117 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | not re-diffed since the workspace grew | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |

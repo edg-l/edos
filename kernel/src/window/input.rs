@@ -461,11 +461,26 @@ fn handle_mouse_event(event: MouseEvent) {
 }
 
 /// Handle a raw key event (press/release) and route to focused window.
+///
+/// A chord the session shell has claimed is withheld from the focused window;
+/// the shell reads the same key off the `/dev/kbd` broadcast, which this does
+/// not touch.
 fn handle_keyboard_event(event: KeyEvent) {
+    let code = event.code as u32;
+    let down = !matches!(event.state, KeyState::Up);
+    let claimed = super::grab::intercept(code, down);
+    if matches!(event.state, KeyState::SingleShot) {
+        // Press and release arrive as one event, so a withheld press here has
+        // no later release to clear the record.
+        super::grab::intercept(code, false);
+    }
+    if claimed {
+        return;
+    }
+
     let registry = read_tracked(ReadSite::HandleKeyboardEvent);
 
     if let Some(focused_id) = registry.focused_window() {
-        let code = event.code as u32;
         match event.state {
             KeyState::Down => send_event(focused_id, WindowEvent::key_press(code)),
             KeyState::Up => send_event(focused_id, WindowEvent::key_release(code)),

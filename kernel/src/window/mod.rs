@@ -6,6 +6,7 @@ use crate::debug::lock_order::RANK_WINDOW_REGISTRY;
 use crate::ranked_write;
 
 pub mod clipboard;
+pub mod grab;
 pub mod input;
 pub mod registry;
 pub mod shell;
@@ -23,8 +24,9 @@ pub fn init() {
 /// Called during process exit.
 pub fn cleanup_process_windows(pid: u64) {
     // Before the windows: a pid can be reused, and a later process must not
-    // inherit the authority this one was given.
+    // inherit the authority this one was given, nor the chords it claimed.
     shell::revoke(pid);
+    grab::release_pid(pid);
 
     // Get window IDs then destroy windows first, so the input thread can't
     // send events to windows whose queues we're about to remove.
