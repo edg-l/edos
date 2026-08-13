@@ -3,6 +3,10 @@
 /// Maximum number of dirty rects before collapsing to full-screen.
 const MAX_RECTS: usize = 16;
 
+/// How much larger a union may be than the two rects apart before it is not
+/// worth merging them, as a percentage.
+const MERGE_SLACK_PERCENT: u64 = 150;
+
 /// A screen-space rectangle that needs to be redrawn.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DirtyRect {
@@ -15,6 +19,24 @@ pub struct DirtyRect {
 impl DirtyRect {
     pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
+    }
+
+    pub fn area(self) -> u64 {
+        self.w as u64 * self.h as u64
+    }
+
+    /// The smallest rectangle containing both.
+    pub fn union(self, other: Self) -> Self {
+        let x0 = self.x.min(other.x);
+        let y0 = self.y.min(other.y);
+        let x1 = (self.x + self.w as i32).max(other.x + other.w as i32);
+        let y1 = (self.y + self.h as i32).max(other.y + other.h as i32);
+        Self {
+            x: x0,
+            y: y0,
+            w: (x1 - x0) as u32,
+            h: (y1 - y0) as u32,
+        }
     }
 
     /// Clip this rect to screen bounds and return None if it becomes empty.
@@ -85,6 +107,44 @@ impl DirtyRegion {
     /// Iterate over accumulated dirty rects (only valid when `full_screen` is false).
     pub fn rects(&self) -> &[DirtyRect] {
         &self.rects[..self.count]
+    }
+
+    /// The dirty rects with cheap merges applied.
+    ///
+    /// Sending one rectangle per region is not automatically cheaper than
+    /// sending their union: two overlapping rects pay for the overlap twice,
+    /// and each transfer is its own ioctl. But merging *everything* into one
+    /// bounding box is far worse in the common case — a cursor near one corner
+    /// and a clock in the other span the whole screen between them, which is
+    /// how a still desktop came to transfer 86% of itself every frame.
+    ///
+    /// So a pair is merged only when the union costs little more than the two
+    /// apart. Areas are summed without subtracting the overlap, which biases
+    /// very slightly toward merging, and toward fewer ioctls.
+    pub fn coalesced(&self) -> ([DirtyRect; MAX_RECTS], usize) {
+        let mut out = self.rects;
+        let mut n = self.count;
+
+        loop {
+            let mut merged = false;
+            'pairs: for i in 0..n {
+                for j in (i + 1)..n {
+                    let union = out[i].union(out[j]);
+                    if union.area() * 100 <= (out[i].area() + out[j].area()) * MERGE_SLACK_PERCENT {
+                        out[i] = union;
+                        out[j] = out[n - 1];
+                        n -= 1;
+                        merged = true;
+                        break 'pairs;
+                    }
+                }
+            }
+            if !merged {
+                break;
+            }
+        }
+
+        (out, n)
     }
 
     /// Compute the bounding box of all dirty rects.

@@ -419,7 +419,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
                     buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
                     flags: window.flags,
                     frame: window.frame.packed(),
-                    damaged: window.damaged as u32,
+                    damage_seq: window.damage_seq,
                     focused: (focused == Some(window.id)) as u32,
                     minimized: window.minimized as u32,
                     title,
@@ -448,16 +448,6 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
         }
     }
 
-    let listed_ids: alloc::vec::Vec<u64> = entries.iter().map(|e| e.id).collect();
-    {
-        let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_list", WINDOW_REGISTRY);
-        for id in listed_ids {
-            if let Some(w) = registry.get_window_mut(id) {
-                w.damaged = false;
-            }
-        }
-    }
-
     total_count as u64
 }
 
@@ -481,8 +471,9 @@ pub struct WindowListEntry {
     /// The frame the window's manager last reported, packed as four u16 edges.
     /// Reported back so a manager can skip rewriting a frame it already set.
     pub frame: u64,
-    /// Set when the client has called SYS_WINDOW_DAMAGE since last list query.
-    pub damaged: u32,
+    /// The client's repaint count. A reader keeps the value it last acted on
+    /// and redraws when it differs; the kernel never resets it.
+    pub damage_seq: u32,
     /// Set for the window that currently holds input focus. The registry is the
     /// single source of truth: clients must not re-derive focus from `z_order`.
     pub focused: u32,
@@ -612,7 +603,7 @@ pub fn sys_window_damage(window_id: WindowId) -> u64 {
         info.lock().errno = Errno::EPERM;
         return !0u64;
     }
-    w.damaged = true;
+    w.damage_seq = w.damage_seq.wrapping_add(1);
     0
 }
 

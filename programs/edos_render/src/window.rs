@@ -136,7 +136,7 @@ pub struct WindowListEntry {
     /// edges. Compare before writing: rewriting an unchanged frame is a
     /// syscall and a registry write lock for nothing.
     pub frame: u64,
-    pub damaged: u32,
+    pub damage_seq: u32,
     /// Set for the window that currently holds input focus. The kernel window
     /// registry is the single source of truth; do not re-derive focus from
     /// `z_order`, which also moves when a window is merely raised.
@@ -199,7 +199,7 @@ impl Default for WindowListEntry {
             buffer_shm_id: 0,
             flags: 0,
             frame: 0,
-            damaged: 0,
+            damage_seq: 0,
             focused: 0,
             minimized: 0,
             title: [0; TITLE_MAX],
@@ -341,8 +341,9 @@ pub fn window_poll(id: WindowId, events: &mut [WindowEvent]) -> Result<usize, i6
     }
 }
 
-/// Mark a window as damaged (client has repainted its buffer).
-/// The WM reads this flag via window_list and only redraws damaged windows.
+/// Mark a window as repainted, advancing its damage counter.
+/// A compositor redraws the window when the counter differs from the value it
+/// last drew; the kernel never clears it, so two readers cannot race.
 /// Put a window away, or bring it back.
 ///
 /// Minimizing the focused window moves focus to whatever is left, and the

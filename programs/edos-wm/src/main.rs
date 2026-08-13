@@ -24,6 +24,7 @@ mod cursor;
 mod decorations;
 mod desktop_menu;
 mod dirty;
+mod frametime;
 mod input;
 
 use compositor::ShmCache;
@@ -34,84 +35,6 @@ use input::{InputAction, InputState};
 
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 64;
-
-/// What a frame costs, reported only when frames are being missed.
-///
-/// A compositor with no frame-time counter cannot be tuned: "it feels slow" and
-/// "it is slow" are different claims and only one of them can be acted on. This
-/// stays silent while frames fit in their budget, so it costs a comparison per
-/// frame and nothing else.
-#[derive(Default)]
-struct FrameStats {
-    frames: u32,
-    over_budget: u32,
-    composite_us: u64,
-    flip_us: u64,
-    worst_us: u64,
-    full_screens: u32,
-    /// Pixels handed to the display, which is what a remote viewer must carry.
-    sent_pixels: u64,
-    last_report: Option<Instant>,
-}
-
-impl FrameStats {
-    fn record(
-        &mut self,
-        composite_us: u64,
-        flip_us: u64,
-        full_screen: bool,
-        budget_ms: u64,
-        sent_pixels: u64,
-    ) {
-        self.sent_pixels += sent_pixels;
-        self.frames += 1;
-        self.composite_us += composite_us;
-        self.flip_us += flip_us;
-        self.worst_us = self.worst_us.max(composite_us + flip_us);
-        if full_screen {
-            self.full_screens += 1;
-        }
-        if composite_us + flip_us > budget_ms * 1000 {
-            self.over_budget += 1;
-        }
-
-        let now = Instant::now();
-        let due = self
-            .last_report
-            .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1));
-        if !due {
-            return;
-        }
-        self.last_report = Some(now);
-        if self.over_budget > 0 {
-            let frames = self.frames.max(1) as u64;
-            log_to_kernel(&format!(
-                "wm: {} of {} frames over {}ms budget; composite avg {}us flip avg {}us worst \
-                 {}us; {} full-screen; {} KiB/s to the display",
-                self.over_budget,
-                self.frames,
-                budget_ms,
-                self.composite_us / frames,
-                self.flip_us / frames,
-                self.worst_us,
-                self.full_screens,
-                self.sent_pixels * 4 / 1024,
-            ));
-        }
-        *self = FrameStats {
-            last_report: self.last_report,
-            ..Default::default()
-        };
-    }
-}
-
-/// Leave a line where the serial log will carry it.
-fn log_to_kernel(message: &str) {
-    use std::io::Write;
-    if let Ok(mut klog) = std::fs::OpenOptions::new().write(true).open("/dev/klog") {
-        let _ = klog.write_all(message.as_bytes());
-    }
-}
 
 /// Hand the display the current cursor image, returning whether it took it.
 ///
@@ -186,6 +109,8 @@ const CURSOR_SIZE: u32 = 16;
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PrevWindowState {
     id: u64,
+    /// The repaint count this compositor last drew for the window.
+    damage_seq: u32,
     x: i32,
     y: i32,
     width: u32,
@@ -199,6 +124,7 @@ impl PrevWindowState {
     fn from_entry(w: &WindowListEntry) -> Self {
         Self {
             id: w.id,
+            damage_seq: w.damage_seq,
             x: w.x,
             y: w.y,
             width: w.width,
@@ -594,7 +520,11 @@ fn main() {
     // False when the display has no cursor plane, and the software cursor is
     // composited as before.
     let mut hw_cursor = upload_cursor(&screen, &cursor);
-    let mut frame_stats = FrameStats::default();
+    let mut frame_log = frametime::FrameLog::new(frame_time_ms);
+    // The cadence is measured between the starts of consecutive frames, which
+    // is what a viewer perceives; the phases below only explain a bad one.
+    let mut previous_frame_start: Option<Instant> = None;
+    let mut previous_cursor = (0i32, 0i32);
     let mut uploaded_shape = cursor.shape();
 
     // Window list buffer
@@ -679,6 +609,9 @@ fn main() {
             InputAction::DumpWindows => dump_windows(),
             InputAction::None => {}
         }
+        // Everything above is polling: two device reads and the window-list
+        // syscall, all of which happen whether or not anything changed.
+        let input_us = frame_start.elapsed().as_micros() as u64;
 
         // Right click opens the desktop menu, which is the affordance every
         // desktop has and this one did not.
@@ -766,8 +699,13 @@ fn main() {
                 // A focus change repaints the title-bar accent, so it is dirty
                 // even when nothing else about the window moved.
                 let focus_changed = prev.is_some_and(|s| s.focused != w.focused);
-                let has_buffer = w.buffer_shm_id != 0;
-                if w.damaged != 0 || prev.is_none() || focus_changed || has_buffer {
+                // A repaint is a change in the window's damage counter since
+                // the frame this compositor last drew. The counter is never
+                // cleared by the kernel, so the panel polling the same window
+                // list cannot consume the signal first and leave the window
+                // looking unchanged.
+                let repainted = prev.is_none_or(|s| s.damage_seq != w.damage_seq);
+                if repainted || focus_changed {
                     let s = PrevWindowState::from_entry(w);
                     if let Some(r) = s.dirty_rect().clipped(screen_w, screen_h) {
                         dirty.mark_dirty(r);
@@ -842,54 +780,89 @@ fn main() {
             uploaded_shape = cursor.shape();
         }
 
-        // Composite all windows into back buffer (always full composite).
-        let composite_start = Instant::now();
-        compositor::composite(
-            &mut screen,
-            windows,
-            &cursor,
-            focused_window_id,
-            &mut shm_cache,
-            hovered_close_window,
-            hw_cursor,
-            &desktop_cache,
-        );
-        // Painted after compositing, so its rectangle has to be sent even
-        // when nothing else on the frame moved.
-        if let Some((ox, oy)) = desktop_menu.origin() {
-            desktop_menu.draw(&mut screen);
-            dirty.mark_dirty(dirty::DirtyRect::new(
-                ox,
-                oy,
-                desktop_menu::WIDTH as u32,
-                desktop_menu::height() as u32,
-            ));
-        }
+        // Nothing changed and no menu is painted over the top, so the image
+        // already on the display is the image this frame would produce. The
+        // compositor rewrites every pixel whatever the damage says, so
+        // skipping here is what turns an idle desktop into an idle CPU.
+        let menu_open = desktop_menu.origin().is_some();
+        let has_work = !dirty.is_empty() || menu_open;
 
-        let composite_us = composite_start.elapsed().as_micros() as u64;
-        let flip_start = Instant::now();
-
-        // Transfer the dirty region to the host and flush.
-        // With single-buffered virtio-gpu, we only need to transfer the
-        // pixels that changed, even though the compositor rewrites everything.
+        let mut composite_us = 0;
+        let mut flip_us = 0;
         let mut sent_pixels: u64 = 0;
-        if dirty.full_screen {
-            sent_pixels = (screen.width() * screen.height()) as u64;
-            screen.flip();
-        } else if let Some(bounds) = dirty.merged_bounds() {
-            if let Some(clipped) = bounds.clipped(screen.width() as u32, screen.height() as u32) {
-                sent_pixels = clipped.w as u64 * clipped.h as u64;
-                screen.flip_rect(clipped.x as u32, clipped.y as u32, clipped.w, clipped.h);
+
+        if has_work {
+            let composite_start = Instant::now();
+            compositor::composite(
+                &mut screen,
+                windows,
+                &cursor,
+                focused_window_id,
+                &mut shm_cache,
+                hovered_close_window,
+                hw_cursor,
+                &desktop_cache,
+            );
+            // Painted after compositing, so its rectangle has to be sent even
+            // when nothing else on the frame moved.
+            if let Some((ox, oy)) = desktop_menu.origin() {
+                desktop_menu.draw(&mut screen);
+                dirty.mark_dirty(dirty::DirtyRect::new(
+                    ox,
+                    oy,
+                    desktop_menu::WIDTH as u32,
+                    desktop_menu::height() as u32,
+                ));
             }
+            composite_us = composite_start.elapsed().as_micros() as u64;
+
+            let flip_start = Instant::now();
+            let screen_w = screen.width() as u32;
+            let screen_h = screen.height() as u32;
+
+            if dirty.full_screen {
+                sent_pixels = (screen.width() * screen.height()) as u64;
+                screen.flip();
+            } else {
+                // One transfer per region rather than one over their bounding
+                // box. Regions that are cheaper together were already merged.
+                let (rects, count) = dirty.coalesced();
+                for rect in &rects[..count] {
+                    if let Some(c) = rect.clipped(screen_w, screen_h) {
+                        sent_pixels += c.area();
+                        screen.flip_rect(c.x as u32, c.y as u32, c.w, c.h);
+                    }
+                }
+                // Past the whole screen there is nothing left to save, and one
+                // ioctl beats several.
+                if sent_pixels >= (screen_w as u64 * screen_h as u64) {
+                    sent_pixels = screen_w as u64 * screen_h as u64;
+                }
+            }
+            flip_us = flip_start.elapsed().as_micros() as u64;
         }
-        let flip_us = flip_start.elapsed().as_micros() as u64;
-        frame_stats.record(
+
+        let interval_us = previous_frame_start
+            .map(|at| frame_start.duration_since(at).as_micros() as u64)
+            .unwrap_or(0);
+        previous_frame_start = Some(frame_start);
+        // Motion is what smoothness is judged on, and an idle desktop averaged
+        // together with a drag hides the behaviour of both.
+        let in_motion =
+            (mx, my) != previous_cursor || drag_state.is_some() || resize_state.is_some();
+        previous_cursor = (mx, my);
+
+        frame_log.record(&frametime::Frame {
+            interval_us,
+            input_us,
             composite_us,
             flip_us,
-            dirty.full_screen,
-            frame_time_ms,
             sent_pixels,
-        );
+            full_screen: dirty.full_screen,
+            idle_repaint: sent_pixels == 0,
+            in_motion,
+        });
+        frame_log.maybe_report();
         dirty.clear();
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that

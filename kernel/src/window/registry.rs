@@ -95,8 +95,14 @@ pub struct WindowInfo {
     /// nobody has decorated has no frame, which is the correct answer for the
     /// frames before the manager gets to it.
     pub frame: Frame,
-    /// Damage flag: set by client via SYS_WINDOW_DAMAGE, cleared by WM via window_list.
-    pub damaged: bool,
+    /// Counts the client's repaints, incremented by SYS_WINDOW_DAMAGE.
+    ///
+    /// A counter rather than a flag, and never cleared by the kernel, because
+    /// damage has more than one reader: the compositor draws from it and the
+    /// panel polls the same window list. A flag consumed by whoever called
+    /// first meant the panel could swallow the repaint the compositor needed,
+    /// so each reader remembers the last value it saw instead.
+    pub damage_seq: u32,
 }
 
 #[allow(dead_code)]
@@ -125,7 +131,7 @@ impl WindowInfo {
             flags: 0,
             minimized: false,
             frame: Frame::NONE,
-            damaged: true, // newly created windows are damaged
+            damage_seq: 1,
         }
     }
 
