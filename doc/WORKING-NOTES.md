@@ -1457,7 +1457,7 @@ does not have to invent them.
 | commits | 1,317 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 171, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 157, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
@@ -1511,13 +1511,12 @@ so the build publishes before any commit does. Commit and push the source too.
 
 The `unwrap` figure includes 19 in test code that is not worth converting: 11 in
 `thread/sched_test.rs` and all 8 in `drivers/usb/hid/report.rs`, whose unwraps
-are in its own descriptor-parsing tests and not on any driver path. By file, the
-ones that would move the number are `drivers/usb/xhci/mod.rs` (19) and
-`acpi/mod.rs` (7). Twelve of the xhci ones are `Option` fields that `init()`
-fills, so removing them means folding `init()` into `find_and_init()` rather than
-rewriting call sites. `acpi/mod.rs` is `OnceCell`-shaped plus three boot-time
-table lookups where the machine genuinely cannot continue — a firmware with no
-MADT does not boot this kernel, and an `expect` that says so is the honest form.
+are in its own descriptor-parsing tests and not on any driver path. The file that
+would still move the number is `acpi/mod.rs` (7): `OnceCell`-shaped plus three
+boot-time table lookups where the machine genuinely cannot continue — a firmware
+with no MADT does not boot this kernel, and an `expect` that says so is the
+honest form. `drivers/usb/xhci/mod.rs` came off this list at 19 → 5 by folding
+`init()` into `find_and_init()`, not by rewriting call sites.
 
 ### An `expect` can be a two-phase constructor wearing a disguise
 
