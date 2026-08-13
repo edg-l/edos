@@ -1183,7 +1183,7 @@ auxv, negative-errno returns, and `mprotect`; then a **static** newlib port,
 which needs no dynamic linker at all; `PT_INTERP` last, because it buys image
 size and `dlopen` and nothing in the tree wants either.
 
-## Counts, remeasured 2026-08-13
+## Counts, remeasured 2026-08-14
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1192,11 +1192,11 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
-| userspace programs | 117 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| userspace programs | 116 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | not re-diffed since the workspace grew | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 202, of which 11 are in `thread/sched_test.rs` | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
 exists" table drifted six programs behind the workspace (`nproc`, `pollbench`,
@@ -1208,8 +1208,13 @@ two sets rather than comparing totals:
 cd /home/edgar/dev/edos-v2
 sed -n '/members = \[/,/\]/p' programs/Cargo.toml | grep -oE '"[^"]+"' | tr -d '"' | sort > /tmp/members.txt
 sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | tr -d '`' | sort -u > /tmp/tabled.txt
-comm -3 /tmp/members.txt /tmp/tabled.txt   # empty is correct
+comm -3 /tmp/members.txt /tmp/tabled.txt   # only `gunzip` is correct
 ```
+
+`gunzip` is the one expected difference: it is a second `[[bin]]` of the `gzip`
+crate, so it is a program the table must list and not a workspace member. A crate
+count and a `filesystem/bin` count therefore differ by more than `edos-edit`
+leaving the image.
 
 The project site at `/usr/src/edos-web` is a separate repo carrying the same
 numbers, and it drifts on its own. It agrees with the table above as of 896950d.

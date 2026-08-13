@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-112 programs and 2 libraries, all in the `programs/` cargo workspace.
+116 programs and 3 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -12,19 +12,20 @@
 | Editor | `edos-edit` (graphical: file tree, tabs, syntax colouring, find), `edos-vi` (PTY, and the only one that works over ssh) |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `mkfifo`, `touch`, `stat`, `find`, `du`, `diff`, `dd` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less`, `sed` |
-| Archives | `tar` (ustar create, list and extract) |
+| Archives | `tar` (ustar create, list and extract), `gzip` and `gunzip` |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
 | System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch`, `keymap` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat`, `sshd` |
+| Packages | `grab` (the package manager, lib + CLI), `edos-grab` (its GUI) |
 | Audio | `play` |
 | Images | `imgview` (BMP and SVG viewer) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
 | Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest` |
-| Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`) |
-| Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows) |
+| Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`), `termbench` (the terminal widget with no window and no compositor) |
+| Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows), `edos_http` (HTTP/1.1 over TLS) |
 
 ## Done
 
