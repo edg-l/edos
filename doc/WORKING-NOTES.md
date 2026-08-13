@@ -6,6 +6,53 @@ session.
 
 ---
 
+## TCP over loopback had never once worked, and non-blocking connect found it
+
+`sys_connect` honours `O_NONBLOCK` now: it returns `EINPROGRESS` as soon as the
+SYN is out, `poll` reports the socket writable exactly when the handshake
+resolves either way, and `getsockopt(SOL_SOCKET, SO_ERROR)` carries the outcome
+once. A second `connect` on the same socket answers for the handshake already
+under way -- `EALREADY` while it is outstanding, `EISCONN` once it succeeded,
+the failure once it failed -- rather than starting another. `Socket::poll_state`
+had reported *every* socket writable unconditionally; the one case that is not
+is a connection in `SynSent`, and that is what makes the poll half work.
+
+**The defect underneath.** `127.0.0.1` was routed correctly -- the stack queues a
+loopback frame and drains it at the outermost `send_ip` -- but both ends built
+their `TcpConnection` with `stack.local_ip`, the interface address, while the
+loopback path rewrites the packet's source to `127.0.0.1`. So the SYN carried a
+checksum computed over `10.0.2.15` inside a header saying `127.0.0.1`, and the
+receiver's `tcp::parse` dropped it. Even had it landed, the reply would have
+missed: `tcp_connections` is keyed by `(local, remote)` and the active side had
+registered itself under the interface address the reply would never name. The
+active side now uses the destination when it is on the loopback net, and the
+passive side uses `ip_hdr.dst_addr` rather than `self.local_ip` -- which is the
+same value for every non-loopback packet, since `handle_ipv4` has already
+dropped anything addressed elsewhere.
+
+Nothing had ever connected to `127.0.0.1` in this system, which is why a
+loopback path that could not complete a handshake sat there looking implemented.
+UDP over loopback is untested for the same reason and probably has the same
+checksum problem, since `sys_sendto` builds its datagram from `local_ip` too.
+
+**The errno list is ABI, so a new code goes on the end.** `SYS_ERRNO` returns the
+`Errno` discriminant, and `edos_rt`'s copy of the enum maps anything past its own
+last variant to `UNKNOWN`. Inserting `EINPROGRESS` beside its relatives would
+have renumbered `UNKNOWN` and every code after it for every program built against
+the published crate, which this repo must not rebuild. New codes therefore append
+after `UNKNOWN`, however odd that reads. A program that must recognise one the
+runtime predates compares raw numbers from `edos_lib::io::last_errno_raw()`
+against `/proc/syscalls`, which publishes the kernel's own name-to-number table;
+`socktest` does exactly that rather than hardcoding 27.
+
+`programs/socktest` covers the whole contract over loopback -- 14 checks, all
+green in a headless guest -- plus one case against an address nothing answers,
+which is the only way to observe `EINPROGRESS` itself: loopback delivers inside
+the sending syscall, so a connect there has already succeeded or been refused by
+the time it returns, and reporting that is correct.
+
+---
+
 ## Where the tree stands at the end of 2026-08-12
 
 **Released as v0.4.0** at `4ce2eea`, tagged and pushed, with `edos-x86_64.iso`
@@ -1048,10 +1095,10 @@ the buttons all follow the install without a refresh.
 Three things worth knowing before touching it.
 
 **Every network call runs on a worker thread and reports over an `mpsc`
-channel.** `grab`'s API is blocking by construction, and `sys_connect` still
-ignores `O_NONBLOCK`, so anything on the GUI thread freezes the window for the
-length of a download -- and an unreachable repository would freeze it with no
-way out. One operation at a time: two installs at once would race over
+channel.** `grab`'s API is blocking by construction, so anything on the GUI
+thread freezes the window for the length of a download -- and an unreachable
+repository freezes it for the handshake wait, since `edos_http` connects
+blocking even though the kernel now offers the non-blocking path. One operation at a time: two installs at once would race over
 `/var/lib/grab/db`. The `Progress` trait is implemented by a struct holding the
 `Sender`, which is the whole of the plumbing.
 

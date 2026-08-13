@@ -1253,6 +1253,7 @@ fn describe_descriptor(descriptor: &FileDescriptor) -> (&'static str, &'static s
                 match socket.state {
                     SocketState::Unbound => "UNBOUND",
                     SocketState::Bound => "BOUND",
+                    SocketState::Connecting => "CONNECTING",
                     SocketState::Connected => "CONNECTED",
                     SocketState::Closed => "CLOSED",
                 }

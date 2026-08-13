@@ -8,6 +8,7 @@ use crate::debug::lock_order::{RANK_PORT_TABLE, RANK_SOCKET, RANK_TCP_CONN};
 use crate::fs::PollState;
 use crate::fs::handle::{PollKey, PollRef, PollRegistration, Pollable};
 use crate::net::tcp::{TcpConnection, TcpState};
+use crate::syscalls::Errno;
 use crate::thread::waitqueue::WaitQueue;
 use crate::{ranked_lock, ranked_lock_same};
 
@@ -32,10 +33,11 @@ pub struct SockAddrIn {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code)]
 pub enum SocketState {
     Unbound,
     Bound,
+    /// A non-blocking `connect` sent its SYN and the handshake is outstanding.
+    Connecting,
     Connected,
     Closed,
 }
@@ -131,6 +133,7 @@ impl Socket {
 
     pub fn poll_state(&self) -> PollState {
         let mut state = PollState::none();
+        let mut handshaking = false;
         if self.sock_type == SOCK_STREAM {
             if self.listening {
                 // Listening socket: readable when accept_queue has a Connected entry
@@ -149,6 +152,7 @@ impl Socket {
                 {
                     state.readable = true;
                 }
+                handshaking = c.state == TcpState::SynSent;
             }
         } else {
             // UDP
@@ -156,11 +160,39 @@ impl Socket {
                 state.readable = true;
             }
         }
-        state.writable = true;
+        // A connect still in its handshake is the one case a socket is not
+        // writable: POSIX has poll report writable exactly when a non-blocking
+        // connect resolves, whichever way it went, and `SO_ERROR` says which.
+        state.writable = !handshaking;
         if self.closed {
             state.hangup = true;
         }
         state
+    }
+
+    /// How a non-blocking `connect` ended, which is what `SO_ERROR` answers
+    /// and what a second `connect` on the same socket reports. Reported once:
+    /// the socket leaves `Connecting` as soon as the handshake resolves, so a
+    /// later read finds no pending error.
+    pub fn take_connect_error(&mut self) -> Errno {
+        if self.state != SocketState::Connecting {
+            return Errno::Clear;
+        }
+        let Some(conn) = self.tcp_conn.clone() else {
+            return Errno::Clear;
+        };
+        let conn_state = ranked_lock!(RANK_TCP_CONN, "socket::connect_error", conn).state;
+        match conn_state {
+            TcpState::Established => {
+                self.state = SocketState::Connected;
+                Errno::Clear
+            }
+            TcpState::Closed => {
+                self.state = SocketState::Closed;
+                Errno::ECONNREFUSED
+            }
+            _ => Errno::Clear,
+        }
     }
 
     pub fn add_poller(&mut self, entry: PollRef) -> PollKey {

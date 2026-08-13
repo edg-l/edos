@@ -83,6 +83,15 @@ impl SyscallTable {
     pub fn errno_name(&self, value: u32) -> Option<&str> {
         self.errnos.get(&value).map(|s| s.as_str())
     }
+
+    /// The number the kernel gives an error code by name, which is what a
+    /// program needs to recognise a code its runtime's `Errno` list predates.
+    pub fn errno_value(&self, name: &str) -> Option<u32> {
+        self.errnos
+            .iter()
+            .find(|(_, known)| known.as_str() == name)
+            .map(|(value, _)| *value)
+    }
 }
 
 /// Parse `/proc/syscalls`.

@@ -160,9 +160,11 @@ Karn's algorithm, `RTO = srtt + 4*rttvar` clamped to 200 ms (permitted by
 section 2.4 at HPET granularity) and 60 s. Backoff now multiplies the measured
 timeout rather than a fixed second.
 
-**Unverified end to end.** No TCP connection can reach Established today — see
-`doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md`. Congestion control
-remains a separate, much larger decision.
+The estimator itself is still unmeasured, though connections do reach
+Established now — the SYN-ACK defect in
+`doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` is fixed and `socktest`
+completes handshakes over loopback. Congestion control remains a separate, much
+larger decision.
 
 ### 1.5 A protocol mismatch in the FS request layer panics — FIXED
 

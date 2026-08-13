@@ -58,6 +58,30 @@ pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
     if ret == u64::MAX { Err(()) } else { Ok(()) }
 }
 
+/// `getsockopt(SOL_SOCKET, SO_ERROR)`: the socket's pending error code, and
+/// zero when it has none. This is how a non-blocking `connect` reports whether
+/// the handshake `poll` just called writable succeeded or failed. The code is a
+/// kernel `errno` number; `/proc/syscalls` names them.
+pub fn so_error(fd: u64) -> Result<u32, ()> {
+    let mut val: i32 = 0;
+    let mut len: u32 = core::mem::size_of::<i32>() as u32;
+    let ret = unsafe {
+        sys::syscall5(
+            sys::SYS_GETSOCKOPT,
+            fd,
+            sys::SOL_SOCKET as u64,
+            sys::SO_ERROR as u64,
+            &mut val as *mut i32 as u64,
+            &mut len as *mut u32 as u64,
+        )
+    };
+    if ret == u64::MAX {
+        Err(())
+    } else {
+        Ok(val as u32)
+    }
+}
+
 pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
     let ret = unsafe {
         sys::syscall3(

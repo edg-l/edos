@@ -191,7 +191,11 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
     };
 
     let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+    let (sock_fd, nonblock) = {
+        let table = fd_table.lock();
+        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
+    };
+    let sock_arc = match sock_fd {
         Some(FileDescriptor::Socket(s)) => s,
         _ => {
             info.lock().errno = Errno::EBADF;
@@ -212,6 +216,31 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
     };
 
     if sock_type == SOCK_STREAM {
+        // A second connect on a socket whose handshake is already under way
+        // answers for that handshake rather than starting another, which is
+        // the POSIX way to collect the outcome without poll.
+        {
+            let mut s = ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc);
+            match s.take_connect_error() {
+                Errno::Clear => {}
+                err => {
+                    info.lock().errno = err;
+                    return !0u64;
+                }
+            }
+            match s.state {
+                SocketState::Connected => {
+                    info.lock().errno = Errno::EISCONN;
+                    return !0u64;
+                }
+                SocketState::Connecting => {
+                    info.lock().errno = Errno::EALREADY;
+                    return !0u64;
+                }
+                _ => {}
+            }
+        }
+
         // TCP active open: auto-bind if needed, build SYN, wait for Established
         let local_port = {
             let needs_bind =
@@ -243,7 +272,16 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
             }
         };
 
-        let local_ip = ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack()).local_ip;
+        // A loopback destination comes back to this host with 127.0.0.1 as its
+        // source, since that is the address the stack builds the packet from.
+        // The connection has to be keyed and its checksums computed from the
+        // same address, or the reply matches no connection and the SYN it
+        // answers carries a checksum over an address that never appeared.
+        let local_ip = if ip[0] == 127 {
+            ip
+        } else {
+            ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack()).local_ip
+        };
         let remote_sa = SocketAddr { ip, port };
         let local_sa = SocketAddr {
             ip: local_ip,
@@ -267,6 +305,35 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).tcp_conn = Some(conn_arc.clone());
         ranked_lock!(RANK_TCP_CONN, "sys_connect", conn_arc).owner =
             Some(Arc::downgrade(&sock_arc));
+
+        // Non-blocking: the SYN is out, so the call is done. Loopback resolves
+        // the handshake inside the send above, so a connection that is already
+        // Established or refused reports that now rather than through poll.
+        if nonblock {
+            let conn_state = ranked_lock!(RANK_TCP_CONN, "sys_connect", conn_arc).state;
+            match conn_state {
+                TcpState::Established => {
+                    ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).state =
+                        SocketState::Connected;
+                    return 0;
+                }
+                TcpState::Closed => {
+                    net_stack()
+                        .lock()
+                        .tcp_connections
+                        .remove(&(local_sa, remote_sa));
+                    ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).tcp_conn = None;
+                    info.lock().errno = Errno::ECONNREFUSED;
+                    return !0u64;
+                }
+                _ => {
+                    ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).state =
+                        SocketState::Connecting;
+                    info.lock().errno = Errno::EINPROGRESS;
+                    return !0u64;
+                }
+            }
+        }
 
         let state_wq = ranked_lock!(RANK_TCP_CONN, "sys_connect", conn_arc)
             .state_wq
@@ -956,8 +1023,10 @@ pub fn sys_getsockopt(
             0
         }
         (SOL_SOCKET, SO_ERROR) => {
-            // Always return 0 (no pending error)
-            let val: i32 = 0;
+            // The outcome of a non-blocking connect, which is the only pending
+            // error this stack records. Zero means the socket has none.
+            let val: i32 =
+                ranked_lock!(RANK_SOCKET, "sys_getsockopt", sock_arc).take_connect_error() as i32;
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;

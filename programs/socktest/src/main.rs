@@ -1,12 +1,17 @@
-//! Socket ABI checks: receive flags, and the value-result address length.
+//! Socket ABI checks: receive flags, the value-result address length, and the
+//! non-blocking connect handshake.
 //!
 //! Needs a reachable DNS server to produce one real datagram; QEMU user
-//! networking answers on 10.0.2.3:53, which is the default.
+//! networking answers on 10.0.2.3:53, which is the default. The connect cases
+//! run over 127.0.0.1 and need no network at all.
 
 use std::env;
 use std::process;
 
+use edos_lib::io::{self, PollState, SelectFd};
 use edos_lib::net::{self, MSG_DONTWAIT, MSG_PEEK, MSG_TRUNC, SockAddrIn};
+use edos_lib::process::set_nonblocking;
+use edos_lib::trace::read_syscall_table;
 
 const SOCKADDR_LEN: u32 = core::mem::size_of::<SockAddrIn>() as u32;
 
@@ -36,6 +41,196 @@ fn query() -> Vec<u8> {
     pkt.extend_from_slice(&1u16.to_be_bytes());
     pkt.extend_from_slice(&1u16.to_be_bytes());
     pkt
+}
+
+/// Wait for `fd` to become writable, which for a socket mid-handshake is the
+/// handshake resolving, either way.
+fn wait_writable(fd: u64, timeout_ms: u64) -> PollState {
+    let mut fds = [SelectFd {
+        fd,
+        interests: PollState {
+            writable: true,
+            ..PollState::default()
+        },
+        result: PollState::default(),
+    }];
+    io::poll(&mut fds, timeout_ms);
+    fds[0].result
+}
+
+/// The non-blocking connect contract: `EINPROGRESS` at once rather than a wait,
+/// `poll` reporting the socket writable when the handshake resolves, and
+/// `SO_ERROR` carrying which way it went.
+///
+/// Loopback, so this needs no network: a listener is one bind away and a port
+/// with nothing on it answers RST. Loopback also delivers inside the sending
+/// syscall, so a connect that has already resolved by the time it returns is
+/// allowed to say so; what is not allowed is blocking, or losing the outcome.
+fn connect_cases(passed: &mut u32, failed: &mut u32) {
+    const LISTEN_PORT: u16 = 7877;
+    const DEAD_PORT: u16 = 7878;
+
+    let table = read_syscall_table();
+    let einprogress = table.errno_value("EINPROGRESS").unwrap_or(u32::MAX);
+    let econnrefused = table.errno_value("ECONNREFUSED").unwrap_or(u32::MAX);
+    let eisconn = table.errno_value("EISCONN").unwrap_or(u32::MAX);
+    let local = |port| SockAddrIn::new([127, 0, 0, 1], port);
+
+    let (Ok(listener), Ok(fd)) = (net::create_tcp_socket(), net::create_tcp_socket()) else {
+        check(passed, failed, "tcp sockets", false, "socket failed".into());
+        return;
+    };
+    if net::bind(listener, &local(LISTEN_PORT)).is_err() || net::listen(listener, 4).is_err() {
+        check(
+            passed,
+            failed,
+            "listen 127.0.0.1",
+            false,
+            "bind failed".into(),
+        );
+        net::close(listener);
+        net::close(fd);
+        return;
+    }
+
+    set_nonblocking(fd, true);
+    let started = net::connect(fd, &local(LISTEN_PORT));
+    let code = io::last_errno_raw();
+    check(
+        passed,
+        failed,
+        "nonblocking connect does not wait",
+        started.is_ok() || code == einprogress,
+        format!("{started:?} errno {code}"),
+    );
+
+    let ready = wait_writable(fd, 3000);
+    check(
+        passed,
+        failed,
+        "poll reports the handshake",
+        ready.writable,
+        format!("writable {} error {}", ready.writable, ready.error),
+    );
+    check(
+        passed,
+        failed,
+        "so_error clear on success",
+        net::so_error(fd) == Ok(0),
+        format!("{:?}", net::so_error(fd)),
+    );
+
+    // A second connect on a socket that already has one reports the outcome
+    // rather than starting another handshake.
+    let again = net::connect(fd, &local(LISTEN_PORT));
+    let again_code = io::last_errno_raw();
+    check(
+        passed,
+        failed,
+        "connect on a connected socket",
+        again.is_err() && again_code == eisconn,
+        format!("{again:?} errno {again_code}"),
+    );
+
+    // The connection is real: the listener has it, and a byte crosses it. The
+    // listener is non-blocking so a handshake that never landed fails the check
+    // instead of hanging the test.
+    set_nonblocking(listener, true);
+    let accepted = if io::poll_readable(listener, 2000) {
+        net::accept(listener)
+    } else {
+        Err(())
+    };
+    let round_trip = match accepted {
+        Ok((peer, _)) => {
+            let sent = net::send(fd, b"x");
+            let mut buf = [0u8; 1];
+            let got = net::recv(peer, &mut buf);
+            net::close(peer);
+            sent == Ok(1) && got == Ok(1) && buf[0] == b'x'
+        }
+        Err(_) => false,
+    };
+    check(
+        passed,
+        failed,
+        "accepted and carries data",
+        round_trip,
+        format!("accept {:?}", accepted.map(|(p, _)| p)),
+    );
+    net::close(fd);
+
+    // A port with nothing listening: the failure has to reach the caller too.
+    let Ok(dead) = net::create_tcp_socket() else {
+        check(passed, failed, "tcp socket", false, "socket failed".into());
+        net::close(listener);
+        return;
+    };
+    set_nonblocking(dead, true);
+    let refused = net::connect(dead, &local(DEAD_PORT));
+    let refused_code = io::last_errno_raw();
+    let outcome = if refused.is_err() && refused_code == econnrefused {
+        econnrefused
+    } else if refused.is_err() && refused_code == einprogress {
+        wait_writable(dead, 3000);
+        net::so_error(dead).unwrap_or(u32::MAX)
+    } else {
+        0
+    };
+    check(
+        passed,
+        failed,
+        "refused connect reports ECONNREFUSED",
+        outcome == econnrefused,
+        format!("{refused:?} errno {refused_code}, so_error {outcome}"),
+    );
+    net::close(dead);
+
+    // An address nothing answers: the handshake stays outstanding, which is the
+    // only way to see EINPROGRESS itself, since loopback resolves inside the
+    // call. Poll must withhold writable for as long as that lasts.
+    let Ok(pending) = net::create_tcp_socket() else {
+        check(passed, failed, "tcp socket", false, "socket failed".into());
+        net::close(listener);
+        return;
+    };
+    set_nonblocking(pending, true);
+    let started = net::connect(pending, &SockAddrIn::new([10, 0, 2, 99], 9));
+    let started_code = io::last_errno_raw();
+    let stalled = wait_writable(pending, 500);
+    check(
+        passed,
+        failed,
+        "EINPROGRESS while the handshake is outstanding",
+        started.is_err() && started_code == einprogress && !stalled.writable,
+        format!(
+            "{started:?} errno {started_code}, writable {}",
+            stalled.writable
+        ),
+    );
+    net::close(pending);
+
+    // Blocking connect is unchanged.
+    let Ok(blocking) = net::create_tcp_socket() else {
+        check(passed, failed, "tcp socket", false, "socket failed".into());
+        net::close(listener);
+        return;
+    };
+    let done = net::connect(blocking, &local(LISTEN_PORT));
+    check(
+        passed,
+        failed,
+        "blocking connect still connects",
+        done.is_ok(),
+        format!("{done:?}"),
+    );
+    if io::poll_readable(listener, 2000) {
+        if let Ok((peer, _)) = net::accept(listener) {
+            net::close(peer);
+        }
+    }
+    net::close(blocking);
+    net::close(listener);
 }
 
 fn main() {
@@ -144,6 +339,9 @@ fn main() {
     );
 
     net::close(fd);
+
+    connect_cases(&mut passed, &mut failed);
+
     println!("{passed} passed, {failed} failed");
     if failed > 0 {
         process::exit(1);

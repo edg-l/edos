@@ -72,6 +72,13 @@ pub fn last_errno() -> edos_rt::sys::Errno {
     edos_rt::sys::errno()
 }
 
+/// The same code as its raw number. A kernel error code newer than the
+/// runtime's `Errno` list reads there as `UNKNOWN`, so a caller that must tell
+/// those apart compares numbers and takes the names from `/proc/syscalls`.
+pub fn last_errno_raw() -> u32 {
+    unsafe { sys::syscall0(sys::SYS_ERRNO) as u32 }
+}
+
 /// Close a file descriptor. Returns 0 on success, or negative on error.
 pub fn close(fd: u64) -> i64 {
     unsafe { sys::syscall1(sys::SYS_CLOSE, fd) as i64 }

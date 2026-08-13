@@ -1288,6 +1288,10 @@ fn sys_clock_settime(buf_ptr: *const u8) -> u64 {
     0
 }
 
+/// Error codes as userspace sees them: the discriminant is what `SYS_ERRNO`
+/// returns, so it is ABI. A code beyond the last one a program's runtime knows
+/// reads there as `UNKNOWN`, which is why new codes go on the end rather than
+/// beside their relatives.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(clippy::upper_case_acronyms, unused)]
 #[repr(u64)]
@@ -1347,6 +1351,12 @@ pub enum Errno {
     ENXIO,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
+    /// A non-blocking `connect` has started its handshake and has not finished.
+    EINPROGRESS,
+    /// A `connect` is already under way on this socket.
+    EALREADY,
+    /// The socket is already connected.
+    EISCONN,
 }
 
 /// Every `Errno`, so the values and names can be published to userspace
@@ -1379,6 +1389,9 @@ pub const ALL_ERRNOS: &[Errno] = &[
     Errno::ELOOP,
     Errno::ENXIO,
     Errno::UNKNOWN,
+    Errno::EINPROGRESS,
+    Errno::EALREADY,
+    Errno::EISCONN,
 ];
 
 impl Errno {
@@ -1411,6 +1424,9 @@ impl Errno {
             Errno::ELOOP => "ELOOP",
             Errno::ENXIO => "ENXIO",
             Errno::UNKNOWN => "UNKNOWN",
+            Errno::EINPROGRESS => "EINPROGRESS",
+            Errno::EALREADY => "EALREADY",
+            Errno::EISCONN => "EISCONN",
         }
     }
 }

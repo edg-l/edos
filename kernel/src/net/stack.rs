@@ -282,7 +282,10 @@ impl NetStack {
                 };
 
                 if is_listening && backlog_ok {
-                    let local_ip = self.local_ip;
+                    // The address the SYN was sent to, not the interface's:
+                    // a connection over loopback carries 127.0.0.1 on both
+                    // sides, and every checksum it writes is computed from it.
+                    let local_ip = ip_hdr.dst_addr;
 
                     // Build SYN-ACK
                     let irs = tcp_hdr.seq_num;

@@ -121,10 +121,11 @@ HTTP/1.1, `Host`, `Connection: close`. Three deliberate choices:
 Redirects are followed to a depth of 5, including `http://` → `https://`, with
 the certificate re-verified at each hop.
 
-Known limitation, inherited: `sys_connect` blocks until the handshake completes
-regardless of `O_NONBLOCK`, so `grab` against an unreachable host waits out the
-kernel's TCP timeout with no way to bound it. That is the existing non-blocking
-connect gap, not a new one.
+`grab` itself still connects blocking, so an unreachable host costs it the
+kernel's five-second handshake wait. A descriptor in `O_NONBLOCK` now gets the
+POSIX shape instead -- `EINPROGRESS`, then `poll` reporting writable when the
+handshake resolves and `SO_ERROR` saying which way -- so a caller that wants its
+own timeout has one available.
 
 ## Compression
 
@@ -464,7 +465,9 @@ Each step is independently useful and independently committable.
   because of X.509, not the handshake.
 - **Baked-in CA roots expire.** `webpki-roots` is a compiled-in snapshot, so root
   rotation eventually needs a rebuild of everything linking it.
-- **No timeout on an unreachable repo**, per the blocking-connect gap above.
+- **No timeout on an unreachable repo.** The kernel offers one now (a
+  non-blocking connect plus `poll`); `edos_http` has not been moved onto it, so
+  an unreachable host still costs the handshake wait.
 
 ## What it does not do
 
