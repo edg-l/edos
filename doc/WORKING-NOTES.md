@@ -1146,6 +1146,43 @@ The compositor-owned damage rule this uncovered is in `doc/design/wm-damage.md`;
 the two instances fixed in the same commit are the cursor's own shape and the
 desktop menu's rectangle on the frame it closes.
 
+## The process ABI is the thing blocking both a dynamic linker and a libc
+
+`doc/design/dynamic-linking-and-libc.md` is the assessment: what `PT_INTERP`
+support would cost, whether musl, picolibc, newlib or a hand-written shim can be
+brought up, and which to attempt first. Three facts from it are worth knowing
+before touching the loader or reading anything about porting C software here,
+because each is easy to assume the other way round:
+
+- **There is no auxiliary vector, and the entry point is called as an ordinary
+  SysV function**, `argc` in `rdi` (`kernel/src/thread/thread.rs:999`), not with
+  the SysV process stack. A dynamic linker learns where the main image is from
+  `AT_PHDR`/`AT_BASE` and has no other channel; every libc's `_start` reads
+  `argc` off the stack. Adding the stack can be additive — keep the registers —
+  which is why it is the cheapest of the blocking changes.
+- **Relocations are read from `SHT_RELA` section headers**
+  (`kernel/src/loader/mod.rs:509`), not from `PT_DYNAMIC`'s `DT_RELA`. Shared
+  objects are routinely shipped with section headers stripped, so this parser
+  cannot read a normal `.so` at all.
+- **TLS is owned by the kernel** (`allocate_tls_region`,
+  `kernel/src/thread/thread.rs:661`, FS restored by the scheduler), and there is
+  no `arch_prctl`-equivalent, so userspace cannot set its own FS base. Static TLS
+  only: no DTV, no `__tls_get_addr`. A static libc wants exactly what is already
+  here; a dynamic linker needs this ownership handed over, which is the largest
+  single change in that direction.
+
+Also absent and load-bearing: `mprotect`, `brk`, `set_tid_address`,
+`sigaltstack`, termios, and a `clockid` on `clock_gettime`. Errors are worse than
+they look: a failed syscall returns `u64::MAX` and the caller makes a **second**
+call, `SYS_ERRNO`, so a signal handler firing in between can overwrite the value,
+and `Errno` is a dense EDOS-private enum of 26 values where POSIX has ~130 —
+`ENOSYS`, `ERANGE` and `EDOM` have nothing to map to.
+
+The recommendation, in short: neither project first. Land the SysV stack with an
+auxv, negative-errno returns, and `mprotect`; then a **static** newlib port,
+which needs no dynamic linker at all; `PT_INTERP` last, because it buys image
+size and `dlopen` and nothing in the tree wants either.
+
 ## Counts, remeasured 2026-08-13
 
 Every number a doc states about the size of the tree, taken rather than carried
