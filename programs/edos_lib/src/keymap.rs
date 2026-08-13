@@ -29,6 +29,11 @@ pub struct Modifiers {
     pub altgr: bool,
     pub caps_lock: bool,
     pub ctrl: bool,
+    /// Left Alt. Distinct from `altgr`, which is the right-hand key and
+    /// selects a third character on a layout. Alt selects nothing: it marks a
+    /// chord as an accelerator, so a program can tell a shortcut it bound from
+    /// one it did not.
+    pub alt: bool,
 }
 
 // KeyCode numeric values (pc_keyboard repr(u8) enum order).
@@ -401,6 +406,10 @@ pub fn update_modifiers(mods: &mut Modifiers, code: u32, pressed: bool) -> bool 
             mods.altgr = pressed;
             true
         }
+        LALT => {
+            mods.alt = pressed;
+            true
+        }
         LCONTROL | RCONTROL => {
             mods.ctrl = pressed;
             true
@@ -422,6 +431,13 @@ pub fn map_keycode(code: u32, mods: &Modifiers) -> Option<char> {
 
 /// Map a keycode and modifier state to a character using a named layout.
 pub fn map_keycode_in(layout: &Layout, code: u32, mods: &Modifiers) -> Option<char> {
+    // Alt marks a chord as an accelerator rather than text, so nothing typed
+    // while it is held produces a character. Without this, a window manager
+    // shortcut also reaches the focused program as ordinary input: Alt+Tab
+    // inserts a tab, and Ctrl+Alt+W arrives indistinguishable from Ctrl+W.
+    if mods.alt {
+        return None;
+    }
     if let Some(key) = layout.key(code) {
         // Ctrl+letter is the control character, taken from what the key
         // produces on this layout rather than from its position, so a layout

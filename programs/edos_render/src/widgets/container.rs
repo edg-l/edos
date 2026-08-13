@@ -147,6 +147,7 @@ impl WidgetContainer {
                 // held these are control characters, and a control character
                 // is exactly what `on_char` is not given.
                 if self.mods.ctrl
+                    && !self.mods.alt
                     && let Some(evt) = self.clipboard_shortcut(scancode)
                 {
                     results.extend(evt);

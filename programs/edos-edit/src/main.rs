@@ -881,6 +881,14 @@ impl App {
     }
 
     fn on_key(&mut self, code: u32) {
+        // Alt belongs to the window manager. Its shortcuts reach the focused
+        // program as well as the manager, because the kernel routes every key
+        // to the focused window and nothing can claim one first, so a chord
+        // held with Alt is one this program did not bind: Ctrl+Alt+W is the
+        // registry dump, not a request to close a tab.
+        if self.mods.alt {
+            return;
+        }
         if code == keycode::ESCAPE {
             self.dismiss_prompt();
             return;
