@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 pub mod device;
 pub mod registers;
 pub mod rings;
@@ -25,7 +23,6 @@ use crate::{
     println,
     thread::{
         mailbox::Mailbox,
-        scheduler::sched,
         util::{kthread_exit, queue_spawn_kthread_named_arg},
     },
 };
@@ -56,11 +53,10 @@ const PCI_PROGIF_XHCI: u8 = 0x30;
 
 #[derive(Debug)]
 pub enum XhciError {
-    ControllerNotReady,
-    ResetTimeout,
     CommandTimeout,
     SlotsFull,
-    TransferError(u8), // completion code
+    /// xHCI completion code, carried for the `Debug` rendering in the driver's logs.
+    TransferError(#[allow(dead_code)] u8),
     InvalidDevice,
     UnsupportedSpeed,
 }
@@ -71,8 +67,6 @@ pub enum UsbBlockRequest {
     Read {
         lba: u64,
         sectors: u16,
-        /// Scratch buffer; resized and filled by the driver thread, then returned.
-        buffer: Vec<u8>,
     },
     Write {
         lba: u64,
@@ -94,19 +88,24 @@ pub static USB_BLOCK_MAILBOX: Once<Arc<Mailbox<UsbBlockRequest, UsbBlockResponse
 
 pub struct XhciController {
     regs: XhciRegisters,
-    pci_addr: PciAddress,
-    context_size: usize,      // 32 or 64 bytes per context entry (HCCPARAMS1.CSZ)
-    dcbaa: Option<DmaBuffer>, // Device Context Base Address Array
+    context_size: usize, // 32 or 64 bytes per context entry (HCCPARAMS1.CSZ)
+    dcbaa: DmaBuffer,    // Device Context Base Address Array
+    /// Owns the scratchpad array the controller reads through DCBAA[0], and the pages it
+    /// points at. The hardware reaches them by physical address, so nothing reads these
+    /// again; holding them is what keeps the allocations alive for the controller's life.
+    #[allow(dead_code)]
     scratch_array: Option<DmaBuffer>,
+    #[allow(dead_code)]
     scratch_pages: Vec<DmaBuffer>,
-    command_ring: Option<CommandRing>,
-    event_ring: Option<EventRing>,
+    command_ring: CommandRing,
+    event_ring: EventRing,
 }
 
 impl XhciController {
-    /// Probe PCI for an xHCI controller and map its MMIO region.
+    /// Probe PCI for an xHCI controller, map its MMIO region and bring the hardware up.
     ///
-    /// Returns `None` if no xHCI device is found.
+    /// Returns `None` if no xHCI device is found, or if none of the ones found could be
+    /// started.
     pub fn find_and_init() -> Option<Self> {
         let devices = pci_manager().read().get_devices().to_vec();
 
@@ -168,57 +167,49 @@ impl XhciController {
                 max_ports
             );
 
-            return Some(Self {
-                regs,
-                pci_addr: dev.address,
-                context_size: 32, // updated during init() from HCCPARAMS1.CSZ
-                dcbaa: None,
-                scratch_array: None,
-                scratch_pages: Vec::new(),
-                command_ring: None,
-                event_ring: None,
-            });
+            match Self::bring_up(regs, dev.address) {
+                Ok(controller) => return Some(controller),
+                Err(e) => {
+                    println!("xhci: init failed: {}", e);
+                    continue;
+                }
+            }
         }
 
         None
     }
 
-    /// Initialize the xHCI controller hardware.
-    ///
-    /// Must be called after `find_and_init()`.
-    pub fn init(&mut self) -> Result<(), &'static str> {
+    /// Bring the controller hardware up on an already-mapped register block.
+    fn bring_up(regs: XhciRegisters, pci_addr: PciAddress) -> Result<Self, &'static str> {
         // 1. Wait for Controller Not Ready (CNR) to clear
-        self.wait_for_ready()?;
+        Self::wait_for_ready(&regs)?;
 
         // 2. Halt the controller
-        self.halt()?;
+        Self::halt(&regs)?;
 
         // 3. Reset the controller
-        self.reset()?;
+        Self::reset(&regs)?;
 
         // 4. Read capabilities
-        let hcsparams1 = unsafe { reg_read(&(*self.regs.cap()).hcsparams1) };
-        let hcsparams2 = unsafe { reg_read(&(*self.regs.cap()).hcsparams2) };
-        let hccparams1 = unsafe { reg_read(&(*self.regs.cap()).hccparams1) };
+        let hcsparams1 = unsafe { reg_read(&(*regs.cap()).hcsparams1) };
+        let hcsparams2 = unsafe { reg_read(&(*regs.cap()).hcsparams2) };
+        let hccparams1 = unsafe { reg_read(&(*regs.cap()).hccparams1) };
 
         let max_slots = (hcsparams1 & 0xFF) as u8;
-        let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
-        self.context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
+        let context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
 
         // 5. Set MaxSlotsEn in CONFIG register
         unsafe {
-            reg_write(&mut (*self.regs.op()).config, max_slots as u32);
+            reg_write(&mut (*regs.op()).config, max_slots as u32);
         }
 
         // 6. Allocate DCBAA (Device Context Base Address Array)
         //    Array of (max_slots + 1) 64-bit pointers, 64-byte aligned.
         let dcbaa_size = (max_slots as usize + 1) * 8;
-        self.dcbaa = Some(
-            dma()
-                .allocate_sized(dcbaa_size)
-                .map_err(|_| "xhci: failed to allocate DCBAA")?,
-        );
-        let dcbaa_phys = self.dcbaa.as_ref().unwrap().phys_addr().as_u64();
+        let dcbaa = dma()
+            .allocate_sized(dcbaa_size)
+            .map_err(|_| "xhci: failed to allocate DCBAA")?;
+        let dcbaa_phys = dcbaa.phys_addr().as_u64();
 
         // 7. Handle scratchpad buffers if required by the controller.
         //    xHCI spec §5.3.3: HCSPARAMS2 bits [31:27] = Hi, bits [25:21] = Lo
@@ -226,12 +217,14 @@ impl XhciController {
         let scratch_lo = ((hcsparams2 >> 21) & 0x1F) as u32;
         let scratch_hi = ((hcsparams2 >> 27) & 0x1F) as u32;
         let num_scratch = (scratch_hi << 5) | scratch_lo;
+        let mut scratch_pages: Vec<DmaBuffer> = Vec::new();
+        let mut scratch_array_buf = None;
         if num_scratch > 0 {
             let scratch_array = dma()
                 .allocate_sized((num_scratch as usize) * 8)
                 .map_err(|_| "xhci: failed to allocate scratchpad array")?;
 
-            let pagesize_reg = unsafe { reg_read(&(*self.regs.op()).pagesize) };
+            let pagesize_reg = unsafe { reg_read(&(*regs.op()).pagesize) };
             // PAGESIZE register: bit N set means page size is 2^(N+12). Use trailing_zeros to
             // find the lowest set bit.
             let page_size = 1usize << ((pagesize_reg & 0xFFFF).trailing_zeros() + 12);
@@ -247,39 +240,39 @@ impl XhciController {
                         page_phys,
                     );
                 }
-                self.scratch_pages.push(page);
+                scratch_pages.push(page);
             }
 
             // Write scratchpad array physical address into DCBAA[0]
             unsafe {
                 core::ptr::write_volatile(
-                    self.dcbaa.as_ref().unwrap().as_ptr() as *mut u64,
+                    dcbaa.as_ptr() as *mut u64,
                     scratch_array.phys_addr().as_u64(),
                 );
             }
-            self.scratch_array = Some(scratch_array);
+            scratch_array_buf = Some(scratch_array);
         }
 
         // Write DCBAAP (split into two 32-bit writes)
         unsafe {
-            reg_write(&mut (*self.regs.op()).dcbaap_lo, dcbaa_phys as u32);
-            reg_write(&mut (*self.regs.op()).dcbaap_hi, (dcbaa_phys >> 32) as u32);
+            reg_write(&mut (*regs.op()).dcbaap_lo, dcbaa_phys as u32);
+            reg_write(&mut (*regs.op()).dcbaap_hi, (dcbaa_phys >> 32) as u32);
         }
 
         // 8. Allocate Command Ring (256 TRBs) and write CRCR.
         //    Bit 0 of CRCR_LO is the initial Consumer Cycle State (cycle=1 matches our ring).
-        self.command_ring = Some(CommandRing::new(256));
-        let cr_phys = self.command_ring.as_ref().unwrap().phys_addr();
+        let command_ring = CommandRing::new(256);
+        let cr_phys = command_ring.phys_addr();
         unsafe {
-            reg_write(&mut (*self.regs.op()).crcr_lo, (cr_phys as u32) | 1);
-            reg_write(&mut (*self.regs.op()).crcr_hi, (cr_phys >> 32) as u32);
+            reg_write(&mut (*regs.op()).crcr_lo, (cr_phys as u32) | 1);
+            reg_write(&mut (*regs.op()).crcr_hi, (cr_phys >> 32) as u32);
         }
 
         // 9. Allocate Event Ring (256 TRBs) and program Interrupter 0.
         //    Write order matters: ERSTSZ, ERDP, then ERSTBA (writing ERSTBA triggers hardware).
-        self.event_ring = Some(EventRing::new(256));
-        let er = self.event_ring.as_ref().unwrap();
-        let intr = self.regs.interrupter(0);
+        let event_ring = EventRing::new(256);
+        let er = &event_ring;
+        let intr = regs.interrupter(0);
         unsafe {
             // ERSTSZ = 1 (one segment)
             reg_write(&mut (*intr).erstsz, 1);
@@ -297,7 +290,7 @@ impl XhciController {
 
         // 10. Enable MSI-X (with MSI fallback) so the controller can signal interrupts.
         let devices = pci_manager().read().get_devices().to_vec();
-        if let Some(dev) = devices.iter().find(|d| d.address == self.pci_addr) {
+        if let Some(dev) = devices.iter().find(|d| d.address == pci_addr) {
             if let Err(e) =
                 crate::drivers::msi::enable_msix_for_device(dev, InterruptIndex::Xhci.as_u8(), 0)
             {
@@ -312,16 +305,24 @@ impl XhciController {
 
         // 11. Start the controller: set Run/Stop (bit 0) and Interrupter Enable (bit 2).
         unsafe {
-            let cmd = reg_read(&(*self.regs.op()).usbcmd);
-            reg_write(&mut (*self.regs.op()).usbcmd, cmd | (1 << 0) | (1 << 2));
+            let cmd = reg_read(&(*regs.op()).usbcmd);
+            reg_write(&mut (*regs.op()).usbcmd, cmd | (1 << 0) | (1 << 2));
         }
 
         // Wait for HCHalted (bit 0 of USBSTS) to clear, confirming the controller is running.
         for _ in 0..1_000_000u32 {
-            let sts = unsafe { reg_read(&(*self.regs.op()).usbsts) };
+            let sts = unsafe { reg_read(&(*regs.op()).usbsts) };
             if sts & (1 << 0) == 0 {
                 println!("xhci: controller started");
-                return Ok(());
+                return Ok(Self {
+                    regs,
+                    context_size,
+                    dcbaa,
+                    scratch_array: scratch_array_buf,
+                    scratch_pages,
+                    command_ring,
+                    event_ring,
+                });
             }
             core::hint::spin_loop();
         }
@@ -330,9 +331,9 @@ impl XhciController {
     }
 
     /// Wait until Controller Not Ready (CNR, bit 11 of USBSTS) clears.
-    fn wait_for_ready(&self) -> Result<(), &'static str> {
+    fn wait_for_ready(regs: &XhciRegisters) -> Result<(), &'static str> {
         for _ in 0..1_000_000u32 {
-            let sts = unsafe { reg_read(&(*self.regs.op()).usbsts) };
+            let sts = unsafe { reg_read(&(*regs.op()).usbsts) };
             if sts & (1 << 11) == 0 {
                 return Ok(());
             }
@@ -342,13 +343,13 @@ impl XhciController {
     }
 
     /// Halt the controller by clearing the Run/Stop bit and waiting for HCHalted.
-    fn halt(&self) -> Result<(), &'static str> {
+    fn halt(regs: &XhciRegisters) -> Result<(), &'static str> {
         unsafe {
-            let cmd = reg_read(&(*self.regs.op()).usbcmd);
-            reg_write(&mut (*self.regs.op()).usbcmd, cmd & !(1 << 0));
+            let cmd = reg_read(&(*regs.op()).usbcmd);
+            reg_write(&mut (*regs.op()).usbcmd, cmd & !(1 << 0));
         }
         for _ in 0..1_000_000u32 {
-            let sts = unsafe { reg_read(&(*self.regs.op()).usbsts) };
+            let sts = unsafe { reg_read(&(*regs.op()).usbsts) };
             if sts & (1 << 0) != 0 {
                 return Ok(());
             }
@@ -358,15 +359,15 @@ impl XhciController {
     }
 
     /// Reset the controller by setting HCRST and waiting for it to clear.
-    fn reset(&self) -> Result<(), &'static str> {
+    fn reset(regs: &XhciRegisters) -> Result<(), &'static str> {
         unsafe {
-            reg_write(&mut (*self.regs.op()).usbcmd, 1 << 1); // HCRST
+            reg_write(&mut (*regs.op()).usbcmd, 1 << 1); // HCRST
         }
         for _ in 0..1_000_000u32 {
-            let cmd = unsafe { reg_read(&(*self.regs.op()).usbcmd) };
+            let cmd = unsafe { reg_read(&(*regs.op()).usbcmd) };
             if cmd & (1 << 1) == 0 {
                 // HCRST cleared; also wait for CNR to clear before returning
-                return self.wait_for_ready();
+                return Self::wait_for_ready(regs);
             }
             core::hint::spin_loop();
         }
@@ -378,7 +379,7 @@ impl XhciController {
     /// All commands and event ring polling happen in the driver thread; there are no cross-thread
     /// races to worry about here.
     pub fn submit_command(&mut self, trb: Trb) -> Result<Trb, XhciError> {
-        let cmd_phys = self.command_ring.as_mut().unwrap().push(trb);
+        let cmd_phys = self.command_ring.push(trb);
 
         // Ring doorbell 0 — Host Controller Command doorbell.
         unsafe {
@@ -388,9 +389,9 @@ impl XhciController {
         // Poll the event ring until we see the Command Completion Event whose parameter
         // field contains the physical address of the command TRB we just submitted.
         for _ in 0..5_000_000u32 {
-            if let Some(event) = self.event_ring.as_mut().unwrap().poll() {
+            if let Some(event) = self.event_ring.poll() {
                 // Acknowledge the event by advancing the ERDP and clearing EHB (bit 3).
-                let erdp = self.event_ring.as_ref().unwrap().dequeue_phys();
+                let erdp = self.event_ring.dequeue_phys();
                 let intr = self.regs.interrupter(0);
                 unsafe {
                     reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
@@ -492,8 +493,8 @@ impl XhciController {
 
         // Poll for the Transfer Event that corresponds to our Status Stage TRB.
         for _ in 0..5_000_000u32 {
-            if let Some(event) = self.event_ring.as_mut().unwrap().poll() {
-                let erdp = self.event_ring.as_ref().unwrap().dequeue_phys();
+            if let Some(event) = self.event_ring.poll() {
+                let erdp = self.event_ring.dequeue_phys();
                 let intr = self.regs.interrupter(0);
                 unsafe {
                     reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
@@ -665,11 +666,9 @@ impl XhciController {
             .map_err(|_| XhciError::InvalidDevice)?;
         let output_ctx_phys = output_ctx.phys_addr().as_u64();
 
-        if let Some(ref dcbaa) = self.dcbaa {
-            unsafe {
-                let entry = (dcbaa.as_ptr() as *mut u64).add(slot_id as usize);
-                core::ptr::write_volatile(entry, output_ctx_phys);
-            }
+        unsafe {
+            let entry = (self.dcbaa.as_ptr() as *mut u64).add(slot_id as usize);
+            core::ptr::write_volatile(entry, output_ctx_phys);
         }
 
         // Step 8 — Address Device command: assigns the USB address and transitions the
@@ -1087,8 +1086,8 @@ impl XhciController {
 
         // Poll for a Transfer Event completion
         for _ in 0..10_000_000u32 {
-            if let Some(event) = self.event_ring.as_mut().unwrap().poll() {
-                let erdp = self.event_ring.as_ref().unwrap().dequeue_phys();
+            if let Some(event) = self.event_ring.poll() {
+                let erdp = self.event_ring.dequeue_phys();
                 let intr = self.regs.interrupter(0);
                 unsafe {
                     reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
@@ -1156,13 +1155,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
             }
         }
     };
-
-    if let Err(e) = controller.init() {
-        println!("xhci: init failed: {}", e);
-        loop {
-            thread_park();
-        }
-    }
 
     // keyboard_device holds the active HID keyboard device, its interrupt IN transfer ring,
     // and the endpoint's DCI (used for doorbell writes).
@@ -1595,7 +1587,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         // Use thread_park_while so we only park if there's truly nothing to do.
         // This avoids lost wakes when a mailbox request arrives between the
         // mailbox check and the park call.
-        let er = controller.event_ring.as_mut().unwrap() as *mut EventRing;
+        let er = &mut controller.event_ring as *mut EventRing;
         if repeat_key.is_some() {
             // Key held: sleep until next repeat or wake on interrupt/mailbox.
             let now = crate::timer::uptime_us();
@@ -1613,8 +1605,8 @@ pub extern "C" fn xhci_driver_main() -> ! {
         }
 
         // Process all pending events.
-        while let Some(event) = controller.event_ring.as_mut().unwrap().poll() {
-            let erdp = controller.event_ring.as_ref().unwrap().dequeue_phys();
+        while let Some(event) = controller.event_ring.poll() {
+            let erdp = controller.event_ring.dequeue_phys();
             let intr = controller.regs.interrupter(0);
             unsafe {
                 reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
@@ -1764,7 +1756,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         if let Some(mailbox) = USB_BLOCK_MAILBOX.get() {
             while let Some(mut req) = mailbox.try_recv() {
                 match req.payload.take().unwrap() {
-                    UsbBlockRequest::Read { lba, sectors, .. } => {
+                    UsbBlockRequest::Read { lba, sectors } => {
                         let result = if let Some((ref mut msc, ref mut in_ring, ref mut out_ring)) =
                             mass_storage_device
                         {

@@ -1385,6 +1385,61 @@ says it ran. Grep the saved log for the thing that proves the work happened
 (`Checking edos-kernel`, `ALL 51 TESTS PASSED`) rather than reading the exit
 status of the chain.
 
+## "Warning-free" does not cover fifteen files
+
+`make check` being warning-free is the tree's standing claim, and fifteen files
+under `kernel/src` opt themselves out of it with a blanket inner attribute:
+
+```bash
+for f in $(grep -rl '^#!\[expect\|^#!\[allow' kernel/src); do
+  printf '%s: ' "$f"; head -3 "$f" | grep '^#!\['; done
+```
+
+`#![expect(unused)]` on line 1 silences the whole `unused` group — unused
+imports, unused variables, never-read fields, never-constructed variants — for
+that module **and every child module**, which is how one line on
+`drivers/usb/xhci/mod.rs` covered `device.rs`, `registers.rs` and `rings.rs` too.
+Errors still surface, so the file looks compiled and checked; only the warnings
+are gone. Removing that one line exposed six, of which one was a real waste: the
+`buffer` field of `UsbBlockRequest::Read` had every caller allocate and send a
+zeroed `Vec` the size of the read, which the driver thread destructured away with
+`..` and never touched.
+
+The probe that establishes whether a gate reports warnings at all, which is worth
+running before trusting a clean run: append `let gate_probe_unused = 5;` to a
+function in the file being changed and check that the build names it. If it does
+not, look for an inner attribute at the top of that file before looking anywhere
+else.
+
+Still carrying the blanket attribute, in rough order of how much driver logic
+sits behind it: `drivers/usb/mass_storage.rs`, `drivers/usb/xhci/device.rs`,
+`drivers/usb/xhci/rings.rs`, `drivers/hda/codec.rs`, `drivers/pci/manager.rs`,
+`acpi/mod.rs`, `drivers/msi/mod.rs`, `drivers/ahci/fis.rs`, `thread/util.rs`,
+`thread/context.rs`, `graphics/colors.rs`, `drivers/vga/mod.rs`,
+`drivers/hda/regs.rs`, `drivers/e1000e/regs.rs`. The register-definition files
+(`hda/regs.rs`, `e1000e/regs.rs`, `ahci/fis.rs`) have a real reason — a hardware
+register block is written out whole and most of it is unused by design — and want
+a narrower `#![expect(dead_code)]` with that sentence rather than the `unused`
+group. The rest want the attribute deleted and the fallout decided one item at a
+time.
+
+## An xHCI controller is built once, not probed then initialised
+
+`XhciController` was two phases: `find_and_init` mapped BAR0 and returned a value
+whose `dcbaa`, `command_ring` and `event_ring` were all `None`, and `init` filled
+them, so every later use of a ring went through `as_mut().unwrap()`. The DCBAA
+cannot be sized before the reset — its length comes from `HCSPARAMS1.MaxSlots`,
+which is only trustworthy after `HCRST` — so the fields genuinely could not be
+set by the old `find_and_init`. Folding the whole bring-up into it is what makes
+them final: `bring_up` owns the reset, the capability read and every allocation
+as locals, and constructs `Self` only on the path that saw HCHalted clear.
+
+Same shape as the AHCI port fix, and the same lesson: an `unwrap` on an `Option`
+field is usually reporting a constructor split across two calls rather than a
+value that might be missing. A controller that fails to start is now skipped and
+the probe moves to the next PCI candidate, instead of being returned in a
+half-built state for the caller to notice.
+
 ## Counts, remeasured 2026-08-14
 
 Every number a doc states about the size of the tree, taken rather than carried

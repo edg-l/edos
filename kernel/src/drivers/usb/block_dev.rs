@@ -5,7 +5,7 @@
 //! completes the handle. The mechanism is sync internally, but presents the
 //! same async surface as AHCI so fs/* sees one trait, not two.
 
-use alloc::{sync::Arc, vec};
+use alloc::sync::Arc;
 use core::time::Duration;
 
 use crate::thread::scheduler::thread_yield;
@@ -69,11 +69,9 @@ impl AsyncBlockDevice for UsbBlockDevice {
         let result = if sectors == 0 || sectors > u16::MAX as u32 {
             Err(BlockError::InvalidArg)
         } else {
-            let scratch = vec![0u8; buf_len];
             match send_and_wait(UsbBlockRequest::Read {
                 lba,
                 sectors: sectors as u16,
-                buffer: scratch,
             }) {
                 None => Err(BlockError::Timeout),
                 Some(UsbBlockResponse::ReadResult(Ok(data))) => {
