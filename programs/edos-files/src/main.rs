@@ -31,6 +31,9 @@ const WIN_H: u32 = 580;
 /// The picture viewer, which is what an image opens in.
 const IMAGE_VIEWER: &str = "/bin/imgview";
 
+/// The editor, which is what text opens in.
+const EDITOR: &str = "/bin/edos-edit";
+
 /// Two clicks closer together than this on the same row mean "open it".
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -269,6 +272,12 @@ impl App {
         if entry.opens_in_viewer() {
             if spawn(IMAGE_VIEWER, &[&path], 0, 1, 2) == u64::MAX {
                 self.note = Note::Warning(format!("Couldn't start {IMAGE_VIEWER}."));
+            }
+            return;
+        }
+        if entry.opens_in_editor() {
+            if spawn(EDITOR, &[&path], 0, 1, 2) == u64::MAX {
+                self.note = Note::Warning(format!("Couldn't start {EDITOR}."));
             }
             return;
         }

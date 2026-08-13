@@ -30,6 +30,7 @@ const PAD: i64 = 5;
 enum Item {
     NewTerminal,
     Files,
+    Editor,
     Widgets,
     NextBackground,
 }
@@ -50,6 +51,11 @@ const ROWS: &[Row] = &[
         item: Item::Files,
         label: "Files",
         icon: &icons::FOLDER,
+    },
+    Row {
+        item: Item::Editor,
+        label: "Editor",
+        icon: &icons::DOCUMENT,
     },
     Row {
         item: Item::Widgets,
@@ -137,6 +143,10 @@ impl DesktopMenu {
             Item::NewTerminal => {
                 let _ = spawn("/bin/edos-terminal", &[], 0, 1, 2);
                 Some(Outcome::Done)
+            }
+            Item::Editor => {
+                let _ = spawn("/bin/edos-edit", &[], 0, 1, 2);
+                None
             }
             Item::Files => {
                 let _ = spawn("/bin/edos-files", &[], 0, 1, 2);

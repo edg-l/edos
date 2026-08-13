@@ -62,6 +62,11 @@ const ROWS: &[Row] = &[
         icon: &icons::FOLDER,
     },
     Row {
+        item: Item::Launch("/bin/edos-edit"),
+        label: "Editor",
+        icon: &icons::DOCUMENT,
+    },
+    Row {
         item: Item::Launch("/bin/wintest"),
         label: "Widgets",
         icon: &icons::APPS,
@@ -84,7 +89,7 @@ const ROWS: &[Row] = &[
 ];
 
 /// Index of the first power row, which is where the rule goes.
-const FIRST_POWER_ROW: usize = 3;
+const FIRST_POWER_ROW: usize = 4;
 
 /// Prefix on every line of a menu dump, so a host-side reader can pick the
 /// block out of an interleaved serial log.

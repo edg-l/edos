@@ -166,7 +166,20 @@ impl Buffer {
     /// rather than refused, so a stray byte in a config file can still be
     /// fixed rather than only reported.
     pub fn open(path: &str) -> Result<Self, String> {
-        let meta = fs::metadata(path).map_err(|err| format!("{path}: {err}"))?;
+        let meta = match fs::metadata(path) {
+            Ok(meta) => meta,
+            // A name with nothing behind it is a file waiting to be written,
+            // not a failure. Opening one gives an empty buffer that remembers
+            // where it belongs, so the first save creates it — which is how a
+            // file gets made here at all. Every other error is still one.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let mut buffer = Self::empty();
+                buffer.path = Some(path.to_string());
+                buffer.lang = syntax::for_path(path);
+                return Ok(buffer);
+            }
+            Err(err) => return Err(format!("{path}: {err}")),
+        };
         if meta.len() > MAX_SIZE {
             return Err(format!(
                 "{path} is {} — too large to open (limit 8 MiB).",

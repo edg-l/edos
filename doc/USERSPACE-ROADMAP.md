@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-111 programs and 2 libraries, all in the `programs/` cargo workspace.
+112 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -9,7 +9,7 @@
 | Init | `edos-init` (the only process the kernel starts; supervises the GUI session and `sshd`, from compiled-in defaults plus `/etc/services/*.conf`), `svc` (start, stop and inspect them at runtime) |
 | GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-files` (file manager), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
-| Editor | `edos-vi` |
+| Editor | `edos-edit` (graphical: file tree, tabs, syntax colouring, find), `edos-vi` (PTY, and the only one that works over ssh) |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `mkfifo`, `touch`, `stat`, `find`, `du`, `diff`, `dd` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less`, `sed` |
 | Archives | `tar` (ustar create, list and extract) |
@@ -351,8 +351,16 @@ opens in `imgview` from a double-click. Three things in it are worth knowing:
   drifted from the text it was supposed to sit in. A second consumer is what
   surfaced both.
 
-A graphical editor is what is left: `widgets::text_input` now works, and
-`wintest` and `edos-files` are its only consumers.
+The graphical editor that was left has shipped as `edos-edit`: a file tree,
+tabs, syntax colouring from a language table, find, go-to-line, and a change
+ribbon marking every line that differs from what is on disk. It is the third
+consumer of `widgets::text_input`, through its prompt bar. Writing it found no
+new defect in that widget -- the two the file manager surfaced were the ones it
+had -- but it did find that `Sans-Regular` carries no `▾` or `▸`, so a glyph
+the face lacks draws nothing and the tree's chevrons are icons.
+
+Item 4 is closed. `edos-vi` stays: it is the only editor that works over ssh
+and on a serial console.
 
 ### 5. A way to get software onto the machine
 

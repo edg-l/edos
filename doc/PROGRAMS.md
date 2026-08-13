@@ -22,12 +22,15 @@ that would house it.
 
 ## The one to write next
 
-**A graphical editor.** What is left of "a desktop that is not a terminal
-launcher": `edos-files` can now reach a file without a shell but nothing
-graphical can change one, so every edit is still `edos-vi` in a PTY. It is also
-the third consumer of `widgets::text_input`, and the second one is what found
-the two defects that had been in that widget since it was written, so a third
-is worth having for the same reason.
+**A settings panel.** The graphical editor has shipped as `edos-edit`, which
+closes "a desktop that is not a terminal launcher": a file can now be reached,
+read and changed without a shell.
+
+What is left unhoused is configuration. The keyboard layout `keymap` writes and
+the wallpaper the desktop menu cycles are real settings with real storage in
+`/etc`, reachable only from a command line. A panel over them is small, and it
+is the first thing that would want a runtime theme -- which is still a `const`,
+and is the one part of Phase 5 item 3 nobody has done.
 
 ## GUI
 

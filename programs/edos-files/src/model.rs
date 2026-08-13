@@ -68,6 +68,22 @@ impl Entry {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("bmp") || ext.eq_ignore_ascii_case("svg"))
     }
 
+    /// Whether this is text the editor should open.
+    ///
+    /// A name with no extension counts: the things that carry one here are
+    /// configuration and scripts, and refusing to open `.profile` because it
+    /// has no suffix would send the reader back to the terminal for the files
+    /// most likely to need an edit.
+    pub fn opens_in_editor(&self) -> bool {
+        const TEXT: &[&str] = &[
+            "rs", "c", "h", "toml", "json", "sh", "md", "txt", "conf", "cfg", "ini", "log",
+        ];
+        match extension(&self.name) {
+            Some(ext) => TEXT.iter().any(|known| ext.eq_ignore_ascii_case(known)),
+            None => true,
+        }
+    }
+
     /// Whether the details pane can draw this itself.
     ///
     /// Narrower than [`Entry::opens_in_viewer`] on purpose: a vector document
