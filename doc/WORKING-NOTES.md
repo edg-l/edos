@@ -5608,3 +5608,56 @@ to happen **after** the last program build and **before** `efs-mkfs` runs;
 `make edos-x86_64.iso` and `make sata-disk.img` both re-enter `make programs`
 and undo an earlier copy. Copying `pkgstage/bin/<name>` in and then running the
 `sata-disk.img` recipe's four commands by hand is the way that works.
+
+## A FAT12 entry can straddle a sector boundary, and three call sites did not (2026-08-14)
+
+A FAT12 entry is 1.5 bytes wide, so the 16-bit window covering one starts at
+`cluster * 3 / 2` and, for one cluster in every 342, that byte offset is 511:
+the low half of the entry lives on the last byte of a sector and the high half
+on the first byte of the next. Cluster 341 is the first (`341 * 3 / 2 == 511`),
+then 683, 1024, and so on, so any FAT12 volume with more than 341 clusters --
+anything past ~175 KB at one sector per cluster -- has them.
+
+All three sites read exactly one sector and indexed two bytes into it:
+
+- `fat32/traverse.rs::get_fat_entry` sliced `sector[off..off + 2]` on a 512-byte
+  `Vec`, which panics the kernel. Reachable from any read that walks a chain
+  through such a cluster, i.e. reading a file bigger than the straddle spacing.
+- `fat32/write.rs::set_fat_value` indexed `sec[within + 1]` the same way, same
+  panic, on link and free.
+- `fat32/write.rs::alloc_cluster`'s `search` had a `within + entry_size >
+  sec.len()` guard, so it did not panic -- it skipped the cluster and moved on.
+  That silently made ~1 cluster in 342 permanently unallocatable.
+
+`sector_span(within, size, bytes_per_sector)` in `fat32/mod.rs` answers how many
+sectors a window needs, and all three now read (and, where they write, write
+back) that many. It answers 1 for every FAT32 and FAT16 entry, whose widths
+divide the sector evenly.
+
+Two things ruled out while fixing it: the FAT32 and FAT16 arms of
+`get_fat_entry` cannot straddle, because their offsets are multiples of 4 and 2
+and the sector size is a power of two -- their `try_into().unwrap()` calls were
+structurally impossible rather than latent panics, and are now explicit byte
+indexing anyway. And the `search` guard was not dead code covering FAT32 too: it
+could only ever have fired for FAT12.
+
+### Not exercised in the guest, and what it would take
+
+The fix is reasoned and builds; no FAT12 volume has ever been mounted by this
+kernel. Building one to prove it is fiddly and the attempt is worth recording:
+FAT12 caps at 4084 clusters, so a 16 MiB image at one sector per cluster is
+*too large* to format (`mkfs.fat: Not enough or too many clusters`) -- 2 MiB is
+about right, and it must hold a file larger than 175 KB for its chain to cross
+cluster 341. `mkfs.fat --offset` also did not produce a mountable partition in
+an `sfdisk`-partitioned image on the first two tries, and a raw unpartitioned
+image gets no `/dev` node at all, since the kernel enumerates partitions and
+synthesises nothing for a bare volume. `scripts/edos-vm start --extra-disk
+<img>` is the way to attach one once it exists.
+
+### Note: FAT32 assumes 512-byte sectors in two different ways
+
+`read_disk_sectors`/`write_disk_sectors` hardcode `SECTOR_SIZE = 512`, and
+`traverse.rs` divides by a literal 512, while `write.rs` divides by
+`boot_info.bytes_per_sector`. They agree only because every volume tried so far
+has 512-byte sectors. A 4096-byte-sector volume would have the two halves
+disagree about which sector an entry is in. Pre-existing, not touched here.

@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::fs::{
     Error,
     fat32::{
-        Fatfs,
+        Fatfs, sector_span,
         structures::{
             ATTR_LONG_NAME, CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry,
             DirectoryRecord, FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
@@ -303,9 +303,12 @@ impl Fatfs {
 
                 let sector = self.read_disk_sectors(fat_sector, 1)?;
 
-                let raw = u32::from_le_bytes(
-                    sector[off_in_sector..off_in_sector + 4].try_into().unwrap(),
-                );
+                let raw = u32::from_le_bytes([
+                    sector[off_in_sector],
+                    sector[off_in_sector + 1],
+                    sector[off_in_sector + 2],
+                    sector[off_in_sector + 3],
+                ]);
                 let val = raw & FAT32_MASK;
 
                 if val == CLUSTER_FREE || val >= CLUSTER_EOF {
@@ -325,9 +328,8 @@ impl Fatfs {
 
                 let sector = self.read_disk_sectors(fat_sector, 1)?;
 
-                let raw = u16::from_le_bytes(
-                    sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
-                ) as u32;
+                let raw =
+                    u16::from_le_bytes([sector[off_in_sector], sector[off_in_sector + 1]]) as u32;
                 let val = raw & FAT16_MASK;
 
                 if val == 0 || val >= 0xFFF8 {
@@ -346,19 +348,15 @@ impl Fatfs {
                 let fat_sector = self.first_fat_lba() + (byte_off / 512);
                 let off_in_sector = (byte_off % 512) as usize;
 
-                let sector = self.read_disk_sectors(fat_sector, 1)?;
+                let sector =
+                    self.read_disk_sectors(fat_sector, sector_span(off_in_sector, 2, 512))?;
+                let raw = u16::from_le_bytes([sector[off_in_sector], sector[off_in_sector + 1]]);
 
                 let val = if (cluster_number & 1) == 0 {
                     // Even cluster: use lower 12 bits of the 16-bit value
-                    let raw = u16::from_le_bytes(
-                        sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
-                    );
                     (raw & 0x0FFF) as u32
                 } else {
                     // Odd cluster: use upper 12 bits of the 16-bit value
-                    let raw = u16::from_le_bytes(
-                        sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
-                    );
                     ((raw >> 4) & 0x0FFF) as u32
                 };
 

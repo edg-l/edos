@@ -9,7 +9,7 @@ use crate::{
     fs::{
         Error,
         fat32::{
-            Fatfs,
+            Fatfs, sector_span,
             structures::{
                 ATTR_LONG_NAME, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, DirectoryRecord,
                 FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
@@ -236,14 +236,10 @@ impl Fatfs {
                 let sector_index = (byte_index / bytes_per_sector) as u64;
                 let within = byte_index % bytes_per_sector;
 
+                let span = sector_span(within, entry_size, bytes_per_sector);
                 sec = self
-                    .read_disk_sectors(self.first_fat_lba() + sector_index, 1)
+                    .read_disk_sectors(self.first_fat_lba() + sector_index, span)
                     .ok()?;
-
-                if within + entry_size > sec.len() {
-                    current_cluster += 1;
-                    continue;
-                }
 
                 let val = match variant {
                     FatVariant::Fat32 => {
@@ -286,8 +282,12 @@ impl Fatfs {
                         }
                     }
 
-                    self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec.clone(), 1)
-                        .ok()?;
+                    self.write_disk_sectors(
+                        self.first_fat_lba() + sector_index,
+                        &sec.clone(),
+                        span,
+                    )
+                    .ok()?;
 
                     return Some(current_cluster);
                 }
@@ -364,21 +364,20 @@ impl Fatfs {
                 let sector_index = byte_offset / bytes_per_sector as u64;
                 let within = (byte_offset % bytes_per_sector as u64) as usize;
 
-                let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, 1)?;
+                let span = sector_span(within, 2, bytes_per_sector);
+                let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, span)?;
 
-                if (cluster & 1) == 0 {
+                let existing = u16::from_le_bytes([sec[within], sec[within + 1]]);
+                let new_val = if (cluster & 1) == 0 {
                     // Even cluster: lower 12 bits
-                    let existing = u16::from_le_bytes([sec[within], sec[within + 1]]);
-                    let new_val = (existing & 0xF000) | ((value & 0x0FFF) as u16);
-                    sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
+                    (existing & 0xF000) | ((value & 0x0FFF) as u16)
                 } else {
                     // Odd cluster: upper 12 bits
-                    let existing = u16::from_le_bytes([sec[within], sec[within + 1]]);
-                    let new_val = (existing & 0x000F) | (((value & 0x0FFF) as u16) << 4);
-                    sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
-                }
+                    (existing & 0x000F) | (((value & 0x0FFF) as u16) << 4)
+                };
+                sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
 
-                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
+                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, span)?;
             }
         }
         Ok(())

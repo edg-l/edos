@@ -62,6 +62,21 @@ pub fn split_fat_ino(ino: u64) -> (u32, u32) {
     (dir_cluster, entry_offset)
 }
 
+/// Sectors that must be held at once to cover `size` bytes at offset `within`
+/// inside a sector.
+///
+/// A FAT12 entry is 1.5 bytes wide, so the 16-bit window covering one can start
+/// on the last byte of a sector and end on the first byte of the next. Every
+/// other FAT variant has an entry width that divides the sector evenly and
+/// always answers 1.
+pub(super) fn sector_span(within: usize, size: usize, bytes_per_sector: usize) -> u16 {
+    if within + size > bytes_per_sector {
+        2
+    } else {
+        1
+    }
+}
+
 #[derive(Debug)]
 pub struct Fatfs {
     pub boot_info: Fat32BootSector,
