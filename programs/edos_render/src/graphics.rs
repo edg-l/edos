@@ -1478,6 +1478,15 @@ pub struct Screen {
     pitch_pixels: usize,
     /// Drawing is confined to this rectangle, in screen pixels, when set.
     clip: Option<(usize, usize, usize, usize)>,
+    /// Where drawing goes when the framebuffer is mapped VRAM.
+    ///
+    /// virtio-gpu reports `double_buffered: 0` and page flipping exists only on
+    /// the Bochs VBE path, so the mapped VRAM *is* the scanout: drawing into it
+    /// puts half-finished frames where the host can read them, and compositing
+    /// a frame takes about a millisecond of scattered writes. Drawing into this
+    /// instead means VRAM is only ever written by the short copy in
+    /// `publish`, immediately before the region is handed to the display.
+    shadow: Vec<u32>,
 }
 
 impl Screen {
@@ -1496,6 +1505,7 @@ impl Screen {
             vram: Some(mapping),
             pitch_pixels,
             clip: None,
+            shadow: vec![0; info.width * info.height],
         })
     }
 
@@ -1521,6 +1531,7 @@ impl Screen {
                     vram: None,
                     pitch_pixels,
                     clip: None,
+                    shadow: Vec::new(),
                 })
             }
         }
@@ -1582,13 +1593,50 @@ impl Screen {
     /// In VRAM mode, returns the current back page slice and pitch_pixels.
     /// In Vec mode, returns the back buffer pixels and width.
     pub fn pixels_mut(&mut self) -> Option<(&mut [u32], usize)> {
+        if self.vram.is_some() {
+            // The shadow, not VRAM: see the field's comment. Its stride is the
+            // screen width, which is not the VRAM pitch.
+            return Some((&mut self.shadow, self.info.width));
+        }
         let stride = self.pitch_pixels;
-        if let Some(ref mut vram) = self.vram {
-            Some((vram.back_page(), stride))
-        } else if let Some(ref mut buf) = self.back_buffer {
+        if let Some(ref mut buf) = self.back_buffer {
             Some((&mut buf.pixels, stride))
         } else {
             None
+        }
+    }
+
+    /// Copy a finished region from the shadow into VRAM.
+    ///
+    /// The only place VRAM is written, and it is a run of memcpys of pixels
+    /// that are already complete, so the window in which the scanout holds a
+    /// half-drawn frame is as short as the copy rather than as long as the
+    /// compositing.
+    fn publish(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        if self.vram.is_none() {
+            return;
+        }
+        let (screen_w, screen_h) = (self.info.width, self.info.height);
+        let x0 = (x as usize).min(screen_w);
+        let y0 = (y as usize).min(screen_h);
+        let x1 = ((x + w) as usize).min(screen_w);
+        let y1 = ((y + h) as usize).min(screen_h);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let span = x1 - x0;
+        let pitch = self.pitch_pixels;
+        let shadow = &self.shadow;
+        let Some(ref mut vram) = self.vram else {
+            return;
+        };
+        let page = vram.back_page();
+        for row in y0..y1 {
+            let src = row * screen_w + x0;
+            let dst = row * pitch + x0;
+            if src + span <= shadow.len() && dst + span <= page.len() {
+                page[dst..dst + span].copy_from_slice(&shadow[src..src + span]);
+            }
         }
     }
 
@@ -1675,6 +1723,7 @@ impl Screen {
     /// Render all pending operations
     pub fn render(&mut self) -> Result<()> {
         if self.vram.is_some() {
+            self.publish(0, 0, self.info.width as u32, self.info.height as u32);
             // Ensure all VRAM writes are visible before flipping pages.
             #[cfg(target_arch = "x86_64")]
             unsafe {
@@ -1756,6 +1805,7 @@ impl Screen {
 
     /// Flip the display (full screen transfer).
     pub fn flip(&mut self) {
+        self.publish(0, 0, self.info.width as u32, self.info.height as u32);
         let offset = self.framebuffer.flip();
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
@@ -1764,6 +1814,7 @@ impl Screen {
 
     /// Flip only a dirty rectangle (partial transfer).
     pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        self.publish(x, y, w, h);
         let offset = self.framebuffer.flip_rect(x, y, w, h);
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
