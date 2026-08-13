@@ -376,7 +376,17 @@ shipped  = false          # false = packaged, absent = shipped
 ```
 
 so the shipped/packaged classification is one field, next to the thing it
-classifies.
+classifies. The version is deliberately *not* here: it comes from the program's
+`Cargo.toml`, because two places to write a version is one place for them to
+disagree, and cargo's is the one that built the binary. An absent `shipped` key
+means shipped, so adding a `pkg.toml` for its metadata alone never takes a
+program off the image by surprise.
+
+`make publish` builds the archives, writes the index and signs it. Packing is
+deterministic — mtime, uid, gid and the gzip header's own timestamp are all
+pinned — so republishing an unchanged repository leaves every SHA-256 unchanged.
+Without that, every publish would tell clients to re-download software that did
+not change.
 
 ## Order of work
 
@@ -392,9 +402,15 @@ Each step is independently useful and independently committable.
    reproducing its input's SHA-256, and a GNU-tar-created `.tar.gz` fetched over
    HTTPS and extracted with `-xf` alone, whose payload matches the host binary
    byte for byte.
-3. **Repo format, `tools/grab-repo`, signing, nginx, publish.** The server side
-   is up: `/srv/edos-pkg` is served at `/pkg/` and answers through Cloudflare.
-   The remainder is the index generator and the signature.
+3. **Repo format, `tools/grab-repo`, signing, nginx, publish. Done.**
+   `edos-edit` is published as the first package. Verified: the index, its
+   signature, the archive and the icon all answer through Cloudflare with the
+   right content types; the signature checks out under an independent ed25519
+   implementation and a one-bit tamper of the index is rejected; and a
+   republish leaves the archive's SHA-256 unchanged.
+   The format lives in `libs/grab-index`, shared by the publisher and the
+   client so the bytes that get signed and the bytes that get parsed cannot
+   drift apart.
 4. **`grab` CLI.**
 5. **`edos-grab` GUI.**
 6. **`edos-edit` leaves the image and becomes the first package**, plus the

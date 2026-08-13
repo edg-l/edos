@@ -1,0 +1,17 @@
+[package]
+name = "grab-repo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "grab-repo"
+path = "src/main.rs"
+
+[dependencies]
+grab-index = { path = "../../libs/grab-index" }
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.10"
+ed25519-dalek = "2"
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }

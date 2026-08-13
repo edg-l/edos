@@ -1,0 +1,8 @@
+# What the package manager shows for this program, and whether it is on the
+# boot image at all. `shipped = false` keeps it off the image and publishes it
+# instead; edos-vi stays behind so a machine with no network still has an
+# editor.
+summary = "Graphical text editor with a file tree, tabs and syntax highlighting"
+category = "editors"
+icon = "assets/edos-edit.svg"
+shipped = false

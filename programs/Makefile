@@ -24,17 +24,34 @@ define install_one
 	objcopy --strip-debug $(1) ../filesystem/bin/$(notdir $(1))
 endef
 
+# Programs published through `grab` instead of going on the boot image. The
+# build emits every workspace binary into ../filesystem/bin, so keeping one off
+# the image is a move afterwards rather than a change to what gets built. They
+# are moved after stripping, so what is published is what would have shipped.
+PACKAGED := edos-edit
+
+define stage_packaged
+	@mkdir -p ../pkgstage/bin
+	@for p in $(PACKAGED); do \
+		if [ -f "../filesystem/bin/$$p" ]; then \
+			mv -f "../filesystem/bin/$$p" "../pkgstage/bin/$$p"; \
+		fi; \
+	done
+endef
+
 .PHONY: build
 build:
 	cargo +edos build -Z unstable-options --artifact-dir=../filesystem/bin/ --target x86_64-unknown-edos
 	rm -f ../filesystem/bin/*.rlib ../filesystem/bin/*.a
 	$(strip_installed)
+	$(stage_packaged)
 
 .PHONY: build-release
 build-release:
 	cargo +edos build -Z unstable-options --artifact-dir=../filesystem/bin/ --release --target x86_64-unknown-edos
 	rm -f ../filesystem/bin/*.rlib ../filesystem/bin/*.a
 	$(strip_installed)
+	$(stage_packaged)
 
 .PHONY: wm
 wm:

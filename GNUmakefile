@@ -460,6 +460,13 @@ clean-sata:
 # silently creates a single directory with the braces in its name instead.
 FILESYSTEM_DIRS := bin boot dev etc home lib var mnt opt root sys tmp share share/fonts share/wallpapers share/icons
 
+.PHONY: publish
+# Build the package archives, write the index and sign it. Needs the repository
+# key; see doc/grab.md.
+publish: programs
+	cargo build --release --manifest-path tools/grab-repo/Cargo.toml
+	tools/grab-repo/target/release/grab-repo
+
 .PHONY: filesystem
 # Outline faces for the shell. Lato sets the chrome and JetBrains Mono the
 # terminal; both are OFL and both ship in Debian, so they are copied from the
