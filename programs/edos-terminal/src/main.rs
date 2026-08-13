@@ -80,7 +80,9 @@ fn main() {
     // Main loop
     loop {
         // Poll window events
+        let mut event_count = 0usize;
         if let Ok(count) = window.poll_events(&mut events) {
+            event_count = count;
             for event in &events[..count] {
                 match event.event_type() {
                     Some(WindowEventType::CloseRequested) => {
@@ -172,27 +174,35 @@ fn main() {
         }
 
         // Read output from shell and display
+        let mut output_len = 0usize;
         if let Some(ref child) = child {
             let n = child.read(&mut read_buf);
             if n > 0 {
+                output_len = n as usize;
                 let output = String::from_utf8_lossy(&read_buf[..n as usize]);
                 terminal.write_str(&output);
             }
         }
 
-        // Update cursor blink
-        terminal.tick();
+        // Update cursor blink. Only the blink phase flipping is a reason to
+        // repaint on its own.
+        let blinked = terminal.tick();
 
-        // Draw
-        window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
+        // Repainting an unchanged terminal is not free: `swap_buffers` reports
+        // damage, and the compositor answers by transferring the whole window.
+        // Doing that 62 times a second to show an identical picture is what
+        // saturated the display link.
+        if event_count > 0 || !input_chars.is_empty() || output_len > 0 || blinked {
+            window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
 
-        let w = window.width;
-        let h = window.height;
-        if let Some(buf) = window.buffer_mut() {
-            terminal.draw(buf, w, h);
+            let w = window.width;
+            let h = window.height;
+            if let Some(buf) = window.buffer_mut() {
+                terminal.draw(buf, w, h);
+            }
+
+            window.swap_buffers();
         }
-
-        window.swap_buffers();
         std::thread::sleep(Duration::from_millis(16));
     }
 }

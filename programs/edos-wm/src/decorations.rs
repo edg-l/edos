@@ -1,6 +1,6 @@
 //! Window decorations for the window manager.
 
-use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
+use edos_render::window::{WindowListEntry, flags, flags::FLAG_DOCK};
 
 /// Height of the title bar.
 ///
@@ -100,6 +100,18 @@ pub fn effective_height(window: &WindowListEntry) -> u64 {
 }
 
 /// Calculate effective width from raw flags and width values (no WindowListEntry needed).
+/// Offset from a window's outer origin to the first pixel of its content.
+///
+/// A client reports damage in its own coordinates, which start inside the
+/// frame; the compositor needs it in screen coordinates.
+pub fn content_origin(w: &WindowListEntry) -> (i32, i32) {
+    if w.flags & flags::FLAG_UNDECORATED != 0 {
+        (0, 0)
+    } else {
+        (BORDER_WIDTH as i32, TITLE_HEIGHT as i32)
+    }
+}
+
 pub fn effective_width_raw(flags: u64, width: u32) -> u64 {
     if (flags & FLAG_DOCK) != 0 {
         width as u64

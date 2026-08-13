@@ -853,14 +853,21 @@ impl Terminal {
     }
 
     /// Update cursor blink state (call periodically).
-    pub fn tick(&mut self) {
+    ///
+    /// Returns whether anything on screen changed, so an owner can skip a
+    /// repaint it does not need. A terminal that redraws unconditionally
+    /// reports damage every frame and makes the compositor retransmit an
+    /// identical window; over a remote display that is the whole cost.
+    pub fn tick(&mut self) -> bool {
         self.tick_counter = self.tick_counter.wrapping_add(1);
         self.cursor_blink_counter += 1;
         if self.cursor_blink_counter >= 30 {
             // Toggle every ~500ms at 60fps
             self.cursor_visible = !self.cursor_visible;
             self.cursor_blink_counter = 0;
+            return true;
         }
+        false
     }
 }
 

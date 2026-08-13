@@ -907,7 +907,8 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_WINDOW_LIST => {
             let buffer_ptr = ctx.rdi as *mut u8;
             let max = ctx.rsi;
-            ctx.rax = window::sys_window_list(buffer_ptr, max);
+            let list_flags = ctx.rdx;
+            ctx.rax = window::sys_window_list(buffer_ptr, max, list_flags);
         }
         SYS_WINDOW_SEND_EVENT => {
             let window_id = ctx.rdi;
@@ -916,7 +917,13 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_WINDOW_DAMAGE => {
             let window_id = ctx.rdi;
-            ctx.rax = window::sys_window_damage(window_id);
+            ctx.rax = window::sys_window_damage(
+                window_id,
+                ctx.rsi as u32,
+                ctx.rdx as u32,
+                ctx.r10 as u32,
+                ctx.r8 as u32,
+            );
         }
         SYS_WINDOW_GRANT_SHELL => {
             ctx.rax = window::sys_window_grant_shell(ctx.rdi);

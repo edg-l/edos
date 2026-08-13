@@ -1,6 +1,6 @@
 //! Window and shared memory syscall wrappers for the EDOS window server.
 
-use edos_lib::sys::{syscall1, syscall2, syscall3, syscall4};
+use edos_lib::sys::{syscall1, syscall2, syscall3, syscall4, syscall5};
 
 /// Window identifier type.
 pub type WindowId = u64;
@@ -137,6 +137,12 @@ pub struct WindowListEntry {
     /// syscall and a registry write lock for nothing.
     pub frame: u64,
     pub damage_seq: u32,
+    /// The region the client reported repainting, window-local. Mirrors the
+    /// kernel's entry field for field.
+    pub damage_x: u32,
+    pub damage_y: u32,
+    pub damage_w: u32,
+    pub damage_h: u32,
     /// Set for the window that currently holds input focus. The kernel window
     /// registry is the single source of truth; do not re-derive focus from
     /// `z_order`, which also moves when a window is merely raised.
@@ -200,6 +206,10 @@ impl Default for WindowListEntry {
             flags: 0,
             frame: 0,
             damage_seq: 0,
+            damage_x: 0,
+            damage_y: 0,
+            damage_w: 0,
+            damage_h: 0,
             focused: 0,
             minimized: 0,
             title: [0; TITLE_MAX],
@@ -367,7 +377,29 @@ pub fn set_frame(id: WindowId, left: u32, top: u32, right: u32, bottom: u32) -> 
 }
 
 pub fn window_damage(id: WindowId) -> Result<(), i64> {
-    let result = unsafe { syscall1(SYS_WINDOW_DAMAGE, id) };
+    window_damage_rect(id, 0, 0, 0, 0)
+}
+
+/// Report the region repainted, in window-local pixels.
+///
+/// A zero width or height means the whole window, which is what a client that
+/// does not track its own damage should send. Reporting the actual region is
+/// what lets the compositor transfer a changed line rather than a changed
+/// window, so it is worth a client knowing what it drew.
+///
+/// Regions accumulate in the kernel until a compositor takes them, so several
+/// calls between two frames are all honoured.
+pub fn window_damage_rect(id: WindowId, x: u32, y: u32, w: u32, h: u32) -> Result<(), i64> {
+    let result = unsafe {
+        syscall5(
+            SYS_WINDOW_DAMAGE,
+            id,
+            x as u64,
+            y as u64,
+            w as u64,
+            h as u64,
+        )
+    };
     if is_error(result) { Err(-1) } else { Ok(()) }
 }
 
@@ -379,11 +411,21 @@ pub fn window_damage(id: WindowId) -> Result<(), i64> {
 /// # Returns
 /// Total number of windows (may be more than buffer size).
 pub fn window_list(buffer: &mut [WindowListEntry]) -> Result<usize, i64> {
+    window_list_flags(buffer, 0)
+}
+
+/// Passed by the compositor to take each window's accumulated damage region.
+/// Every other reader leaves the regions for it; see the kernel's
+/// `WINDOW_LIST_CONSUME_DAMAGE`.
+pub const WINDOW_LIST_CONSUME_DAMAGE: u64 = 1;
+
+pub fn window_list_flags(buffer: &mut [WindowListEntry], flags: u64) -> Result<usize, i64> {
     let result = unsafe {
-        syscall2(
+        syscall3(
             SYS_WINDOW_LIST,
             buffer.as_mut_ptr() as u64,
             buffer.len() as u64,
+            flags,
         )
     };
     if is_error(result) {

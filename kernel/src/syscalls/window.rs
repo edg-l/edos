@@ -9,7 +9,7 @@ use crate::{
     window::{
         WindowEvent, clipboard,
         input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
-        registry::{Frame, ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
+        registry::{DamageBox, Frame, ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
         shell,
     },
 };
@@ -366,7 +366,7 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 ///     title: [u8; TITLE_MAX],
 /// }
 /// ```
-pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
+pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
@@ -420,6 +420,10 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
                     flags: window.flags,
                     frame: window.frame.packed(),
                     damage_seq: window.damage_seq,
+                    damage_x: window.damage_box.map_or(0, |d| d.x),
+                    damage_y: window.damage_box.map_or(0, |d| d.y),
+                    damage_w: window.damage_box.map_or(0, |d| d.w),
+                    damage_h: window.damage_box.map_or(0, |d| d.h),
                     focused: (focused == Some(window.id)) as u32,
                     minimized: window.minimized as u32,
                     title,
@@ -448,8 +452,27 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
         }
     }
 
+    if flags & WINDOW_LIST_CONSUME_DAMAGE != 0 {
+        let listed: alloc::vec::Vec<u64> = entries.iter().map(|e| e.id).collect();
+        let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_list", WINDOW_REGISTRY);
+        for id in listed {
+            if let Some(w) = registry.get_window_mut(id) {
+                w.damage_box = None;
+            }
+        }
+    }
+
     total_count as u64
 }
+
+/// Passed by the one caller that acts on damage regions -- the compositor --
+/// to take them. Every other reader leaves them alone.
+///
+/// This is the same coupling the old code had, where reporting the list
+/// cleared each damage flag, but stated in the call instead of hidden in a
+/// side effect. Hidden, it meant the panel polling the same list could swallow
+/// a repaint the compositor had not seen yet.
+pub const WINDOW_LIST_CONSUME_DAMAGE: u64 = 1;
 
 /// Maximum title length in WindowListEntry (including null terminator).
 pub const TITLE_MAX: usize = 64;
@@ -474,6 +497,13 @@ pub struct WindowListEntry {
     /// The client's repaint count. A reader keeps the value it last acted on
     /// and redraws when it differs; the kernel never resets it.
     pub damage_seq: u32,
+    /// The region the client reported repainting, in window-local pixels, or
+    /// all zeroes when it reported none. Only meaningful to a caller that
+    /// consumes damage; see `WINDOW_LIST_CONSUME_DAMAGE`.
+    pub damage_x: u32,
+    pub damage_y: u32,
+    pub damage_w: u32,
+    pub damage_h: u32,
     /// Set for the window that currently holds input focus. The registry is the
     /// single source of truth: clients must not re-derive focus from `z_order`.
     pub focused: u32,
@@ -587,23 +617,51 @@ pub fn sys_window_grant_shell(target_pid: u64) -> u64 {
 /// - rdi: window ID
 ///
 /// Returns: 0 on success, !0 on error.
-pub fn sys_window_damage(window_id: WindowId) -> u64 {
+pub fn sys_window_damage(window_id: WindowId, x: u32, y: u32, w: u32, h: u32) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
     let pid = info.lock().pid;
 
     let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_damage", WINDOW_REGISTRY);
-    let Some(w) = registry.get_window_mut(window_id) else {
+    let Some(window) = registry.get_window_mut(window_id) else {
         info.lock().errno = Errno::ENOENT;
         return !0u64;
     };
     // Only the window's own process may declare it repainted. Otherwise any
     // process can make the compositor redraw the screen every frame.
-    if w.pid != pid {
+    if window.pid != pid {
         info.lock().errno = Errno::EPERM;
         return !0u64;
     }
-    w.damage_seq = w.damage_seq.wrapping_add(1);
+    window.damage_seq = window.damage_seq.wrapping_add(1);
+
+    let (win_w, win_h) = (window.width, window.height);
+    // A zero-sized region means the whole window, which is what a client that
+    // does not track its own damage reports. Everything else is clamped to the
+    // window: a region outside it would grow the union without ever describing
+    // a pixel the compositor can draw.
+    let reported = if w == 0 || h == 0 {
+        DamageBox {
+            x: 0,
+            y: 0,
+            w: win_w,
+            h: win_h,
+        }
+    } else {
+        let x = x.min(win_w);
+        let y = y.min(win_h);
+        DamageBox {
+            x,
+            y,
+            w: w.min(win_w - x),
+            h: h.min(win_h - y),
+        }
+    };
+
+    window.damage_box = Some(match window.damage_box {
+        Some(existing) => existing.union(reported),
+        None => reported,
+    });
     0
 }
 

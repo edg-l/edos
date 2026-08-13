@@ -103,6 +103,36 @@ pub struct WindowInfo {
     /// first meant the panel could swallow the repaint the compositor needed,
     /// so each reader remembers the last value it saw instead.
     pub damage_seq: u32,
+    /// Union of the regions the client has reported since a compositor last
+    /// consumed them, in window-local pixels. Accumulated rather than replaced
+    /// because a client can publish two buffers between two composites, and
+    /// the compositor has to repaint both regions, not just the newer one.
+    pub damage_box: Option<DamageBox>,
+}
+
+/// A rectangle of a window the client says it repainted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DamageBox {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl DamageBox {
+    /// Grow to cover `other` as well.
+    pub fn union(self, other: DamageBox) -> DamageBox {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (self.x + self.w).max(other.x + other.w);
+        let bottom = (self.y + self.h).max(other.y + other.h);
+        DamageBox {
+            x,
+            y,
+            w: right - x,
+            h: bottom - y,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -132,6 +162,7 @@ impl WindowInfo {
             minimized: false,
             frame: Frame::NONE,
             damage_seq: 1,
+            damage_box: None,
         }
     }
 

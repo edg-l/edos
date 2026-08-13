@@ -8,8 +8,8 @@ use edos_lib::config;
 use edos_lib::io::klog_dump;
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    WindowEvent, WindowEventType, WindowListEntry, flags, focused_id, property, set_frame,
-    window_list, window_minimize, window_send_event, window_set,
+    WINDOW_LIST_CONSUME_DAMAGE, WindowEvent, WindowEventType, WindowListEntry, flags, focused_id,
+    property, set_frame, window_list_flags, window_minimize, window_send_event, window_set,
 };
 
 /// Height of the panel, which a maximized window must not cover.
@@ -582,7 +582,7 @@ fn main() {
         }
 
         // Get current window list from kernel
-        let window_count = match window_list(&mut entries) {
+        let window_count = match window_list_flags(&mut entries, WINDOW_LIST_CONSUME_DAMAGE) {
             Ok(count) => count.min(MAX_WINDOWS),
             Err(_) => 0,
         };
@@ -670,7 +670,7 @@ fn main() {
         handle_resize(&mut resize_state, mx, my, left_held);
 
         // Re-fetch window list after potential modifications
-        let window_count = match window_list(&mut entries) {
+        let window_count = match window_list_flags(&mut entries, WINDOW_LIST_CONSUME_DAMAGE) {
             Ok(count) => count.min(MAX_WINDOWS),
             Err(_) => 0,
         };
@@ -707,7 +707,27 @@ fn main() {
                 let repainted = prev.is_none_or(|s| s.damage_seq != w.damage_seq);
                 if repainted || focus_changed {
                     let s = PrevWindowState::from_entry(w);
-                    if let Some(r) = s.dirty_rect().clipped(screen_w, screen_h) {
+                    // A client that reported the region it drew gets that
+                    // region transferred; one that reported nothing, or whose
+                    // frame decoration changed, gets the whole window.
+                    let whole = s.dirty_rect();
+                    let region = if repainted
+                        && !focus_changed
+                        && w.damage_w != 0
+                        && w.damage_h != 0
+                        && w.damage_w < w.width
+                    {
+                        let (fx, fy) = decorations::content_origin(w);
+                        DirtyRect::new(
+                            w.x + fx + w.damage_x as i32,
+                            w.y + fy + w.damage_y as i32,
+                            w.damage_w,
+                            w.damage_h,
+                        )
+                    } else {
+                        whole
+                    };
+                    if let Some(r) = region.clipped(screen_w, screen_h) {
                         dirty.mark_dirty(r);
                     }
                 }
