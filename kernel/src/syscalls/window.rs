@@ -204,6 +204,9 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         property::BUFFER_SHM => {
             window.buffer_shm_id = if value == 0 { None } else { Some(value) };
         }
+        property::BUFFER_SIZE => {
+            window.buffer_size = ((value >> 32) as u32, value as u32);
+        }
         property::FLAGS => {
             window.flags = value;
         }
@@ -417,6 +420,8 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
                     z_order: window.z_order,
                     visible: window.visible as u32,
                     buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
+                    buffer_width: window.buffer_size.0,
+                    buffer_height: window.buffer_size.1,
                     flags: window.flags,
                     frame: window.frame.packed(),
                     damage_seq: window.damage_seq,
@@ -490,6 +495,12 @@ pub struct WindowListEntry {
     pub z_order: u32,
     pub visible: u32,
     pub buffer_shm_id: u64,
+    /// Pixel dimensions the client wrote `buffer_shm_id` at, or zero when it
+    /// has not said. Read the buffer at these rather than at `width` and
+    /// `height`: those are the manager's and change before the client has
+    /// allocated to match, so reading at them shears the picture.
+    pub buffer_width: u32,
+    pub buffer_height: u32,
     pub flags: u64,
     /// The frame the window's manager last reported, packed as four u16 edges.
     /// Reported back so a manager can skip rewriting a frame it already set.

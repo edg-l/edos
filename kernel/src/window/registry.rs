@@ -78,6 +78,10 @@ pub struct WindowInfo {
     pub title: String,
     /// Shared memory ID for the window buffer, if any.
     pub buffer_shm_id: Option<u64>,
+    /// Pixel dimensions the client wrote `buffer_shm_id` at, or (0, 0) when it
+    /// has not said. See `property::BUFFER_SIZE` for why this is not `width`
+    /// and `height`.
+    pub buffer_size: (u32, u32),
     /// Window flags: see the `flags` module.
     pub flags: u64,
     /// Set while the window is put away. Distinct from `visible`, which is the
@@ -158,6 +162,7 @@ impl WindowInfo {
             visible: false,
             title: String::new(),
             buffer_shm_id: None,
+            buffer_size: (0, 0),
             flags: 0,
             minimized: false,
             frame: Frame::NONE,
@@ -219,6 +224,15 @@ pub mod property {
     /// whoever decorates the window, so pointer routing follows the frame that
     /// is actually drawn.
     pub const FRAME: u64 = 10;
+    /// Pixel dimensions of the buffer named by [`BUFFER_SHM`], packed as two
+    /// u32s: width in the high half, height in the low.
+    ///
+    /// The buffer's stride is the client's, not the window manager's. A resize
+    /// changes [`WIDTH`] the moment the manager decides it, while the client
+    /// allocates its new buffer some frames later, so a compositor that reads
+    /// the buffer at the window's current width reads it at a stride it was
+    /// never written with and draws a sheared picture.
+    pub const BUFFER_SIZE: u64 = 11;
 }
 
 /// Window flags.

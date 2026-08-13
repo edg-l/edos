@@ -748,11 +748,19 @@ fn main() {
                 }
             }
 
-            // Mark old rects of moved or disappeared windows (exposes background).
+            // Mark old rects of moved, resized or disappeared windows, which is
+            // what repaints the ground they no longer cover. Size counts as
+            // much as position: a window dragged smaller vacates a band down
+            // its old right and bottom edges, and leaving it out of this test
+            // left that band showing the window that used to be there.
             for slot in prev_windows[..prev_window_count].iter().flatten() {
-                let still_here = windows
-                    .iter()
-                    .any(|w| w.id == slot.id && w.x == slot.x && w.y == slot.y);
+                let still_here = windows.iter().any(|w| {
+                    w.id == slot.id
+                        && w.x == slot.x
+                        && w.y == slot.y
+                        && w.width == slot.width
+                        && w.height == slot.height
+                });
                 if !still_here {
                     if let Some(r) = slot.dirty_rect().clipped(screen_w, screen_h) {
                         dirty.mark_dirty(r);

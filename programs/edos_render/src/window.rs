@@ -131,6 +131,12 @@ pub struct WindowListEntry {
     pub z_order: u32,
     pub visible: u32,
     pub buffer_shm_id: u64,
+    /// Pixel dimensions the client wrote `buffer_shm_id` at, or zero when it
+    /// has not said. Read the buffer at these rather than at `width` and
+    /// `height`: those are the manager's and change before the client has
+    /// allocated to match, so reading at them shears the picture.
+    pub buffer_width: u32,
+    pub buffer_height: u32,
     pub flags: u64,
     /// The frame this window's manager last reported, packed as four u16
     /// edges. Compare before writing: rewriting an unchanged frame is a
@@ -203,6 +209,8 @@ impl Default for WindowListEntry {
             z_order: 0,
             visible: 0,
             buffer_shm_id: 0,
+            buffer_width: 0,
+            buffer_height: 0,
             flags: 0,
             frame: 0,
             damage_seq: 0,
@@ -242,6 +250,10 @@ pub mod property {
     /// whoever decorates the window, so pointer routing follows the frame that
     /// is actually drawn instead of a second copy of the same constants.
     pub const FRAME: u64 = 10;
+    /// Pixel dimensions of the buffer named by [`BUFFER_SHM`], packed as two
+    /// u32s: width in the high half, height in the low. Publish this before
+    /// the buffer it describes.
+    pub const BUFFER_SIZE: u64 = 11;
 }
 
 /// Window flags.
@@ -528,6 +540,13 @@ impl Window {
     /// the compositor, then flips so the old front is now the back.
     pub fn swap_buffers(&mut self) {
         let back_shm_id = self.buffers[self.back_index].0;
+        // Before the buffer, so a compositor never sees a buffer described by
+        // the size of the one before it.
+        let _ = window_set(
+            self.id,
+            property::BUFFER_SIZE,
+            (self.width as u64) << 32 | self.height as u64,
+        );
         let _ = window_set(self.id, property::BUFFER_SHM, back_shm_id);
         let _ = window_damage(self.id);
         self.back_index = 1 - self.back_index;
@@ -540,6 +559,13 @@ impl Window {
     /// pixels on screen, so a caller that is unsure wants [`swap_buffers`].
     pub fn swap_buffers_damaged(&mut self, x: i32, y: i32, w: u32, h: u32) {
         let back_shm_id = self.buffers[self.back_index].0;
+        // Before the buffer, so a compositor never sees a buffer described by
+        // the size of the one before it.
+        let _ = window_set(
+            self.id,
+            property::BUFFER_SIZE,
+            (self.width as u64) << 32 | self.height as u64,
+        );
         let _ = window_set(self.id, property::BUFFER_SHM, back_shm_id);
         let x0 = x.max(0) as u32;
         let y0 = y.max(0) as u32;
@@ -594,7 +620,14 @@ impl Window {
             e
         })?;
 
-        // Point the compositor at the new buffer 0 before destroying the old ones.
+        // Point the compositor at the new buffer 0 before destroying the old
+        // ones, and at its size first: a buffer published under the previous
+        // buffer's dimensions is read at a stride it was never written with.
+        window_set(
+            self.id,
+            property::BUFFER_SIZE,
+            (new_width as u64) << 32 | new_height as u64,
+        )?;
         window_set(self.id, property::BUFFER_SHM, new_buf0.0)?;
 
         let old = self.buffers;

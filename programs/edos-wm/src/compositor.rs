@@ -57,15 +57,16 @@ impl ShmCache {
         }
     }
 
-    /// Get or create a mapping for the given shm_id.
-    /// Returns the mapped pointer and buffer dimensions if successful.
+    /// Map a window's buffer and report the dimensions it is safe to read at.
     ///
-    /// IMPORTANT: A shared memory buffer's size is fixed at creation time.
-    /// If the kernel reports different dimensions than we cached, it means
-    /// the WM updated the window size but the client hasn't created a new
-    /// buffer yet. We return the cached (actual) dimensions to avoid
-    /// reading beyond the buffer's real size. Once the client creates a
-    /// new shm_id, cleanup() will remove the old mapping.
+    /// `width` and `height` are the client's own, from `buffer_width` and
+    /// `buffer_height`. They are not the window's: a resize changes those the
+    /// moment the manager decides it, while the client allocates its matching
+    /// buffer some frames later, and reading a buffer at a width it was never
+    /// written with produces a sheared picture rather than merely a stale one.
+    ///
+    /// Still clamped against the mapping's real size, since the dimensions
+    /// arrive from another process and only the allocation bounds the read.
     pub fn get_or_map(
         &mut self,
         shm_id: u64,
@@ -76,33 +77,17 @@ impl ShmCache {
             return Some((ptr, cached_w, cached_h));
         }
 
-        // Not cached, map fresh.
-        // Use the SHM's actual allocated size to derive safe dimensions,
-        // not the window's current width/height which may have been updated
-        // by the WM during a resize before the client allocated a new buffer.
-        if let Ok(ptr) = shm_map(shm_id, PROT_READ) {
-            let (safe_w, safe_h) = if let Ok(size) = shm_size(shm_id) {
-                let max_pixels = size / 4;
-                if (width as usize) * (height as usize) <= max_pixels {
-                    (width, height)
-                } else if width > 0 {
-                    let h = (max_pixels / width as usize) as u32;
-                    (width, h)
-                } else {
-                    (0, 0)
-                }
-            } else {
-                (width, height)
-            };
-            self.mappings.insert(shm_id, (ptr, safe_w, safe_h));
-            if safe_w > 0 && safe_h > 0 {
-                Some((ptr, safe_w, safe_h))
-            } else {
-                None
+        let ptr = shm_map(shm_id, PROT_READ).ok()?;
+        let (safe_w, safe_h) = match shm_size(shm_id) {
+            Ok(size) if width > 0 => {
+                let rows = (size / 4) / width as usize;
+                (width, height.min(rows as u32))
             }
-        } else {
-            None
-        }
+            Ok(_) => (0, 0),
+            Err(_) => (width, height),
+        };
+        self.mappings.insert(shm_id, (ptr, safe_w, safe_h));
+        (safe_w > 0 && safe_h > 0).then_some((ptr, safe_w, safe_h))
     }
 
     /// Drop mappings for windows that are gone.
@@ -611,9 +596,11 @@ fn draw_window_direct(
 
     // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {
-        if let Some((ptr, buf_w, buf_h)) =
-            shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height)
-        {
+        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(
+            window.buffer_shm_id,
+            window.buffer_width,
+            window.buffer_height,
+        ) {
             let pixel_count = (buf_w as usize) * (buf_h as usize);
             let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
@@ -639,9 +626,20 @@ fn draw_window_direct(
                 let dst_x = content_abs_x.max(0) as u64;
                 let dst_y = content_abs_y.max(0) as u64;
 
-                // Calculate visible dimensions of the content
-                let vis_w = ((buf_w as u64).saturating_sub(src_off_x)).min(screen_w as u64 - dst_x);
-                let vis_h = ((buf_h as u64).saturating_sub(src_off_y)).min(screen_h as u64 - dst_y);
+                // Calculate visible dimensions of the content.
+                //
+                // Bounded by the window as well as by the buffer: the two
+                // disagree for the frames between a resize and the client
+                // allocating to match, and a buffer wider than its window
+                // paints over the ground the window just vacated -- which is
+                // then stranded there, because nothing marks it dirty again
+                // once the client does catch up.
+                let vis_w = ((buf_w as u64).saturating_sub(src_off_x))
+                    .min(screen_w as u64 - dst_x)
+                    .min(window.width as u64);
+                let vis_h = ((buf_h as u64).saturating_sub(src_off_y))
+                    .min(screen_h as u64 - dst_y)
+                    .min(window.height as u64);
 
                 if vis_w > 0 && vis_h > 0 {
                     let _ = screen.blit_pixels_clipped(
@@ -676,9 +674,11 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
 
     // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {
-        if let Some((ptr, buf_w, buf_h)) =
-            shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height)
-        {
+        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(
+            window.buffer_shm_id,
+            window.buffer_width,
+            window.buffer_height,
+        ) {
             let pixel_count = (buf_w as usize) * (buf_h as usize);
             let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
@@ -700,9 +700,20 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
                 let dst_x = content_abs_x.max(0) as u64;
                 let dst_y = content_abs_y.max(0) as u64;
 
-                // Calculate visible dimensions of the content
-                let vis_w = ((buf_w as u64).saturating_sub(src_off_x)).min(screen_w as u64 - dst_x);
-                let vis_h = ((buf_h as u64).saturating_sub(src_off_y)).min(screen_h as u64 - dst_y);
+                // Calculate visible dimensions of the content.
+                //
+                // Bounded by the window as well as by the buffer: the two
+                // disagree for the frames between a resize and the client
+                // allocating to match, and a buffer wider than its window
+                // paints over the ground the window just vacated -- which is
+                // then stranded there, because nothing marks it dirty again
+                // once the client does catch up.
+                let vis_w = ((buf_w as u64).saturating_sub(src_off_x))
+                    .min(screen_w as u64 - dst_x)
+                    .min(window.width as u64);
+                let vis_h = ((buf_h as u64).saturating_sub(src_off_y))
+                    .min(screen_h as u64 - dst_y)
+                    .min(window.height as u64);
 
                 if vis_w > 0 && vis_h > 0 {
                     let _ = screen.blit_pixels_clipped(
