@@ -1,6 +1,6 @@
 //! Wall-clock time and sleeping.
 
-use crate::sys;
+use crate::{net, sys};
 
 /// POSIX `timespec`, laid out as the kernel reads it.
 #[repr(C)]
@@ -154,4 +154,153 @@ fn civil_from_days(days: i64) -> (u16, u8, u8) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
     (y as u16, m as u8, d as u8)
+}
+
+/// Seconds between the NTP epoch (1900-01-01) and the Unix epoch.
+const NTP_UNIX_DELTA: u64 = 2_208_988_800;
+/// The well-known NTP port.
+pub const NTP_PORT: u16 = 123;
+const NTP_PACKET_LEN: usize = 48;
+/// Offset of the transmit timestamp within a packet, for both directions.
+const NTP_TRANSMIT_OFFSET: usize = 40;
+
+/// Nanoseconds since the Unix epoch at 2020-01-01, the point below which a
+/// clock is treated as unset rather than merely wrong.
+///
+/// The kernel reads the RTC at boot, so a clock this far behind means the RTC
+/// itself is unset. It matters because TLS checks certificate validity against
+/// this clock, and an unset one rejects every certificate on earth.
+pub const CLOCK_PLAUSIBLE_FROM_NANOS: u64 = 1_577_836_800 * 1_000_000_000;
+
+/// What one NTP server answered.
+pub struct SntpSample {
+    /// Server time at the moment the reply was sent, in nanoseconds since the
+    /// Unix epoch.
+    pub server_nanos: u64,
+    /// How far the local clock is behind the server, in nanoseconds.
+    pub offset_nanos: i64,
+    /// Round-trip delay less the server's own processing time, in nanoseconds.
+    pub delay_nanos: i64,
+    pub stratum: u8,
+}
+
+/// Send one SNTP client packet and turn the reply into a [`SntpSample`].
+///
+/// RFC 4330. One round trip, no state kept between calls.
+pub fn sntp_query(ip: [u8; 4], port: u16, timeout_ms: u64) -> Result<SntpSample, String> {
+    let fd = net::create_udp_socket().map_err(|_| "cannot create a UDP socket".to_string())?;
+    if net::set_recv_timeout(fd, timeout_ms).is_err() {
+        net::close(fd);
+        return Err("cannot set a receive timeout".to_string());
+    }
+
+    let mut packet = [0u8; NTP_PACKET_LEN];
+    // Leap indicator 0, version 4, mode 3 (client).
+    packet[0] = 0x23;
+
+    let t1 = sntp_now()?;
+    packet[NTP_TRANSMIT_OFFSET..NTP_TRANSMIT_OFFSET + 8]
+        .copy_from_slice(&unix_to_ntp(t1).to_be_bytes());
+
+    let addr = net::SockAddrIn::new(ip, port);
+    if net::sendto(fd, &packet, Some(&addr)).is_err() {
+        net::close(fd);
+        return Err("send failed".to_string());
+    }
+
+    let mut reply = [0u8; 128];
+    let received = net::recvfrom(fd, &mut reply);
+    net::close(fd);
+    let len = received.map_err(|_| "no reply".to_string())?;
+    // The local timestamp belongs immediately after the read, before any
+    // parsing work is charged to the round trip.
+    let t4 = sntp_now()?;
+
+    if len < NTP_PACKET_LEN {
+        return Err(format!("short reply: {} bytes", len));
+    }
+    let mode = reply[0] & 0x07;
+    if mode != 4 {
+        return Err(format!("reply is not from a server (mode {})", mode));
+    }
+    let stratum = reply[1];
+    if stratum == 0 {
+        let code = String::from_utf8_lossy(&reply[12..16])
+            .trim_end()
+            .to_string();
+        return Err(format!("kiss-o'-death: {}", code));
+    }
+    if stratum > 15 {
+        return Err(format!("server is unsynchronised (stratum {})", stratum));
+    }
+
+    let originate = ntp_at(&reply, 24);
+    if originate != unix_to_ntp(t1) {
+        return Err("reply does not echo the transmit timestamp".to_string());
+    }
+    let t2 = ntp_to_unix(ntp_at(&reply, 32));
+    let t3 = ntp_to_unix(ntp_at(&reply, NTP_TRANSMIT_OFFSET));
+    if t3 == 0 {
+        return Err("reply carries no transmit timestamp".to_string());
+    }
+
+    // RFC 4330 §5: the offset is the mean of the two one-way differences, and
+    // the delay is the round trip less the time the server held the request.
+    let offset_nanos = ((t2 as i64 - t1 as i64) + (t3 as i64 - t4 as i64)) / 2;
+    let delay_nanos = (t4 as i64 - t1 as i64) - (t3 as i64 - t2 as i64);
+
+    Ok(SntpSample {
+        server_nanos: t3,
+        offset_nanos,
+        delay_nanos,
+        stratum,
+    })
+}
+
+/// Step the wall clock by the offset a sample measured.
+pub fn sntp_step_clock(sample: &SntpSample) -> Result<(), String> {
+    let local = clock_gettime_nanos().ok_or_else(|| "the kernel has no wall clock".to_string())?;
+    let target = local.saturating_add_signed(sample.offset_nanos);
+    if clock_settime_nanos(target) {
+        Ok(())
+    } else {
+        Err("the kernel refused to set the clock".to_string())
+    }
+}
+
+fn sntp_now() -> Result<u64, String> {
+    clock_gettime_nanos().ok_or_else(|| "the kernel has no wall clock".to_string())
+}
+
+/// Read a big-endian 64-bit NTP timestamp out of a packet.
+fn ntp_at(packet: &[u8], offset: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&packet[offset..offset + 8]);
+    u64::from_be_bytes(bytes)
+}
+
+/// Nanoseconds since the Unix epoch for an NTP timestamp, or 0 if it is unset.
+///
+/// NTP seconds are a 32-bit count that wraps in 2036. A value below the Unix
+/// epoch is therefore not a date in 1900 but one in the next era, which is the
+/// interpretation RFC 4330 §3 requires.
+fn ntp_to_unix(ts: u64) -> u64 {
+    if ts == 0 {
+        return 0;
+    }
+    let seconds = ts >> 32;
+    let fraction = ts & 0xffff_ffff;
+    let unix_seconds = if seconds >= NTP_UNIX_DELTA {
+        seconds - NTP_UNIX_DELTA
+    } else {
+        seconds + (1u64 << 32) - NTP_UNIX_DELTA
+    };
+    unix_seconds * 1_000_000_000 + ((fraction * 1_000_000_000) >> 32)
+}
+
+/// An NTP timestamp for nanoseconds since the Unix epoch.
+fn unix_to_ntp(nanos: u64) -> u64 {
+    let seconds = (nanos / 1_000_000_000) + NTP_UNIX_DELTA;
+    let fraction = ((nanos % 1_000_000_000) << 32) / 1_000_000_000;
+    ((seconds & 0xffff_ffff) << 32) | fraction
 }

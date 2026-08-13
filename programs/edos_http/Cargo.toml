@@ -1,0 +1,20 @@
+[package]
+name = "edos_http"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+edos_lib = { path = "../edos_lib" }
+
+# rustls must lose its defaults: they pull `aws_lc_rs`, which needs a C
+# toolchain and NASM. `rustls-rustcrypto` must KEEP its defaults, which is the
+# opposite of every other crypto crate here -- `default-features = false`
+# strips its `alloc` feature and it answers with a compile_error.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+webpki-roots = "1"
+
+# Reaches this crate through rand_core 0.6 under elliptic-curve and rsa. On an
+# unrecognised target its unmodified form is a compile_error; `custom` replaces
+# that with the registration hook in tls.rs.
+getrandom = { version = "0.2", features = ["custom"] }

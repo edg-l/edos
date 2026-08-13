@@ -86,17 +86,24 @@ TLS 1.2 is kept alongside 1.3. It costs a feature flag and removes a class of
 
 Certificate validity is checked against the system clock, which makes a wrong
 clock present as a certificate error — the single most confusing failure this
-design can produce. So `grab` reads `SYS_CLOCK_GETTIME` before its first
-connection, and if the clock reads earlier than 2020, it performs an SNTP sync
-and retries once. If the clock is still implausible, or a handshake fails on
-validity period, the error names the real cause:
+design can produce. So `edos_http` reads `SYS_CLOCK_GETTIME` before any TLS
+handshake, and if the clock reads earlier than 2020 it performs an SNTP sync and
+retries once. The check lives in the transport rather than in `grab`, so `wget`
+and `http` get the same treatment for free.
+
+If the clock is still implausible, or a handshake fails on validity period, the
+error names the real cause rather than the symptom:
 
 ```
-grab: certificate rejected: system clock reads 1970-01-01T00:00:12Z
+wget: system clock reads 1970-01-01T00:00:12Z, so no certificate can be valid; run `sntp -s`
 ```
 
-This wants `sntp`'s query extracted into `edos_lib::time` so both programs use
-one implementation rather than two.
+The server is `pool.ntp.org` unless `/etc/ntp` names another, since a machine
+with no route to the pool needs somewhere else to ask.
+
+`sntp`'s protocol half moved into `edos_lib::time` (`sntp_query`,
+`sntp_step_clock`) so the program and the transport share one implementation
+rather than keeping two.
 
 ### HTTP
 
@@ -177,7 +184,11 @@ one artifact rather than a machine format and a human format that can disagree.
 
 An ed25519 detached signature over the exact bytes of `index`. The index carries
 `SHA256` and `Size` for every package, so package integrity chains from the one
-signature. The public key is a 32-byte constant compiled into `grab`.
+signature. The public key is a 32-byte constant compiled into `grab`:
+
+```
+7a3332b8a9a74b55c9b64a423bd9cbd0b26f9d108bf52fb04c0097bbbd646dda
+```
 
 The reason this is not "TLS is enough": **Cloudflare terminates TLS for this
 domain.** The certificate a guest validates is Cloudflare's, not ours. Under TLS
@@ -273,28 +284,54 @@ not also be typed into it.
 
 ## Server side
 
-nginx, inside the existing `edos.edgl.dev` block:
+nginx, inside the existing `edos.edgl.dev` server block. The live config is
+`/etc/nginx/sites-enabled/edgl.conf` — note that `~/sites-enabled/edgl.conf` is
+a stale copy that differs substantially, and reading it instead will produce
+confident wrong conclusions about what the server does.
 
 ```nginx
-location /pkg/ {
+location ^~ /pkg/ {
     alias /srv/edos-pkg/;
     autoindex off;
+
+    location ~* ^/pkg/p/.*\.tar\.gz$ {
+        add_header Cache-Control "public, max-age=604800, immutable";
+    }
 }
 
-# Version-stamped package files are immutable and cache well. The index is not.
-location = /pkg/index     { alias /srv/edos-pkg/index;     add_header Cache-Control "no-cache"; }
-location = /pkg/index.sig { alias /srv/edos-pkg/index.sig; add_header Cache-Control "no-cache"; }
+location = /pkg/index {
+    alias /srv/edos-pkg/index;
+    default_type text/plain;
+    add_header Cache-Control "no-store";
+}
+location = /pkg/index.sig {
+    alias /srv/edos-pkg/index.sig;
+    default_type application/octet-stream;
+    add_header Cache-Control "no-store";
+}
 ```
 
 Package files are served from `/srv/edos-pkg`, outside the site's git checkout,
-because they are binaries and binaries do not belong in that repo. `tools/grab-repo
-publish` writes there.
+because they are binaries and binaries do not belong in that repo.
+`tools/grab-repo publish` writes there.
 
-Two things about the existing config matter. The media regex already matches
-`gz`, so `.tar.gz` inherits `expires 1d` — correct, because package filenames
-carry their version and are therefore immutable. The index has no extension and
-would inherit no expiry at all, which is why it gets an explicit `no-cache`:
-a cached index is an invisible rollback.
+Three things about this are load-bearing:
+
+- **`^~` is required, not decoration.** The block's static-asset regex matches
+  `svg`, and regex locations beat ordinary prefix locations. Without `^~`,
+  `/pkg/icons/<name>.svg` is claimed by that regex and served from the Astro
+  root, where it does not exist — so every package icon 404s while every other
+  file in the repository works.
+- **Package files are immutable, the index is not.** Filenames carry their
+  version, so a published tarball can be held at the edge for a week. The index
+  is `no-store`, because a cached index is an invisible rollback: it hides that
+  a newer version was published.
+- **Exact-match (`=`) beats `^~`**, which is what lets the two index rules
+  override the surrounding block.
+
+Plain HTTP is not an option without new configuration: there is no port-80
+server block for this host, so `http://edos.edgl.dev/pkg/index` reaches nginx's
+*default* server and answers 404 rather than redirecting.
 
 The human-facing catalogue lives at `/software/`, not `/pkg/`, since `/pkg/` is
 an nginx alias and cannot also be an Astro page. It renders from the same index
@@ -334,10 +371,15 @@ classifies.
 Each step is independently useful and independently committable.
 
 1. **`edos_http`** — HTTP/1.1 plus TLS; `wget` and `http` gain `https://`.
-   Done when a real fetch from `https://edos.edgl.dev` succeeds inside the guest.
+   **Done.** Verified in the guest against `https://edos.edgl.dev`: a TLS
+   handshake through Cloudflare with the chain validated against the compiled-in
+   roots, a 213681-byte `wget` download whose SHA-256 matches the host file byte
+   for byte, a 404 reported as a 404, and a 301 followed over a second
+   connection.
 2. **gzip/gunzip and `tar -z`.**
-3. **Repo format, `tools/grab-repo`, signing, nginx, publish.** Done when the
-   guest can `wget` a verified index.
+3. **Repo format, `tools/grab-repo`, signing, nginx, publish.** The server side
+   is up: `/srv/edos-pkg` is served at `/pkg/` and answers through Cloudflare.
+   The remainder is the index generator and the signature.
 4. **`grab` CLI.**
 5. **`edos-grab` GUI.**
 6. **`edos-edit` leaves the image and becomes the first package**, plus the
@@ -345,15 +387,12 @@ Each step is independently useful and independently committable.
 
 ## Risks
 
-- **The probe proves linking, not a handshake.** rustls, the RustCrypto provider
-  and webpki-roots build and link for `x86_64-unknown-edos`; nothing yet proves
-  a completed TLS session against Cloudflare. Step 1 is where that is settled,
-  and it is the step most likely to surface work not listed here.
-- **Cloudflare may not like an unusual client.** A bare Rust HTTP client with no
-  JavaScript can attract bot protection, which would present as an HTML
-  challenge page where a tarball was expected. Mitigations in order: a plain
-  `User-Agent: grab/0.1 (EDOS)`, then a cache/security rule for `/pkg/*`, then
-  moving the repo to a DNS-only subdomain that bypasses the proxy entirely.
+- ~~The probe proves linking, not a handshake.~~ **Settled**: a full session
+  against Cloudflare completes from inside the guest.
+- ~~Cloudflare may not like an unusual client.~~ **Did not materialise**: a bare
+  Rust client identifying as `grab/0.1 (EDOS)` is served normally, with no
+  challenge. If that ever changes, the escalations are a cache/security rule for
+  `/pkg/*`, then a DNS-only subdomain that bypasses the proxy.
 - **`rustls-rustcrypto` is 0.0.2-alpha.** If it rots, the fallbacks are a
   hand-written provider over p256/p384/rsa behind rustls's `custom-provider`
   feature, or a hand-rolled TLS 1.3 client. The second is expensive mostly

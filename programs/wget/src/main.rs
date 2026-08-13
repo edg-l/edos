@@ -1,38 +1,20 @@
-use std::env;
-use std::fs;
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
+//! Download a URL to a file.
 
-fn parse_url(url: &str) -> (&str, u16, &str) {
-    let url = url.strip_prefix("http://").unwrap_or(url);
+use std::{
+    env,
+    fs::File,
+    io::{self, Write},
+    process,
+};
 
-    let (hostport, path) = match url.find('/') {
-        Some(i) => (&url[..i], &url[i..]),
-        None => (url, "/"),
-    };
-
-    match hostport.rfind(':') {
-        Some(i) => match hostport[i + 1..].parse::<u16>() {
-            Ok(port) => (&hostport[..i], port, path),
-            Err(_) => (hostport, 80, path),
-        },
-        None => (hostport, 80, path),
-    }
-}
-
-fn filename_from_path(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(i) if i + 1 < trimmed.len() => &trimmed[i + 1..],
-        _ => "index.html",
-    }
-}
+use edos_http::{Options, fetch, url::Url};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mut output: Option<&str> = None;
-    let mut url_arg: Option<&str> = None;
+    let mut output: Option<String> = None;
+    let mut quiet = false;
+    let mut url_arg: Option<String> = None;
     let mut i = 1;
 
     while i < args.len() {
@@ -40,75 +22,137 @@ fn main() {
             "-O" => {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("wget: -O requires an argument");
-                    std::process::exit(1);
+                    fail("-O requires an argument");
                 }
-                output = Some(&args[i]);
+                output = Some(args[i].clone());
             }
-            arg if arg.starts_with("-O") => {
-                output = Some(&args[i][2..]);
+            "-q" | "--quiet" => quiet = true,
+            "-h" | "--help" => {
+                usage();
+                process::exit(0);
             }
-            _ => url_arg = Some(&args[i]),
+            arg if arg.starts_with("-O") => output = Some(args[i][2..].to_string()),
+            arg if arg.starts_with('-') && arg.len() > 1 => {
+                fail(&format!("unknown option: {}", arg));
+            }
+            _ => url_arg = Some(args[i].clone()),
         }
         i += 1;
     }
 
     let Some(url_arg) = url_arg else {
-        eprintln!("usage: wget [-O output] <url>");
-        std::process::exit(1);
+        usage();
+        process::exit(1);
     };
 
-    if url_arg.starts_with("https://") {
-        eprintln!("wget: HTTPS is not supported (no TLS)");
-        std::process::exit(1);
-    }
+    let dest = output.unwrap_or_else(|| match Url::parse(&url_arg) {
+        Ok(url) => url.filename().to_string(),
+        Err(_) => "index.html".to_string(),
+    });
 
-    let (host, port, path) = parse_url(url_arg);
+    let opts = Options::default();
+    let mut reporter = Reporter::new(quiet);
 
-    let addr = format!("{}:{}", host, port);
-    let mut stream = match TcpStream::connect(addr.as_str()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("wget: connect to {}: {}", addr, e);
-            std::process::exit(1);
-        }
-    };
-
-    let request = format!(
-        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        path, host
-    );
-
-    if let Err(e) = stream.write_all(request.as_bytes()) {
-        eprintln!("wget: send: {}", e);
-        std::process::exit(1);
-    }
-
-    let mut response = Vec::new();
-    if let Err(e) = stream.read_to_end(&mut response) {
-        eprintln!("wget: recv: {}", e);
-        std::process::exit(1);
-    }
-
-    let header_end = response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap_or(response.len());
-    let body_start = (header_end + 4).min(response.len());
-    let body = &response[body_start..];
-
-    let dest = output.unwrap_or_else(|| filename_from_path(path));
-
-    if dest == "-" {
+    // Writing to a file as the body arrives rather than buffering it: a package
+    // can be larger than the room this machine has to hold it twice.
+    let result = if dest == "-" {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(body);
-        let _ = out.flush();
+        fetch(&url_arg, &opts, &mut out, &mut |done, total| {
+            reporter.update(done, total)
+        })
     } else {
-        if let Err(e) = fs::write(dest, body) {
-            eprintln!("wget: {}: {}", dest, e);
-            std::process::exit(1);
+        match File::create(&dest) {
+            Ok(mut file) => fetch(&url_arg, &opts, &mut file, &mut |done, total| {
+                reporter.update(done, total)
+            }),
+            Err(e) => {
+                eprintln!("wget: {}: {}", dest, e);
+                process::exit(1);
+            }
         }
-        eprintln!("wget: saved to '{}' ({} bytes)", dest, body.len());
+    };
+
+    let head = match result {
+        Ok(head) => head,
+        Err(e) => {
+            reporter.clear();
+            eprintln!("wget: {}: {}", url_arg, e);
+            process::exit(1);
+        }
+    };
+
+    reporter.clear();
+
+    if !head.is_success() {
+        eprintln!("wget: {}: {} {}", url_arg, head.status, head.reason);
+        process::exit(1);
     }
+    if !quiet {
+        eprintln!(
+            "wget: saved to '{}' ({} bytes)",
+            dest,
+            reporter.written_total()
+        );
+    }
+}
+
+/// A one-line progress report on stderr, rewritten in place.
+struct Reporter {
+    quiet: bool,
+    written: u64,
+    shown: bool,
+}
+
+impl Reporter {
+    fn new(quiet: bool) -> Self {
+        Reporter {
+            quiet,
+            written: 0,
+            shown: false,
+        }
+    }
+
+    fn update(&mut self, done: u64, total: Option<u64>) {
+        self.written = done;
+        if self.quiet {
+            return;
+        }
+        match total {
+            Some(total) if total > 0 => {
+                let percent = done.saturating_mul(100) / total;
+                eprint!("\r{} / {} bytes ({}%)   ", done, total, percent);
+            }
+            _ => eprint!("\r{} bytes   ", done),
+        }
+        let _ = io::stderr().flush();
+        self.shown = true;
+    }
+
+    /// Take the progress line back off the terminal, so an error or the final
+    /// message is not printed onto the end of it.
+    fn clear(&mut self) {
+        if self.shown {
+            eprint!("\r{:60}\r", "");
+            let _ = io::stderr().flush();
+            self.shown = false;
+        }
+    }
+
+    fn written_total(&self) -> u64 {
+        self.written
+    }
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("wget: {}", message);
+    usage();
+    process::exit(2);
+}
+
+fn usage() {
+    eprintln!("usage: wget [-q] [-O OUTPUT] URL");
+    eprintln!("  -O  write to OUTPUT, or to stdout when it is '-'");
+    eprintln!("  -q  no progress reporting");
+    eprintln!("http:// and https:// are both supported.");
 }
