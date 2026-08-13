@@ -44,9 +44,7 @@ pub struct Buffer {
     pub path: Option<String>,
     pub lines: Vec<Line>,
     pub cursor: Position,
-    /// The other end of a selection. None when nothing is selected. Read once
-    /// a selection can be made.
-    #[allow(dead_code)]
+    /// The other end of a selection. None when nothing is selected.
     pub anchor: Option<Position>,
     pub scroll_line: usize,
     pub scroll_col: usize,
@@ -75,13 +73,29 @@ pub struct Buffer {
     coalescing: bool,
 }
 
-/// One reversible change to the document. Each is its own inverse with the
-/// variant swapped: undoing an insert is deleting what it inserted, and
-/// undoing a delete is putting back what it removed.
+/// One reversible change to the document. Insert and Delete are each other's
+/// inverse with the variant swapped: undoing an insert is deleting what it
+/// inserted, and undoing a delete is putting back what it removed.
+///
+/// `Replace` is what a selection under new text becomes — one entry instead
+/// of a `Delete` for the old text followed by an `Insert` of the new, which
+/// would otherwise make the same user action undo in two steps rather than
+/// one. It inverts by swapping `old` and `new`.
 #[derive(Clone)]
 pub enum Edit {
-    Insert { at: Position, text: String },
-    Delete { at: Position, text: String },
+    Insert {
+        at: Position,
+        text: String,
+    },
+    Delete {
+        at: Position,
+        text: String,
+    },
+    Replace {
+        at: Position,
+        old: String,
+        new: String,
+    },
 }
 
 /// One entry in the undo log: the edit, and where the cursor sat just before
@@ -217,6 +231,58 @@ impl Buffer {
         self.cursor.col = self.cursor.col.min(self.line_chars(self.cursor.line));
     }
 
+    // --- Selection ------------------------------------------------------
+
+    /// The selection as an ordered range, `anchor` and `cursor` in whichever
+    /// order they actually fall in. None when there is no anchor, or the
+    /// anchor sits exactly on the cursor — an empty selection is the same as
+    /// no selection.
+    pub fn selection_range(&self) -> Option<(Position, Position)> {
+        let anchor = self.anchor?;
+        if anchor == self.cursor {
+            return None;
+        }
+        let ordered = if (anchor.line, anchor.col) < (self.cursor.line, self.cursor.col) {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        };
+        Some(ordered)
+    }
+
+    /// The text currently selected, or None when nothing is.
+    pub fn selected_text(&self) -> Option<String> {
+        let (from, to) = self.selection_range()?;
+        Some(self.text_between(from, to))
+    }
+
+    /// End the current selection, leaving the cursor where it is.
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    /// The text between `from` and `to` (`from` must not come after `to`),
+    /// without removing it. The read-only counterpart of `delete_range`,
+    /// which shares the same line-joining arithmetic but mutates.
+    fn text_between(&self, from: Position, to: Position) -> String {
+        if from == to {
+            return String::new();
+        }
+        let from_chars: Vec<char> = self.lines[from.line].text.chars().collect();
+        if from.line == to.line {
+            return from_chars[from.col..to.col].iter().collect();
+        }
+        let mut result: String = from_chars[from.col..].iter().collect();
+        for line in &self.lines[from.line + 1..to.line] {
+            result.push('\n');
+            result.push_str(&line.text);
+        }
+        result.push('\n');
+        let to_chars: Vec<char> = self.lines[to.line].text.chars().collect();
+        result.extend(&to_chars[..to.col]);
+        result
+    }
+
     // --- Mutation -----------------------------------------------------------
     //
     // Every public mutation routes through these two: inserting a character,
@@ -291,6 +357,54 @@ impl Buffer {
         removed
     }
 
+    /// Delete the current selection as one `Edit::Delete` covering the whole
+    /// range, so a single undo restores all of it rather than walking back
+    /// through it piece by piece. Returns whether there was a selection to
+    /// delete; callers use that to fall back to their own single-character
+    /// behaviour when there was not.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some((from, to)) = self.selection_range() else {
+            return false;
+        };
+        let cursor_before = self.cursor;
+        let removed = self.delete_range(from, to);
+        self.push_edit(
+            Edit::Delete {
+                at: from,
+                text: removed,
+            },
+            cursor_before,
+        );
+        self.cursor = from;
+        self.clear_selection();
+        self.break_coalesce();
+        true
+    }
+
+    /// Replace the current selection with `text` as one `Edit::Replace`
+    /// entry, rather than a `Delete` of the old text followed by an `Insert`
+    /// of the new — which would make typing or pasting over a selection undo
+    /// in two steps instead of one. None when there is no selection; the
+    /// caller's ordinary single-edit insert path runs in that case instead.
+    pub fn replace_selection(&mut self, text: &str) -> Option<Position> {
+        let (from, to) = self.selection_range()?;
+        let cursor_before = self.cursor;
+        let old = self.delete_range(from, to);
+        let end = self.insert_text(from, text);
+        self.push_edit(
+            Edit::Replace {
+                at: from,
+                old,
+                new: text.to_string(),
+            },
+            cursor_before,
+        );
+        self.cursor = end;
+        self.clear_selection();
+        self.break_coalesce();
+        Some(end)
+    }
+
     // --- Undo log -------------------------------------------------------
 
     /// Apply `edit` to the buffer, returning where the cursor lands. The one
@@ -302,6 +416,10 @@ impl Buffer {
             Edit::Delete { at, text } => {
                 self.delete_range(*at, end_position(*at, text));
                 *at
+            }
+            Edit::Replace { at, old, new } => {
+                self.delete_range(*at, end_position(*at, old));
+                self.insert_text(*at, new)
             }
         }
     }
@@ -316,6 +434,11 @@ impl Buffer {
             Edit::Delete { at, text } => Edit::Insert {
                 at: *at,
                 text: text.clone(),
+            },
+            Edit::Replace { at, old, new } => Edit::Replace {
+                at: *at,
+                old: new.clone(),
+                new: old.clone(),
             },
         }
     }

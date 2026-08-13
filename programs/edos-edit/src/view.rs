@@ -315,6 +315,7 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
 
     let visible_rows = layout.rows_visible.max(1);
     let visible_cols = layout.cols_visible.max(1);
+    let selection = buffer.selection_range();
 
     for row in 0..visible_rows {
         let line_index = buffer.scroll_line + row;
@@ -353,6 +354,37 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
         for ch in number.chars() {
             canvas.text(nx, y, &ch.to_string(), mono(ink.raw()));
             nx += char_width() as i32;
+        }
+
+        // Selection fill, clipped to the visible columns, behind the glyphs
+        // it sits under.
+        if let Some((from, to)) = selection
+            && line_index >= from.line
+            && line_index <= to.line
+        {
+            let line_len = line.text.chars().count();
+            let start_col = if line_index == from.line { from.col } else { 0 };
+            let end_col = if line_index == to.line {
+                to.col
+            } else {
+                line_len
+            };
+            let start_col = start_col.max(buffer.scroll_col);
+            let end_col = end_col.min(buffer.scroll_col + visible_cols);
+            if end_col > start_col {
+                let rect = cell_rect(
+                    layout,
+                    buffer.scroll_line,
+                    buffer.scroll_col,
+                    line_index,
+                    start_col,
+                );
+                let width = (end_col - start_col) as u32 * char_width();
+                canvas.fill(
+                    Rect::new(rect.x, rect.y, width, layout.line_h),
+                    theme.editor_selection.raw(),
+                );
+            }
         }
 
         for (col, ch) in line

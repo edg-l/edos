@@ -11,6 +11,7 @@ mod view;
 
 use std::time::Duration;
 
+use edos_lib::clipboard;
 use edos_lib::keymap::{Modifiers, keycode, map_keycode, update_modifiers};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
@@ -27,12 +28,32 @@ const SCROLL_STEP: usize = 3;
 /// file's own indent.
 const TAB_INDENT: &str = "    ";
 
+/// Keys that move the cursor without editing, and so extend or clear a
+/// selection depending on whether Shift is held — as opposed to a shortcut
+/// like Ctrl+S, which leaves any selection alone.
+fn is_movement_key(code: u32) -> bool {
+    matches!(
+        code,
+        keycode::ARROW_LEFT
+            | keycode::ARROW_RIGHT
+            | keycode::ARROW_UP
+            | keycode::ARROW_DOWN
+            | keycode::PAGE_UP
+            | keycode::PAGE_DOWN
+            | keycode::HOME
+            | keycode::END
+    )
+}
+
 struct App {
     window: Window,
     buffer: Buffer,
     layout: view::Layout,
     mods: Modifiers,
     sidebar_open: bool,
+    /// Whether the left button is down over the pane, extending the
+    /// selection as the pointer moves. Follows `edos-files`' `dragging_scroll`.
+    dragging: bool,
     /// What the last save, undo or redo reported, shown in the status strip
     /// until the next edit. `true` marks a failure.
     status: Option<(String, bool)>,
@@ -48,6 +69,7 @@ impl App {
             layout,
             mods: Modifiers::default(),
             sidebar_open: true,
+            dragging: false,
             status: None,
         };
         app.buffer.clamp_cursor();
@@ -111,10 +133,18 @@ impl App {
     // --- Editing ----------------------------------------------------------
 
     /// Insert `text` at the cursor as one log entry, and move the cursor
-    /// past it. Consecutive single-character calls coalesce in the log
-    /// unless `text` is `"\n"`, which always starts a fresh entry.
+    /// past it. A selection under the cursor is replaced as a single
+    /// `Edit::Replace` rather than a delete followed by an insert.
+    /// Consecutive single-character calls coalesce in the log unless `text`
+    /// is `"\n"`, which always starts a fresh entry.
     fn insert_str(&mut self, text: &str) {
         self.status = None;
+        if let Some(end) = self.buffer.replace_selection(text) {
+            self.buffer.cursor = end;
+            self.scroll_into_view();
+            self.update_title();
+            return;
+        }
         let cursor_before = self.buffer.cursor;
         let end = self.buffer.insert_text(cursor_before, text);
         self.buffer.push_edit(
@@ -133,9 +163,14 @@ impl App {
     }
 
     /// Delete the character before the cursor, joining with the previous
-    /// line at column 0.
+    /// line at column 0. Deletes the selection instead when there is one.
     fn backspace(&mut self) {
         self.status = None;
+        if self.buffer.delete_selection() {
+            self.scroll_into_view();
+            self.update_title();
+            return;
+        }
         let cursor = self.buffer.cursor;
         let from = if cursor.col > 0 {
             Position {
@@ -165,9 +200,14 @@ impl App {
     }
 
     /// Delete the character after the cursor, joining with the next line at
-    /// its end.
+    /// its end. Deletes the selection instead when there is one.
     fn delete_forward(&mut self) {
         self.status = None;
+        if self.buffer.delete_selection() {
+            self.scroll_into_view();
+            self.update_title();
+            return;
+        }
         let cursor = self.buffer.cursor;
         let last_line = self.buffer.lines.len() - 1;
         let to = if cursor.col < self.buffer.line_chars(cursor.line) {
@@ -216,6 +256,44 @@ impl App {
         self.update_title();
     }
 
+    // --- Selection and clipboard --------------------------------------
+
+    /// Select the whole document.
+    fn select_all(&mut self) {
+        self.buffer.anchor = Some(Position::default());
+        let last = self.buffer.lines.len() - 1;
+        let col = self.buffer.line_chars(last);
+        self.set_cursor(Position { line: last, col });
+    }
+
+    fn copy(&mut self) {
+        if let Some(text) = self.buffer.selected_text() {
+            let _ = clipboard::set(clipboard::Buffer::Clipboard, &text);
+        }
+    }
+
+    /// Copy the selection to the clipboard, then delete it as one log entry.
+    fn cut(&mut self) {
+        let Some(text) = self.buffer.selected_text() else {
+            return;
+        };
+        let _ = clipboard::set(clipboard::Buffer::Clipboard, &text);
+        self.status = None;
+        self.buffer.delete_selection();
+        self.scroll_into_view();
+        self.update_title();
+    }
+
+    /// Insert the clipboard's contents at the cursor, replacing the
+    /// selection when there is one — through `insert_str`, so either shape
+    /// lands as a single log entry.
+    fn paste(&mut self) {
+        let text = clipboard::get(clipboard::Buffer::Clipboard);
+        if !text.is_empty() {
+            self.insert_str(&text);
+        }
+    }
+
     /// Replace the document with an empty, unsaved one.
     fn new_buffer(&mut self) {
         self.buffer = Buffer::empty();
@@ -253,6 +331,7 @@ impl App {
                 let _ = self.window.resize(width, height);
             }
             Some(WindowEventType::MouseButton) => self.on_mouse_button(event),
+            Some(WindowEventType::MouseMove) => self.on_mouse_move(event.x, event.y),
             Some(WindowEventType::MouseScroll) => self.on_scroll(event.data as i32),
             Some(WindowEventType::KeyPress) => {
                 // A modifier key changes state and produces no character of
@@ -271,21 +350,48 @@ impl App {
         true
     }
 
+    /// The buffer position under `(x, y)`, or None when `y` falls outside
+    /// the pane's rows. Column is clamped to the line's length and line to
+    /// the last line in the buffer, the same clamping `line_at`/`col_at`'s
+    /// callers already did before this helper existed.
+    fn pane_position(&self, x: i32, y: i32) -> Option<Position> {
+        let line = view::line_at(&self.layout, self.buffer.scroll_line, y)?;
+        let line = line.min(self.buffer.lines.len().saturating_sub(1));
+        let col =
+            view::col_at(&self.layout, self.buffer.scroll_col, x).min(self.buffer.line_chars(line));
+        Some(Position { line, col })
+    }
+
     fn on_mouse_button(&mut self, event: &WindowEvent) {
+        if event.data == 0 {
+            self.dragging = false;
+            return;
+        }
         // Only a left-button press acts; nothing else is bound yet.
-        if event.data == 0 || event.code != 0 {
+        if event.code != 0 {
             return;
         }
         if !self.layout.pane.contains(event.x, event.y) {
             return;
         }
-        let Some(line) = view::line_at(&self.layout, self.buffer.scroll_line, event.y) else {
+        let Some(pos) = self.pane_position(event.x, event.y) else {
             return;
         };
-        let line = line.min(self.buffer.lines.len().saturating_sub(1));
-        let col = view::col_at(&self.layout, self.buffer.scroll_col, event.x)
-            .min(self.buffer.line_chars(line));
-        self.set_cursor(Position { line, col });
+        self.buffer.anchor = Some(pos);
+        self.set_cursor(pos);
+        self.dragging = true;
+    }
+
+    /// Extend the selection to the pointer while the button is held over the
+    /// pane. Does nothing once released.
+    fn on_mouse_move(&mut self, x: i32, y: i32) {
+        if !self.dragging {
+            return;
+        }
+        let Some(pos) = self.pane_position(x, y) else {
+            return;
+        };
+        self.set_cursor(pos);
     }
 
     fn on_scroll(&mut self, delta: i32) {
@@ -302,6 +408,18 @@ impl App {
     }
 
     fn on_key(&mut self, code: u32) {
+        // A movement key extends the selection when Shift is held — setting
+        // the anchor to wherever the cursor already sits, the first time,
+        // rather than on every key so a run of Shift+Right keeps the start
+        // fixed — and otherwise ends it, the same way a plain click does.
+        if is_movement_key(code) {
+            if self.mods.shift {
+                self.buffer.anchor.get_or_insert(self.buffer.cursor);
+            } else {
+                self.buffer.clear_selection();
+            }
+        }
+
         let rows = self.layout.rows_visible.max(1) as i32;
         match code {
             keycode::ARROW_LEFT => self.move_cursor_col(-1),
@@ -325,6 +443,10 @@ impl App {
                 let col = self.buffer.line_chars(line);
                 self.set_cursor(Position { line, col });
             }
+            keycode::A if self.mods.ctrl => self.select_all(),
+            keycode::C if self.mods.ctrl => self.copy(),
+            keycode::X if self.mods.ctrl => self.cut(),
+            keycode::V if self.mods.ctrl => self.paste(),
             keycode::S if self.mods.ctrl => self.save(),
             keycode::Z if self.mods.ctrl => self.undo(),
             keycode::Y if self.mods.ctrl => self.redo(),
