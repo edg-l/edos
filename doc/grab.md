@@ -133,10 +133,22 @@ already ships, pulled in by resvg for the PNGs an SVG can embed. So inflate is
 wiring, not implementation:
 
 - `gzip` / `gunzip` as programs, since a system that can download a `.gz` and
-  not open it is worse than one that can do neither.
-- `tar -z`, so `tar -xzf` behaves the way every user expects.
+  not open it is worse than one that can do neither. One library crate behind
+  two binaries: `gunzip` is `gzip -d` and differs in nothing else.
+- `tar -z`, so `tar -czf` behaves the way every user expects. On the way *in*
+  the flag is not needed at all: the reader checks for the RFC 1952 magic
+  (`1f 8b`) and decompresses on that, so `tar -xf pkg.tar.gz` works and `-z` on
+  an uncompressed archive is not an error.
 
 `grab` uses the library directly rather than shelling out to either.
+
+Two things worth knowing about the encoder, both of which produce a corrupt
+archive that reports success if got wrong. The gzip trailer carries the CRC and
+the uncompressed length and is written only by `finish()`; a dropped `GzEncoder`
+can do nothing with the error from writing it. And `tar` resolves a relative
+`-f` before honouring `-C`, because the archive is named relative to where the
+command was run, not to the directory being extracted into — without that,
+`tar -xf pkg.tar.gz -C /somewhere` cannot work.
 
 ## The repository
 
@@ -376,7 +388,10 @@ Each step is independently useful and independently committable.
    roots, a 213681-byte `wget` download whose SHA-256 matches the host file byte
    for byte, a 404 reported as a 404, and a 301 followed over a second
    connection.
-2. **gzip/gunzip and `tar -z`.**
+2. **gzip/gunzip and `tar -z`. Done.** Verified in the guest: a gzip round trip
+   reproducing its input's SHA-256, and a GNU-tar-created `.tar.gz` fetched over
+   HTTPS and extracted with `-xf` alone, whose payload matches the host binary
+   byte for byte.
 3. **Repo format, `tools/grab-repo`, signing, nginx, publish.** The server side
    is up: `/srv/edos-pkg` is served at `/pkg/` and answers through Cloudflare.
    The remainder is the index generator and the signature.

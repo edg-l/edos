@@ -725,6 +725,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gzip"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1712,6 +1719,7 @@ name = "tar"
 version = "0.1.0"
 dependencies = [
  "edos_lib",
+ "flate2",
 ]
 
 [[package]]

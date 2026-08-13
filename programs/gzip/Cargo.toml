@@ -1,0 +1,19 @@
+[package]
+name = "gzip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[lib]
+name = "gzip"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gzip"
+path = "src/bin_gzip.rs"
+
+[[bin]]
+name = "gunzip"
+path = "src/bin_gunzip.rs"

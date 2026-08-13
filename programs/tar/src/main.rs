@@ -2,15 +2,16 @@
 
 mod header;
 
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use header::{BLOCK, Decoded, Entry, Kind};
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::UNIX_EPOCH;
 
-const USAGE: &str = "usage: tar -c|-t|-x [-v] [-f archive] [-C dir] [path...]";
+const USAGE: &str = "usage: tar -c|-t|-x [-vz] [-f archive] [-C dir] [path...]";
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Mode {
@@ -22,13 +23,14 @@ enum Mode {
 struct Options {
     mode: Option<Mode>,
     verbose: bool,
+    gzip: bool,
     archive: Option<String>,
     directory: Option<String>,
     paths: Vec<String>,
 }
 
 fn main() -> ExitCode {
-    let opts = match parse_args(env::args().skip(1)) {
+    let mut opts = match parse_args(env::args().skip(1)) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("tar: {}\n{}", e, USAGE);
@@ -40,6 +42,23 @@ fn main() -> ExitCode {
         eprintln!("tar: one of -c, -t or -x is required\n{}", USAGE);
         return ExitCode::FAILURE;
     };
+
+    // `-f` names the archive relative to where the command was run, not to the
+    // directory `-C` moves into. Resolving it before the change is what makes
+    // `tar -xf pkg.tar.gz -C /somewhere` work at all.
+    if opts.directory.is_some()
+        && let Some(archive) = opts.archive.as_deref()
+        && archive != "-"
+        && !archive.starts_with('/')
+    {
+        match env::current_dir() {
+            Ok(cwd) => opts.archive = Some(cwd.join(archive).to_string_lossy().into_owned()),
+            Err(e) => {
+                eprintln!("tar: cannot read the current directory: {}", e);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     if let Some(dir) = &opts.directory
         && let Err(e) = env::set_current_dir(dir)
@@ -68,6 +87,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut opts = Options {
         mode: None,
         verbose: false,
+        gzip: false,
         archive: None,
         directory: None,
         paths: Vec::new(),
@@ -90,6 +110,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
                     't' => opts.mode = Some(Mode::List),
                     'x' => opts.mode = Some(Mode::Extract),
                     'v' => opts.verbose = true,
+                    'z' => opts.gzip = true,
                     'f' | 'C' => pending = Some(c),
                     _ => return Err(format!("unknown option '-{}'", c)),
                 }
@@ -116,13 +137,32 @@ fn create(opts: &Options) -> Result<(), String> {
     }
 
     let stdout = io::stdout();
-    let mut out: Box<dyn Write> = if is_stdio(&opts.archive) {
+    let sink: Box<dyn Write> = if is_stdio(&opts.archive) {
         Box::new(stdout.lock())
     } else {
         let path = opts.archive.as_deref().unwrap();
         Box::new(File::create(path).map_err(|e| format!("{}: {}", path, e))?)
     };
 
+    // `finish` rather than a dropped encoder: the gzip trailer carries the CRC
+    // and the uncompressed size, and Drop can only discard the error from
+    // writing it, leaving a truncated archive that reports success.
+    if opts.gzip {
+        let mut encoder = GzEncoder::new(sink, Compression::default());
+        let result = write_entries(opts, &mut encoder);
+        encoder
+            .finish()
+            .map_err(|e| format!("write: {}", e))?
+            .flush()
+            .map_err(|e| format!("write: {}", e))?;
+        result
+    } else {
+        let mut out = sink;
+        write_entries(opts, &mut out)
+    }
+}
+
+fn write_entries(opts: &Options, out: &mut dyn Write) -> Result<(), String> {
     let mut failed = false;
     for path in &opts.paths {
         // A leading slash is dropped so an archive never writes outside the
@@ -133,7 +173,7 @@ fn create(opts: &Options) -> Result<(), String> {
             failed = true;
             continue;
         }
-        if let Err(e) = archive_path(&mut out, path, name, opts.verbose) {
+        if let Err(e) = archive_path(out, path, name, opts.verbose) {
             eprintln!("tar: {}: {}", path, e);
             failed = true;
         }
@@ -269,11 +309,26 @@ fn mtime_of(path: &str) -> u64 {
 /// disagree about where the next header is.
 fn read_archive(opts: &Options, extract: bool) -> Result<(), String> {
     let stdin = io::stdin();
-    let mut input: Box<dyn Read> = if is_stdio(&opts.archive) {
+    let raw: Box<dyn Read> = if is_stdio(&opts.archive) {
         Box::new(stdin.lock())
     } else {
         let path = opts.archive.as_deref().unwrap();
         Box::new(File::open(path).map_err(|e| format!("{}: {}", path, e))?)
+    };
+
+    // RFC 1952 §2.3.1: a gzip member starts 1f 8b. Reading the magic rather
+    // than trusting `-z` means `tar -xf x.tar.gz` works, which is what everyone
+    // types, and `-z` on an uncompressed archive is not a failure.
+    let mut buffered = BufReader::new(raw);
+    let compressed = match buffered.fill_buf() {
+        Ok(head) => head.starts_with(&[0x1f, 0x8b]),
+        Err(e) => return Err(format!("read: {}", e)),
+    };
+
+    let mut input: Box<dyn Read> = if compressed || opts.gzip {
+        Box::new(GzDecoder::new(buffered))
+    } else {
+        Box::new(buffered)
     };
 
     let wanted: Vec<&str> = opts.paths.iter().map(|p| p.as_str()).collect();
