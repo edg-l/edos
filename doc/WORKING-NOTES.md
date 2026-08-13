@@ -1194,6 +1194,10 @@ does not have to invent them.
 | syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
 | userspace programs | 116 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | not re-diffed since the workspace grew | diff the table against the workspace, below |
+| binaries in `filesystem/bin` | 116 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
+| Rust | 101,538 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out |
+| kernel Rust | 50,215 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,299 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 202, of which 11 are in `thread/sched_test.rs` | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -1217,7 +1221,13 @@ count and a `filesystem/bin` count therefore differ by more than `edos-edit`
 leaving the image.
 
 The project site at `/usr/src/edos-web` is a separate repo carrying the same
-numbers, and it drifts on its own. It agrees with the table above as of 896950d.
+numbers, and it drifts on its own. It agrees with the table above as of 0788ddd,
+where its syscall inventory was set-diffed against the kernel's and came back
+empty both ways, and its program list against `filesystem/bin` the same. The
+three names the site carries that `/bin` does not are explained on the page
+itself: `edos-sh` and `edos-vi` install as `sh` and `vi`, and `edos-edit` is
+published to the package repository rather than installed to the image.
+
 The places to check, because a count lives in more than one of them:
 
 - `src/pages/index.astro`, the `TREE` array: Rust lines and files, kernel lines,

@@ -350,6 +350,9 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 /// Arguments:
 /// - rdi: pointer to buffer (array of WindowListEntry)
 /// - rsi: maximum number of entries
+/// - rdx: flags; `WINDOW_LIST_CONSUME_DAMAGE` clears each listed window's
+///   damage as it is read, so the caller that acts on it is the one that
+///   takes it
 ///
 /// Returns: number of windows, or !0 on error (sets errno).
 ///
@@ -671,6 +674,8 @@ pub fn sys_window_grab_key(code: u64, mods: u64, claim: u64) -> u64 {
 ///
 /// Arguments:
 /// - rdi: window ID
+/// - rsi, rdx: x and y of the repainted region, in window coordinates
+/// - r10, r8: its width and height; a zero in either means the whole window
 ///
 /// Returns: 0 on success, !0 on error.
 pub fn sys_window_damage(window_id: WindowId, x: u32, y: u32, w: u32, h: u32) -> u64 {
