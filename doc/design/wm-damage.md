@@ -9,12 +9,17 @@ is `on`).
 
 A still desktop with one terminal, nobody touching the machine:
 
-| | before | after the damage fix |
-| --- | --- | --- |
-| to the display | 263 MB/s | 82 MB/s |
-| frames doing work | 77 of 77 | 66 of 77 |
-| composite p50 | 1354 us | 1322 us |
-| interval p50 / p95 | 13018 / 13024 us | 13018 / 13022 us |
+| | before | damage fix | + regions, terminal on change |
+| --- | --- | --- | --- |
+| to the display | 263 MB/s | 82 MB/s | **6.6 MB/s** |
+| frames doing work | 77 of 77 | 66 of 77 | **22 of 77** |
+| composite p50 | 1354 us | 1322 us | **0 us** |
+| interval p50 / p95 | 13018 / 13024 us | 13018 / 13022 us | 13011 / 13014 us |
+
+The median frame now does no work at all. What remains at idle is the panel
+redrawing itself 20 times a second whatever is on it (~4 MB/s) and the
+terminal's cursor blink (~2.5 MB/s), which together account for the 22 working
+frames and the 6.6 MB/s almost exactly.
 
 The cadence was never the problem and still is not: 76.8 fps with 6 us between
 p50 and p95 is a metronome. Every symptom reported — a drag at about 5 fps,
@@ -100,10 +105,24 @@ every frame.
 
 ## Order
 
-1. Region damage in the kernel and `edos_render`, compositor using the box.
-2. `composite()` clipped to the dirty region.
+1. ~~Region damage in the kernel and `edos_render`, compositor using the box.~~
+   **Done.** `sys_window_damage(id, x, y, w, h)`, accumulated per window;
+   `sys_window_list` takes `WINDOW_LIST_CONSUME_DAMAGE`, which only the
+   compositor passes.
+2. `composite()` clipped to the dirty region. **Open.** The compositor still
+   redraws all 1280x800 whenever any frame does work; only the transfer is
+   bounded by damage today. This is what would move composite p95, which is
+   still 1.37 ms.
 3. Terminal and panel tracking their own damage and skipping unchanged frames.
-4. Frame callbacks, and clients converted from timers to callbacks.
+   **Half done.** The terminal skips a repaint unless an event, input, output
+   or the blink says otherwise, and that is most of the win above. Two pieces
+   left: the panel needs the same test over a signature of what it draws
+   (clock text, task list, hover, menu open), and neither client yet reports a
+   *region* — the terminal should damage the rows it changed rather than all
+   of itself, which is what makes typing cost a line.
+4. Frame callbacks, and clients converted from timers to callbacks. **Open.**
+   `SYS_WINDOW_POLL` cannot block, so this needs a per-window waitqueue woken
+   by event delivery and by the compositor after it presents.
 
 Each stage is measurable on its own with the telemetry above: 1 and 3 move
 KiB/s, 2 moves composite p50, 4 moves both plus idle CPU.
