@@ -510,6 +510,15 @@ impl FileSystem for Fatfs {
             }
         }
 
+        // The long-name entries are found by scanning up to the short entry, so
+        // they must go before it is marked deleted.
+        self.delete_long_name_sequence(
+            parent_cluster,
+            dir_cluster,
+            entry_off,
+            entry.short_name_checksum(),
+        )?;
+
         // Mark the directory entry deleted (0xE5).
         let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
         let mut buf = self.read_disk_sectors(base_lba, sectors)?;
@@ -518,13 +527,6 @@ impl FileSystem for Fatfs {
         }
         buf[entry_off] = 0xE5;
         self.write_disk_sectors(base_lba, &buf, sectors)?;
-
-        self.delete_long_name_sequence(
-            parent_cluster,
-            dir_cluster,
-            entry_off,
-            entry.short_name_checksum(),
-        )?;
 
         if is_fat32 {
             let ino = fat_ino_from_pos(dir_cluster, entry_off);
@@ -600,6 +602,15 @@ impl FileSystem for Fatfs {
             let _freed = self.free_cluster_chain(start)?;
         }
 
+        // The long-name entries are found by scanning up to the short entry, so
+        // they must go before it is marked deleted.
+        self.delete_long_name_sequence(
+            parent_cluster,
+            dir_cluster,
+            entry_off,
+            entry.short_name_checksum(),
+        )?;
+
         // Mark the parent directory entry deleted (0xE5)
         let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
 
@@ -609,13 +620,6 @@ impl FileSystem for Fatfs {
         }
         read_buffer[entry_off] = 0xE5;
         self.write_disk_sectors(base_lba, &read_buffer, sectors)?;
-
-        self.delete_long_name_sequence(
-            parent_cluster,
-            dir_cluster,
-            entry_off,
-            entry.short_name_checksum(),
-        )?;
 
         Ok(())
     }
@@ -757,7 +761,7 @@ impl FileSystem for Fatfs {
 
     fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
         if path.normalize().is_root() {
-            return Ok(self.boot_info.root_cluster as u64);
+            return Ok(self.root_dir_cluster() as u64);
         }
 
         // FAT12/16: use legacy first-cluster ino; no side table.

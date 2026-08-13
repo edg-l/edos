@@ -26,11 +26,7 @@ impl Fatfs {
         }
         let (parent, name) = (&comps[..comps.len() - 1], &comps[comps.len() - 1]);
 
-        // Start from root - handle FAT12/16 vs FAT32 differently
-        let mut dir_cluster = match self.variant {
-            FatVariant::Fat32 => self.boot_info.root_cluster,
-            FatVariant::Fat12 | FatVariant::Fat16 => 0, // Use 0 as special marker for root
-        };
+        let mut dir_cluster = self.root_dir_cluster();
 
         for comp in parent {
             let entries = if dir_cluster == 0
@@ -373,12 +369,30 @@ impl Fatfs {
         }
     }
 
+    /// The cluster naming the root directory. FAT12 and FAT16 keep their root in
+    /// a fixed region ahead of the data area rather than in a chain, so 0 stands
+    /// for it there and `dir_entry_region` maps it to that region.
+    #[inline(always)]
+    pub fn root_dir_cluster(&self) -> u32 {
+        match self.variant {
+            FatVariant::Fat32 => self.boot_info.root_cluster,
+            FatVariant::Fat12 | FatVariant::Fat16 => 0,
+        }
+    }
+
+    /// Whether `cluster` names the fixed FAT12/16 root directory, which has no
+    /// chain and cannot be grown.
+    #[inline(always)]
+    pub fn is_fixed_root(&self, cluster: u32) -> bool {
+        cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16)
+    }
+
     /// Resolve a directory entry location (cluster, byte_offset) as returned by `find_dir_entry`
     /// into (base_lba, sector_count) suitable for reading/writing.
     /// For FAT12/16 root dir entries (cluster==0), returns the root dir region.
     /// For cluster-based dirs, returns the cluster's LBA and sectors_per_cluster.
     pub fn dir_entry_region(&self, entry_cluster: u32) -> (u64, u16) {
-        if entry_cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
+        if self.is_fixed_root(entry_cluster) {
             let root_dir_lba = self.root_dir_lba();
             let root_dir_sectors =
                 (self.boot_info.root_entry_count as u64 * 32).div_ceil(512) as u16;

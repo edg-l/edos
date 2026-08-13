@@ -5713,15 +5713,41 @@ It is silent from userspace. `openat(..., O_CREAT)` returns a valid fd and
 `fs::copy` failed. FAT32 is unaffected — its root is an ordinary chain starting
 at `BPB_RootClus`, which is >= 2.
 
-The fix is a root-region branch in every write-side function that takes a
-directory cluster: `append_dir_entry`, `patch_dir_entry_at`,
-`mark_entry_deleted`, `delete_long_name_sequence` and `generate_short_name` in
-`fat32/write.rs`. For FAT12/16 with cluster 0 they must address the fixed root
-region (`root_entry_count * 32` bytes at the root-dir LBA `cluster_to_lba`
-already computes for reads) and return "directory full" rather than allocating
-and linking a cluster, since that root cannot be extended. Making
-`cluster_to_lba` reject cluster 0 instead would only turn silent corruption into
-an error on a path that is meant to work, so it is not the fix.
+FIXED. Two helpers on `Fatfs` name the case once — `root_dir_cluster()` for the
+cluster the root is reached by, and `is_fixed_root(cluster)` for the FAT12/16
+marker — and every write-side function that takes a directory cluster now
+addresses it through `dir_entry_region`, which already mapped cluster 0 to the
+root region for reads. `append_dir_entry` returns `NoSpace` on a full fixed root
+rather than allocating and linking a cluster, since that root cannot be extended.
+Making `cluster_to_lba` reject cluster 0 instead would only turn silent
+corruption into an error on a path that is meant to work, so it was not the fix.
+
+Verified in the guest against the recipe above: create, `cp` a 264000-byte file
+whose digest matched the host, `mkdir`, a long name, `rm`, `rmdir`. Host
+`fsck.fat -n` then exits 0 and the boot sector is byte-identical to the pristine
+image.
+
+### Two defects that only showed up once creation worked
+
+Both were found by running host `fsck.fat` on the volume the guest had written,
+and neither is FAT12-specific.
+
+**Deleting a long-named file orphaned its long-name entries, on every variant.**
+`remove_file` and `remove_dir` marked the short entry `0xE5` and *then* called
+`delete_long_name_sequence`, which finds the LFN run by scanning forward to the
+short entry it belongs to — and its `first == 0xE5` arm clears `pending` and
+skips, so the target was never matched and the preceding LFN entries were left
+behind. `fsck.fat` reports `Orphaned long file name part "..."`. The rename path
+was already correct because it deletes the sequence before patching the entry.
+The order is the fix: clean the long name first, mark the short entry second.
+
+**Only the first FAT was ever written.** `set_fat_value`'s doc comment claimed it
+wrote "both primary and backup FATs" and no arm did; `alloc_cluster` wrote the
+primary directly too. Every allocation and free therefore left the mirrors
+diverged (`fsck.fat`: "FATs differ but appear to be intact"), so a volume whose
+primary FAT is later damaged recovers to a stale mirror. FAT writes now go
+through `write_fat_sectors`, which repeats the write at `backup_fat_lba` when
+`BPB_NumFATs > 1`.
 
 ### Note: FAT32 assumes 512-byte sectors in two different ways
 

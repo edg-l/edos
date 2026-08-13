@@ -282,12 +282,8 @@ impl Fatfs {
                         }
                     }
 
-                    self.write_disk_sectors(
-                        self.first_fat_lba() + sector_index,
-                        &sec.clone(),
-                        span,
-                    )
-                    .ok()?;
+                    self.write_fat_sectors(sector_index, &sec.clone(), span)
+                        .ok()?;
 
                     return Some(current_cluster);
                 }
@@ -333,7 +329,22 @@ impl Fatfs {
         Ok(())
     }
 
-    /// Low-level setter for a FAT entry. Writes to both primary and backup FATs.
+    /// Write `sectors` sectors of FAT content at `sector_index` into every FAT
+    /// the volume carries, so the mirrors do not diverge from the primary.
+    pub(super) fn write_fat_sectors(
+        &self,
+        sector_index: u64,
+        buf: &[u8],
+        sectors: u16,
+    ) -> Result<(), Error> {
+        self.write_disk_sectors(self.first_fat_lba() + sector_index, buf, sectors)?;
+        if self.boot_info.num_fats > 1 {
+            self.write_disk_sectors(self.backup_fat_lba() + sector_index, buf, sectors)?;
+        }
+        Ok(())
+    }
+
+    /// Low-level setter for a FAT entry. Writes to every FAT.
     fn set_fat_value(&self, cluster: u32, value: u32) -> Result<(), Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
 
@@ -346,7 +357,7 @@ impl Fatfs {
                 let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, 1)?;
                 let v = value & FAT32_MASK;
                 sec[within..within + 4].copy_from_slice(&v.to_le_bytes());
-                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
+                self.write_fat_sectors(sector_index, &sec, 1)?;
             }
             FatVariant::Fat16 => {
                 let byte_index = (cluster as usize) * 2;
@@ -356,7 +367,7 @@ impl Fatfs {
                 let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, 1)?;
                 let v = (value & FAT16_MASK) as u16;
                 sec[within..within + 2].copy_from_slice(&v.to_le_bytes());
-                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
+                self.write_fat_sectors(sector_index, &sec, 1)?;
             }
             FatVariant::Fat12 => {
                 // FAT12 uses 1.5 bytes per entry, requiring special handling
@@ -377,7 +388,7 @@ impl Fatfs {
                 };
                 sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
 
-                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, span)?;
+                self.write_fat_sectors(sector_index, &sec, span)?;
             }
         }
         Ok(())
@@ -432,9 +443,13 @@ impl Fatfs {
         let name = comps[comps.len() - 1].clone();
 
         // Walk down from root
-        let mut dir_cluster = self.boot_info.root_cluster;
+        let mut dir_cluster = self.root_dir_cluster();
         for comp in parent_components {
-            let entries = self.get_dir_entries(dir_cluster)?;
+            let entries = if self.is_fixed_root(dir_cluster) {
+                self.get_root_dir_entries()?
+            } else {
+                self.get_dir_entries(dir_cluster)?
+            };
             let mut hit = None;
             for record in entries {
                 if record.entry.is_directory() && record.matches_name(comp) {
@@ -457,12 +472,11 @@ impl Fatfs {
         dir_cluster: u32,
         desired: &str,
     ) -> Result<(String, bool), Error> {
-        let existing_records =
-            if dir_cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
-                self.get_root_dir_entries()?
-            } else {
-                self.get_dir_entries(dir_cluster)?
-            };
+        let existing_records = if self.is_fixed_root(dir_cluster) {
+            self.get_root_dir_entries()?
+        } else {
+            self.get_dir_entries(dir_cluster)?
+        };
 
         let existing_short: Vec<[u8; 11]> = existing_records
             .iter()
@@ -552,9 +566,9 @@ impl Fatfs {
 
         let mut buf;
         loop {
-            let base_lba = self.cluster_to_lba(dir_cluster);
-            buf = self.read_disk_sectors(base_lba, spc)?;
-            if buf.len() < cluster_bytes {
+            let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
+            buf = self.read_disk_sectors(base_lba, sectors)?;
+            if buf.len() < bps * sectors as usize {
                 return Err(Error::IoError);
             }
 
@@ -577,11 +591,16 @@ impl Fatfs {
                     }
                     let bytes: [u8; 32] = bytemuck::cast(*new_entry);
                     buf[pos..pos + 32].copy_from_slice(&bytes);
-                    self.write_disk_sectors(base_lba, &buf, spc)?;
+                    self.write_disk_sectors(base_lba, &buf, sectors)?;
                     return Ok((dir_cluster, pos));
                 }
 
                 off += 32;
+            }
+
+            // The FAT12/16 root is a fixed region with no chain behind it.
+            if self.is_fixed_root(dir_cluster) {
+                return Err(Error::NoSpace);
             }
 
             // No space here. Advance or extend directory chain.
@@ -623,17 +642,12 @@ impl Fatfs {
         target_offset: usize,
         checksum: u8,
     ) -> Result<(), Error> {
-        if dir_head == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
-            return Ok(());
-        }
-
-        let spc = self.boot_info.sectors_per_cluster as u16;
         let mut cluster = dir_head;
         let mut pending: Vec<(u32, usize, LongFilenameEntry)> = Vec::new();
 
         loop {
-            let base_lba = self.cluster_to_lba(cluster);
-            let buf = self.read_disk_sectors(base_lba, spc)?;
+            let (base_lba, sectors) = self.dir_entry_region(cluster);
+            let buf = self.read_disk_sectors(base_lba, sectors)?;
             let mut off = 0usize;
 
             while off + 32 <= buf.len() {
@@ -667,6 +681,10 @@ impl Fatfs {
 
                 pending.clear();
                 off += 32;
+            }
+
+            if self.is_fixed_root(cluster) {
+                return Ok(());
             }
 
             match self.get_fat_entry(cluster)? {
