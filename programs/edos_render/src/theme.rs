@@ -86,6 +86,36 @@ pub struct Theme {
     pub terminal_fg: Color,
     pub terminal_cursor: Color,
     pub terminal_selection: Color,
+
+    // Editor
+    /// `fn`, `if`, `pub`, `return`.
+    pub syn_keyword: Color,
+    /// String and char literals.
+    pub syn_string: Color,
+    /// Numeric literals, `true`, `false`, `null`.
+    pub syn_number: Color,
+    /// Type names, TOML section headers, markdown headings.
+    pub syn_type: Color,
+    /// A name immediately followed by `(`.
+    pub syn_function: Color,
+    /// Line and block comments.
+    pub syn_comment: Color,
+    /// `+ - = < > & | !` and friends.
+    pub syn_operator: Color,
+    /// `( ) { } [ ] , ; :`.
+    pub syn_punct: Color,
+    /// Escapes inside a string, `#[attributes]`, `$VAR`.
+    pub syn_special: Color,
+    /// Fill behind the line the cursor is on.
+    pub editor_line_highlight: Color,
+    /// Line numbers other than the current one.
+    pub editor_gutter: Color,
+    /// One hairline per indent level.
+    pub editor_indent_guide: Color,
+    /// Fill behind selected text.
+    pub editor_selection: Color,
+    /// The change ribbon, and the tab's unsaved dot.
+    pub editor_change: Color,
 }
 
 impl Theme {
@@ -163,6 +193,23 @@ impl Theme {
         terminal_fg: Color::from_rgb(0xCB, 0xCC, 0xC6),
         terminal_cursor: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange cursor
         terminal_selection: Color::from_rgb(0x27, 0x2D, 0x38),
+
+        // Editor. Ayu is a code-editor theme, so this is the half of the
+        // palette the rest of the shell has never had a reason to draw.
+        syn_keyword: Color::from_rgb(0xFF, 0x8F, 0x40),
+        syn_string: Color::from_rgb(0xAA, 0xD9, 0x4C),
+        syn_number: Color::from_rgb(0xD2, 0xA6, 0xFF), // = entry_special
+        syn_type: Color::from_rgb(0x59, 0xC2, 0xFF),   // = entry_dir
+        syn_function: Color::from_rgb(0xFF, 0xB4, 0x54),
+        syn_comment: Color::from_rgb(0x62, 0x6A, 0x73),
+        syn_operator: Color::from_rgb(0xF2, 0x96, 0x68),
+        syn_punct: Color::from_rgb(0x6C, 0x73, 0x80), // = title_text_inactive
+        syn_special: Color::from_rgb(0xE6, 0xB6, 0x73),
+        editor_line_highlight: Color::from_rgb(0x13, 0x17, 0x21),
+        editor_gutter: Color::from_rgb(0x3D, 0x45, 0x50),
+        editor_indent_guide: Color::from_rgb(0x1E, 0x24, 0x2E),
+        editor_selection: Color::from_rgb(0x18, 0x32, 0x4F),
+        editor_change: Color::from_rgb(0xE6, 0xB4, 0x50), // = title_accent
     };
 }
 

@@ -215,6 +215,27 @@ pub const FILE: Mask = [
     0b0000000000000000,
 ];
 
+/// Page with a folded corner and three rules of text: a document, distinct
+/// from the plain `FILE` icon by carrying content rather than being empty.
+pub const DOCUMENT: Mask = [
+    0b0000000000000000,
+    0b0001111110000000,
+    0b0001000011000000,
+    0b0001000010100000,
+    0b0001000010010000,
+    0b0001000011111000,
+    0b0001000000001000,
+    0b0001011111010000,
+    0b0001000000001000,
+    0b0001011111010000,
+    0b0001000000001000,
+    0b0001011111010000,
+    0b0001000000001000,
+    0b0001111111111000,
+    0b0000000000000000,
+    0b0000000000000000,
+];
+
 /// Arrow leaving to the north-east: a symbolic link, which is a name pointing
 /// somewhere else.
 pub const LINK: Mask = [
