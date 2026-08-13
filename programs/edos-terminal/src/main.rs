@@ -80,15 +80,20 @@ fn main() {
     // Main loop
     loop {
         // Poll window events
-        let mut event_count = 0usize;
+        // Not every event changes what is on screen. Pointer motion in
+        // particular arrives for the whole of a window drag, and treating it
+        // as a reason to repaint made a terminal re-rasterise every glyph it
+        // holds on every frame of that drag -- which is why dragging a
+        // terminal full of text was far worse than dragging an empty one.
+        let mut content_changed = false;
         if let Ok(count) = window.poll_events(&mut events) {
-            event_count = count;
             for event in &events[..count] {
                 match event.event_type() {
                     Some(WindowEventType::CloseRequested) => {
                         return;
                     }
                     Some(WindowEventType::Resize) => {
+                        content_changed = true;
                         let new_w = event.x as u32;
                         let new_h = event.y as u32;
                         if window.resize(new_w, new_h).is_ok() {
@@ -109,11 +114,13 @@ fn main() {
                     }
                     Some(WindowEventType::KeyPress) => {
                         terminal.on_key(event.code, true);
+                        content_changed = true;
                     }
                     Some(WindowEventType::KeyRelease) => {
                         terminal.on_key(event.code, false);
                     }
                     Some(WindowEventType::MouseButton) => {
+                        content_changed = true;
                         // Bit order is the boot protocol's: 0 left, 1 right,
                         // 2 middle. Left drives selection, middle pastes the
                         // primary selection on release, so a click that lands
@@ -131,9 +138,15 @@ fn main() {
                         }
                     }
                     Some(WindowEventType::MouseMove) => {
-                        terminal.on_mouse_move(event.x as i32, event.y as i32);
+                        // Only a selection drag changes the picture; the
+                        // pointer merely crossing the window does not.
+                        if terminal.is_selecting() {
+                            terminal.on_mouse_move(event.x as i32, event.y as i32);
+                            content_changed = true;
+                        }
                     }
                     Some(WindowEventType::MouseScroll) => {
+                        content_changed = true;
                         // HID reports a wheel turned away from the user as
                         // positive, and the widget takes positive as "back into
                         // history", which is the same direction: pushing the
@@ -142,12 +155,12 @@ fn main() {
                         terminal.scroll(event.data as i32);
                     }
                     Some(WindowEventType::FocusGained) => {
-                        eprintln!("[Term] FocusGained");
                         terminal.set_focused(true);
+                        content_changed = true;
                     }
                     Some(WindowEventType::FocusLost) => {
-                        eprintln!("[Term] FocusLost");
                         terminal.set_focused(false);
+                        content_changed = true;
                     }
                     _ => {}
                 }
@@ -192,7 +205,7 @@ fn main() {
         // damage, and the compositor answers by transferring the whole window.
         // Doing that 62 times a second to show an identical picture is what
         // saturated the display link.
-        if event_count > 0 || !input_chars.is_empty() || output_len > 0 || blinked {
+        if content_changed || !input_chars.is_empty() || output_len > 0 || blinked {
             window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
 
             let w = window.width;

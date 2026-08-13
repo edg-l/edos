@@ -852,6 +852,16 @@ impl Terminal {
         self.paste(Buffer::Primary);
     }
 
+    /// Whether a selection drag is in progress.
+    ///
+    /// Pointer motion only changes the picture while this is true. A window
+    /// being dragged by its title bar delivers motion to the terminal for the
+    /// whole drag, and repainting on that made the cost of moving a window
+    /// scale with how much text it held.
+    pub fn is_selecting(&self) -> bool {
+        self.selecting
+    }
+
     /// Update cursor blink state (call periodically).
     ///
     /// Returns whether anything on screen changed, so an owner can skip a
