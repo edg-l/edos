@@ -88,11 +88,16 @@ Pipes:
 
   ls /bin | grep sh         Pipe stdout to next command
 
-Redirects:
+Redirects, applied per pipeline stage. A descriptor number may prefix
+any of them, and >& / <& duplicate one descriptor onto another:
 
   echo hello > file.txt     Write stdout to file (create/truncate)
   echo more >> file.txt     Append to file
   cat < file.txt            Read stdin from file
+  cmd 2> errors.txt         Write stderr to file
+  cmd 2>&1                  Send stderr where stdout is going
+  cmd 1>&2                  And the reverse
+  cmd &> both.txt           Both descriptors to one file
 
 
 Control Flow
@@ -140,6 +145,76 @@ BREAK and CONTINUE
   end
 
   Output: 1 2
+
+FUNCTION / END
+
+  function greet
+      echo "Hello, $1!"
+      return 0
+  end
+
+  greet world
+
+Arguments arrive as $1-$9 and $@, the same way a script receives them.
+"return" sets the exit status and leaves the function.
+
+
+Arithmetic
+----------
+
+$(( expr )) evaluates integer arithmetic. Variables inside need no $.
+
+  echo $(( (2 + 3) * 4 ))       Prints 20
+  i=0
+  i=$(( i + 1 ))
+
+Operators: + - * / %, comparisons < <= > >= == !=, ! for negation,
+parentheses, and assignment.
+
+
+Globbing
+--------
+
+*, ? and [...] expand against the filesystem:
+
+  ls /bin/e*
+  rm /tmp/*.log
+
+A pattern that matches nothing is passed through unchanged rather than
+erroring, and a quoted pattern is left alone.
+
+
+Heredocs
+--------
+
+<<MARKER feeds the following lines to a command's stdin, up to a line
+holding only the marker:
+
+  cat > note << EOF
+  home is $HOME
+  EOF
+
+Quoting the marker suppresses expansion:
+
+  cat << 'EOF'
+  this $HOME stays literal
+  EOF
+
+
+Job Control
+-----------
+
+Each pipeline gets its own process group, and the terminal is handed to
+whichever group is in the foreground, so Ctrl+C on "sleep 30 | cat"
+kills both stages rather than one.
+
+  sleep 60 &                Run in the background
+  jobs                      List running and suspended jobs
+  fg [n]                    Bring a job to the foreground
+  bg [n]                    Resume a job in the background
+  wait                      Block until children finish
+
+Ctrl+Z suspends the foreground job.
 
 
 Test Expressions
@@ -200,7 +275,13 @@ Builtin Commands
   history                   Show command history
   test EXPR / [ EXPR ]      Evaluate expression
   set -e / set +e           Toggle exit-on-error
+  return [n]                Return from a function with status n
+  break / continue          Leave or restart the enclosing loop
   exit [n]                  Exit the shell with status n (default: $?)
+  kill [-SIG] PID           Signal a process
+  jobs / fg [n] / bg [n]    Job control
+  wait                      Block until children finish
+  ifconfig / ip             Network interface configuration
   clear                     Clear the terminal
   help                      Show help
 
