@@ -1150,6 +1150,25 @@ rasterized to 32x32 on the worker, so listing 100 packages downloads no
 packages. An empty catalogue -- which is what a failed fetch reports --
 deliberately does not clear the icons already rendered.
 
+## The website's catalogue reads the same index the guest does
+
+`/software/` on `edos.edgl.dev` is `src/content/docs/software.mdx` rendering
+`src/components/SoftwareCatalogue.astro`, in the separate `/usr/src/edos-web`
+checkout. The component fetches `https://edos.edgl.dev/pkg/index` at build time
+and parses the same RFC822 stanzas `grab` parses, so there is one artifact
+rather than a machine format and a human format that can disagree. It cannot
+live at `/pkg/`: that path is an nginx alias to `/srv/edos-pkg` and cannot also
+be an Astro route.
+
+Two properties are deliberate and neither is obvious from the rendered page.
+The fetch happens on the *build* machine, so a page built where the repository
+is unreachable would otherwise render a correct-looking empty catalogue, which
+reads as "the repository has nothing in it" rather than "this was not read" --
+so a failed fetch renders the reason and a link to the index instead of an empty
+list. And the icons are `<img src="/pkg/icons/...">` served straight by nginx,
+not build-time assets, so publishing a package updates the page's icon without
+rebuilding the site.
+
 ## A chord the window manager acts on no longer reaches the focused window
 
 `/dev/kbd` is a broadcast and window events are a separate delivery, so
@@ -1301,7 +1320,7 @@ count and a `filesystem/bin` count therefore differ by more than `edos-edit`
 leaving the image.
 
 The project site at `/usr/src/edos-web` is a separate repo carrying the same
-numbers, and it drifts on its own. It agrees with the table above as of 0788ddd,
+numbers, and it drifts on its own. It agrees with the table above as of 873535b,
 where its syscall inventory was set-diffed against the kernel's and came back
 empty both ways, and its program list against `filesystem/bin` the same. The
 three names the site carries that `/bin` does not are explained on the page
