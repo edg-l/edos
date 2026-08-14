@@ -12,7 +12,7 @@ use edos_render::metrics::space;
 use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 
-use crate::doc::{Block, BlockKind, Document, Marker, Run};
+use crate::doc::{Block, BlockKind, Document, Marker, Picture, Run};
 
 /// Margin between the page and the window edge.
 pub const PAGE_PAD: u32 = space(4);
@@ -22,6 +22,10 @@ const LIST_INDENT: u32 = space(6);
 const QUOTE_INDENT: u32 = space(4);
 /// Width of the scrollbar drawn when the page is taller than the viewport.
 pub const SCROLLBAR_W: u32 = space(2);
+/// Tallest an image is drawn. A page's hero picture is often taller than the
+/// window, and one that has to be scrolled past to reach the first paragraph
+/// reads as a page that failed to load.
+const MAX_IMAGE_H: u32 = space(60);
 
 /// A run of text on one line, already positioned and styled.
 pub struct Fragment {
@@ -36,13 +40,29 @@ pub struct Fragment {
     pub underline: bool,
 }
 
-/// One laid-out line: the fragments sharing a baseline, or a horizontal rule.
+/// What a line draws.
+pub enum LineKind {
+    Text,
+    /// `hr`, a hairline across the column.
+    Rule,
+    /// A picture rasterised for this column: the pixels and the size they were
+    /// rendered at, which is also the line's own size.
+    Image {
+        pixels: Vec<u32>,
+        width: u32,
+    },
+}
+
+/// One laid-out line: the fragments sharing a baseline, a horizontal rule, or
+/// an image.
+///
+/// An image still carries `items`, holding one empty fragment over its box when
+/// it is inside a link, so the hit test needs to know nothing about pictures.
 pub struct Line {
     pub y: i32,
     pub height: u32,
     pub items: Vec<Fragment>,
-    /// `hr`, which draws a hairline across the column instead of text.
-    pub rule: bool,
+    pub kind: LineKind,
 }
 
 /// A document laid out for one column width.
@@ -89,13 +109,23 @@ impl Layout {
                     y,
                     height,
                     items: Vec::new(),
-                    rule: true,
+                    kind: LineKind::Rule,
                 });
                 y += height as i32 + plan.gap_after as i32;
                 continue;
             }
 
             let avail = column.saturating_sub(plan.indent).max(1);
+
+            // A picture that rasterises is the block; one that does not falls
+            // through to the alt text it carries, which is what the block would
+            // have been had the fetch failed.
+            if let Some(picture) = &block.picture
+                && out.picture(picture, block, &plan, avail, &mut y)
+            {
+                y += plan.gap_after as i32;
+                continue;
+            }
             let marker = plan.marker.as_ref().map(|text| Fragment {
                 x: 0,
                 width: text::width(text, plan.style),
@@ -144,6 +174,69 @@ impl Layout {
         self.links.get(item.link?).map(String::as_str)
     }
 
+    /// Place a decoded picture as one line, scaled to fit the column. Returns
+    /// false when it cannot be rasterised at all.
+    fn picture(
+        &mut self,
+        picture: &Picture,
+        block: &Block,
+        plan: &Plan,
+        avail: u32,
+        y: &mut i32,
+    ) -> bool {
+        let (own_w, own_h) = picture.intrinsic_size();
+        // Shrunk to the column but never enlarged past its own size: a picture
+        // blown up to the measure of the text is detail a raster has not got,
+        // and it is not the size the page asked for either.
+        let mut width = own_w.min(avail).max(1);
+        let mut height = (own_h as u64 * width as u64 / own_w as u64).max(1) as u32;
+        if height > MAX_IMAGE_H {
+            height = MAX_IMAGE_H;
+            width = ((own_w as u64 * height as u64 / own_h as u64).max(1) as u32)
+                .min(avail)
+                .max(1);
+        }
+        let Some(pixels) = picture.render(width, height, Theme::DEFAULT.background) else {
+            return false;
+        };
+
+        // An image inside a link is the link, so it gets a fragment of its own
+        // size carrying no text: the hit test measures fragments, and the draw
+        // pass has nothing to write.
+        let link = block
+            .runs
+            .first()
+            .and_then(|run| run.link.clone())
+            .map(|target| self.link_index(&target));
+        let items = vec![Fragment {
+            x: (PAGE_PAD + plan.indent) as i32,
+            width,
+            text: String::new(),
+            style: plan.style,
+            link,
+            underline: false,
+        }];
+        self.lines.push(Line {
+            y: *y,
+            height,
+            items,
+            kind: LineKind::Image { pixels, width },
+        });
+        *y += height as i32;
+        true
+    }
+
+    /// The index of a link target, adding it in document order on first sight.
+    fn link_index(&mut self, target: &str) -> usize {
+        match self.links.iter().position(|existing| existing == target) {
+            Some(index) => index,
+            None => {
+                self.links.push(target.to_string());
+                self.links.len() - 1
+            }
+        }
+    }
+
     /// Split the runs into words, recording each link target once.
     fn words(&mut self, runs: &[Run], base: Style) -> Vec<Word> {
         let mut words = Vec::new();
@@ -153,15 +246,7 @@ impl Layout {
         let mut space_pending = false;
         for run in runs {
             let style = run_style(run, base);
-            let link = run.link.as_ref().map(|target| {
-                match self.links.iter().position(|existing| existing == target) {
-                    Some(index) => index,
-                    None => {
-                        self.links.push(target.clone());
-                        self.links.len() - 1
-                    }
-                }
-            });
+            let link = run.link.as_ref().map(|target| self.link_index(target));
             // A link is underlined unless the document says otherwise, so
             // emphasis is not carried by colour alone.
             let underline = run.css.underline.unwrap_or(link.is_some());
@@ -253,7 +338,7 @@ impl Layout {
             y: *y,
             height,
             items,
-            rule: false,
+            kind: LineKind::Text,
         });
         *y += height as i32;
     }
@@ -337,7 +422,7 @@ fn default_plan(block: &Block) -> Plan {
             indent: QUOTE_INDENT,
             ..base
         },
-        BlockKind::Rule | BlockKind::Paragraph => Plan {
+        BlockKind::Rule | BlockKind::Paragraph | BlockKind::Image => Plan {
             gap_before: space(1),
             ..base
         },
@@ -418,19 +503,40 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         if y + line.height as i32 <= top as i32 || y >= height as i32 {
             continue;
         }
-        if line.rule {
-            fill(
-                surface.pixels,
-                width,
-                height,
-                0,
-                y + line.height as i32 / 2,
-                width.saturating_sub(PAGE_PAD * 2).max(1),
-                1,
-                rule_color,
-                PAGE_PAD as i32,
-            );
-            continue;
+        match &line.kind {
+            LineKind::Rule => {
+                fill(
+                    surface.pixels,
+                    width,
+                    height,
+                    0,
+                    y + line.height as i32 / 2,
+                    width.saturating_sub(PAGE_PAD * 2).max(1),
+                    1,
+                    rule_color,
+                    PAGE_PAD as i32,
+                );
+                continue;
+            }
+            LineKind::Image {
+                pixels,
+                width: image_w,
+            } => {
+                let x = line.items.first().map_or(PAGE_PAD as i32, |item| item.x);
+                blit(
+                    surface.pixels,
+                    width,
+                    height,
+                    top,
+                    x,
+                    y,
+                    pixels,
+                    *image_w,
+                    line.height,
+                );
+                continue;
+            }
+            LineKind::Text => {}
         }
         for item in &line.items {
             text::draw(&mut surface, item.x, y, &item.text, item.style);
@@ -494,6 +600,36 @@ fn draw_scrollbar(
         Theme::DEFAULT.slider_thumb.raw(),
         0,
     );
+}
+
+/// Copy an image's pixels into the buffer, clipped to the page area: a picture
+/// scrolled under the chrome is cut at `top`, not drawn over it.
+#[allow(clippy::too_many_arguments)]
+fn blit(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    top: u32,
+    x: i32,
+    y: i32,
+    pixels: &[u32],
+    image_w: u32,
+    image_h: u32,
+) {
+    for row in 0..image_h as i32 {
+        let py = y + row;
+        if py < top as i32 || py >= height as i32 {
+            continue;
+        }
+        let src = row as usize * image_w as usize;
+        for col in 0..image_w as i32 {
+            let px = x + col;
+            if px < 0 || px >= width as i32 {
+                continue;
+            }
+            buffer[py as usize * width as usize + px as usize] = pixels[src + col as usize];
+        }
+    }
 }
 
 /// Fill a rectangle, clipped to the buffer. `x_offset` shifts the whole rect,

@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 edos_http = { path = "../edos_http" }
 edos_lib = { path = "../edos_lib" }
-edos_render = { path = "../edos_render" }
+# `svg` because a page's pictures are as often vector as raster, and the
+# decoder is already in the tree.
+edos_render = { path = "../edos_render", features = ["svg"] }
 html5ever = "0.39"
 markup5ever_rcdom = "0.39.0-unofficial"

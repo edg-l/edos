@@ -6,9 +6,12 @@
 //! emphasis, the link it belongs to -- is on a `Run`, so a text dump and a
 //! window draw the same list.
 
+use std::fmt;
 use std::rc::Rc;
 
 use edos_http::url::Url;
+use edos_render::graphics::Color;
+use edos_render::image::{Image, Svg, decode_bmp, looks_like_svg};
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
@@ -31,6 +34,9 @@ pub enum BlockKind {
     Quote,
     /// `hr`.
     Rule,
+    /// An `img` whose bytes were fetched and decoded, carrying its alt text as
+    /// its runs so a rendering that cannot draw it still says what it was.
+    Image,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,6 +67,69 @@ pub struct Block {
     /// belong to a box rather than to a run: its margins, and the colour and
     /// size its runs inherit.
     pub css: Computed,
+    /// The decoded picture, on a [`BlockKind::Image`] block only. Shared
+    /// because the history keeps a document alive after the next one is
+    /// parsed, and a page of photographs is the one thing here worth not
+    /// copying.
+    pub picture: Option<Rc<Picture>>,
+}
+
+/// A decoded image, kept in whichever form it was decoded to.
+///
+/// A vector document stays a tree rather than becoming a bitmap, so a window
+/// resized wider re-renders it at the new column width instead of magnifying
+/// what it drew at the old one.
+pub enum Picture {
+    Raster(Image),
+    Vector(Svg),
+}
+
+impl Picture {
+    /// The size the image asks to be drawn at.
+    pub fn intrinsic_size(&self) -> (u32, u32) {
+        match self {
+            Picture::Raster(image) => (image.width.max(1), image.height.max(1)),
+            Picture::Vector(svg) => svg.intrinsic_size(),
+        }
+    }
+
+    /// Rasterise at exactly `width` x `height`, over `background`.
+    ///
+    /// The caller sizes the box, since only it knows the column; both axes are
+    /// scaled independently, so pass a size that keeps the aspect ratio.
+    pub fn render(&self, width: u32, height: u32, background: Color) -> Option<Vec<u32>> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        match self {
+            Picture::Raster(image) => Some(image.scaled_to_fit(width, height)),
+            Picture::Vector(svg) => svg.render(width, height, background).ok().map(|i| i.pixels),
+        }
+    }
+}
+
+impl fmt::Debug for Picture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (width, height) = self.intrinsic_size();
+        let kind = match self {
+            Picture::Raster(_) => "raster",
+            Picture::Vector(_) => "vector",
+        };
+        write!(f, "Picture({kind} {width}x{height})")
+    }
+}
+
+/// Decode fetched bytes, sniffing the format rather than trusting the URL's
+/// extension or the server's content type.
+///
+/// BMP and SVG are what this system decodes; a PNG or a JPEG is not an error,
+/// it is an image that renders as its alt text.
+fn decode(bytes: &[u8]) -> Option<Picture> {
+    if looks_like_svg(bytes) {
+        Svg::parse(bytes).ok().map(Picture::Vector)
+    } else {
+        decode_bmp(bytes).ok().map(Picture::Raster)
+    }
 }
 
 impl Block {
@@ -97,6 +166,11 @@ pub const ROOT_PX: u32 = edos_render::font::size::BODY;
 /// than this is linking print sheets and font sheets; a browser that fetched
 /// all of them would spend the page's load time on styles nothing reads.
 const MAX_SHEETS: usize = 6;
+
+/// How many images one document may fetch. Each one is fetched serially on the
+/// thread about to lay the page out, so this is the page's load time as much as
+/// its appearance; a document is readable long before its twentieth picture.
+const MAX_IMAGES: usize = 12;
 
 /// Parse `html` as a document fetched from `base`, using `fetch` for the
 /// stylesheets it links.
@@ -135,6 +209,8 @@ pub fn parse(
 
     let mut builder = Builder {
         base,
+        fetch,
+        images: 0,
         title: String::new(),
         blocks: Vec::new(),
         runs: Vec::new(),
@@ -171,8 +247,11 @@ struct List {
     next: usize,
 }
 
-struct Builder {
+struct Builder<'a> {
     base: Url,
+    fetch: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    /// How many images have been fetched, against [`MAX_IMAGES`].
+    images: usize,
     title: String,
     blocks: Vec<Block>,
     runs: Vec<Run>,
@@ -192,7 +271,7 @@ struct Builder {
     block_css: Computed,
 }
 
-impl Builder {
+impl Builder<'_> {
     fn walk(&mut self, node: &Handle) {
         match &node.data {
             NodeData::Text { contents } => {
@@ -272,13 +351,7 @@ impl Builder {
                         self.style.code = true
                     }
                     local_name!("br") => self.push_text("\n"),
-                    local_name!("img") => {
-                        // No decode yet, so an image contributes what a reader
-                        // with images off would see.
-                        if let Some(alt) = attr(node, "alt").filter(|a| !a.trim().is_empty()) {
-                            self.push_text(&format!("[{}]", alt.trim()));
-                        }
-                    }
+                    local_name!("img") => self.image(node),
                     _ => {}
                 }
 
@@ -305,6 +378,57 @@ impl Builder {
                 }
             }
         }
+    }
+
+    /// An `img`: fetch and decode it, or leave behind what a reader with
+    /// images turned off would see.
+    ///
+    /// A picture is a block of its own, because the block list has no inline
+    /// box. An image in the middle of a sentence therefore breaks it in two,
+    /// and the text after it resumes in the block it interrupted.
+    fn image(&mut self, node: &Handle) {
+        let alt = attr(node, "alt").unwrap_or_default().trim().to_string();
+        let Some(picture) = self.fetch_image(node) else {
+            if !alt.is_empty() {
+                self.push_text(&format!("[{}]", alt));
+            }
+            return;
+        };
+
+        let interrupted = self.kind;
+        self.flush();
+        let style = self.style.clone();
+        let runs = (!alt.is_empty())
+            .then(|| {
+                vec![Run {
+                    text: format!("[{}]", alt),
+                    link: style.link,
+                    bold: style.bold,
+                    italic: style.italic,
+                    code: style.code,
+                    css: self.computed,
+                }]
+            })
+            .unwrap_or_default();
+        self.blocks.push(Block {
+            kind: BlockKind::Image,
+            runs,
+            css: self.computed,
+            picture: Some(Rc::new(picture)),
+        });
+        self.kind = interrupted;
+    }
+
+    /// Fetch and decode one image, against the document's budget. The budget is
+    /// spent on the attempt rather than on the success, since what it bounds is
+    /// how long the page takes to arrive.
+    fn fetch_image(&mut self, node: &Handle) -> Option<Picture> {
+        if self.images >= MAX_IMAGES {
+            return None;
+        }
+        let url = self.resolve(&attr(node, "src")?)?;
+        self.images += 1;
+        decode(&(self.fetch)(&url)?)
     }
 
     /// The depth and marker for an `li`, consuming an ordered list's counter.
@@ -397,6 +521,7 @@ impl Builder {
                 kind,
                 runs: Vec::new(),
                 css,
+                picture: None,
             });
             return;
         }
@@ -405,7 +530,12 @@ impl Builder {
             return;
         }
         runs.retain(|r| !r.text.is_empty());
-        self.blocks.push(Block { kind, runs, css });
+        self.blocks.push(Block {
+            kind,
+            runs,
+            css,
+            picture: None,
+        });
     }
 }
 

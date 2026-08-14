@@ -7285,3 +7285,31 @@ the fixture proves both directions: the `.wide` paragraph is green from a
 matching `@media screen and (width >= 20em)`, and the `p { display: none }`
 inside `@media (min-width: 100em)` leaves every paragraph standing at the
 760px window the browser opens at.
+
+## Images draw, and a local page needed an origin first (2026-08-15)
+
+`edos-web` decodes and draws `<img>`. The decode is `edos_render::image`, the
+same one `imgview` uses, sniffing the bytes rather than the URL: SVG stays a
+parsed tree (`doc::Picture::Vector`) so `view.rs` re-renders it at whatever
+column it ends up in, and BMP is resampled. Anything else — a PNG, a JPEG, a
+fetch that failed — leaves the block's `[alt]` text, so a page reads the same
+whether or not its pictures arrived.
+
+**The blocker was not the decoder, it was the base URL.** A document read from
+a path used to get `http://localhost/` as a placeholder origin, so every
+relative reference on it resolved to a URL nothing answered — which is why the
+fixture had to carry its CSS inline, and why an `<img src>` on it would have
+been dead on arrival. The base is now the file's own path under `localhost`,
+and `main::local_path` maps that host back to the filesystem, so a local page
+resolves its siblings and absolute paths like any other. Two things to know
+about it: `Url::join` does not implement RFC 3986 §5.2.4, so a `../` in a
+subresource still fails, and a real HTTP server on the guest's own port 80
+would be shadowed by the filesystem.
+
+`view::Line` carries a `LineKind` now instead of a `rule: bool`. An image line
+still holds one empty `Fragment` the width of the picture, so `link_at` finds a
+linked image with no knowledge that pictures exist.
+
+The fixture at `assets/welcome.html` shows all three paths — a linked SVG, a
+downscaled BMP wallpaper, and a PNG that renders as its alt text — which makes
+it what to open when an image stops drawing.

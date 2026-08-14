@@ -48,8 +48,7 @@ links underlined and its lists marked. What is left in this stage is the click:
 is a hit test against the fragment boxes, a re-fetch, and a stack for the back
 action.
 
-Two limits are stage-2 work, not defects. Images contribute their `alt` text in
-brackets because nothing decodes them yet. And an element set the page lays out
+One limit is stage-2 work, not a defect: an element set the page lays out
 with CSS -- a `nav` of bare `<a>` with no whitespace between them -- renders
 run-together, because without CSS there is nothing in the document to say those
 are separate boxes.
@@ -122,10 +121,32 @@ Three deliberate limits:
   fetch is the same blocking-`edos_http` problem the window already has, and it
   is now on the load path twice over.
 
-A document read from a local file has no origin — its base is a placeholder —
-so its relative `href`s resolve to a URL that does not answer and it renders
-with only its `<style>`. That is why `assets/welcome.html` carries its CSS
-inline.
+**Images are decoded and drawn.** An `<img>` whose bytes arrive and decode
+becomes a `BlockKind::Image` block carrying an `Rc<Picture>`, which is either a
+raster or a still-parsed SVG tree; `view.rs` rasterises it at layout time, so a
+vector picture is re-rendered when the column changes rather than magnified.
+Four rules:
+
+- **BMP and SVG are what decodes**, sniffed from the bytes rather than taken
+  from the URL. A PNG or a JPEG is not an error — the block falls back to the
+  `[alt]` text it carries, which is also what a failed fetch gives, so the page
+  reads the same either way.
+- **A picture is a block**, since the block list has no inline box. An image
+  mid-sentence breaks the sentence in two and the text after it resumes in the
+  block it interrupted.
+- **Shrunk to the column, never enlarged**, and capped at `view::MAX_IMAGE_H`.
+  A hero image that has to be scrolled past to reach the first paragraph reads
+  as a page that failed to load.
+- **At most `doc::MAX_IMAGES` are fetched, serially**, on the same terms and
+  the same load path as the stylesheets. The budget is spent on the attempt,
+  not the success.
+
+A locally-read document's base is its own path under `http://localhost`, and
+`load` reads that host back off the filesystem. So a page opened from disk
+resolves what it refers to relative to itself: `/share/icons/edos.svg` and a
+sibling `style.css` both work, and only the network is out of reach.
+`Url::join` does not resolve `..` segments, so a subresource that climbs out of
+its directory still fails.
 
 `css.rs` depends on nothing but `std`, so its unit tests run on the host even
 though the crate only links for `x86_64-unknown-edos`:

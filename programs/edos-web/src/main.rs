@@ -100,13 +100,15 @@ fn main() {
 /// A path is worth accepting because it separates a parse or layout problem
 /// from a network one, which is the first question when a page renders wrong.
 pub(crate) fn load(target: &str) -> Result<(Vec<u8>, Url), String> {
-    if target.starts_with('/') || target.starts_with("./") {
-        let html = fs::read(target).map_err(|e| format!("{}: {}", target, e))?;
-        // A local file has no origin, so relative links resolve against the
-        // site the page most likely came from only if it says so itself; until
-        // stage 2 reads <base>, they resolve against a placeholder.
-        let base = Url::parse("http://localhost/").expect("a literal URL parses");
-        return Ok((html, base));
+    if let Some(path) = local_path(target) {
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {}", path, e))?;
+        // A local document's origin is this machine, so its base is its own
+        // path under the host that means the filesystem. Both `logo.bmp` beside
+        // the page and `/share/icons/edos.svg` then resolve to a URL this
+        // function reads straight back off disk.
+        let base = Url::parse(&format!("http://{}{}", LOCAL_HOST, path))
+            .map_err(|e| format!("{}: {}", path, e))?;
+        return Ok((bytes, base));
     }
 
     let url = if target.contains("://") {
@@ -128,13 +130,32 @@ pub(crate) fn load(target: &str) -> Result<(Vec<u8>, Url), String> {
     Ok((response.body, base))
 }
 
-/// Fetch something the document refers to by absolute URL: a stylesheet today.
+/// The host a locally-read document is given, so that what it refers to
+/// relative to itself comes back to this filesystem rather than to a network.
+const LOCAL_HOST: &str = "localhost";
+
+/// The file `target` names, for a path or for a URL on [`LOCAL_HOST`].
+fn local_path(target: &str) -> Option<String> {
+    if let Some(rest) = target.strip_prefix("./") {
+        let cwd = env::current_dir().unwrap_or_else(|_| "/".into());
+        return Some(cwd.join(rest).to_string_lossy().into_owned());
+    }
+    if target.starts_with('/') {
+        return Some(target.to_string());
+    }
+    let rest = target
+        .strip_prefix("http://")?
+        .strip_prefix(LOCAL_HOST)
+        .filter(|rest| rest.starts_with('/'))?;
+    Some(rest.to_string())
+}
+
+/// Fetch something the document refers to by absolute URL: a stylesheet or an
+/// image.
 ///
 /// A subresource that cannot be had is not an error for the page -- it renders
-/// with whatever styling did arrive -- so this reports nothing and returns
-/// `None`. A document read from a local file has no origin, so its relative
-/// hrefs resolve against the placeholder base and fail here; a local page that
-/// wants styling carries it in a `<style>`.
+/// with whatever styling and pictures did arrive -- so this reports nothing and
+/// returns `None`.
 pub(crate) fn fetch_subresource(url: &str) -> Option<Vec<u8>> {
     load(url).ok().map(|(bytes, _)| bytes)
 }
