@@ -1,0 +1,9 @@
+[package]
+name = "edos-web"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+edos_http = { path = "../edos_http" }
+html5ever = "0.39"
+markup5ever_rcdom = "0.39.0-unofficial"

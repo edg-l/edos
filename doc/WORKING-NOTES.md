@@ -6955,3 +6955,43 @@ Two rules worth carrying:
 This is the second harness bug in the same file in one session; the first is
 "A benchmark reported 140x too good" above. Both produced numbers that were
 *better* than reality, which is the direction that gets published.
+
+---
+
+## `html5ever` and `taffy` build for the edos target, and one of them lies about its version
+
+`programs/edos-web` exists and reads a real page: fetch with `edos_http`, parse
+with `html5ever`, print blocks as text. The three crates the browser plan named
+all build for `x86_64-unknown-edos` under `cargo +edos`, unpatched and with no
+feature surgery — `html5ever` 0.39, `markup5ever_rcdom` 0.39.0-unofficial,
+`taffy` 0.9. `taffy` is not a dependency yet; it was built only to answer the
+question, since stage 3 is where it earns its place.
+
+Three things cost time and will cost it again:
+
+- **`markup5ever_rcdom` is published only as a prerelease.** Every version
+  carries an `+unofficial` build tag, so a plain `"0.39"` requirement resolves
+  to nothing at all and the error reads like the crate is missing. The
+  requirement has to be written `"0.39.0-unofficial"`. Cargo's help text names
+  the fix, which is the one mercy here.
+- **Pin the two to the same major.** `markup5ever_rcdom` 0.39 wants `html5ever`
+  0.39, and asking for `html5ever = "0.35"` beside it does not fail — it
+  compiles *both* major versions, and the two `LocalName` types are then
+  different types with the same name.
+- **Reach the DOM root through `RcDom`'s `document` field**, not
+  `TreeSink::get_document`. The trait method needs `html5ever::tree_builder`
+  imported, which is a dependency on the parser's internals in exchange for
+  nothing.
+
+The whitespace model is the part worth knowing before changing `doc.rs`:
+collapsing happens as text is appended, against the *previous run's* trailing
+character rather than per text node, because a run boundary falls wherever a
+tag does and `<b>one</b> <b>two</b>` must not lose the space between them. The
+start of a block counts as ending in whitespace, which is what drops the
+leading indentation HTML sources are full of.
+
+What it does not do yet, and none of it is a bug: no CSS, no images decoded
+(an `img` contributes its `alt` in brackets), no `<base>` element, and links in
+a `nav` with no whitespace between them render run-together — which is what
+every text browser does with that markup, because the whitespace genuinely is
+not in the document.

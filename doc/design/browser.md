@@ -58,11 +58,31 @@ Stated here so it is not left as an implied someday. A DOM without scripting
 renders most documentation and most articles, which is the point of this
 program.
 
-## Check before planning
+## The crates, checked against a real build
 
-That `html5ever` and `taffy` build for `x86_64-unknown-edos` under `cargo
-+edos`. `resvg` building is the precedent that says real crates can be pulled
-in; the ones that fail are the ones reaching for a libc.
+Both build for `x86_64-unknown-edos` under `cargo +edos`, from source, with no
+patching and no feature surgery:
+
+| Crate | Version | Result |
+|---|---|---|
+| `html5ever` | 0.39 | builds |
+| `markup5ever_rcdom` | 0.39.0-unofficial | builds |
+| `taffy` | 0.9 | builds |
+
+Two things about the versions are worth knowing before reaching for them.
+`markup5ever_rcdom` is published only as a prerelease -- every version carries
+an `+unofficial` build tag -- so a plain `"0.39"` requirement finds no candidate
+and cargo's error names the fix (`"0.39.0-unofficial"`). And its html5ever
+requirement is exact enough that pairing it with an older `html5ever` compiles
+*both* major versions into the binary; keep the two pinned to the same one.
+
+`RcDom` exposes the root as the `document` field. `TreeSink::get_document`
+reaches the same node but needs the trait imported, which is a dependency on
+html5ever's internals for nothing.
+
+`resvg` building was the precedent that said real crates can be pulled in; the
+ones that fail are the ones reaching for a libc, which is why `usvg`'s text
+feature is off in `edos_render::image`. Neither of these three does.
 
 ## What it exercises in the kernel
 
