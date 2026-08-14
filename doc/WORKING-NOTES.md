@@ -108,6 +108,30 @@ surviving that pair is the defect and an empty table is the fix.
 
 ---
 
+## A claimed chord is matched exactly, so the shell must match it exactly too
+
+`grab::intercept` compares the modifier mask for equality — `Alt+Tab` and
+`Ctrl+Alt+Tab` are different chords, and claiming one leaves the other with the
+focused window. `edos-wm` was testing `alt_held` as a *subset*, so `Shift+Alt+Tab`
+cycled windows while the kernel, seeing `SHIFT|ALT` against a claim of `ALT`,
+delivered the Tab to the focused program as well. That is the double-delivery the
+grab exists to remove, reachable by a common reflex, and the only thing hiding it
+was the application-side Alt guard — the workaround the grab was meant to
+replace.
+
+The window manager derives one mask from the same modifier table the kernel uses
+and compares it against `CLAIMED_CHORDS` for equality, so the two agree by
+construction: whatever it acts on is exactly what it claimed. Adding a chord
+means adding one row, and reverse cycling on `Shift+Alt+Tab` would be a claim of
+its own rather than a looser test. It also picks up the right-hand Control key,
+which the kernel counted and the shell did not, so `RCtrl+Alt+W` used to be
+withheld from the focused window by a shell that then ignored it.
+
+The check is `scripts/edos-vm windows` before and after: `alt+tab` moves the
+focused row, `shift+alt+tab` must not, and the focused program must see neither.
+
+---
+
 ## TCP over loopback had never once worked, and non-blocking connect found it
 
 `sys_connect` honours `O_NONBLOCK` now: it returns `EINPROGRESS` as soon as the

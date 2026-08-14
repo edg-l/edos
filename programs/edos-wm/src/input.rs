@@ -4,8 +4,8 @@ use std::io::Read;
 
 use edos_lib::io::klog_dump;
 use edos_render::window::{
-    GRAB_MOD_ALT, GRAB_MOD_CTRL, WindowListEntry, flags::FLAG_DOCK, read_mouse_state,
-    window_grab_key,
+    GRAB_MOD_ALT, GRAB_MOD_CTRL, GRAB_MOD_SHIFT, WindowListEntry, flags::FLAG_DOCK,
+    read_mouse_state, window_grab_key,
 };
 
 /// KeyCode for Left Alt (pc_keyboard::KeyCode::LAlt = 95).
@@ -19,6 +19,15 @@ pub const RAW_TAB: u32 = 38;
 
 /// KeyCode for Left Control (pc_keyboard::KeyCode::LControl = 93).
 pub const RAW_LCTRL: u32 = 93;
+
+/// KeyCode for Right Control (pc_keyboard::KeyCode::RControl = 100).
+pub const RAW_RCTRL: u32 = 100;
+
+/// KeyCode for Left Shift (pc_keyboard::KeyCode::LShift = 76).
+pub const RAW_LSHIFT: u32 = 76;
+
+/// KeyCode for Right Shift (pc_keyboard::KeyCode::RShift = 87).
+pub const RAW_RSHIFT: u32 = 87;
 
 /// KeyCode for W (pc_keyboard::KeyCode::W = 40).
 pub const RAW_W: u32 = 40;
@@ -67,18 +76,36 @@ fn claim_shortcuts() {
 pub struct InputState {
     mouse_file: std::fs::File,
     kbd_file: Option<std::fs::File>,
-    alt_held: bool,
-    ctrl_held: bool,
+    /// Modifiers held, as [`GRAB_MOD_ALT`] and friends, so the mask compared
+    /// here is the same one the kernel matches a grab against.
+    mods: u32,
     last_mouse_buttons: u8,
 }
 
 /// The chords the window manager acts on, and therefore the ones the focused
 /// window must not also receive.
+///
+/// The mask is matched exactly, the way the kernel matches a grab. A subset
+/// match here would act on a chord the kernel did not withhold — Shift+Alt+Tab
+/// would cycle windows *and* send the focused program a Tab, which is the
+/// defect the grab exists to remove.
 const CLAIMED_CHORDS: [(u32, u32, &str); 3] = [
     (RAW_F4, GRAB_MOD_ALT, "Alt+F4"),
     (RAW_TAB, GRAB_MOD_ALT, "Alt+Tab"),
     (RAW_W, GRAB_MOD_CTRL | GRAB_MOD_ALT, "Ctrl+Alt+W"),
 ];
+
+/// The modifier bit `key` stands for, if it is a modifier at all. Mirrors the
+/// kernel's own table in `window/grab.rs`: AltGr is not Alt, since it selects a
+/// character rather than qualifying one.
+fn modifier_bit(key: u32) -> Option<u32> {
+    match key {
+        RAW_LSHIFT | RAW_RSHIFT => Some(GRAB_MOD_SHIFT),
+        RAW_LCTRL | RAW_RCTRL => Some(GRAB_MOD_CTRL),
+        RAW_LALT => Some(GRAB_MOD_ALT),
+        _ => None,
+    }
+}
 
 impl InputState {
     /// Open input devices. Panics if /dev/mouse is unavailable.
@@ -87,8 +114,7 @@ impl InputState {
         Self {
             mouse_file: std::fs::File::open("/dev/mouse").expect("failed to open /dev/mouse"),
             kbd_file: std::fs::File::open("/dev/kbd").ok(),
-            alt_held: false,
-            ctrl_held: false,
+            mods: 0,
             last_mouse_buttons: 0,
         }
     }
@@ -149,12 +175,12 @@ impl InputState {
             let key = raw & !KEY_RELEASE_BIT;
 
             // Track modifier press/release
-            if key == RAW_LALT {
-                self.alt_held = !is_release;
-                continue;
-            }
-            if key == RAW_LCTRL {
-                self.ctrl_held = !is_release;
+            if let Some(bit) = modifier_bit(key) {
+                if is_release {
+                    self.mods &= !bit;
+                } else {
+                    self.mods |= bit;
+                }
                 continue;
             }
 
@@ -163,21 +189,27 @@ impl InputState {
                 continue;
             }
 
-            if self.ctrl_held && self.alt_held && key == RAW_W {
-                return InputAction::DumpWindows;
+            let mods = self.mods;
+            if !CLAIMED_CHORDS
+                .iter()
+                .any(|&(code, chord, _)| code == key && chord == mods)
+            {
+                continue;
             }
 
-            if self.alt_held {
-                if key == RAW_F4 {
-                    self.alt_held = false;
+            // A chord fires once per press of its modifier: dropping the
+            // modifier state here is what keeps Alt held across a repeat from
+            // cycling on every frame.
+            self.mods = 0;
+
+            match key {
+                RAW_W => return InputAction::DumpWindows,
+                RAW_F4 => {
                     if let Some(fid) = focused_window_id {
                         return InputAction::AltF4 { focused_id: fid };
                     }
-                    continue;
                 }
-
-                if key == RAW_TAB {
-                    self.alt_held = false;
+                RAW_TAB => {
                     // Cycle focus to next visible non-dock window
                     let visible: Vec<u64> = windows
                         .iter()
@@ -194,11 +226,8 @@ impl InputState {
                             next_id: visible[next_idx],
                         };
                     }
-                    continue;
                 }
-
-                // Unrecognized key while Alt held: clear Alt state
-                self.alt_held = false;
+                _ => {}
             }
         }
 
