@@ -45,7 +45,7 @@ use crate::{
         irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         paging::allocate_process_pml4,
-        runqueue::{DEFAULT_PRIORITY, PRIORITY_LEVELS},
+        runqueue::{BASE_SLICE, DEFAULT_PRIORITY, PRIORITY_LEVELS, virtual_delta, weight_of},
         scheduler::switch_to_kernel_page,
         signal::SignalState,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_free},
@@ -144,6 +144,19 @@ pub struct Thread {
 
     // Every field below is an `Instant` in nanoseconds, with 0 meaning unset.
     pub slice_deadline: AtomicU64,
+
+    /// Virtual time consumed, in virtual nanoseconds. Comparable only against
+    /// the runqueue that placed it: a thread arriving from anywhere else is
+    /// re-placed against the destination's clock. See `thread::runqueue`.
+    pub vruntime: AtomicU64,
+
+    /// The virtual deadline of the current request, `vruntime + slice/weight`
+    /// at the moment the request was made. The pick orders by this.
+    pub vdeadline: AtomicU64,
+
+    /// What this thread asks for each time it is picked, in nanoseconds. A
+    /// smaller request is an earlier deadline and so a sooner, shorter turn.
+    pub slice_ns: AtomicU64,
 
     // Sleep data split to avoid locking:
     pub sleep_deadline: AtomicU64,
@@ -885,6 +898,11 @@ impl Thread {
         mask == 0 || (cpu < 32 && mask & (1u32 << cpu) != 0)
     }
 
+    /// What this thread asks for each time it is picked, in nanoseconds.
+    pub fn request_ns(&self) -> u64 {
+        self.slice_ns.load(Ordering::Acquire)
+    }
+
     pub fn begin_run(&self, start_ns: u64) {
         self.run_start_ns.store(start_ns, Ordering::Release);
     }
@@ -901,6 +919,31 @@ impl Thread {
         }
 
         self.cpu_time_ns.fetch_add(elapsed_ns, Ordering::AcqRel);
+        self.charge_vruntime(elapsed_ns);
+    }
+
+    /// Charge a stretch of CPU to this thread's virtual clock, and open a new
+    /// request once the last one is spent.
+    ///
+    /// The deadline moves only when the thread has consumed what it asked for,
+    /// which is what makes a slice a *request* rather than a quantum: a thread
+    /// preempted early keeps the deadline it had and finishes the turn it was
+    /// promised, instead of being sent to the back for having been interrupted.
+    fn charge_vruntime(&self, elapsed_ns: u64) {
+        let weight = weight_of(self.priority());
+        let vruntime = self
+            .vruntime
+            .load(Ordering::Acquire)
+            .saturating_add(virtual_delta(elapsed_ns, weight));
+        self.vruntime.store(vruntime, Ordering::Release);
+
+        if vruntime >= self.vdeadline.load(Ordering::Acquire) {
+            let request = self.slice_ns.load(Ordering::Acquire);
+            self.vdeadline.store(
+                vruntime.saturating_add(virtual_delta(request, weight)),
+                Ordering::Release,
+            );
+        }
     }
 
     /// The process group this thread belongs to.
@@ -953,6 +996,9 @@ impl Thread {
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
+            vruntime: AtomicU64::new(0),
+            vdeadline: AtomicU64::new(0),
+            slice_ns: AtomicU64::new(BASE_SLICE.as_nanos() as u64),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
@@ -1084,6 +1130,9 @@ impl Thread {
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
+            vruntime: AtomicU64::new(0),
+            vdeadline: AtomicU64::new(0),
+            slice_ns: AtomicU64::new(BASE_SLICE.as_nanos() as u64),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),

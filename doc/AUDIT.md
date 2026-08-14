@@ -348,12 +348,28 @@ Beyond affinity (1.2), things that look like the next real improvements:
   running six threads and takes the placement between the two. A decayed
   utilisation average is still the better metric and is now an improvement
   rather than a correction.
-- **No priority inheritance.** The starvation fix bounds how long a low-priority
-  lock holder can be passed over, but a high-priority waiter still waits behind
-  it. This is the classic reason to add PI to the blocking primitives, and the
-  rank table already gives a place to hang it.
-- **The timeslice is a flat 5ms** regardless of priority, so priority affects
-  pick order but never share of CPU.
+- **No priority inheritance.** EEVDF bounds how long a low-priority lock holder
+  can be passed over — it falls behind `V` and its deadline expires — but a
+  high-priority waiter still waits behind it. This is the classic reason to add
+  PI to the blocking primitives, and the rank table already gives a place to
+  hang it. It is now the only item left in this section.
+- **The timeslice was a flat 5 ms — FIXED, and the entry understated it.**
+  Priority did not merely fail to affect share of CPU; the strict-priority
+  buckets that carried it could withhold the CPU entirely. Their anti-starvation
+  escape serviced the highest non-empty level *below* the top, so with three
+  levels occupied on one runqueue the bottom never ran at all — measured, on a
+  CPU carrying an `IO_PRIORITY` kthread, as seven priority levels buying 58x of
+  the CPU rather than the 2:1 the escape was thought to guarantee.
+
+  The buckets are replaced by EEVDF: weight per priority level, a virtual clock
+  per thread, and a pick of the eligible thread with the earliest virtual
+  deadline. Share now tracks weight — seven levels measured 4.84x against the
+  4.77x the table asks for — and starvation is impossible by construction rather
+  than bounded by an escape hatch. The slice became a per-thread *request*
+  (`BASE_SLICE`, 1 ms, derived from the ~1 us hypervisor timer-arm cost) rather
+  than a quantum the scheduler hands out. `weighted-share` and
+  `starvation-three-levels` in `thread/sched_test.rs` are the gates; both were
+  watched fail against the bucket scheduler.
 - **The idle loop polled for steals — FIXED.** `run_idle` waited for its own
   backoff to come round, up to a 100 ms halt per interval and the interval
   doubling to sixteen of them, so a burst of wakes sat in the waker's runqueue

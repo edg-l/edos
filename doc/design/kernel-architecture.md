@@ -144,10 +144,13 @@ reporting up to 6.6× throughput and 88% lower tail latency against IX and ZygOS
 microsecond timescales based on queueing delay, Caladan through a centralised
 scheduler plus a kernel module that bypasses Linux's.
 
-Two numbers in `doc/SCHED-ROADMAP.md` sit directly against this: EDOS's
-timeslice is a flat 5 ms and its `MIN_TIMER_INTERVAL` is an admittedly picked
-10 µs. Shinjuku's whole result is that the interesting region is three orders of
-magnitude below the first of those.
+One number in `doc/SCHED-ROADMAP.md` sits directly against this:
+`MIN_TIMER_INTERVAL` is an admittedly picked 10 µs. The flat 5 ms timeslice that
+used to sit beside it is gone — the slice is a per-thread request now, defaulting
+to 1 ms — but Shinjuku's region is still three orders of magnitude below that,
+and the reason is measurable here rather than a matter of ambition: arming the
+APIC one-shot costs ~1 µs because a hypervisor traps it, so a 5 µs quantum would
+spend a fifth of the machine on its own timer.
 
 ### 2.7 What the current literature is actually about
 
@@ -243,13 +246,13 @@ else does there and lose nothing, which is true of no other subsystem.
 Three things make it concrete rather than aspirational:
 
 - **There is real, measured work waiting.** `doc/SCHED-ROADMAP.md` and
-  `doc/AUDIT.md` §4 already name four defects: load is measured as
-  `thread_count`, so a sleeping thread weighs the same as a CPU-bound one and
-  `pick_sched`/`try_rebalance` balance the wrong quantity; there is no priority
-  inheritance, so a high-priority waiter queues behind a low-priority lock
-  holder; the timeslice is a flat 5 ms regardless of priority; and the idle loop
-  polls for steals on a backoff instead of being told by an IPI. Parked threads
-  never migrate, either.
+  `doc/AUDIT.md` §4 named four defects, and three are now closed: load was
+  measured as `thread_count`, so a sleeping thread weighed the same as a
+  CPU-bound one; the timeslice was a flat 5 ms regardless of priority, on top of
+  priority buckets that could starve their bottom level outright; and the idle
+  loop polled for steals on a backoff instead of being told by an IPI. What is
+  left is priority inheritance, so a high-priority waiter still queues behind a
+  low-priority lock holder. Parked threads never migrate, either.
 - **The instruments exist.** `programs/switchbench` and `/proc/sched_prof`,
   with the single-CPU-boot discipline the roadmap already documents.
 - **EDOS is less constrained than Linux is.** sched_ext has to coexist with

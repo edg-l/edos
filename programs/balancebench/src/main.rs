@@ -303,6 +303,14 @@ fn wake_burst(out: &mut Out, workers_arg: Option<u64>) {
 
     // What one worker's lump costs with a CPU to itself, measured the same way
     // the workers measure it so the ratio below compares like with like.
+    //
+    // The settle is part of "like with like" and not politeness: every burst is
+    // timed after one, and this lump is short enough that the machine still
+    // draining the report above it costs a measurable fraction. Timed straight
+    // after the write it read 6.8 ms against the 4.2 ms the same arithmetic
+    // takes in the default mode, which is a baseline that flatters every ratio
+    // computed from it.
+    thread::sleep(WAKE_SETTLE);
     let t0 = Instant::now();
     let checksum = work(WAKE_ROUNDS, 1);
     let solo = t0.elapsed();

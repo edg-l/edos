@@ -614,6 +614,80 @@ to spend a wakeup there is a real question and this leaves it conservative.
 `spawn_thread` still only IPIs the CPU it chose. Both are the same one-line
 extension; neither is measured.
 
+### Done: the priority buckets are EEVDF now (2026-08-15)
+
+The runqueue was sixteen strict-priority lists with an anti-starvation escape,
+and every pick handed out the same 5 ms. Both halves were wrong, and the second
+was worse than `doc/AUDIT.md` §4 claimed.
+
+**What the buckets actually did.** Strict order alone starves, so `pop_next`
+serviced a lower level every `STARVE_STREAK_LIMIT` picks — which fixed a real
+deadlock in 2026-08-08 and left a hole nobody had looked for. The escape went to
+the highest non-empty level **below the top**, so with three levels occupied on
+one runqueue the bottom was never reached at all. That is not a corner case: the
+default is 7, block I/O runs at 8, and an interrupt-priority wake landed at 9 or
+10. Measured on a CPU carrying an `IO_PRIORITY` kthread, seven priority levels
+bought **58x** of the CPU — not the fixed 2:1 the escape was thought to
+guarantee, and not a share at all.
+
+**What replaced it.** Each thread has a weight (1.25x per priority level), a
+virtual clock that advances at `delta * 1024 / weight`, and a virtual deadline
+of `vruntime + slice/weight`. `V` is the queue's weighted average; a thread
+behind it is *eligible*; the pick is the eligible thread with the earliest
+deadline. Starvation stops being a rule to maintain and becomes structural: a
+passed-over thread falls behind `V` and its deadline is already in the past.
+
+Three deliberate departures from Linux, all in `thread/runqueue.rs`:
+
+- **A linear scan, not an RB-tree.** Linux needs the tree because a runqueue can
+  hold thousands; one here holds single digits, and the pick it replaced was
+  already an O(16) walk of the buckets.
+- **`V` is recomputed each pick, not maintained.** Same reason `Scheduler::load`
+  is derived: it stays a fact about the queue rather than a running sum that
+  every enqueue, dequeue and steal must remember to adjust.
+- **The interrupt-wake boost is a shorter request, not a heavier weight.** The
+  buckets said "run this sooner" by lending two priority levels, which also
+  handed the thread a larger *share* for as long as it stayed runnable. A
+  smaller request is an earlier deadline and expires on its own.
+
+The slice became a per-thread request. `BASE_SLICE` is 1 ms, derived rather than
+picked: arming the APIC one-shot costs ~1 us because a hypervisor traps it, so
+1 ms keeps arming under 0.15%, and at ~13 ms per compositor frame it lets about
+thirteen runnable threads each take a turn per frame.
+
+**Measured.** Share now tracks weight — seven levels bought **4.84x** against
+the 4.77x the weight table asks for, a 1.5% error. The switch path got *faster*,
+because the old pick walked sixteen levels from the top and `pop_lower_than`
+walked back down every third one:
+
+| single-CPU boot | buckets | EEVDF |
+|---|---|---|
+| `sched_yield`, handover to a sibling thread | 365 ns | **290** |
+| `sched_yield`, handover to another process | 420 ns | **354** |
+| `sched_yield`, nothing else Ready | 255 ns | **235** |
+| pipe round trip, two processes | 2210 ns | 2174 |
+| `getpid` (control) | 81 ns | 83 |
+| pipe echo (control) | 422 ns | 427 |
+
+The two controls take no scheduler pick and did not move, which is what makes
+the rest attributable. Placement and throughput are unchanged: `balancebench`
+imbalance 1.00, wake fanout 1.99/2.01/2.05 against 1.97-2.03 before, and a solo
+lump of 152.3 ms against the 152 ms on record.
+
+Both gates were watched fail against the bucket scheduler, which is the whole
+reason the 58x above is a measurement rather than a theory: `weighted-share`
+(seven levels must buy more than 3x and less than 9x) and
+`starvation-three-levels` (three levels pinned to one CPU, the bottom must run).
+`thread/sched_test.rs`, 52 → 54 tests.
+
+**Not done, and deliberately.** Linux carries a task's *lag* across a sleep and
+hands it back on return; a thread here is placed at `V` with zero lag instead.
+That costs some responsiveness for a thread sleeping in short bursts, and buys
+immunity to the other side of it — a long sleeper returning with a large credit
+and monopolising a CPU until it is spent. Most of the responsiveness comes from
+the deadline anyway: a waking thread is eligible immediately. Adding lag means
+deciding its clamp and decay, and neither has an instrument here yet.
+
 ### The table above is stale in two rows, and one of them was a regression
 
 Re-measuring the whole of `switchbench` on 2026-08-14 against a comparably quiet

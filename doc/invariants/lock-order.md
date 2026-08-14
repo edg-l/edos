@@ -461,10 +461,12 @@ copy.
 
 A holder does not have to park to stall: preemption is involuntary, so any
 guard can be held by a `Ready` thread. What bounds that wait is the scheduler
-refusing to starve a runnable thread (`RunQueue::pop_next` services a lower
-level every `STARVE_STREAK_LIMIT` picks, and `Scheduler::expire_timeslice`
-ends a slice that has elapsed). Without both, a spin lock shared by threads at
-different priorities deadlocks outright: see
+refusing to starve a runnable thread. Under EEVDF that is structural rather than
+a rule anyone has to maintain: a thread passed over falls behind the runqueue's
+`V`, becoming *eligible*, and its virtual deadline is already in the past, so it
+wins the next pick outright. `Scheduler::expire_timeslice` still ends a slice
+that has elapsed, which is what makes the pick happen at all. Without both, a
+spin lock shared by threads at different priorities deadlocks outright: see
 `doc/bugs/2026-08-08-window-registry-stuck-reader.md`.
 
 Allocation still happens under both guards (`sys_window_list` builds its

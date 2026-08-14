@@ -101,9 +101,23 @@ struct TestHarness {
     load_parkers_ready: AtomicU32,
     load_spinners_ready: AtomicU32,
     load_check_done: AtomicBool,
+    // three-level starvation: the CPU all three are pinned to, and the same
+    // start/finish/progress sampling the two-level case uses
+    contend_cpu: u32,
+    tri_started: AtomicU32,
+    tri_finished: AtomicU32,
+    tri_progress: AtomicU64,
+    tri_progress_saturated: AtomicU64,
+    tri_progress_end: AtomicU64,
+    // weighted share: the window both threads count over, and their counts
+    share_started: AtomicU32,
+    share_deadline: AtomicU64,
+    share_finished: AtomicU32,
+    share_heavy: AtomicU64,
+    share_light: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 52;
+const TOTAL_TESTS: u32 = 54;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -154,6 +168,20 @@ pub fn run_sched_tests() {
         load_parkers_ready: AtomicU32::new(0),
         load_spinners_ready: AtomicU32::new(0),
         load_check_done: AtomicBool::new(false),
+        // The *lowest* registered lapic id. The affinity and load cases both
+        // pin to the highest ids, and these two saturate whatever CPU they land
+        // on, so they are put as far from those as the machine allows.
+        contend_cpu: SCHEDULERS.read().keys().copied().min().unwrap_or(0),
+        tri_started: AtomicU32::new(0),
+        tri_finished: AtomicU32::new(0),
+        tri_progress: AtomicU64::new(0),
+        tri_progress_saturated: AtomicU64::new(0),
+        tri_progress_end: AtomicU64::new(0),
+        share_started: AtomicU32::new(0),
+        share_deadline: AtomicU64::new(0),
+        share_finished: AtomicU32::new(0),
+        share_heavy: AtomicU64::new(0),
+        share_light: AtomicU64::new(0),
     });
 
     // --- Basic tests (8) ---
@@ -242,6 +270,38 @@ pub fn run_sched_tests() {
 
     // Load metric: threads parked on one CPU must not repel work from it (1)
     spawn_test(&harness, "test-load-parked", test_load_parked);
+
+    // Three occupied priority levels on one CPU: the bottom one must run (1)
+    let contend_mask = 1u32 << harness.contend_cpu;
+    for prio in [TRI_HIGH_PRIORITY, TRI_MID_PRIORITY] {
+        let boxed = Box::into_raw(Box::new((harness.clone(), prio as u64))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-tri-spin",
+            test_tri_spinner as *const () as u64,
+            boxed,
+            contend_mask,
+        );
+    }
+    {
+        let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-tri-victim",
+            test_tri_victim as *const () as u64,
+            boxed,
+            contend_mask,
+        );
+    }
+
+    // Weighted share: priority must buy CPU in proportion to weight (1)
+    for prio in [SHARE_HEAVY_PRIORITY, SHARE_LIGHT_PRIORITY] {
+        let boxed = Box::into_raw(Box::new((harness.clone(), prio as u64))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-share",
+            test_weighted_share as *const () as u64,
+            boxed,
+            contend_mask,
+        );
+    }
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -1312,4 +1372,161 @@ extern "C" fn test_coordinator(arg: *mut u8) -> ! {
         }
         thread_sleep(Duration::from_millis(100));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Three occupied priority levels on one CPU
+//
+// The two-level starvation case above cannot reach this. Strict levels with an
+// anti-starvation escape serviced the highest non-empty level *below* the top,
+// so with three levels occupied on one runqueue the escape always went to the
+// middle one and the bottom waited on an empty promise. Under EEVDF a passed
+// over thread falls behind V, becomes eligible, and its deadline is already in
+// the past — there is no level to be behind.
+//
+// All three are pinned to one CPU, which is what makes it three levels in one
+// runqueue rather than three runqueues with one level each.
+// ---------------------------------------------------------------------------
+
+const TRI_HIGH_PRIORITY: u8 = DEFAULT_PRIORITY + 3;
+const TRI_MID_PRIORITY: u8 = DEFAULT_PRIORITY + 2;
+const TRI_SPIN_MS: u64 = 300;
+const TRI_SPINNERS: u32 = 2;
+
+extern "C" fn test_tri_spinner(arg: *mut u8) -> ! {
+    let (h, priority) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
+    current_thread().unwrap().set_priority(priority as u8);
+
+    // The last spinner up marks the point where both upper levels are occupied.
+    if h.tri_started.fetch_add(1, Ordering::AcqRel) + 1 == TRI_SPINNERS {
+        h.tri_progress_saturated
+            .store(h.tri_progress.load(Ordering::Acquire), Ordering::Release);
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(TRI_SPIN_MS);
+    while Instant::now() < deadline {
+        core::hint::spin_loop();
+    }
+
+    // The first to finish ends the window, so the samples bracket only the
+    // stretch where every level above the victim was busy.
+    if h.tri_finished.fetch_add(1, Ordering::AcqRel) == 0 {
+        h.tri_progress_end
+            .store(h.tri_progress.load(Ordering::Acquire), Ordering::Release);
+    }
+    thread_exit(0);
+}
+
+extern "C" fn test_tri_victim(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    while h.tri_finished.load(Ordering::Acquire) < TRI_SPINNERS {
+        h.tri_progress.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+
+    let saturated = h.tri_progress_saturated.load(Ordering::Acquire);
+    let end = h.tri_progress_end.load(Ordering::Acquire);
+    assert!(
+        end > saturated,
+        "[sched-test] tri-starvation: the bottom of three occupied levels made no progress \
+         on cpu {} while {TRI_SPINNERS} spinners above it ran",
+        h.contend_cpu
+    );
+
+    test_done(&h, "starvation-three-levels");
+    thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Weighted share
+//
+// Two CPU-bound threads pinned to one CPU, seven priority levels apart, each
+// counting its own loop iterations over one window. The counts are the share.
+//
+// This is the thing the priority buckets could not express, and it is bounded
+// on both sides because they failed on both. In isolation the escape hatch gave
+// the upper thread two picks in three *whatever the gap*, so the answer was 2.0
+// for every pair and a 16-level dial had two settings — the lower bound catches
+// that. On a real machine it was worse: this CPU also carries suite threads at
+// IO_PRIORITY, and an escape that only ever serviced the highest level below
+// the top never reached the bottom one at all. Measured against the bucket
+// scheme, seven levels bought **58.55x** (heavy 35383060, light 604304), which
+// is not a share at all — the upper bound catches that.
+//
+// Seven levels is 1.25^7 = 4.77x of weight, and both bounds sit clear of it.
+//
+// The ratio is asserted rather than either count, because the rest of the suite
+// is running too. Interference costs both threads roughly in proportion and so
+// leaves the ratio alone, where it would move an absolute count freely.
+// ---------------------------------------------------------------------------
+
+const SHARE_HEAVY_PRIORITY: u8 = DEFAULT_PRIORITY + 7;
+const SHARE_LIGHT_PRIORITY: u8 = DEFAULT_PRIORITY;
+const SHARE_WINDOW_MS: u64 = 300;
+const SHARE_THREADS: u32 = 2;
+
+extern "C" fn test_weighted_share(arg: *mut u8) -> ! {
+    let (h, priority) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
+    let priority = priority as u8;
+    let heavy = priority == SHARE_HEAVY_PRIORITY;
+    current_thread().unwrap().set_priority(priority);
+
+    // The second thread up opens the window, so both count over the same one.
+    if h.share_started.fetch_add(1, Ordering::AcqRel) + 1 == SHARE_THREADS {
+        h.share_deadline.store(
+            (Instant::now() + Duration::from_millis(SHARE_WINDOW_MS)).as_nanos(),
+            Ordering::Release,
+        );
+    }
+    while h.share_deadline.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+
+    let deadline = h.share_deadline.load(Ordering::Acquire);
+    let counter = if heavy {
+        &h.share_heavy
+    } else {
+        &h.share_light
+    };
+    while Instant::now().as_nanos() < deadline {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // One of the two checks, after both have stopped counting.
+    if h.share_finished.fetch_add(1, Ordering::AcqRel) + 1 != SHARE_THREADS {
+        thread_exit(0);
+    }
+
+    let heavy_count = h.share_heavy.load(Ordering::Acquire);
+    let light_count = h.share_light.load(Ordering::Acquire).max(1);
+    // Scaled rather than floating point: the kernel is built soft-float.
+    let ratio_x100 = heavy_count.saturating_mul(100) / light_count;
+    assert!(
+        ratio_x100 > 300,
+        "[sched-test] weighted-share: {} levels apart bought {}.{:02}x of the CPU \
+         (heavy {heavy_count}, light {light_count}); 2.00x is priority as a pick order \
+         rather than a share",
+        SHARE_HEAVY_PRIORITY - SHARE_LIGHT_PRIORITY,
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+    );
+    assert!(
+        ratio_x100 < 900,
+        "[sched-test] weighted-share: {}.{:02}x is past the {}x the weight table asks for \
+         (heavy {heavy_count}, light {light_count}); the lower thread is being starved",
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+        4,
+    );
+
+    println!(
+        "[sched-test] weighted-share: {} levels bought {}.{:02}x of the CPU \
+         (heavy {heavy_count}, light {light_count}), weight table asks 4.77x",
+        SHARE_HEAVY_PRIORITY - SHARE_LIGHT_PRIORITY,
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+    );
+    test_done(&h, "weighted-share");
+    thread_exit(0);
 }

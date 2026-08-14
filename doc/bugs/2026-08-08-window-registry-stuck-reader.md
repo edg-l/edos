@@ -109,6 +109,14 @@ the kernel rather than to this one:
 - `RunQueue::pop_next` counts every pick, not just boosted ones, and services
   the highest non-empty lower level every `STARVE_STREAK_LIMIT` picks.
 
+> **Superseded, 2026-08-15.** The second of those no longer exists: the priority
+> buckets and their starvation escape were replaced by EEVDF, which cannot
+> starve a runnable thread by construction. The escape is also why it had to be
+> — it serviced only the highest non-empty level *below* the top, so with three
+> levels occupied the bottom one waited indefinitely, which the
+> `starvation-three-levels` sched-test now pins. The bound this post-mortem
+> needed still holds; the mechanism named here is history.
+
 Separately, `WINDOW_REGISTRY` and `WINDOW_EVENTS` are now `IrqRwLock`, holding
 their guards with interrupts disabled so the sections cannot be preempted at
 all. With the scheduler fixed that is no longer required for correctness; it

@@ -34,7 +34,7 @@ use crate::{
         context::CpuContext,
         irqlock::IrqSpinlock,
         preempt::{debug_assert_preemptible, preempt_enabled},
-        runqueue::RunQueue,
+        runqueue::{BASE_SLICE, LATENCY_SLICE, RunQueue},
         sched_prof::{self, Stage},
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id, record_thread_exit},
         util::pick_sched_for,
@@ -155,9 +155,20 @@ pub enum WakePriority {
 }
 
 impl WakePriority {
+    /// The service this wake asks for on the thread's behalf.
+    ///
+    /// An interrupt-priority wake asks for *less*, which is an earlier virtual
+    /// deadline and so a sooner turn. The priority buckets this replaces said
+    /// the same thing by lending the thread two levels, which also handed it a
+    /// larger share of the CPU for as long as it stayed runnable — a latency
+    /// request that quietly became a bandwidth one. A smaller request expires
+    /// on its own: the next deadline comes from the thread's own slice.
     #[inline]
-    const fn is_boosted(self) -> bool {
-        matches!(self, WakePriority::Interrupt)
+    fn request_ns(self, thread: &Thread) -> u64 {
+        match self {
+            WakePriority::Interrupt => LATENCY_SLICE.as_nanos() as u64,
+            WakePriority::Normal => thread.request_ns(),
+        }
     }
 }
 
@@ -177,9 +188,6 @@ pub struct Scheduler {
 
     // Current running thread id for this CPU.
     pub current: AtomicU64, // 0 means idle
-
-    // Time accounting
-    pub default_timeslice: Duration,
 
     sleepers: Mutex<BinaryHeap<SleepEntry, Min, 1024>>,
 
@@ -217,8 +225,9 @@ impl Scheduler {
                 thread.id.0,
                 state
             );
+            let request = priority.request_ns(thread);
             sc.with_rq(|rq| {
-                rq.enqueue(thread.clone(), thread.priority(), priority.is_boosted());
+                rq.enqueue_waking(thread.clone(), request);
             });
             sc.has_work.store(true, Ordering::Release);
             trace_event!(Enqueue {
@@ -273,7 +282,6 @@ impl Scheduler {
             },
             rq: Mutex::new(RunQueue::new()),
             current: AtomicU64::new(0),
-            default_timeslice: Duration::from_millis(5),
             sleepers: Mutex::new(BinaryHeap::new()),
             queued: AtomicU64::new(0),
             earliest_deadline: AtomicU64::new(u64::MAX),
@@ -330,6 +338,14 @@ impl Scheduler {
     /// Threads waiting in this CPU's runqueue, without the one running.
     pub fn queued(&self) -> u64 {
         self.queued.load(Ordering::Acquire)
+    }
+
+    /// This CPU's virtual clock: the point a thread on it has been served
+    /// exactly its share up to. Only comparable against itself — two CPUs'
+    /// clocks advance independently, which is why a migrated thread is
+    /// re-placed rather than carried over.
+    pub fn vtime(&self) -> u64 {
+        self.rq.lock().vtime()
     }
 
     /// Threads this CPU has taken from another's runqueue.
@@ -429,8 +445,7 @@ impl Scheduler {
                         "tick_finish: thread {} already linked before re-enqueue",
                         cur.id.0
                     );
-                    let priority = cur.priority();
-                    self.with_rq(|rq| rq.enqueue(cur.clone(), priority, false));
+                    self.with_rq(|rq| rq.enqueue(cur.clone()));
                     self.has_work.store(true, Ordering::Release);
                 }
                 self.pick_and_run(context);
@@ -461,7 +476,7 @@ impl Scheduler {
                 .map(|cur| cur.slice_deadline.load(Ordering::Acquire))
                 .filter(|deadline| *deadline > now.as_nanos())
                 .map(Instant::from_nanos);
-            let mut next = running_until.unwrap_or(now + self.default_timeslice);
+            let mut next = running_until.unwrap_or(now + BASE_SLICE);
             if ed != u64::MAX && ed != 0 {
                 let dl = Instant::from_nanos(ed);
                 if dl < next {
@@ -498,8 +513,8 @@ impl Scheduler {
                     t.id.0
                 );
                 t.state.store(State::Ready as u8, Ordering::Release);
-                let priority = t.priority();
-                self.with_rq(|rq| rq.enqueue(t, priority, false));
+                let request = t.request_ns();
+                self.with_rq(|rq| rq.enqueue_waking(t, request));
                 self.has_work.store(true, Ordering::Release);
                 self.mark_running_thread_need_resched();
             }
@@ -715,7 +730,7 @@ impl Scheduler {
         loop {
             let probe = sched_prof::now_ns();
             let next = self.with_rq(|rq| {
-                let item = rq.pop_next();
+                let item = rq.pick_next();
                 self.has_work.store(!rq.is_empty(), Ordering::Release);
                 item
             });
@@ -897,7 +912,9 @@ impl Scheduler {
 
         let now = Instant::now();
         next.begin_run(now.as_nanos());
-        let mut deadline = now + self.default_timeslice;
+        // The slice is what this thread asked for, not a quantum the
+        // scheduler hands out: see `thread::runqueue`.
+        let mut deadline = now + Duration::from_nanos(next.request_ns());
 
         let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
 
@@ -1088,7 +1105,8 @@ impl Scheduler {
             );
             thread.state.store(State::Ready as u8, Ordering::Release);
             thread.cpu.store(self.cpu, Ordering::Release);
-            self.with_rq(|rq| rq.enqueue(thread.clone(), thread.priority(), false));
+            let request = thread.request_ns();
+            self.with_rq(|rq| rq.enqueue_waking(thread.clone(), request));
             self.has_work.store(true, Ordering::Release);
             self.mark_running_thread_need_resched();
 
@@ -1135,28 +1153,14 @@ impl Scheduler {
                     return None;
                 }
 
-                // pop_back_any takes the lowest-priority tail thread.
-                let thread = rq.pop_back_any()?;
-
-                // Skip threads whose context hasn't been saved yet.
-                // This happens when a thread is enqueued (e.g. yield,
-                // park abort) before context_switch saves its registers.
-                if !thread.context_saved.load(Ordering::Acquire) {
-                    trace_event!(StealSkip {
-                        cpu: self.cpu,
-                        tid: thread.id.0
-                    });
-                    let prio = thread.priority();
-                    rq.enqueue(thread, prio, false);
-                    return None;
-                }
-                if !self.thread_can_run_here(&thread) {
-                    // Thread can't run on this CPU -- push it back.
-                    let prio = thread.priority();
-                    rq.enqueue(thread, prio, false);
-                    return None;
-                }
-                Some(thread)
+                // The least urgent thread this CPU is allowed to run, chosen
+                // in place. A thread whose context is not saved yet is not
+                // stealable: it was enqueued (by a yield or a park abort)
+                // before `context_switch` wrote its registers, so resuming it
+                // elsewhere would resume stale state.
+                rq.steal_victim(|thread| {
+                    thread.context_saved.load(Ordering::Acquire) && self.thread_can_run_here(thread)
+                })
             });
 
             // Don't touch victim.has_work here -- the victim updates it on its
@@ -1214,8 +1218,8 @@ impl Scheduler {
         });
         thread.cpu.store(self.cpu, Ordering::Release);
 
-        let prio = thread.priority();
-        self.with_rq(|rq| rq.enqueue(thread.clone(), prio, false));
+        let request = thread.request_ns();
+        self.with_rq(|rq| rq.enqueue_waking(thread.clone(), request));
         self.has_work.store(true, Ordering::Release);
 
         self.steal_count.fetch_add(1, Ordering::Relaxed);
@@ -1241,8 +1245,8 @@ impl Scheduler {
             let home_cpu = thread.cpu.load(Ordering::Acquire);
             let home = sched_for_cpu(home_cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            let prio = thread.priority();
-            home.with_rq(|rq| rq.enqueue(thread, prio, false));
+            let request = thread.request_ns();
+            home.with_rq(|rq| rq.enqueue_waking(thread, request));
             home.has_work.store(true, Ordering::Release);
             return false;
         }
@@ -1253,6 +1257,14 @@ impl Scheduler {
             tid: thread.id.0,
         });
         self.steal_count.fetch_add(1, Ordering::Relaxed);
+
+        // This path runs the thread without ever enqueuing it here, so it is
+        // the one migration that has to place the thread by hand. Its virtual
+        // clock is the victim CPU's and says nothing about this one: carried
+        // over unplaced, a thread stolen from a busy CPU would arrive far
+        // behind an idle CPU's `V` and hold it against everything that follows.
+        let request = thread.request_ns();
+        self.with_rq(|rq| rq.place(&thread, request));
 
         // context_switch_to overwrites the interrupt frame in-place.
         unsafe { self.context_switch_to(thread, context) };
@@ -1817,8 +1829,7 @@ extern "C" fn transition_yield(_arg: *mut u8) -> bool {
         return true;
     };
     if cur.cas_state(State::Running, State::Ready) {
-        let priority = cur.priority();
-        sched.with_rq(|rq| rq.enqueue(cur.clone(), priority, false));
+        sched.with_rq(|rq| rq.enqueue(cur.clone()));
         sched.has_work.store(true, Ordering::Release);
     }
     cur.flags

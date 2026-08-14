@@ -2632,7 +2632,9 @@ thread forever. Two defects made the wait unbounded, both now fixed:
   `pop_lower_than` only when `rq_boosted` was set, which happens for
   `WakePriority::Interrupt` wakes alone, so a high *base* priority thread
   starved everything below it. It now counts every pick and services the highest
-  non-empty lower level every `STARVE_STREAK_LIMIT`.
+  non-empty lower level every `STARVE_STREAK_LIMIT`. **That mechanism is gone as
+  of 2026-08-15**: EEVDF replaced the buckets, and the escape turned out to have
+  a hole of its own — see "Three occupied priority levels" below.
 
 The window-input kthread runs at priority 10 and user threads at 7, so a
 preempted guard holder behind that kthread was never picked again. The same
@@ -6881,3 +6883,38 @@ Two things worth copying:
 
 The scaffolding was suspect before the kernel was, which is the rule: the
 harness had been written in the same session, the kernel had not.
+
+## A benchmark's baseline was measured while the machine was still talking
+
+`balancebench wake` reports `median burst / solo`, and after the EEVDF change it
+read **1.31** where the bucket scheduler had read 2.00 — a headline improvement
+that was not real. The burst had barely moved (8.39 → 8.90 ms). The *solo* had
+gone from 4.16 ms to 6.80 ms, and a ratio flatters itself when its denominator
+grows.
+
+The solo was timed immediately after `out.line` wrote the run's header to
+`/dev/klog`, and that drain overlapped the first milliseconds of the lump. Every
+burst is timed after a 60 ms settle; the baseline was not, so the two were never
+comparable. Over the default mode's 152 ms lump the same interference is 1.7%
+and invisible, which is why it had never shown up before.
+
+**What caught it** was a cross-check inside the same run, not a rerun: the
+default mode measured 152.3 ms for `WORK_ROUNDS`, and `WAKE_ROUNDS` is exactly
+1/36.4 of it, so the wake solo should have been 4.19 ms. Two measurements of the
+same arithmetic disagreeing by 62% is a harness bug, and the 152.3 ms also
+matched the 152 ms already on record for the bucket era — which ruled out a real
+throughput regression in the same step. With the settle added the solo returned
+to 4.20/4.25/4.27 ms and the fanout to 1.99/2.01/2.05, i.e. unchanged.
+
+Two rules worth carrying:
+
+- **A ratio's baseline must be measured under the same conditions as its
+  numerator.** Settling before the measured burst but not before the baseline is
+  a bug even though it looks like care.
+- **Derive an expected value from another measurement in the same run.** A
+  benchmark that reports two things sized from the same constant can check
+  itself, and that is cheaper than rerunning and much cheaper than believing it.
+
+This is the second harness bug in the same file in one session; the first is
+"A benchmark reported 140x too good" above. Both produced numbers that were
+*better* than reality, which is the direction that gets published.
