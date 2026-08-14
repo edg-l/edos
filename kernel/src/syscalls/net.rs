@@ -313,8 +313,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
                     return 0;
                 }
                 TcpState::Closed => {
-                    net_stack()
-                        .lock()
+                    ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack())
                         .tcp_connections
                         .remove(&(local_sa, remote_sa));
                     ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).tcp_conn = None;
@@ -347,8 +346,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
             0
         } else {
             // Connection failed, clean up
-            net_stack()
-                .lock()
+            ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack())
                 .tcp_connections
                 .remove(&(local_sa, remote_sa));
             ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).tcp_conn = None;
