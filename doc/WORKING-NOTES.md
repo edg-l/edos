@@ -1510,9 +1510,9 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,496 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 49,913 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,324 | `git rev-list --count HEAD` |
+| Rust | 101,495 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 49,912 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,326 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 152, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -2370,6 +2370,20 @@ trusted on the strength of one green run.
 The two runtime-hostile features are still only compile-checked, which is all
 this gate claims: `lock-order-self-test-inversion` panics by design, and
 `sched-test` has `make test-headless` for the runtime half.
+
+`trace` itself was then watched work, which is worth recording because the dump
+only ever runs from the panic handler and there is no obvious way to reach it on
+purpose. Combining the two features is the way: the inversion self-test panics
+by design, so its panic dumps the ring.
+
+```
+make edos-x86_64.iso CARGO_FLAGS="--features trace,lock-order-self-test-inversion"
+scripts/edos-vm start --smp 1     # NOT --no-cdrom: Limine is on the ISO,
+                                  # and sata-disk.img alone is not bootable
+```
+
+`run_log.txt` then carries `=== TRACE DUMP ===`, one `--- CPU n ---` block per
+CPU that recorded anything, and `=== END TRACE ===` ahead of the backtrace.
 
 ## Three defects the overnight run's own code review missed
 
