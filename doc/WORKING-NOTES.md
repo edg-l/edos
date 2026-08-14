@@ -1510,9 +1510,9 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,495 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 49,912 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,322 | `git rev-list --count HEAD` |
+| Rust | 101,496 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 49,913 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,324 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 152, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -1542,9 +1542,18 @@ count and a `filesystem/bin` count therefore differ by more than `edos-edit`
 leaving the image.
 
 The project site at `/usr/src/edos-web` is a separate repo carrying the same
-numbers, and it drifts on its own. It agrees with the table above as of 873535b,
-where its syscall inventory was set-diffed against the kernel's and came back
-empty both ways, and its program list against `filesystem/bin` the same. The
+numbers, and it drifts on its own. It agrees with the table above as of its
+commit for repo 20b54c1, where its syscall inventory was set-diffed against the
+kernel's and came back empty both ways, and its program list against
+`filesystem/bin` the same.
+
+Its line counts drift faster than its inventories, and for a reason worth
+knowing: deleting dead code moves the LOC figure on every commit while adding
+neither a program nor a syscall, so a session that touches no interface at all
+still leaves the site's tree table wrong. Clearing the warning-gate opt-outs cost
+430 lines and four files across four commits with both inventories flat. Reread
+the four line figures whenever the repo's own table moves, even when nothing
+user-visible changed. The
 three names the site carries that `/bin` does not are explained on the page
 itself: `edos-sh` and `edos-vi` install as `sh` and `vi`, and `edos-edit` is
 published to the package repository rather than installed to the image.
