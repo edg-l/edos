@@ -182,9 +182,21 @@ elsewhere.
 
 ### 3.2 Does EDOS want `fork`?
 
-**No, and it nearly does not have it.** This is the strongest novelty
-opportunity in the list because the work is small and the position is already
-half-taken.
+**Yes — `fork` stays.** Edgar's call, and it settles a question this section had
+left open rather than answered. What follows is the case that was made for
+removing it, kept because the facts in it are worth having and because the next
+reader deserves to see what was weighed rather than only the verdict.
+
+Two things follow from keeping it. Stage 2 of the libc work is **not** blocked
+on this decision, so the pressure this section put on that schedule is gone. And
+the open pgid-inheritance bug — `do_spawn` does not copy the spawner's group
+where both `fork` paths do — has to be fixed on its own, since it was going to
+be deleted along with `fork` rather than repaired.
+
+---
+
+The case that was made, and rejected: **EDOS nearly does not have `fork`
+already.** The work is small and the position is half-taken by accident.
 
 What stands in the way is two `edos-sh` features: background jobs and subshells.
 Both are solvable without `fork` — a background job needs `spawn` plus a
@@ -199,9 +211,10 @@ inheritance bug that is still open. That is a large, load-bearing subsystem
 removed in exchange for two shell features, and it makes a defensible claim:
 *EDOS is a Unix-shaped system with no `fork`.*
 
-The honest cost: `fork` is what a lot of ported C software expects, and stage 2
-of the libc work is about running ported C software. Those pull in opposite
-directions and the decision cannot be deferred past stage 2.
+The honest cost, and the one that decided it: `fork` is what a lot of ported C
+software expects, and stage 2 of the libc work is about running ported C
+software. Those pull in opposite directions, and running other people's software
+is worth more to this system than the claim.
 
 ### 3.3 Is the fd table the right abstraction, or handles/capabilities?
 
@@ -211,8 +224,11 @@ syscall and every program, and the benefit — least privilege by construction �
 is not something anything in the tree currently wants. Revisit only if EDOS ever
 wants to run untrusted code.
 
-Worth taking the cheap half: `fork`'s inherit-by-default is the concrete
-least-privilege violation here, and 3.2 removes it without a capability system.
+`fork`'s inherit-by-default is the concrete least-privilege violation here, and
+§3.2 would have removed it without a capability system — but `fork` stays, so it
+stays too. Nothing in the tree runs untrusted code, so it is a blemish on the
+model rather than an exposure; `SYS_SPAWN2` already passes descriptors
+explicitly, which is the shape to prefer for anything new.
 
 ### 3.4 Where could the type system replace a hardware mechanism?
 
@@ -281,18 +297,16 @@ In order:
    than `thread_count` is the one that changes behaviour most — and take the
    structural step at the same time: a scheduler behind an interface, chosen at
    boot or at runtime, so a policy is a thing you write rather than a patch.
-2. **Delete `fork`.** Highest ratio of claim to work in this document, and the
-   only item where EDOS is already most of the way to a position the literature
-   argues for. Removes COW, a fixed security bug's whole class, and an open pgid
-   bug. Decide before stage 2 of the libc work, because ported C software is the
-   counter-pressure.
-3. **Draw a framekernel line.** Not a rewrite: an audit of the 824 `unsafe`
+2. **Draw a framekernel line.** Not a rewrite: an audit of the 824 `unsafe`
    sites into privileged and incidental, and a rule that new code outside the
    privileged set is safe Rust. Measure the ratio and publish it; Asterinas's
    14.0% is the number to be compared against.
-4. **Name the mechanism/policy seam.** The window system already follows it and
+3. **Name the mechanism/policy seam.** The window system already follows it and
    nobody has written it down as a principle. Item 1 is the biggest instance;
    writeback thresholds and readahead are the next candidates.
+
+Deleting `fork` was ranked second here and is no longer on the list; §3.2 keeps
+the analysis and records why.
 
 ### What to say no to
 
