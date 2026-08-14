@@ -521,12 +521,10 @@ impl NetStack {
     }
 
     pub fn is_local_subnet(&self, ip: &[u8; 4]) -> bool {
-        for i in 0..4 {
-            if (ip[i] & self.subnet_mask[i]) != (self.local_ip[i] & self.subnet_mask[i]) {
-                return false;
-            }
-        }
-        true
+        ip.iter()
+            .zip(&self.subnet_mask)
+            .zip(&self.local_ip)
+            .all(|((o, mask), local)| (o & mask) == (local & mask))
     }
 
     pub fn mac(&self) -> [u8; 6] {

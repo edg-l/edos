@@ -1,4 +1,5 @@
 //! HDA codec discovery and configuration.
+#![allow(clippy::unusual_byte_groupings)]
 
 use super::HdaController;
 use crate::log;
@@ -7,7 +8,6 @@ use alloc::string::String;
 // HDA verb helpers (12-bit verb ID + 8-bit payload format)
 // The literals are grouped verb-then-payload, which is what the hardware encoding
 // means; equal-sized groups would hide it.
-#[allow(clippy::unusual_byte_groupings)]
 const GET_PARAM: u32 = 0xF00_00; // Get Parameter (verb 0xF00, param in low 8 bits)
 const SET_POWER_STATE: u32 = 0x705_00; // Set Power State
 const SET_STREAM_FORMAT: u32 = 0x200_00; // Set Converter Format (verb 0x200)

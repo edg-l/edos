@@ -302,9 +302,7 @@ impl WindowRegistry {
     /// Minimizing the focused window hands focus to whatever is left, since a
     /// window the user cannot see must not keep the keyboard.
     pub fn set_minimized(&mut self, id: WindowId, minimized: bool) -> Option<WindowId> {
-        let Some(window) = self.windows.get_mut(&id) else {
-            return None;
-        };
+        let window = self.windows.get_mut(&id)?;
         if window.minimized == minimized {
             return None;
         }

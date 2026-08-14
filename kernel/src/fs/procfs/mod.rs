@@ -380,7 +380,7 @@ impl Procfs {
         // Averages are the point of the file: a commit's cost is what the
         // fsync-per-write row of fsbench pays, and blocks per command is how
         // much of the batch the drive sees at once.
-        let per = |total: u64| if commits == 0 { 0 } else { total / commits };
+        let per = |total: u64| total.checked_div(commits).unwrap_or(0);
         // Summed over every mounted journal, the way the counters above are.
         let (sealed, pending, tracked) = BlockPageCache::global().all_journals().iter().fold(
             (0usize, 0usize, 0usize),
@@ -410,11 +410,10 @@ impl Procfs {
             per(ring_blocks),
             // The commit block is its own FUA command and is not part of the
             // batch, so it comes off both sides of this ratio.
-            if commands == 0 {
-                0
-            } else {
-                ring_blocks.saturating_sub(commits) / commands
-            },
+            ring_blocks
+                .saturating_sub(commits)
+                .checked_div(commands)
+                .unwrap_or(0),
             sealed,
             pending,
             tracked,

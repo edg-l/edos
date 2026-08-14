@@ -273,8 +273,7 @@ impl VirtioGpuDisplay {
             return;
         }
 
-        let mut src_row = src_offset_y;
-        for dst_y in start_y..end_y {
+        for (src_row, dst_y) in (src_offset_y..).zip(start_y..end_y) {
             let src_start = src_row * src_width + src_offset_x;
             let dst_start = dst_y * pixels_per_row + start_x;
             unsafe {
@@ -284,7 +283,6 @@ impl VirtioGpuDisplay {
                     row_len,
                 );
             }
-            src_row += 1;
         }
     }
 
@@ -572,8 +570,7 @@ impl DirectFramebuffer {
 
         if self.is_identity {
             // Fast path: memcpy rows directly to framebuffer
-            let mut src_row = src_offset_y;
-            for dst_y in start_y..end_y {
+            for (src_row, dst_y) in (src_offset_y..).zip(start_y..end_y) {
                 let src_start = src_row * src_width + src_offset_x;
                 let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
 
@@ -584,8 +581,6 @@ impl DirectFramebuffer {
                         row_len,
                     );
                 }
-
-                src_row += 1;
             }
         } else {
             // Slow path: per-pixel LUT color conversion.
@@ -595,13 +590,15 @@ impl DirectFramebuffer {
             let blue_lut = &self.blue_lut;
             let conv = &mut self.converted_row_buffer[..row_len];
 
-            let mut src_row = src_offset_y;
-            for dst_y in start_y..end_y {
+            for (src_row, dst_y) in (src_offset_y..).zip(start_y..end_y) {
                 let src_start = src_row * src_width + src_offset_x;
                 let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
 
-                for i in 0..row_len {
-                    let rgb = src[src_start + i];
+                for (i, rgb) in src[src_start..src_start + row_len]
+                    .iter()
+                    .copied()
+                    .enumerate()
+                {
                     let r = ((rgb >> 16) & 0xFF) as usize;
                     let g = ((rgb >> 8) & 0xFF) as usize;
                     let b = (rgb & 0xFF) as usize;
@@ -615,8 +612,6 @@ impl DirectFramebuffer {
                         row_len,
                     );
                 }
-
-                src_row += 1;
             }
         }
     }

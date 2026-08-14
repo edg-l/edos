@@ -7086,7 +7086,7 @@ The general rule the menu makes concrete: a launcher entry is only real if the
 program it names does something useful with the arguments the launcher can
 give it. Check that before adding the row.
 
-## Kernel clippy went 199 warnings to 33, and `cargo fix` needs two things
+## Kernel clippy went 199 warnings to 0, and `cargo fix` needs two things
 
 `cargo clippy --fix` on this crate does nothing at all under normal conditions,
 and reports success while doing it. Two separate reasons:
@@ -7124,7 +7124,19 @@ reason:
 - **`large_enum_variant`**, **`too_many_arguments`** and **`module_inception`**
   are all cases where the fix moves the same complexity one level out.
 
-What is left is 33 warnings, all needing real thought rather than a rewrite:
-`needless_range_loop` over hardware tables, `manual_memcpy` in FAT32 writes,
-`type_complexity` on `read_thread_info`'s return tuple, and the loop-counter
-lints in `graphics`.
+The last 33 were hand-written, and only two of them were not mechanical:
+
+- **The FAT32 LFN write is not `copy_from_slice`.** Clippy's `manual_memcpy`
+  suggestion for `entry.name1[i] = chunk[i]` does not compile: `LfnEntry` is
+  `#[repr(packed)]`, and `copy_from_slice` needs a `&mut [u16]` to a field that
+  is not guaranteed aligned (E0793). Assign the whole array instead --
+  `entry.name1 = chunk[..5].try_into().unwrap()` -- which is a place expression
+  and takes no reference.
+- **`lock_order.rs`'s rank table was a `///` block on `RANK_VFS`.** The
+  `empty_lines_after_doc_comment` warning was the symptom; the table documents
+  the module, so it is `//!` now. A `///` block separated from the item below it
+  by a blank line silently documents whatever comes next, which is how a
+  50-line table ended up as the doc comment of a single `u16`.
+
+Both `cargo clippy --target x86_64-unknown-none` and the same with
+`--features sched-test` are clean, and the gate is worth keeping that way.

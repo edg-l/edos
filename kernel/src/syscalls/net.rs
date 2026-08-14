@@ -658,9 +658,9 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
     // Register in port table under TCP protocol if not already present
     if let Some(local_addr) = local_addr {
         let mut table = ranked_lock!(RANK_PORT_TABLE, "sys_listen", port_table());
-        if !table.contains_key(&(6u8, local_addr.port)) {
-            table.insert((6u8, local_addr.port), sock_arc.clone());
-        }
+        table
+            .entry((6u8, local_addr.port))
+            .or_insert_with(|| sock_arc.clone());
     }
 
     let mut s = ranked_lock!(RANK_SOCKET, "sys_listen", sock_arc);

@@ -1,59 +1,59 @@
 // Atomics are accessed from both debug and release builds (always-exported).
 
-/// Lock-order rank constants and per-thread enforcement infrastructure.
-///
-/// # Invariant
-///
-/// Every thread that acquires two or more ranked locks must do so in strictly
-/// increasing rank order (lower rank number acquired first). Violations are
-/// caught at acquisition time via a debug-only per-thread rank stack.
-///
-/// # Rank table (see `doc/invariants/lock-order.md` for full details)
-///
-/// | Rank | Lock                                  |
-/// |-----:|---------------------------------------|
-/// |   10 | `VFS` mount registry                  |
-/// |   30 | `inode.lock` (per-inode)              |
-/// |   31 | `EfsDriver.inode_rmw`                 |
-/// |   32 | `EfsDriver.bitmap_mutex`              |
-/// |   35 | `dentry_cache.inner`                  |
-/// |   36 | `INODE_CACHE`                         |
-/// |   40 | `inode.pages.pages`                   |
-/// |   42 | `InodePages.in_flight`                |
-/// |   50 | `inode.pages.dirty_keys`              |
-/// |   60 | `inode.mappers`                       |
-/// |   70 | `UserThread.vmas`                     |
-/// |   80 | `UserThread.memory_manager`           |
-/// |   90 | `SHARED_MEMORY_REGISTRY`              |
-/// |  100 | `DIRTY_INODES`                        |
-/// |  110 | `BlockPageCache.shards[N]`            |
-/// |  120 | `BlockPageCache.journals`             |
-/// |  130 | `Journal.checkpoint_tracker`          |
-/// |  140 | `CachedBlockPage.write_lock`          |
-/// |  150 | `Journal.state`                       |
-/// |  160 | `EfsDriver.mutable`                   |
-/// |  170 | `AhciPort.legacy_lock`                |
-/// |  180 | `AhciPort.slot_waiters[i]`            |
-/// |  190 | `AhciPort.mmio_lock`                  |
-/// |  200 | `PCI_CONFIG_LOCK`                     |
-/// |  204 | `Mailbox.queue`                       |
-/// |  206 | `ResponseInner.value`                 |
-/// |  210 | `TTY_BUFFER`                          |
-/// |  220 | `Pipe` (per-pipe)                     |
-/// |  230 | `Pty` (per-pty)                       |
-/// |  240 | `NET_STACK`                           |
-/// |  250 | `PORT_TABLE`                          |
-/// |  260 | `Socket` (per-socket)                 |
-/// |  270 | `TcpConnection` (per-connection)      |
-/// |  280 | `WINDOW_REGISTRY`                     |
-/// |  290 | `WINDOW_EVENTS`                       |
-/// |  300 | `LAST_MOUSE_BUTTONS`                  |
-/// |  310 | `Broadcaster.subs`                    |
-/// |  320 | device poller lists                   |
-/// |  330 | `HdaPlaybackState`                    |
-/// |  340 | `DevFs.shared`                        |
-/// |  900 | kernel-global mapper                  |
-/// |  910 | `FRAME_ALLOCATOR`                     |
+//! Lock-order rank constants and per-thread enforcement infrastructure.
+//!
+//! # Invariant
+//!
+//! Every thread that acquires two or more ranked locks must do so in strictly
+//! increasing rank order (lower rank number acquired first). Violations are
+//! caught at acquisition time via a debug-only per-thread rank stack.
+//!
+//! # Rank table (see `doc/invariants/lock-order.md` for full details)
+//!
+//! | Rank | Lock                                  |
+//! |-----:|---------------------------------------|
+//! |   10 | `VFS` mount registry                  |
+//! |   30 | `inode.lock` (per-inode)              |
+//! |   31 | `EfsDriver.inode_rmw`                 |
+//! |   32 | `EfsDriver.bitmap_mutex`              |
+//! |   35 | `dentry_cache.inner`                  |
+//! |   36 | `INODE_CACHE`                         |
+//! |   40 | `inode.pages.pages`                   |
+//! |   42 | `InodePages.in_flight`                |
+//! |   50 | `inode.pages.dirty_keys`              |
+//! |   60 | `inode.mappers`                       |
+//! |   70 | `UserThread.vmas`                     |
+//! |   80 | `UserThread.memory_manager`           |
+//! |   90 | `SHARED_MEMORY_REGISTRY`              |
+//! |  100 | `DIRTY_INODES`                        |
+//! |  110 | `BlockPageCache.shards[N]`            |
+//! |  120 | `BlockPageCache.journals`             |
+//! |  130 | `Journal.checkpoint_tracker`          |
+//! |  140 | `CachedBlockPage.write_lock`          |
+//! |  150 | `Journal.state`                       |
+//! |  160 | `EfsDriver.mutable`                   |
+//! |  170 | `AhciPort.legacy_lock`                |
+//! |  180 | `AhciPort.slot_waiters[i]`            |
+//! |  190 | `AhciPort.mmio_lock`                  |
+//! |  200 | `PCI_CONFIG_LOCK`                     |
+//! |  204 | `Mailbox.queue`                       |
+//! |  206 | `ResponseInner.value`                 |
+//! |  210 | `TTY_BUFFER`                          |
+//! |  220 | `Pipe` (per-pipe)                     |
+//! |  230 | `Pty` (per-pty)                       |
+//! |  240 | `NET_STACK`                           |
+//! |  250 | `PORT_TABLE`                          |
+//! |  260 | `Socket` (per-socket)                 |
+//! |  270 | `TcpConnection` (per-connection)      |
+//! |  280 | `WINDOW_REGISTRY`                     |
+//! |  290 | `WINDOW_EVENTS`                       |
+//! |  300 | `LAST_MOUSE_BUTTONS`                  |
+//! |  310 | `Broadcaster.subs`                    |
+//! |  320 | device poller lists                   |
+//! |  330 | `HdaPlaybackState`                    |
+//! |  340 | `DevFs.shared`                        |
+//! |  900 | kernel-global mapper                  |
+//! |  910 | `FRAME_ALLOCATOR`                     |
 
 // ---- Rank constants ---------------------------------------------------------
 

@@ -273,7 +273,7 @@ impl WaitQueue {
         if let Some(chosen) = action {
             match chosen {
                 SleepAction::Park => {
-                    thread_park_while(|| !ready() && !(killable && current_thread_killed()));
+                    thread_park_while(|| !(ready() || killable && current_thread_killed()));
                 }
                 SleepAction::Sleep(dt) => {
                     let deadline = Instant::now() + dt;

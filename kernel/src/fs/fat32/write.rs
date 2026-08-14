@@ -820,15 +820,11 @@ fn build_lfn_entries(name: &str, checksum: u8) -> Vec<[u8; 32]> {
             entry.order |= 0x40;
         }
 
-        for i in 0..5 {
-            entry.name1[i] = chunk[i];
-        }
-        for i in 0..6 {
-            entry.name2[i] = chunk[5 + i];
-        }
-        for i in 0..2 {
-            entry.name3[i] = chunk[11 + i];
-        }
+        // Field-at-a-time assignment: the struct is `packed`, so a `&mut` to any
+        // of these arrays (what `copy_from_slice` needs) would be unaligned.
+        entry.name1 = chunk[..5].try_into().unwrap();
+        entry.name2 = chunk[5..11].try_into().unwrap();
+        entry.name3 = chunk[11..13].try_into().unwrap();
 
         entries.push(bytemuck::cast(entry));
     }

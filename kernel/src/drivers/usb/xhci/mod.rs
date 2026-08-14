@@ -1797,7 +1797,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     unsafe {
                                         core::ptr::copy_nonoverlapping(
                                             data.as_ptr(),
-                                            buf.as_ptr() as *mut u8,
+                                            buf.as_ptr(),
                                             copy_len,
                                         );
                                     }

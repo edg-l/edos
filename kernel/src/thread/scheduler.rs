@@ -512,8 +512,7 @@ impl Scheduler {
         // Stale = not Sleeping (already woken, died, etc.).
         // We drain all stale entries at the top first, then process expired ones,
         // continuing to skip stale entries encountered along the way.
-        loop {
-            let Some(top) = sl.peek() else { break };
+        while let Some(top) = sl.peek() {
             // Drain stale entries regardless of deadline.
             if top.thread.state() != State::Sleeping {
                 sl.pop();

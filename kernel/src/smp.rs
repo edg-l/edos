@@ -42,12 +42,11 @@ static CPU_COUNT: AtomicU32 = AtomicU32::new(0);
 pub fn current_cpu_index() -> usize {
     let my_lapic = get_percpu_data().lapic_id.get();
     let count = cpu_count();
-    for i in 0..count {
-        if CPU_LAPIC_IDS[i].load(Ordering::Relaxed) == my_lapic {
-            return i;
-        }
-    }
-    0
+    CPU_LAPIC_IDS
+        .iter()
+        .take(count)
+        .position(|id| id.load(Ordering::Relaxed) == my_lapic)
+        .unwrap_or(0)
 }
 
 /// Returns the bitmask of all currently online CPUs.

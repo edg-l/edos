@@ -150,7 +150,7 @@ impl Pipe {
         if self.readers == 0 {
             return true; // not room, but the write is about to fail
         }
-        let want = len.min(PIPE_BUF).max(1);
+        let want = len.clamp(1, PIPE_BUF);
         self.space() >= want
     }
 

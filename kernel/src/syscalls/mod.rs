@@ -1026,10 +1026,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let handler = ctx.rsi;
             let restorer = ctx.rdx;
             let info = current_thread_info();
-            if signum == 0 || signum >= 32 || signal::is_uncatchable(signum) {
-                info.lock().errno = Errno::EINVAL;
-                ctx.rax = !0u64;
-            } else if handler > signal::SIG_IGN && restorer == 0 {
+            if signum == 0
+                || signum >= 32
+                || signal::is_uncatchable(signum)
+                || (handler > signal::SIG_IGN && restorer == 0)
+            {
                 info.lock().errno = Errno::EINVAL;
                 ctx.rax = !0u64;
             } else if let Some(cur_thread) = current_thread() {
@@ -1756,10 +1757,7 @@ fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> u64 {
     let deadline =
         crate::timer::Instant::now() + Duration::new(req.tv_sec as u64, req.tv_nsec as u32);
 
-    loop {
-        let Some(remaining) = deadline.checked_duration_since(crate::timer::Instant::now()) else {
-            break;
-        };
+    while let Some(remaining) = deadline.checked_duration_since(crate::timer::Instant::now()) {
         if remaining.is_zero() {
             break;
         }

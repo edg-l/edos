@@ -419,7 +419,7 @@ impl UsbMassStorage {
         // 3. Read CSW on bulk IN using the pre-allocated buffer.
         let csw_phys = self.csw_buf.phys_addr().as_u64();
         unsafe {
-            core::ptr::write_bytes(self.csw_buf.as_ptr() as *mut u8, 0, 13);
+            core::ptr::write_bytes(self.csw_buf.as_ptr(), 0, 13);
         }
         controller.bulk_transfer(self.slot_id, in_ring, self.ep_in_dci, csw_phys, 13, true)?;
 

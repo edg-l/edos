@@ -554,8 +554,8 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
             let last_slot = (effective_end.as_u64() - vma.start.as_u64()).div_ceil(4096) as usize;
             let last_slot = last_slot.min(pages.len());
 
-            for slot in first_slot..last_slot {
-                if let Some(page) = &pages[slot]
+            for (slot, entry) in pages.iter().enumerate().take(last_slot).skip(first_slot) {
+                if let Some(page) = entry
                     && page.is_dirty()
                 {
                     let page_idx = (file_offset + slot as u64 * 4096) / 4096;

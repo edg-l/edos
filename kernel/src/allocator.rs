@@ -80,9 +80,9 @@ impl SizeClassCache {
     fn drain_batch(&mut self) -> ([*mut u8; BATCH], usize) {
         let n = self.count.min(BATCH);
         let mut out = [core::ptr::null_mut(); BATCH];
-        for i in 0..n {
+        for slot in out.iter_mut().take(n) {
             self.count -= 1;
-            out[i] = self.stack[self.count];
+            *slot = self.stack[self.count];
         }
         (out, n)
     }
@@ -223,9 +223,9 @@ impl Allocator {
             let mut last = None;
             for _ in 0..BATCH {
                 if let Ok(block) = heap.alloc(sc_layout) {
-                    if last.is_some() {
+                    if let Some(prev) = last {
                         // Push previous into cache.
-                        let _ = cache.caches[idx].try_push(last.unwrap());
+                        let _ = cache.caches[idx].try_push(prev);
                     }
                     last = Some(block.as_ptr());
                 } else {
@@ -262,9 +262,9 @@ impl Allocator {
             // Return drained objects to global heap.
             let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
             let mut heap = self.inner.lock();
-            for i in 0..n {
+            for ptr in drained.iter().take(n) {
                 unsafe {
-                    heap.dealloc(NonNull::new_unchecked(drained[i]), sc_layout);
+                    heap.dealloc(NonNull::new_unchecked(*ptr), sc_layout);
                 }
             }
 

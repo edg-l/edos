@@ -215,11 +215,9 @@ pub unsafe fn try_copy_string_from_user(
         return Err(UAccessError::Fault);
     }
 
-    let mut len = 0;
-
-    for i in 0..max_len {
+    for len in 0..max_len {
         let mut byte: u8 = 0;
-        if !unsafe { try_copy_from_user(&mut byte as *mut u8, src.add(i), 1) } {
+        if !unsafe { try_copy_from_user(&mut byte as *mut u8, src.add(len), 1) } {
             return Err(UAccessError::Fault);
         }
 
@@ -227,8 +225,7 @@ pub unsafe fn try_copy_string_from_user(
             return Ok(len);
         }
 
-        unsafe { dst.add(i).write(byte) };
-        len += 1;
+        unsafe { dst.add(len).write(byte) };
     }
 
     // String too long - no null terminator found

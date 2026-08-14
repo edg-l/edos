@@ -1192,8 +1192,8 @@ extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
 
     // Also use a stack-allocated array to detect stack corruption.
     let mut stack_canary: [u64; 8] = [0; 8];
-    for i in 0..8 {
-        stack_canary[i] = 0xDEAD_BEEF_0000_0000u64 + seed * 8 + i as u64;
+    for (i, slot) in stack_canary.iter_mut().enumerate() {
+        *slot = 0xDEAD_BEEF_0000_0000u64 + seed * 8 + i as u64;
     }
 
     for i in 0u64..500 {
@@ -1220,13 +1220,11 @@ extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
     }
 
     // Verify stack canary wasn't corrupted
-    for i in 0..8 {
+    for (i, got) in stack_canary.iter().copied().enumerate() {
         let expected = 0xDEAD_BEEF_0000_0000u64 + seed * 8 + i as u64;
         assert!(
-            stack_canary[i] == expected,
-            "[sched-test] compute: stack canary corrupted at [{i}]: got {:#x}, expected {:#x}",
-            stack_canary[i],
-            expected
+            got == expected,
+            "[sched-test] compute: stack canary corrupted at [{i}]: got {got:#x}, expected {expected:#x}"
         );
     }
 

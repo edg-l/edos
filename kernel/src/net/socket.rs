@@ -1,4 +1,5 @@
 use crate::thread::preempt::PreemptSpinlock as Mutex;
+use alloc::collections::btree_map::Entry;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -329,8 +330,8 @@ pub fn allocate_ephemeral_port(protocol: u8, sock: Arc<Mutex<Socket>>) -> Option
     for _ in 0..1000 {
         let raw = EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
         let port = EPHEMERAL_START + (raw % EPHEMERAL_RANGE);
-        if !table.contains_key(&(protocol, port)) {
-            table.insert((protocol, port), sock);
+        if let Entry::Vacant(e) = table.entry((protocol, port)) {
+            e.insert(sock);
             return Some(port);
         }
     }

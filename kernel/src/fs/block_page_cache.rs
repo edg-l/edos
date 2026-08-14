@@ -727,13 +727,13 @@ impl BlockPageCache {
         let mut miss_indices: Vec<usize> = Vec::new();
 
         // Check cache for each page.
-        for i in 0..count {
+        for (i, guard) in guards.iter_mut().enumerate() {
             let key = (device_id, start_page + i as u64);
             let si = shard_index(key);
             let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             if let Some(page) = shard.lru.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                guards[i] = Some(BlockPageGuard::new(Arc::clone(page)));
+                *guard = Some(BlockPageGuard::new(Arc::clone(page)));
             } else {
                 miss_indices.push(i);
             }
