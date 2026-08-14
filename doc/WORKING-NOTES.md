@@ -7027,3 +7027,35 @@ scroll costs a blit. Two things it does that are not obvious:
 The theme has no italic face. `<i>`/`<em>` without `<b>` borrows
 `title_accent` rather than being silently dropped, which is the honest
 degradation until a face exists.
+
+## Links are clickable, and a rename now repaints the title bar
+
+`edos-web` follows a link on a left click and goes back on Backspace or the
+`< Back` button in its header. Two pieces make that work, and one of them was a
+window-manager bug that had nothing to do with the browser.
+
+**Hit testing reuses the fragments the draw pass measured.** `Layout::link_at`
+in `view.rs` takes page coordinates -- window coordinates with the header
+removed and the scroll added back -- and finds the line whose band contains the
+y, then the fragment whose x range contains the x. There is no separate metric,
+which is the point: a proportional face makes any second opinion about where a
+word sits wrong at the first glyph that is not a fixed cell wide.
+
+**The back button keeps its slot when it is disabled.** Drawing it only when
+there is history would move the title sideways on the first navigation, under a
+pointer that is about to click.
+
+**A window that renames itself left a stale title in its frame.** The
+compositor draws `window.title_str()` fresh every frame, so the title was never
+the problem: `PrevWindowState` in `edos-wm/src/main.rs` did not record it, and
+a rename moves nothing, resizes nothing and changes no focus. The client's own
+damage report then took the `reported_region` path, which describes its content
+and by construction cannot include the decorations -- so the bar kept whatever
+it last had. Ruled out first, and worth recording because both look identical:
+the kernel registry was correct throughout, which the taskbar proved by showing
+the new title beside a frame showing the old one. The fix is a title hash in
+`PrevWindowState` and a `renamed` term beside `moved` and `focus_changed`, both
+marking the window whole-dirty and disqualifying the reported-region path.
+
+Any program that calls `set_title` after `show` was affected, not just the
+browser.

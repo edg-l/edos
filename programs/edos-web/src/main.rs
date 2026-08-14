@@ -77,11 +77,7 @@ fn main() {
     // arrived empty from one that never loaded.
     println!(
         "edos-web: {} - {} blocks from {}",
-        if document.title.is_empty() {
-            "untitled"
-        } else {
-            &document.title
-        },
+        document.display_title(),
         document.blocks.len(),
         address
     );
@@ -96,7 +92,7 @@ fn main() {
 ///
 /// A path is worth accepting because it separates a parse or layout problem
 /// from a network one, which is the first question when a page renders wrong.
-fn load(target: &str) -> Result<(Vec<u8>, Url), String> {
+pub(crate) fn load(target: &str) -> Result<(Vec<u8>, Url), String> {
     if target.starts_with('/') || target.starts_with("./") {
         let html = fs::read(target).map_err(|e| format!("{}: {}", target, e))?;
         // A local file has no origin, so relative links resolve against the
@@ -133,7 +129,8 @@ fn usage() {
         "  -w, --width N   wrap to N columns (default {})",
         DEFAULT_WIDTH
     );
-    eprintln!("in the window: arrows, PageUp/PageDown, Home/End scroll; q closes");
+    eprintln!("in the window: click a link to follow it, Backspace or Back goes back");
+    eprintln!("  arrows, PageUp/PageDown, Home/End scroll; q closes");
 }
 
 fn fail(message: &str) -> ! {

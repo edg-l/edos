@@ -68,6 +68,17 @@ pub struct Document {
     pub blocks: Vec<Block>,
 }
 
+impl Document {
+    /// The title to show for the page, for the documents that carry none.
+    pub fn display_title(&self) -> &str {
+        if self.title.is_empty() {
+            "untitled"
+        } else {
+            &self.title
+        }
+    }
+}
+
 /// Parse `html` as a document fetched from `base`.
 pub fn parse(html: &[u8], base: Url) -> Document {
     let dom = parse_document(RcDom::default(), Default::default())

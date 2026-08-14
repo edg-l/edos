@@ -1,5 +1,5 @@
-//! The browser window: a header carrying the page's title and address, the
-//! laid-out page below it, and scrolling.
+//! The browser window: a header carrying a back button, the page's title and
+//! its address, the laid-out page below it, scrolling, and clickable links.
 //!
 //! Layout is rebuilt only when the column width changes, so a scroll redraws
 //! at the cost of a blit rather than re-measuring every glyph on the page.
@@ -21,6 +21,16 @@ const WIN_W: u32 = 760;
 const WIN_H: u32 = 560;
 /// Pixels one wheel notch or arrow press moves the page.
 const SCROLL_STEP: u32 = space(6);
+/// The back button's label. Its width is measured, never counted.
+const BACK_LABEL: &str = "< Back";
+
+/// A page the browser came from, kept so going back neither refetches it nor
+/// forgets where it was scrolled to.
+struct Entry {
+    document: Document,
+    url: String,
+    scroll: u32,
+}
 
 pub struct Browser {
     window: Window,
@@ -30,6 +40,10 @@ pub struct Browser {
     scroll: u32,
     header_h: u32,
     mods: Modifiers,
+    history: Vec<Entry>,
+    /// Why the last navigation failed, shown in place of the address. A dead
+    /// link leaves the page that carried it on screen.
+    status: Option<String>,
 }
 
 impl Browser {
@@ -45,6 +59,8 @@ impl Browser {
             scroll: 0,
             header_h,
             mods: Modifiers::default(),
+            history: Vec::new(),
+            status: None,
         };
         browser.window.set_title(&browser.window_title())?;
         browser.window.show()?;
@@ -84,6 +100,12 @@ impl Browser {
                     self.relayout();
                 }
             }
+            Some(WindowEventType::MouseButton) => {
+                // Left button, on the press rather than the release.
+                if event.code == 0 && event.data != 0 {
+                    self.on_click(event.x, event.y);
+                }
+            }
             Some(WindowEventType::MouseScroll) => {
                 // Positive is a scroll up, which moves the page towards its top.
                 let delta = event.data as i32;
@@ -112,6 +134,7 @@ impl Browser {
                 }
                 match event.code {
                     keycode::ESCAPE => return false,
+                    keycode::BACKSPACE => self.back(),
                     keycode::ARROW_DOWN => self.scroll_by(SCROLL_STEP as i32),
                     keycode::ARROW_UP => self.scroll_by(-(SCROLL_STEP as i32)),
                     keycode::PAGE_DOWN | keycode::SPACEBAR => self.scroll_by(page),
@@ -133,6 +156,74 @@ impl Browser {
         self.scroll = self.scroll.min(self.max_scroll());
     }
 
+    /// A click in the chrome works the back button; one in the page follows
+    /// whatever link is under it.
+    fn on_click(&mut self, x: i32, y: i32) {
+        if y < self.header_h as i32 {
+            if !self.history.is_empty() && x >= back_x(0) && x < back_x(1) {
+                self.back();
+            }
+            return;
+        }
+        let page_y = y - self.header_h as i32 + self.scroll as i32;
+        let Some(target) = self.layout.link_at(x, page_y).map(str::to_string) else {
+            return;
+        };
+        self.navigate(&target);
+    }
+
+    /// Fetch `target`, show it, and push the page it replaced onto the history.
+    fn navigate(&mut self, target: &str) {
+        let loaded = crate::load(target).map(|(html, base)| {
+            let address = base.to_string();
+            (crate::doc::parse(&html, base), address)
+        });
+        let (document, address) = match loaded {
+            Ok(loaded) => loaded,
+            Err(message) => {
+                println!("edos-web: {} - {}", target, message);
+                self.status = Some(message);
+                return;
+            }
+        };
+        // Said on stdout as well as drawn, so a headless run can see which
+        // page a click actually reached.
+        println!(
+            "edos-web: -> {} - {} blocks from {}",
+            document.display_title(),
+            document.blocks.len(),
+            address
+        );
+        let previous = Entry {
+            document: std::mem::replace(&mut self.document, document),
+            url: std::mem::replace(&mut self.url, address),
+            scroll: self.scroll,
+        };
+        self.history.push(previous);
+        self.after_load();
+    }
+
+    fn back(&mut self) {
+        let Some(entry) = self.history.pop() else {
+            return;
+        };
+        println!("edos-web: <- {}", entry.url);
+        self.document = entry.document;
+        self.url = entry.url;
+        self.after_load();
+        self.scroll = entry.scroll.min(self.max_scroll());
+    }
+
+    /// Adopt a document the browser has just switched to: it needs its own
+    /// layout at the current width, not the one the previous page was measured
+    /// at, so this cannot go through `relayout`.
+    fn after_load(&mut self) {
+        self.status = None;
+        self.layout = Layout::build(&self.document, self.window.width);
+        self.scroll = 0;
+        let _ = self.window.set_title(&self.window_title());
+    }
+
     fn viewport_h(&self) -> u32 {
         self.window.height.saturating_sub(self.header_h)
     }
@@ -149,7 +240,12 @@ impl Browser {
     fn draw(&mut self) {
         let (width, height, header_h) = (self.window.width, self.window.height, self.header_h);
         let title = self.window_title();
-        let address = self.url.clone();
+        let chrome = Chrome {
+            title: title.trim_end_matches(" - edos-web").to_string(),
+            address: self.status.clone().unwrap_or_else(|| self.url.clone()),
+            failed: self.status.is_some(),
+            back: !self.history.is_empty(),
+        };
         self.window.fill(Theme::DEFAULT.background.raw());
 
         let layout = &self.layout;
@@ -161,13 +257,39 @@ impl Browser {
         view::draw(layout, buffer, width, height, header_h, scroll);
 
         // The header is drawn last so a page scrolled under it is covered.
-        header(buffer, width, height, header_h, &title, &address);
+        header(buffer, width, height, header_h, &chrome);
         self.window.swap_buffers();
     }
 }
 
-/// The strip carrying the page title and the address it came from.
-fn header(buffer: &mut [u32], width: u32, height: u32, header_h: u32, title: &str, url: &str) {
+/// What the header shows about the page currently on screen.
+struct Chrome {
+    title: String,
+    address: String,
+    /// The address slot is carrying an error rather than a URL.
+    failed: bool,
+    /// There is somewhere to go back to.
+    back: bool,
+}
+
+fn back_style(enabled: bool) -> Style {
+    let color = if enabled {
+        Theme::DEFAULT.title_text
+    } else {
+        Theme::DEFAULT.text_disabled
+    };
+    Style::new(color.raw()).with_px(edos_render::font::size::CAPTION)
+}
+
+/// The back button's left edge at `edge == 0` and its right edge at `edge == 1`,
+/// so the hit test and the draw cannot disagree about where it is.
+fn back_x(edge: u32) -> i32 {
+    let width = text::width(BACK_LABEL, back_style(true)) + space(2);
+    (PAGE_PAD + width * edge) as i32
+}
+
+/// The strip carrying the back button, the page title and its address.
+fn header(buffer: &mut [u32], width: u32, height: u32, header_h: u32, chrome: &Chrome) {
     for y in 0..header_h.min(height) {
         let color = if y + 1 == header_h {
             Theme::DEFAULT.window_border_highlight.raw()
@@ -183,17 +305,28 @@ fn header(buffer: &mut [u32], width: u32, height: u32, header_h: u32, title: &st
     let y = space(2) as i32;
     let title_style = Style::new(Theme::DEFAULT.title_text.raw())
         .with_weight(edos_render::font::Weight::Semibold);
-    let title = title.trim_end_matches(" - edos-web");
-    text::draw(&mut surface, PAGE_PAD as i32, y, title, title_style);
+
+    // The button keeps its slot when there is nowhere to go back to, drawn
+    // disabled, so the title does not move under the pointer on the first
+    // navigation.
+    let back = back_style(chrome.back);
+    text::draw(&mut surface, back_x(0), y + 2, BACK_LABEL, back);
+
+    let title_x = back_x(1) + space(2) as i32;
+    text::draw(&mut surface, title_x, y, &chrome.title, title_style);
 
     // The address is right-aligned so a long title does not push it off, and
     // it is measured rather than counted because the face is proportional.
-    let url_style =
-        Style::new(Theme::DEFAULT.label_text.raw()).with_px(edos_render::font::size::CAPTION);
-    let url_w = text::width(url, url_style);
-    let title_w = text::width(title, title_style);
+    let url_style = Style::new(if chrome.failed {
+        Theme::DEFAULT.warning.raw()
+    } else {
+        Theme::DEFAULT.label_text.raw()
+    })
+    .with_px(edos_render::font::size::CAPTION);
+    let url_w = text::width(&chrome.address, url_style);
+    let title_w = text::width(&chrome.title, title_style);
     let x = width.saturating_sub(PAGE_PAD + url_w) as i32;
-    if x > (PAGE_PAD + title_w + space(2)) as i32 {
-        text::draw(&mut surface, x, y + 2, url, url_style);
+    if x > title_x + (title_w + space(2)) as i32 {
+        text::draw(&mut surface, x, y + 2, &chrome.address, url_style);
     }
 }

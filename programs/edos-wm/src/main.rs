@@ -119,6 +119,11 @@ struct PrevWindowState {
     visible: u32,
     flags: u64,
     focused: u32,
+    /// Hash of the title this compositor last drew in the bar. A client that
+    /// renames its window does not move, resize or change focus, and the region
+    /// it reports covers its content only, so the title is the sole evidence
+    /// that the decorations are stale.
+    title_hash: u64,
 }
 
 impl PrevWindowState {
@@ -133,6 +138,7 @@ impl PrevWindowState {
             visible: w.visible,
             flags: w.flags,
             focused: w.focused,
+            title_hash: title_hash(w),
         }
     }
 
@@ -141,6 +147,17 @@ impl PrevWindowState {
         let eff_h = decorations::effective_height_raw(self.flags, self.height);
         DirtyRect::new(self.x, self.y, eff_w as u32, eff_h as u32)
     }
+}
+
+/// FNV-1a over the title bytes, which is enough to notice a rename without
+/// carrying a 256-byte array through the per-frame window snapshots.
+fn title_hash(w: &WindowListEntry) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in w.title_str().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Find the topmost window under the cursor.
@@ -719,7 +736,10 @@ fn main() {
                 // list cannot consume the signal first and leave the window
                 // looking unchanged.
                 let repainted = prev.is_none_or(|s| s.damage_seq != w.damage_seq);
-                if repainted || focus_changed || moved {
+                // A rename repaints the title bar, which is outside every
+                // region the client itself can report.
+                let renamed = prev.is_some_and(|s| s.title_hash != title_hash(w));
+                if repainted || focus_changed || moved || renamed {
                     let s = PrevWindowState::from_entry(w);
                     // A client that reported the region it drew gets that
                     // region transferred. Anything that changes the window as a
@@ -730,6 +750,7 @@ fn main() {
                     let reported_region = repainted
                         && !focus_changed
                         && !moved
+                        && !renamed
                         && prev.is_some()
                         && w.damage_w != 0
                         && w.damage_h != 0;

@@ -122,6 +122,23 @@ impl Layout {
         out
     }
 
+    /// The link target at page coordinates, if a link's text is under them.
+    ///
+    /// Page space is window space with the chrome removed and the scroll added
+    /// back, so a hit test uses the same fragment rectangles the draw pass
+    /// measured -- which is why a proportional face needs no separate metric.
+    pub fn link_at(&self, x: i32, y: i32) -> Option<&str> {
+        let line = self
+            .lines
+            .iter()
+            .find(|line| y >= line.y && y < line.y + line.height as i32)?;
+        let item = line
+            .items
+            .iter()
+            .find(|item| x >= item.x && x < item.x + item.width as i32)?;
+        self.links.get(item.link?).map(String::as_str)
+    }
+
     /// Split the runs into words, recording each link target once.
     fn words(&mut self, runs: &[Run], base: Style) -> Vec<Word> {
         let mut words = Vec::new();
