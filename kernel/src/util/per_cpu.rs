@@ -14,7 +14,12 @@ use crate::thread::preempt::PreemptCount;
 use crate::{
     acpi::raw_current_apic_id,
     allocator::PerCpuCacheCell,
-    thread::{scheduler::Scheduler, thread::Thread},
+    thread::{
+        UserThreadInfo,
+        irqlock::IrqSpinlock,
+        scheduler::Scheduler,
+        thread::{Thread, ThreadId},
+    },
     util::uaccess::UAccessState,
 };
 
@@ -30,6 +35,14 @@ pub struct PerCpuData {
     pub lapic: Cell<*mut LocalApic>,
     pub scheduler: Cell<*mut Scheduler>,
     current_thread: UnsafeCell<Option<Arc<Thread>>>,
+    /// The running thread's `UserThreadInfo`, so a syscall does not pay a
+    /// registry lookup to reach it.
+    ///
+    /// Keyed by thread id rather than trusted blindly. Ids are never reused, so
+    /// a matching key is a match for the thread actually running here, and the
+    /// cache stays correct even if some path publishes a thread without going
+    /// through `set_current_thread`.
+    current_info: UnsafeCell<Option<(ThreadId, Arc<IrqSpinlock<UserThreadInfo>>)>>,
     pub uaccess: UAccessState,
     /// Top of the per-CPU scheduler stack. The voluntary context-switch
     /// trampoline pivots RSP here before calling the transition fn and
@@ -59,6 +72,7 @@ impl PerCpuData {
             lapic: Cell::new(core::ptr::null_mut()),
             scheduler: Cell::new(core::ptr::null_mut()),
             current_thread: UnsafeCell::new(None),
+            current_info: UnsafeCell::new(None),
             uaccess: UAccessState::new(),
             scheduler_stack_top: Cell::new(0),
             heap_cache: PerCpuCacheCell::new(),
@@ -91,9 +105,37 @@ impl PerCpuData {
         unsafe { (*self.current_thread.get()).as_deref().map(f) }
     }
 
-    /// Set the current thread.
+    /// Set the current thread, dropping any cached `UserThreadInfo` with it.
+    ///
+    /// The drop is what keeps a thread's fd table, working directory and
+    /// address space from outliving it by however long this CPU takes to run
+    /// another user thread.
     pub unsafe fn set_current_thread(&self, thread: Option<Arc<Thread>>) {
-        unsafe { *self.current_thread.get() = thread }
+        unsafe {
+            *self.current_info.get() = None;
+            *self.current_thread.get() = thread;
+        }
+    }
+
+    /// This CPU's cached `UserThreadInfo` for `tid`, or `None` when it holds
+    /// another thread's or nothing.
+    pub fn cached_thread_info(&self, tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThreadInfo>>> {
+        unsafe {
+            match &*self.current_info.get() {
+                Some((cached, info)) if *cached == tid => Some(info.clone()),
+                _ => None,
+            }
+        }
+    }
+
+    /// Remember `info` as `tid`'s, for the rest of this thread's turn here.
+    ///
+    /// # Safety
+    /// Interrupts must be off: this CPU's slot is being written, and a
+    /// migration between the read of the current thread and this store would
+    /// cache the entry against the wrong CPU.
+    pub unsafe fn cache_thread_info(&self, tid: ThreadId, info: Arc<IrqSpinlock<UserThreadInfo>>) {
+        unsafe { *self.current_info.get() = Some((tid, info)) }
     }
 }
 

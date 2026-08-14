@@ -469,24 +469,77 @@ threads never migrate, so a thread wakes back onto the CPU it parked on; and
 `REBALANCE_THRESHOLD = 2` and `REBALANCE_INTERVAL = 10` are picked numbers that
 nothing has measured against the new quantity.
 
-### The table above is stale in two rows, and one of them is a regression
+### Done: the current thread's info is cached per CPU (2026-08-14)
+
+`current_thread_info()` was a registry lookup every time it was called —
+`without_interrupts`, a `RwLock` read over `THREADS.infos`, a `BTreeMap` get and
+an `Arc` clone — and a syscall calls it several times over: once for the errno it
+clears on entry, once per arm that wants the fd table or the working directory,
+and once more on the way out if the call failed. `sys_getpid` is *only* that
+lookup plus a lock, which is why the shortest call the kernel has cost 94 ns.
+
+This CPU's `PerCpuData` now holds the running thread's `UserThreadInfo` beside
+the thread itself, keyed by thread id, filled on the first call of a turn and
+dropped by `set_current_thread` on the way out. Measured on a single-CPU boot,
+five runs, medians:
+
+| | before | after |
+|---|---|---|
+| `getpid` | 94 ns | 85 ns |
+| `read` of a bad fd | 169 ns | 145 ns |
+| pipe echo, nothing blocks | 450 ns | 425 ns |
+
+Every syscall in the system is ~9 ns cheaper, and one that touches a descriptor
+or fails is ~25 ns cheaper because it made more than one call.
+
+What makes the cache sound rather than merely fast: a live thread's registry
+entry is never replaced (both `insert_thread_info` sites are creating a *child*,
+and `execve` mutates the existing info through its lock rather than swapping the
+`Arc`), thread ids are never reused so a key match is a real match, and the fill
+runs with interrupts off so the thread cannot migrate between the read and the
+store. Dropping the entry on switch is what keeps a dead thread's fd table and
+address space from being held alive by a CPU that has moved on.
+
+### The table above is stale in two rows, and one of them was a regression
 
 Re-measuring the whole of `switchbench` on 2026-08-14 against a comparably quiet
 host (the same resident devnet, load average 1.4) found two figures that have
 moved since 2026-08-11, in **both** builds either side of the load change, so
 neither is that change:
 
-| | 2026-08-11 | 2026-08-14 |
-|---|---|---|
-| `read` of a bad fd | 128 ns | 169 ns |
-| pipe echo, nothing blocks | 387 ns | 450 ns |
-| cross-process round trip | 2016 ns | 2266 ns |
-| `getpid` | 94 ns | 94 ns |
+| | 2026-08-11 | 2026-08-14 | after the cache |
+|---|---|---|---|
+| `read` of a bad fd | 128 ns | 169 ns | 145 ns |
+| pipe echo, nothing blocks | 387 ns | 450 ns | 425 ns |
+| cross-process round trip | 2016 ns | 2266 ns | |
+| `getpid` | 94 ns | 94 ns | 85 ns |
 
-`getpid` is unchanged, so the syscall boundary itself did not move; what moved
-is what happens on top of it, and most sharply on the **error** return. The
-negative-errno conversion (6fbb047) landed inside that window and is the first
-place to look. Not chased yet.
+`getpid` was unchanged, so the syscall boundary itself did not move; what moved
+was what happens on top of it, and most sharply on the **error** return.
+
+**Bisected, and it was the negative-errno conversion.** Building the tree at
+whole commits either side, single-CPU boot, three runs each: the bad-fd read is
+140–141 ns at `4c0cffc` and 169 at `6fbb047`, so that one commit costs **+29 ns
+on every failing syscall**. The mechanism is the line it added to
+`syscall_handler` — `current_thread_info().lock().errno` — which was a second
+registry lookup on the way out. The per-CPU cache above takes it back without
+giving up the feature, and the same bisect priced the rest of the window:
+
+| | bad fd | pipe echo |
+|---|---|---|
+| 2026-08-11 (recorded) | 128 | 387 |
+| `61a3dec`, end of 08-13 | 144 | 452 |
+| `4c0cffc`, before negative errno | 140 | 450 |
+| `6fbb047`, negative errno | 169 | 450 |
+| now, with the info cache | 145 | 425 |
+
+So the error path is recovered, and **~38 ns of the pipe echo is still
+unaccounted for**: it arrived between the 2026-08-11 reading and `61a3dec`, it
+is on the *successful* fd path rather than the error one, and the only two
+commits in that window that touch the fd or pipe code are `eb4dd2f` (named
+pipes, the bounded PTY) and `f96e896` (`O_NONBLOCK` that outlives the open,
+which added a second table lookup per read and write). Bisecting those two is
+the next step in this thread; the harness is in `doc/WORKING-NOTES.md`.
 
 `yield thread` also reads 1–3 ns over idle now against 55 ns then, on both
 builds. That one is probably not a regression but a correction: the idle case

@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-14 (runnable load, balancebench)
+## Counts, remeasured 2026-08-14 (per-CPU thread info)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1585,9 +1585,9 @@ does not have to invent them.
 | userspace programs | 119 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 120 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 102,679 code lines across 436 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,123 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,348 | `git rev-list --count HEAD` |
+| Rust | 102,710 code lines across 436 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,154 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,349 | `git rev-list --count HEAD` |
 | in-kernel test suite | 52 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 155, of which 14 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -6690,3 +6690,77 @@ cross-process round trip 2266 against 2016 — on both builds either side of the
 load change, on a comparably quiet host. `getpid` is unchanged at 94, so the
 syscall boundary did not move; the error return did. `doc/SCHED-ROADMAP.md` has
 the table and names the negative-errno conversion as the first suspect.
+
+
+## A syscall paid a registry lookup for its own identity (2026-08-14)
+
+Re-measuring `switchbench` while pricing the load change found three figures
+worse than the 2026-08-11 table on a comparably quiet host — a bad-fd `read` at
+169 ns against 128, the pipe echo at 450 against 387, a cross-process round trip
+at 2266 against 2016 — while `getpid` sat unchanged at 94. A boundary that has
+not moved with everything on top of it moving says the cost is not in the entry
+stub, and the sharpest of the three was the **error** return.
+
+**The bisect.** Whole-tree checkouts either side, single-CPU boot, three runs
+each, reading the bad-fd `read`:
+
+| | bad fd | pipe echo |
+|---|---|---|
+| 2026-08-11, recorded | 128 | 387 |
+| `61a3dec`, end of 08-13 | 144 | 452 |
+| `4c0cffc`, before negative errno | 140 | 450 |
+| `6fbb047`, negative errno | 169 | 450 |
+
+Two separate regressions, and reading the pipe echo column is what separates
+them: it had already arrived by 08-13 and did not move on 08-14, so the +29 ns
+on 08-14 belongs to the error path alone. That is `6fbb047`, whose whole cost is
+one line — `current_thread_info().lock().errno` in `syscall_handler`, on the way
+out of any call that failed.
+
+**The fix is not to that line.** `current_thread_info()` was a registry lookup
+*every time*: `without_interrupts`, a `RwLock` read over `THREADS.infos`, a
+`BTreeMap` get, an `Arc` clone. A syscall makes several — the errno it clears on
+entry, the fd table or working directory its arm wants, and now the errno on the
+way out — and `sys_getpid` is nothing but one of them plus a lock, which is why
+the shortest call in the kernel cost 94 ns. So the thing to fix was the lookup,
+not the caller that exposed it.
+
+`PerCpuData` now carries the running thread's `UserThreadInfo` beside the thread
+itself, keyed by thread id, filled on the first call of a turn, dropped by
+`set_current_thread`. Single-CPU boot, five runs, medians: `getpid` 94 → **85**,
+bad-fd read 169 → **145**, pipe echo 450 → **425**. Every syscall in the system
+is ~9 ns cheaper and one that touches a descriptor or fails is ~25 ns cheaper,
+because it was making more than one call.
+
+Four things make the cache sound, and all four had to be checked rather than
+assumed:
+
+- A live thread's registry entry is never replaced. Both `insert_thread_info`
+  call sites are creating a *child*, and `execve` mutates the existing info
+  through its lock rather than swapping the `Arc` — so a cached pointer cannot
+  go stale against a thread that is still running.
+- Thread ids are never reused (`allocate_thread_id` only counts up), so keying
+  the cache by id makes a hit self-validating rather than a matter of trusting
+  the invalidation.
+- The fill runs with interrupts off, so the thread cannot migrate between the
+  read of the current thread and the store into this CPU's slot.
+- Dropping the entry in `set_current_thread` is what keeps a dead thread's fd
+  table, working directory and address space from being held alive by whichever
+  CPU last ran it.
+
+**Still open: ~38 ns of the pipe echo.** It arrived between 2026-08-11 and
+`61a3dec`, it is on the successful fd path rather than the error one, and only
+two commits in that window touch the fd or pipe code — `eb4dd2f` (named pipes
+and the bounded PTY) and `f96e896` (`O_NONBLOCK` that outlives the open, which
+added a second table lookup to every read and write).
+
+**The harness, which is the reusable part.** `switchbench` reports every figure
+above, and driving it takes: `scripts/edos-vm start --smp 1`, wait for the
+`panel|` line in `run_log.txt`, then `click 400 300` — and *only* that click.
+Clicking the taskbar button first toggles an already-visible window to
+minimised, after which every keystroke lands on the wallpaper and the run
+silently produces nothing. Then `type 'switchbench 20000 -l' --enter` and wait
+for `sleep worst overshoot` to appear once per run. Bisect by checking out whole
+commits in place rather than kernel-only: an old kernel under current userspace
+crosses the negative-errno boundary in the middle of the range, and the two
+disagree about what a failure looks like.

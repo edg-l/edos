@@ -1251,10 +1251,26 @@ pub fn current_thread_weak() -> Option<Weak<Thread>> {
 /// which by construction runs on behalf of one, and the id is read from this CPU
 /// rather than from a scheduler that may belong to another.
 pub fn current_thread_info() -> Arc<IrqSpinlock<UserThreadInfo>> {
-    let tid = current_thread_id().expect("current_thread_info: no thread running on this CPU");
-    THREADS
-        .get_info(tid)
-        .unwrap_or_else(|| panic!("current_thread_info: no UserThreadInfo for tid {}", tid.0))
+    without_interrupts(|| {
+        let cpu = get_percpu_data();
+        let tid = cpu
+            .with_current_thread(|t| t.id)
+            .expect("current_thread_info: no thread running on this CPU");
+        // The registry is a shared `RwLock` over a map, and a syscall reaches
+        // here several times over — once for the errno it clears on entry, once
+        // per arm that wants the fd table or the working directory, and once
+        // more on the way out if the call failed. Answering from this CPU's own
+        // slot is what keeps that from being a lookup each time; the thread
+        // running here cannot change while interrupts are off.
+        if let Some(info) = cpu.cached_thread_info(tid) {
+            return info;
+        }
+        let info = THREADS
+            .get_info(tid)
+            .unwrap_or_else(|| panic!("current_thread_info: no UserThreadInfo for tid {}", tid.0));
+        unsafe { cpu.cache_thread_info(tid, info.clone()) };
+        info
+    })
 }
 
 #[inline]
