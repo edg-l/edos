@@ -166,6 +166,20 @@ fn build_one(opts: &Options, entry: &manifest::Manifest) -> Result<Package, Stri
         None => None,
     };
 
+    // Settings the program wants a machine to start with. `grab` copies each
+    // into `/etc` only where nothing is there already, so the tree under
+    // `defaults/` mirrors `/etc`: `defaults/services/httpd.conf` becomes
+    // `share/defaults/services/httpd.conf` and seeds `/etc/services/httpd.conf`.
+    for relative in collect_defaults(&entry.directory.join("defaults"))? {
+        let packaged = format!("share/defaults/{}", relative);
+        installs.push(packaged.clone());
+        contents.push(pack::Item {
+            path: packaged,
+            source: entry.directory.join("defaults").join(&relative),
+            mode: 0o644,
+        });
+    }
+
     let file = format!("p/{}-{}.tar.gz", entry.name, entry.version);
     let archive = opts.repo.join(&file);
     pack::write_archive(&archive, &contents)?;
@@ -184,6 +198,52 @@ fn build_one(opts: &Options, entry: &manifest::Manifest) -> Result<Package, Stri
         icon,
         installs,
     })
+}
+
+/// Every file under `root`, as paths relative to it, in a stable order.
+///
+/// A package with no `defaults/` directory is the ordinary case and answers an
+/// empty list rather than an error.
+fn collect_defaults(root: &Path) -> Result<Vec<String>, String> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut found = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), String::new())];
+
+    while let Some((directory, prefix)) = pending.pop() {
+        let entries =
+            fs::read_dir(&directory).map_err(|e| format!("{}: {}", directory.display(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            // A symlink is refused rather than followed: `grab` rejects an
+            // archive containing one, so producing it here would only fail
+            // later, at the machine rather than at the publisher.
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() {
+                return Err(format!(
+                    "{}: {} is a symlink, which a package may not contain",
+                    root.display(),
+                    relative
+                ));
+            }
+            if kind.is_dir() {
+                pending.push((entry.path(), relative));
+            } else {
+                found.push(relative);
+            }
+        }
+    }
+
+    found.sort();
+    Ok(found)
 }
 
 fn measure(path: &Path) -> Result<(u64, String), String> {

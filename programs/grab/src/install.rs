@@ -19,8 +19,16 @@ use ustar::{BLOCK, Decoded, Kind};
 ///
 /// `etc` is deliberately absent: settings belong to the machine, not to a
 /// package, and a package that could write `/etc` could change where `grab`
-/// itself looks for its repository.
+/// itself looks for its repository. A package that needs a setting to exist
+/// ships a default under [`DEFAULTS`] instead; see [`seed_etc`].
 const ALLOWED_ROOTS: [&str; 4] = ["bin", "lib", "share", "opt"];
+
+/// Where a package puts the settings it wants a machine to start with.
+///
+/// The tree under it mirrors `/etc`, so `share/defaults/services/httpd.conf`
+/// is the default for `/etc/services/httpd.conf`. It is an ordinary packaged
+/// path: owned by the package, replaced on upgrade, removed with it.
+pub const DEFAULTS: &str = "share/defaults/";
 
 /// Unpack `archive` and move it into place, returning every path installed.
 pub fn apply(name: &str, archive: &[u8]) -> Result<Vec<String>> {
@@ -177,6 +185,87 @@ fn check_ownership(name: &str, paths: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Copy each packaged default into `/etc`, skipping every destination that
+/// already holds something. Returns the paths it created.
+///
+/// This is the whole of the machine-versus-package split. `/etc` stays the
+/// machine's: a file already there is a decision someone made, and an install
+/// never revisits it — which also means a corrected default never reaches a
+/// machine that has been seeded once, and the package's own copy under
+/// [`DEFAULTS`] is where to read what that default now says.
+///
+/// The destination is the packaged path with [`DEFAULTS`] cut off, so it
+/// inherits the `..`, absolute-path and symlink refusals [`validate`] already
+/// applied to the archive.
+pub fn seed_etc(installed: &[String]) -> Result<Vec<String>> {
+    let mut seeded = Vec::new();
+
+    for path in installed {
+        let Some(relative) = path.strip_prefix(DEFAULTS) else {
+            continue;
+        };
+        if relative.is_empty() {
+            continue;
+        }
+
+        let destination = format!("/etc/{}", relative);
+        if fs::exists(&destination).unwrap_or(false) {
+            continue;
+        }
+        if let Some(parent) = Path::new(&destination).parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| Error::Io(format!("{}: {}", parent.display(), e)))?;
+        }
+
+        let from = format!("/{}", path);
+        fs::copy(&from, &destination).map_err(|e| Error::Io(format!("{}: {}", destination, e)))?;
+        seeded.push(destination);
+    }
+
+    Ok(seeded)
+}
+
+/// Delete the settings an install created, keeping any that were since edited.
+///
+/// Returns the paths it kept. A seeded file still byte-identical to the default
+/// it came from is the install's own leftover and goes; one that differs is a
+/// decision someone made after the fact, and removing a package is no reason to
+/// throw it away. Call this before [`remove_files`], which deletes the default
+/// this compares against.
+pub fn unseed(seeded: &[String], defaults: &[String]) -> Result<Vec<String>> {
+    let mut kept = Vec::new();
+
+    for destination in seeded {
+        let Some(relative) = destination.strip_prefix("/etc/") else {
+            continue;
+        };
+        let packaged = format!("/{}{}", DEFAULTS, relative);
+        // Only ever compare against this package's own file. A path it no
+        // longer ships may belong to another package by now, and reading that
+        // one would decide the question with the wrong document.
+        let ours = defaults.iter().any(|p| format!("/{}", p) == packaged);
+
+        let same = match (ours, fs::read(&packaged), fs::read(destination)) {
+            (true, Ok(default), Ok(current)) => default == current,
+            // Nothing to compare against: keep the setting rather than guess
+            // that nobody meant it.
+            _ => false,
+        };
+        if !same {
+            kept.push(destination.clone());
+            continue;
+        }
+
+        match fs::remove_file(destination) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::Io(format!("{}: {}", destination, e))),
+        }
+    }
+
+    Ok(kept)
 }
 
 pub fn remove_files(files: &[String]) -> Result<()> {

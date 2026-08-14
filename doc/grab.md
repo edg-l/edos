@@ -237,7 +237,8 @@ Two rules, both enforced by `grab` rather than by trust in the archive:
 
 - **Path whitelist.** Only `bin/`, `lib/`, `share/` and `opt/` may be written.
   Absolute paths, `..` components and everything else are refused. `etc/` is
-  excluded deliberately: settings belong to the machine, not to a package.
+  excluded deliberately: settings belong to the machine, not to a package. A
+  package that needs a setting to exist ships a default instead, below.
 - **No overwriting what a package does not own.** `grab` refuses to write a path
   that exists and is not recorded in some installed package's file list. This is
   what makes the shipped and packaged namespaces disjoint mechanically, so a
@@ -259,18 +260,59 @@ no permission bits and no chmod-shaped syscall, and `sys_access` grants `X_OK`
 unconditionally, so an installed binary is runnable regardless; honouring the
 bit would mean `fs::set_permissions`, which reports Unsupported here.
 
+### Default settings
+
+A package cannot write `/etc`, but it can say what it would like to find there.
+Files under `share/defaults/` mirror the `/etc` tree, and after an install moves
+everything into place `grab` copies each one to its `/etc` path **only where
+nothing is there already**:
+
+```
+share/defaults/services/httpd.conf   ->   /etc/services/httpd.conf
+```
+
+The publisher side is a `defaults/` directory beside the program's `pkg.toml`,
+packed recursively; no manifest key names it, so a package either has the
+directory or has no defaults.
+
+This is what makes a packaged daemon possible at all: `edos-init` only discovers
+a service from `/etc/services/<name>.conf` (`doc/services.md`), which a package
+could not create before. `enabled_by` still gates it, so a seeded service is
+known to init and not started until the file it names exists — which is why a
+package must ship the declaration and never the credential it points at.
+
+Three consequences, stated plainly because two of them are costs:
+
+- **An existing file is never touched.** A setting already on the machine is a
+  decision someone made, and an install does not revisit it.
+- **Therefore a corrected default never reaches a machine that has been seeded
+  once.** The packaged copy under `share/defaults/` is upgraded like any other
+  file, so what the default now says is always readable there; what `/etc` says
+  is what the machine will use. This is the same trade dpkg makes with
+  conffiles, without the prompts.
+- **Every seed is announced** through `Progress`. An install that changes what
+  the machine runs at boot must not do it quietly.
+
+Removal is the mirror: `grab remove` deletes a seeded file only while it is
+still byte-identical to the default it came from, and keeps and reports one that
+has been edited since. Removing a package is no reason to discard a setting
+someone wrote.
+
 Installed state, all of it plain text:
 
 ```
 /var/lib/grab/db/<name>/meta      the package's index stanza, verbatim
 /var/lib/grab/db/<name>/files     one installed path per line
+/var/lib/grab/db/<name>/seeded    one /etc path this install created, per line
 /var/cache/grab/index             last verified index
 /var/cache/grab/index.sig
 /etc/grab/repo                    repo base URL, via edos_lib::config
 ```
 
 `files` is what makes removal exact: `grab remove` deletes what it recorded and
-nothing else.
+nothing else. `seeded` is what lets it tell a setting the install created from
+one that was already there; an upgrade seeds nothing, since the destinations
+exist by then, so the list carries forward from the install that did.
 
 There is **no dependency resolution**, and this is not a simplification to
 revisit. EDOS has no dynamic linker — PT_INTERP is unimplemented — so every
@@ -398,6 +440,11 @@ classifies. The version is deliberately *not* here: it comes from the program's
 disagree, and cargo's is the one that built the binary. An absent `shipped` key
 means shipped, so adding a `pkg.toml` for its metadata alone never takes a
 program off the image by surprise.
+
+A `defaults/` directory beside that file, if there is one, is packed recursively
+as the program's default settings; see "Default settings" above. It has no key
+of its own, because a directory that is either there or not needs no second
+place to say so.
 
 `make publish` builds the archives, writes the index and signs it. Packing is
 deterministic — mtime, uid, gid and the gzip header's own timestamp are all

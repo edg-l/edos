@@ -117,10 +117,34 @@ pub fn install_package(base: &str, package: &Package, progress: &mut dyn Progres
 
     progress.message(&format!("installing {}", package.name));
     let installed = install::apply(&package.name, &archive)?;
+    let seeded = seed(&package.name, &installed, progress)?;
 
-    db::write(package, &installed)?;
+    db::write(package, &installed, &seeded)?;
     progress.message(&format!("{} {} installed", package.name, package.version));
     Ok(())
+}
+
+/// Copy the package's defaults into `/etc` and report every one that landed.
+///
+/// Each is announced rather than done quietly: a seeded
+/// `/etc/services/<name>.conf` is what makes `edos-init` supervise a packaged
+/// daemon, so an install can change what the machine runs at boot and the
+/// person running it has to be able to see that.
+///
+/// An upgrade seeds nothing, because the destinations exist by then, so the
+/// previous install's list carries forward — otherwise removal would forget the
+/// settings the first install created.
+fn seed(name: &str, installed: &[String], progress: &mut dyn Progress) -> Result<Vec<String>> {
+    let mut seeded = db::read(name)?.map(|r| r.seeded).unwrap_or_default();
+
+    for path in install::seed_etc(installed)? {
+        progress.message(&format!("wrote {}, which had no setting before", path));
+        if !seeded.contains(&path) {
+            seeded.push(path);
+        }
+    }
+
+    Ok(seeded)
 }
 
 /// Install a local archive without checking any signature.
@@ -146,6 +170,7 @@ pub fn install_local(path: &str, progress: &mut dyn Progress) -> Result<()> {
     ));
 
     let installed = install::apply(&name, &archive)?;
+    let seeded = seed(&name, &installed, progress)?;
     let package = Package {
         name: name.clone(),
         version,
@@ -157,7 +182,7 @@ pub fn install_local(path: &str, progress: &mut dyn Progress) -> Result<()> {
         icon: None,
         installs: installed.clone(),
     };
-    db::write(&package, &installed)?;
+    db::write(&package, &installed, &seeded)?;
 
     progress.message(&format!("{} installed", name));
     Ok(())
@@ -187,6 +212,12 @@ fn name_and_version(path: &str) -> (String, String) {
 pub fn remove(name: &str, progress: &mut dyn Progress) -> Result<()> {
     let record =
         db::read(name)?.ok_or_else(|| Error::NotFound(format!("{} is not installed", name)))?;
+
+    // Before the files: this compares each seeded setting against the packaged
+    // default it came from, and that default is one of the files below.
+    for kept in install::unseed(&record.seeded, &record.files)? {
+        progress.message(&format!("kept {}, which has been edited since", kept));
+    }
 
     install::remove_files(&record.files)?;
     db::forget(name)?;

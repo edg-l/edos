@@ -1,8 +1,11 @@
 //! What this machine has installed.
 //!
 //! Plain text under `/var/lib/grab/db`, one directory per package: `meta` for
-//! what it is, `files` for exactly what it put on the disk. `files` is what
-//! makes removal exact rather than a guess from the package's name.
+//! what it is, `files` for exactly what it put on the disk, and `seeded` for
+//! the `/etc` paths the install created from the package's defaults. `files` is
+//! what makes removal exact rather than a guess from the package's name;
+//! `seeded` is what lets removal tell a setting it created from one that was
+//! already there.
 
 use crate::{Error, Result};
 use grab_index::Package;
@@ -17,9 +20,11 @@ pub struct Record {
     pub summary: String,
     pub category: String,
     pub files: Vec<String>,
+    /// Absolute `/etc` paths this install created from packaged defaults.
+    pub seeded: Vec<String>,
 }
 
-pub fn write(package: &Package, files: &[String]) -> Result<()> {
+pub fn write(package: &Package, files: &[String], seeded: &[String]) -> Result<()> {
     let dir = format!("{}/{}", DB, package.name);
     fs::create_dir_all(&dir).map_err(|e| Error::Io(format!("{}: {}", dir, e)))?;
 
@@ -30,10 +35,27 @@ pub fn write(package: &Package, files: &[String]) -> Result<()> {
     fs::write(format!("{}/meta", dir), meta)
         .map_err(|e| Error::Io(format!("{}/meta: {}", dir, e)))?;
 
-    let mut listing = files.join("\n");
+    write_list(&dir, "files", files)?;
+    write_list(&dir, "seeded", seeded)
+}
+
+fn write_list(dir: &str, name: &str, paths: &[String]) -> Result<()> {
+    let mut listing = paths.join("\n");
     listing.push('\n');
-    fs::write(format!("{}/files", dir), listing)
-        .map_err(|e| Error::Io(format!("{}/files: {}", dir, e)))
+    fs::write(format!("{}/{}", dir, name), listing)
+        .map_err(|e| Error::Io(format!("{}/{}: {}", dir, name, e)))
+}
+
+fn read_list(dir: &str, name: &str) -> Vec<String> {
+    fs::read_to_string(format!("{}/{}", dir, name))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn read(name: &str) -> Result<Option<Record>> {
@@ -49,22 +71,15 @@ pub fn read(name: &str) -> Result<Option<Record>> {
             .to_string()
     };
 
-    let files = fs::read_to_string(format!("{}/files", dir))
-        .map(|text| {
-            text.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-
     Ok(Some(Record {
         name: field("Package"),
         version: field("Version"),
         summary: field("Summary"),
         category: field("Category"),
-        files,
+        files: read_list(&dir, "files"),
+        // Absent for a package installed before defaults existed, which reads
+        // as "this install seeded nothing" and is correct: it did not.
+        seeded: read_list(&dir, "seeded"),
     }))
 }
 
