@@ -12,7 +12,7 @@ use edos_http::url::Url;
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::css::{Computed, Element, Stylesheet, Vars};
+use crate::css::{self, Computed, Element, Stylesheet, Vars, Viewport};
 
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,7 +91,7 @@ impl Document {
 }
 
 /// The font size relative lengths and the absolute keywords resolve against.
-const ROOT_PX: u32 = edos_render::font::size::BODY;
+pub const ROOT_PX: u32 = edos_render::font::size::BODY;
 
 /// How many external stylesheets one document may pull in. A page linking more
 /// than this is linking print sheets and font sheets; a browser that fetched
@@ -104,7 +104,17 @@ const MAX_SHEETS: usize = 6;
 /// `fetch` takes an absolute URL and returns the bytes, or `None` when it could
 /// not be had: a stylesheet that fails to load leaves the page unstyled, never
 /// unparsed.
-pub fn parse(html: &[u8], base: Url, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Document {
+///
+/// `viewport` answers the document's media queries. It is read once, here: the
+/// cascade is what a media query changes, and the cascade runs at parse time,
+/// so a window resized after a page loads keeps the styles it was parsed with
+/// until the page is loaded again.
+pub fn parse(
+    html: &[u8],
+    base: Url,
+    fetch: &dyn Fn(&str) -> Option<Vec<u8>>,
+    viewport: Viewport,
+) -> Document {
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
         .read_from(&mut &html[..])
@@ -114,10 +124,11 @@ pub fn parse(html: &[u8], base: Url, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) ->
     // `<style>` or a `<link>` may sit anywhere in the document, so collecting
     // it is its own pass rather than something the walk picks up as it goes.
     let mut sheets = Sheets {
-        sheet: Stylesheet::default(),
+        sheet: Stylesheet::new(viewport),
         base: &base,
         fetch,
         fetched: 0,
+        viewport,
     };
     sheets.collect(&dom.document);
     let sheet = sheets.sheet;
@@ -483,6 +494,7 @@ struct Sheets<'a> {
     base: &'a Url,
     fetch: &'a dyn Fn(&str) -> Option<Vec<u8>>,
     fetched: usize,
+    viewport: Viewport,
 }
 
 impl Sheets<'_> {
@@ -520,10 +532,11 @@ impl Sheets<'_> {
         {
             return;
         }
-        // A `media` this cannot evaluate is refused for the reason `@media` is
-        // skipped: a print sheet applied to the screen is worse than no sheet.
+        // A sheet for another medium is not fetched at all: a print sheet
+        // applied to the screen is worse than no sheet, and fetching one this
+        // will not use costs the page's load time.
         if let Some(media) = attr(node, "media")
-            && !matches!(media.trim().to_lowercase().as_str(), "" | "all" | "screen")
+            && !css::media_matches(&media, &self.viewport)
         {
             return;
         }

@@ -7204,10 +7204,10 @@ That is worth reaching for on any userspace module that is pure logic. It needs
 no `+edos` toolchain and runs in under a second, which makes it a far tighter
 loop than a guest boot for anything decidable from the input alone.
 
-**Three decisions in the parser that look like gaps and are not.** `@media`
-and `@supports` bodies are skipped whole, because applying rules conditional on
-a viewport this cannot answer for lets a page's mobile rules beat its desktop
-ones. A selector containing `:`, `[`, `>`, `+`, `~` or `*` is dropped rather
+**Three decisions in the parser that look like gaps and are not.** An
+`@supports` body is skipped whole, because applying rules conditional on a
+feature set this cannot answer for lets a page's fallback and its real styling
+both land. A selector containing `:`, `[`, `>`, `+`, `~` or `*` is dropped rather
 than matched loosely, since a `p[hidden]` matched as `p` restyles the whole
 document. And an unparseable value leaves the inherited one standing rather
 than falling back to a default the page never asked for.
@@ -7259,5 +7259,29 @@ Two traps found on the way:
 
 The fetch is serial, capped at `doc::MAX_SHEETS`, and runs on the thread about
 to lay the page out — the same blocking-`edos_http` problem the window already
-had, now on the load path twice over. A `<link>` with a `media` other than `all`
-or `screen` is not fetched at all, for the reason `@media` is skipped.
+had, now on the load path twice over.
+
+## `@media` is answered from the window (2026-08-15)
+
+`css::media_matches` evaluates a media query list against a `Viewport`, so
+`@media` bodies are parsed when they apply and dropped when they do not, and a
+`<link media=...>` goes through the same evaluator instead of a three-keyword
+allowlist. It reads media types, `and`, `not`, `only`, comma alternatives,
+`width`/`height` in both the `min-`/`max-` and the range forms, and
+`orientation`. Two rules keep it from over-applying: anything it cannot answer
+(an unknown feature, a `vw` length, the boolean `(color)` form) is false, and a
+query whose *syntax* it cannot read is false even under `not` — otherwise
+`not (some-unreadable-thing)` would turn every print sheet into a match.
+
+**The viewport is read once, at parse time**, because a media query changes the
+cascade and the cascade runs inside `doc::parse`. `ui::Browser::navigate` hands
+it the window's content area, so following a link in a resized window uses the
+new size; resizing a window that already has a page loaded reflows the layout
+but does not re-cascade. Fixing that means keeping the DOM and the fetched
+sheets alive past `doc::parse` rather than anything about the evaluator.
+
+`assets/welcome.html` carries one query that applies and one that does not, so
+the fixture proves both directions: the `.wide` paragraph is green from a
+matching `@media screen and (width >= 20em)`, and the `p { display: none }`
+inside `@media (min-width: 100em)` leaves every paragraph standing at the
+760px window the browser opens at.

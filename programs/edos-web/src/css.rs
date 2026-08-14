@@ -228,16 +228,52 @@ pub struct Element {
     pub classes: Vec<String>,
 }
 
+/// The window a media query is answered against.
+#[derive(Clone, Copy, Debug)]
+pub struct Viewport {
+    pub width_px: u32,
+    pub height_px: u32,
+    /// The initial font size. `em` in a media query resolves against it, never
+    /// against the root element's own `font-size` (CSS Media Queries 4 §1.3),
+    /// which is why this is not the cascade's `root_px`.
+    pub root_px: u32,
+}
+
+impl Viewport {
+    pub fn new(width_px: u32, height_px: u32, root_px: u32) -> Viewport {
+        Viewport {
+            width_px,
+            height_px,
+            root_px,
+        }
+    }
+}
+
+impl Default for Viewport {
+    fn default() -> Viewport {
+        Viewport::new(760, 560, 16)
+    }
+}
+
 /// Every rule from every stylesheet the document carries, in cascade order.
 #[derive(Default)]
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    viewport: Viewport,
 }
 
 impl Stylesheet {
+    /// An empty sheet whose `@media` rules are answered for `viewport`.
+    pub fn new(viewport: Viewport) -> Stylesheet {
+        Stylesheet {
+            rules: Vec::new(),
+            viewport,
+        }
+    }
+
     /// Add the rules in `source`, which is one `<style>` element's text.
     pub fn add(&mut self, source: &str) {
-        parse_rules(source, &mut self.rules);
+        parse_rules(source, &mut self.rules, &self.viewport);
     }
 
     /// The style of the element on top of `stack`, cascading this sheet's
@@ -355,7 +391,7 @@ fn split_first_top_level(text: &str, sep: char) -> Option<(&str, &str)> {
 }
 
 /// Strip comments, then read rule after rule until the source runs out.
-fn parse_rules(source: &str, out: &mut Vec<Rule>) {
+fn parse_rules(source: &str, out: &mut Vec<Rule>, viewport: &Viewport) {
     let source = strip_comments(source);
     let bytes: Vec<char> = source.chars().collect();
     let mut i = 0;
@@ -367,21 +403,26 @@ fn parse_rules(source: &str, out: &mut Vec<Rule>) {
             continue;
         }
         if bytes[i] == '@' {
-            // A cascade layer's body is ordinary rules, and a modern stylesheet
-            // puts nearly all of itself inside one, so skipping it would drop
-            // the sheet. Layer *order* is not honoured: rules keep their
-            // document order, which differs from a real cascade only where two
-            // layers set the same property on the same element.
-            if at_keyword(&bytes, i) == "layer"
-                && let Some(body) = at_rule_body(&bytes, i)
-            {
-                parse_rules(&body, out);
+            let descend = match at_keyword(&bytes, i).as_str() {
+                // A cascade layer's body is ordinary rules, and a modern
+                // stylesheet puts nearly all of itself inside one, so skipping
+                // it would drop the sheet. Layer *order* is not honoured: rules
+                // keep their document order, which differs from a real cascade
+                // only where two layers set the same property on the same
+                // element.
+                "layer" => true,
+                // A media query is answered against the window the page is
+                // being laid out for. One this cannot read -- an unknown
+                // feature, a unit with no fixed length -- drops its body rather
+                // than applying it, since a page's print or mobile rules
+                // beating its desktop ones is worse than losing them.
+                "media" => media_matches(&at_prelude(&bytes, i), viewport),
+                // `@supports` and the rest are skipped whole, bodies included.
+                _ => false,
+            };
+            if descend && let Some(body) = at_rule_body(&bytes, i) {
+                parse_rules(&body, out, viewport);
             }
-            // Everything else is skipped whole. `@media` and `@supports` are
-            // conditional on a viewport and a feature set this has no answer
-            // for, and applying their contents unconditionally is worse than
-            // ignoring them: a page's mobile rules would win over its desktop
-            // ones.
             i = skip_at_rule(&bytes, i);
             continue;
         }
@@ -410,6 +451,16 @@ fn at_keyword(chars: &[char], start: usize) -> String {
         .iter()
         .take_while(|c| c.is_ascii_alphabetic())
         .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// The at-rule's prelude: everything between its keyword and its block, which
+/// for `@media` is the query list.
+fn at_prelude(chars: &[char], start: usize) -> String {
+    let after_keyword = start + 1 + at_keyword(chars, start).chars().count();
+    chars[after_keyword..]
+        .iter()
+        .take_while(|c| !matches!(c, '{' | ';'))
         .collect()
 }
 
@@ -536,6 +587,229 @@ fn push_part(kind: u8, name: &mut String, compound: &mut Compound) {
 /// A declaration block's `name: value` pairs. Values keep their internal
 /// spacing but are lowercased, since every value this understands is
 /// case-insensitive and none of them is a string.
+/// Whether a media query list applies to `viewport`.
+///
+/// An empty list applies: that is what a `<style>` or a `<link>` with no
+/// `media` attribute means. A list is a set of alternatives, so one query that
+/// cannot be read does not sink the ones beside it.
+pub fn media_matches(list: &str, viewport: &Viewport) -> bool {
+    list.trim().is_empty() || list.split(',').any(|query| media_query(query, viewport))
+}
+
+/// One query of a list: an optional `not`, then `and`-joined terms.
+fn media_query(query: &str, viewport: &Viewport) -> bool {
+    let lowered = query.trim().to_ascii_lowercase();
+    let mut rest = lowered.as_str();
+    let mut negated = false;
+    if let Some(tail) = rest.strip_prefix("not ") {
+        negated = true;
+        rest = tail;
+    } else if let Some(tail) = rest.strip_prefix("only ") {
+        // `only` exists to hide a sheet from browsers written before media
+        // queries were; to one that has them it says nothing.
+        rest = tail;
+    }
+    match media_terms(rest.trim(), viewport) {
+        Some(matched) => matched != negated,
+        // Syntax this cannot read never applies, negated or not. `not` flipping
+        // an unparsed query into a match is how a sheet meant for print ends up
+        // on the screen.
+        None => false,
+    }
+}
+
+/// Every `and`-joined term of one query, or `None` when the syntax is not read.
+fn media_terms(query: &str, viewport: &Viewport) -> Option<bool> {
+    let mut matched = true;
+    for term in split_and(query) {
+        matched &= media_term(term.trim(), viewport)?;
+    }
+    Some(matched)
+}
+
+/// Split a query on the `and` combinators outside its parentheses.
+fn split_and(query: &str) -> Vec<&str> {
+    const AND: &str = " and ";
+    let (mut parts, mut depth, mut start, mut skip_to) = (Vec::new(), 0usize, 0usize, 0usize);
+    for (i, ch) in query.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && query[i..].starts_with(AND) {
+            parts.push(&query[start..i]);
+            skip_to = i + AND.len();
+            start = skip_to;
+        }
+    }
+    parts.push(&query[start..]);
+    parts
+}
+
+/// One term: a parenthesised feature test, or a media type.
+fn media_term(term: &str, viewport: &Viewport) -> Option<bool> {
+    if let Some(inner) = term.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        return media_feature(inner.trim(), viewport);
+    }
+    match term {
+        // A window is a screen, and `all` is every medium there is.
+        "screen" | "all" => Some(true),
+        // Any other media type -- `print`, `speech` -- is one this is not, and
+        // an unknown type is simply a type this is not either.
+        _ if !term.is_empty() && term.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// A feature test, in either the `min-width: 40rem` form or the range form.
+fn media_feature(feature: &str, viewport: &Viewport) -> Option<bool> {
+    if let Some((operands, ops)) = range_parts(feature) {
+        // `20em <= width <= 40em` is two comparisons sharing their middle
+        // operand, and reads left to right like the arithmetic it looks like.
+        let mut matched = true;
+        for (index, op) in ops.iter().enumerate() {
+            matched &= compare(operands[index], *op, operands[index + 1], viewport)?;
+        }
+        return Some(matched);
+    }
+    let Some((name, value)) = feature.split_once(':') else {
+        // The boolean form, `(color)`, asks whether a feature exists and is
+        // non-zero. None of the ones answered here can be written that way.
+        return Some(false);
+    };
+    let (name, value) = (name.trim(), value.trim());
+    let (axis, op) = match name {
+        "min-width" => (Axis::Width, Cmp::Ge),
+        "max-width" => (Axis::Width, Cmp::Le),
+        "width" => (Axis::Width, Cmp::Eq),
+        "min-height" => (Axis::Height, Cmp::Ge),
+        "max-height" => (Axis::Height, Cmp::Le),
+        "height" => (Axis::Height, Cmp::Eq),
+        "orientation" => {
+            return Some(match value {
+                "landscape" => viewport.width_px >= viewport.height_px,
+                "portrait" => viewport.width_px < viewport.height_px,
+                _ => false,
+            });
+        }
+        // A feature this cannot answer -- `prefers-color-scheme`, `hover`,
+        // `resolution` -- never matches (CSS Media Queries 4 §3).
+        _ => return Some(false),
+    };
+    Some(op.holds(axis.of(viewport), media_length(value, viewport)?))
+}
+
+/// One comparison of the range form, with the feature named on either side.
+fn compare(lhs: &str, op: Cmp, rhs: &str, viewport: &Viewport) -> Option<bool> {
+    if let Some(axis) = Axis::named(lhs) {
+        return Some(op.holds(axis.of(viewport), media_length(rhs, viewport)?));
+    }
+    if let Some(axis) = Axis::named(rhs) {
+        // `40rem <= width` is `width >= 40rem`.
+        return Some(
+            op.flip()
+                .holds(axis.of(viewport), media_length(lhs, viewport)?),
+        );
+    }
+    Some(false)
+}
+
+/// Split the range form into its operands and the comparators between them.
+fn range_parts(feature: &str) -> Option<(Vec<&str>, Vec<Cmp>)> {
+    let (mut operands, mut ops, mut start, mut i) = (Vec::new(), Vec::new(), 0usize, 0usize);
+    let bytes = feature.as_bytes();
+    while i < bytes.len() {
+        let (op, len) = match (bytes[i], bytes.get(i + 1)) {
+            (b'>', Some(b'=')) => (Cmp::Ge, 2),
+            (b'<', Some(b'=')) => (Cmp::Le, 2),
+            (b'>', _) => (Cmp::Gt, 1),
+            (b'<', _) => (Cmp::Lt, 1),
+            (b'=', _) => (Cmp::Eq, 1),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        operands.push(feature[start..i].trim());
+        ops.push(op);
+        i += len;
+        start = i;
+    }
+    if ops.is_empty() {
+        return None;
+    }
+    operands.push(feature[start..].trim());
+    Some((operands, ops))
+}
+
+/// A media query's length. `em` resolves against the initial font size, and a
+/// unit whose length depends on the viewport is refused rather than resolved
+/// against the very thing being asked about.
+fn media_length(value: &str, viewport: &Viewport) -> Option<u32> {
+    parse_length(value, viewport.root_px, viewport.root_px)
+}
+
+#[derive(Clone, Copy)]
+enum Axis {
+    Width,
+    Height,
+}
+
+impl Axis {
+    fn named(name: &str) -> Option<Axis> {
+        match name {
+            "width" => Some(Axis::Width),
+            "height" => Some(Axis::Height),
+            _ => None,
+        }
+    }
+
+    fn of(self, viewport: &Viewport) -> u32 {
+        match self {
+            Axis::Width => viewport.width_px,
+            Axis::Height => viewport.height_px,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Cmp {
+    Lt,
+    Le,
+    Eq,
+    Ge,
+    Gt,
+}
+
+impl Cmp {
+    fn holds(self, left: u32, right: u32) -> bool {
+        match self {
+            Cmp::Lt => left < right,
+            Cmp::Le => left <= right,
+            Cmp::Eq => left == right,
+            Cmp::Ge => left >= right,
+            Cmp::Gt => left > right,
+        }
+    }
+
+    /// The comparator that says the same thing with its operands swapped.
+    fn flip(self) -> Cmp {
+        match self {
+            Cmp::Lt => Cmp::Gt,
+            Cmp::Le => Cmp::Ge,
+            Cmp::Eq => Cmp::Eq,
+            Cmp::Ge => Cmp::Le,
+            Cmp::Gt => Cmp::Lt,
+        }
+    }
+}
+
 pub fn parse_declarations(body: &str) -> Vec<Declaration> {
     let mut out = Vec::new();
     for piece in split_top_level(body, ';') {
@@ -705,7 +979,11 @@ mod tests {
     }
 
     fn sheet(source: &str) -> Stylesheet {
-        let mut sheet = Stylesheet::default();
+        sheet_in(source, Viewport::default())
+    }
+
+    fn sheet_in(source: &str, viewport: Viewport) -> Stylesheet {
+        let mut sheet = Stylesheet::new(viewport);
         sheet.add(source);
         sheet
     }
@@ -747,13 +1025,61 @@ mod tests {
         assert!(!cascade(&sheet, &outside, None).hidden);
     }
 
+    /// A viewport wide enough for `min-width: 50em`, and one that is not.
+    fn wide() -> Viewport {
+        Viewport::new(1000, 700, 16)
+    }
+
+    fn narrow() -> Viewport {
+        Viewport::new(600, 700, 16)
+    }
+
     #[test]
-    fn media_queries_are_skipped_whole() {
-        let sheet = sheet("@media (min-width: 50em) { p { display: none } } p { color: red }");
+    fn a_media_query_applies_only_at_its_width() {
+        let source = "p { color: red } @media (min-width: 50em) { p { color: blue } }";
         let stack = vec![element("p", &[])];
-        let computed = cascade(&sheet, &stack, None);
-        assert!(!computed.hidden);
-        assert_eq!(computed.color, Some(rgb(255, 0, 0)));
+        let at_wide = cascade(&sheet_in(source, wide()), &stack, None);
+        let at_narrow = cascade(&sheet_in(source, narrow()), &stack, None);
+        assert_eq!(at_wide.color, Some(rgb(0, 0, 255)));
+        assert_eq!(at_narrow.color, Some(rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn media_queries_read_types_lists_and_negation() {
+        let vp = wide();
+        assert!(media_matches("", &vp));
+        assert!(media_matches("screen", &vp));
+        assert!(media_matches("only screen and (min-width: 40em)", &vp));
+        assert!(media_matches("print, screen", &vp));
+        assert!(media_matches("not print", &vp));
+        assert!(media_matches("(orientation: landscape)", &vp));
+        assert!(!media_matches("print", &vp));
+        assert!(!media_matches("not screen", &vp));
+        assert!(!media_matches("screen and (max-width: 40em)", &vp));
+        assert!(!media_matches("(orientation: portrait)", &vp));
+    }
+
+    #[test]
+    fn the_range_form_reads_either_way_round() {
+        let vp = wide();
+        assert!(media_matches("(width >= 50em)", &vp));
+        assert!(media_matches("(50em <= width)", &vp));
+        assert!(media_matches("(40em < width < 80em)", &vp));
+        assert!(media_matches("(height > 40em)", &vp));
+        assert!(!media_matches("(width < 50em)", &vp));
+        assert!(!media_matches("(80em <= width)", &vp));
+    }
+
+    #[test]
+    fn a_query_this_cannot_answer_never_matches() {
+        let vp = wide();
+        // An unknown feature, an unreadable unit, and a bare boolean test are
+        // each false, and `not` does not turn any of them into a match.
+        assert!(!media_matches("(prefers-color-scheme: dark)", &vp));
+        assert!(!media_matches("(min-width: 40vw)", &vp));
+        assert!(!media_matches("(color)", &vp));
+        assert!(!media_matches("not (min-width: 40vw)", &vp));
+        assert!(!media_matches("screen and (hover: hover)", &vp));
     }
 
     #[test]

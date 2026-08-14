@@ -8,6 +8,8 @@ use std::{env, fs, io::Write as _, process};
 
 use edos_http::{Options, url::Url};
 
+use crate::css::Viewport;
+
 mod css;
 mod doc;
 mod text;
@@ -59,7 +61,11 @@ fn main() {
     };
 
     let address = base.to_string();
-    let document = doc::parse(&html, base, &fetch_subresource);
+    // The window the page is about to open in answers its media queries, and it
+    // is the honest answer for `-d` too: the text dump is the same document,
+    // read out rather than drawn.
+    let viewport = Viewport::new(ui::WIN_W, ui::WIN_H, doc::ROOT_PX);
+    let document = doc::parse(&html, base, &fetch_subresource, viewport);
 
     if dump {
         let rendered = text::render(&document, width, links);

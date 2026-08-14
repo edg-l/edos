@@ -12,13 +12,14 @@ use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
+use crate::css::Viewport;
 use crate::doc::Document;
 use crate::view::{self, Layout, PAGE_PAD};
 
 /// Opening size: wide enough for a readable measure, short enough to fit the
 /// screens the guest boots at.
-const WIN_W: u32 = 760;
-const WIN_H: u32 = 560;
+pub const WIN_W: u32 = 760;
+pub const WIN_H: u32 = 560;
 /// Pixels one wheel notch or arrow press moves the page.
 const SCROLL_STEP: u32 = space(6);
 /// The back button's label. Its width is measured, never counted.
@@ -172,12 +173,23 @@ impl Browser {
         self.navigate(&target);
     }
 
+    /// The window as a media query sees it: the page's own area, so a query the
+    /// page writes about the viewport is answered with the space it gets.
+    fn viewport(&self) -> Viewport {
+        Viewport::new(
+            self.window.width,
+            self.window.height.saturating_sub(self.header_h),
+            crate::doc::ROOT_PX,
+        )
+    }
+
     /// Fetch `target`, show it, and push the page it replaced onto the history.
     fn navigate(&mut self, target: &str) {
+        let viewport = self.viewport();
         let loaded = crate::load(target).map(|(html, base)| {
             let address = base.to_string();
             (
-                crate::doc::parse(&html, base, &crate::fetch_subresource),
+                crate::doc::parse(&html, base, &crate::fetch_subresource, viewport),
                 address,
             )
         });

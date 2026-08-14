@@ -89,13 +89,27 @@ without them, and each is small:
   itself inside one and skipping them drops the sheet. Layer *order* is not
   honoured — rules keep their document order — which differs from a real
   cascade only where two layers set the same property on the same element.
+- **`@media` is answered from the window.** `css::media_matches` reads a query
+  list: media types, `and`, `not`, `only`, comma alternatives, `width` and
+  `height` in both the `min-`/`max-` and the range forms (`(40em < width <
+  80em)`, either operand first), and `orientation`. A `<link media=...>` goes
+  through the same evaluator, so a print sheet is never even fetched. Anything
+  it cannot answer — an unknown feature, a viewport-relative unit, the boolean
+  form — is false rather than a guess, and `not` does not turn one of those into
+  a match.
+
+  A media query changes the cascade, and the cascade runs at parse time, so
+  `doc::parse` takes the viewport and **a window resized after a page loads
+  keeps the styles it was parsed with** until that page is loaded again. The
+  layout still reflows on every resize; only the media-dependent styles are
+  fixed. Re-cascading on resize means keeping the DOM and the fetched sheets
+  alive past `doc::parse`, which is the change to make when that shows.
 
 Three deliberate limits:
 
-- **`@media` and `@supports` are skipped whole**, bodies included, and a `<link>`
-  carrying a `media` other than `all` or `screen` is not fetched. Applying a
-  rule set that is conditional on a viewport this cannot answer for would let a
-  page's mobile rules beat its desktop ones.
+- **`@supports` is skipped whole**, body included: the feature set it asks
+  about is not one this can answer for, and a rule set applied on a guess is
+  worse than one lost.
 - **A selector using anything not implemented is dropped, not approximated.**
   `a:hover`, `p[hidden]`, `>` and `*` all refuse to parse, because a selector
   matched loosely applies far too widely; the failure mode of dropping one is a

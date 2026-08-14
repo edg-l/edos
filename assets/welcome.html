@@ -16,6 +16,7 @@
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
       @media (min-width: 100em) { p { display: none } }
+      @media screen and (width >= 20em) { .wide { color: #a3be8c } }
       @layer page { .layered { color: var(--accent); font-weight: bold } }
     </style>
   </head>
@@ -29,6 +30,10 @@
     </p>
     <p class="note">This paragraph is styled by the page, not by the browser.</p>
     <p class="hidden">If you can read this, display: none is not honoured.</p>
+    <p class="wide">
+      This line is green because the window is wider than 20em, and the
+      paragraphs are all still here because it is not 100em wide.
+    </p>
     <p class="layered">
       This line is styled from inside a cascade layer, in a colour a custom
       property names.
