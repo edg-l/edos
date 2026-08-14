@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     time::Duration,
@@ -9,13 +9,13 @@ use crate::{
     thread::{
         mutex::BlockingMutex,
         preempt::{PreemptSpinlock, preempt_disable, preempt_enabled},
-        runqueue::DEFAULT_PRIORITY,
+        runqueue::{BASE_SLICE, DEFAULT_PRIORITY},
         rwlock::RwLock as BlockingRwLock,
         scheduler::{
             SCHEDULERS, WakePriority, current_thread, current_thread_id, sched, thread_exit,
             thread_park, thread_park_while, thread_sleep, thread_yield,
         },
-        thread::{ThreadId, get_thread_weak},
+        thread::{Thread, ThreadId, get_thread_weak},
         util::{pick_sched_filtered, queue_spawn_kthread_affine, queue_spawn_kthread_named_arg},
         waitqueue::WaitQueue,
     },
@@ -115,12 +115,29 @@ struct TestHarness {
     share_finished: AtomicU32,
     share_heavy: AtomicU64,
     share_light: AtomicU64,
+    // lag across a sleep: the CPU the pair is pinned to, the window they count
+    // over, and the count each one reached
+    burst_cpu: u32,
+    burst_started: AtomicU32,
+    burst_deadline: AtomicU64,
+    burst_finished: AtomicU32,
+    burst_steady: AtomicU64,
+    burst_sleeper: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 54;
+const TOTAL_TESTS: u32 = 55;
+
+/// Registered lapic ids in ascending order, which is how the pinning cases
+/// below pick CPUs far enough apart not to measure each other.
+fn registered_cpus() -> Vec<u32> {
+    let mut ids: Vec<u32> = SCHEDULERS.read().keys().copied().collect();
+    ids.sort_unstable();
+    ids
+}
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
+    let cpus = registered_cpus();
     let harness = Arc::new(TestHarness {
         done_count: AtomicU32::new(0),
         total: TOTAL_TESTS,
@@ -171,7 +188,7 @@ pub fn run_sched_tests() {
         // The *lowest* registered lapic id. The affinity and load cases both
         // pin to the highest ids, and these two saturate whatever CPU they land
         // on, so they are put as far from those as the machine allows.
-        contend_cpu: SCHEDULERS.read().keys().copied().min().unwrap_or(0),
+        contend_cpu: cpus.first().copied().unwrap_or(0),
         tri_started: AtomicU32::new(0),
         tri_finished: AtomicU32::new(0),
         tri_progress: AtomicU64::new(0),
@@ -182,6 +199,17 @@ pub fn run_sched_tests() {
         share_finished: AtomicU32::new(0),
         share_heavy: AtomicU64::new(0),
         share_light: AtomicU64::new(0),
+        // The second-lowest registered lapic id, so this pair does not share a
+        // CPU with the two contention cases below it. On a one-CPU boot every
+        // pin resolves to the same place and they interfere, which is why the
+        // assertion is a ratio between two threads that interference moves
+        // together rather than either count on its own.
+        burst_cpu: cpus.get(1).or(cpus.first()).copied().unwrap_or(0),
+        burst_started: AtomicU32::new(0),
+        burst_deadline: AtomicU64::new(0),
+        burst_finished: AtomicU32::new(0),
+        burst_steady: AtomicU64::new(0),
+        burst_sleeper: AtomicU64::new(0),
     });
 
     // --- Basic tests (8) ---
@@ -300,6 +328,19 @@ pub fn run_sched_tests() {
             test_weighted_share as *const () as u64,
             boxed,
             contend_mask,
+        );
+    }
+
+    // Lag across a sleep: a thread that sleeps off the end of every slice must
+    // not out-earn one that simply stays runnable (1)
+    let burst_mask = 1u32 << harness.burst_cpu;
+    for sleeps in [false, true] {
+        let boxed = Box::into_raw(Box::new((harness.clone(), sleeps as u64))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-burst",
+            test_burst_share as *const () as u64,
+            boxed,
+            burst_mask,
         );
     }
 
@@ -1229,13 +1270,25 @@ extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
 // what makes it deterministic: asking instead whether the parked CPU wins
 // placements outright depends on what the rest of the suite is doing on every
 // other CPU at that moment, and it legitimately loses to an idle one.
+//
+// It owns their contents, not their *only* contents. The parked CPU is where
+// the rest of the suite's unpinned threads are placed, and for the very reason
+// this test exists: its parked threads weigh nothing, so it is the emptiest CPU
+// on the machine and spawn placement keeps choosing it. Whatever the suite is
+// running at that moment lands there, so the busy side has to be unambiguous
+// against that rather than a couple of threads clear of it — with six spinners
+// it read 7 against a parked CPU carrying 9 of the suite's own threads, and
+// failed one run in three. Nothing about what is gated changes: a metric
+// counting membership puts the parked CPU at 33 or more.
 // ---------------------------------------------------------------------------
 
 /// Enough that a metric counting membership cannot mistake the parked CPU for
 /// the emptier of the two.
 const LOAD_PARKERS: u32 = 32;
-/// Real, runnable work on the CPU the parked one is compared against.
-const LOAD_SPINNERS: u32 = 6;
+/// Real, runnable work on the CPU the parked one is compared against. Well
+/// clear of the suite's own threads on the parked CPU, and still well under
+/// [`LOAD_PARKERS`], so the assertion has room on both sides.
+const LOAD_SPINNERS: u32 = 20;
 /// Ceiling on how long a spinner holds its CPU if the checker never releases
 /// it, so a failure elsewhere cannot leave the suite burning a core.
 const LOAD_SPIN_LIMIT_MS: u64 = 5_000;
@@ -1528,5 +1581,133 @@ extern "C" fn test_weighted_share(arg: *mut u8) -> ! {
         ratio_x100 % 100,
     );
     test_done(&h, "weighted-share");
+    thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Lag across a sleep
+//
+// Two threads of equal priority pinned to one CPU. One stays runnable for the
+// whole window; the other burns a slice of CPU, sleeps briefly, and repeats.
+// Each reports the CPU time it was actually given, which is the share itself
+// rather than a proxy for it.
+//
+// The sleeper is the shape that abuses a scheduler which places a waking thread
+// level with the queue. It leaves the runnable set at the point it is furthest
+// ahead — it has just spent a full slice while its competitor waited — so being
+// placed at `V` on return forgives that whole slice of service, every cycle,
+// for the price of a sleep a tenth of one long. Carrying the lag closes it: the
+// sleeper leaves one slice in debt and returns one slice in debt, so its own
+// sleep is the only thing moving it off an even split and it should land
+// slightly *below* the steady thread.
+//
+// **The burst is a slice of CPU, not of wall clock**, and the difference is the
+// whole discrimination of the test. Spinning for `BASE_SLICE` of wall clock on
+// a CPU it shares gets it half a slice ahead, not one, so only half the overrun
+// is there to be forgiven: written that way the same defect measured 1.30x,
+// under a threshold that had to sit above the 1.02x a correct kernel reaches.
+// Charging its own CPU time instead puts it exactly one slice ahead at the
+// moment it sleeps, which is where the clamp is and where the effect is
+// largest.
+//
+// The bound is on the ratio, not on either total, for the reason the weighted
+// share case gives: the rest of the suite is running, and interference moves
+// both threads together. It shows in the spread: the corrected arm reads 0.94x
+// to 0.95x across runs and the defective one 1.20x to 1.72x, so the ratio is
+// stable where it matters and noisy only where it is already failing.
+// ---------------------------------------------------------------------------
+
+/// One [`BASE_SLICE`] of CPU, so the sleeper leaves exactly at the point its
+/// request runs out and its lag is at the clamp.
+const BURST_RUN: Duration = BASE_SLICE;
+
+/// Short enough that the sleeper is runnable for most of the window, so a fair
+/// scheduler gives it near half the CPU and the abuse has nowhere to hide
+/// behind a low duty cycle.
+const BURST_SLEEP: Duration = Duration::from_micros(100);
+
+const BURST_WINDOW_MS: u64 = 300;
+const BURST_THREADS: u32 = 2;
+
+/// Where the two arms separate, measured rather than picked. Three runs each,
+/// four CPUs: with the lag carried the sleeper takes 0.94x, 0.94x and 0.95x of
+/// the steady thread's CPU; with `RunQueue::place` reverted to placing it level
+/// at `V`, 1.20x, 1.30x and 1.72x. The bound sits between them with the wider
+/// margin on the side that varies least.
+const BURST_MAX_RATIO_X100: u64 = 110;
+
+/// CPU nanoseconds charged to `thread`, including the stretch it is running now.
+///
+/// `cpu_time_ns` is only settled at a switch, so on its own it reads a thread
+/// that has been running for a millisecond as though it had not started.
+fn cpu_time_now(thread: &Thread) -> u64 {
+    let charged = thread.cpu_time_ns.load(Ordering::Acquire);
+    let start = thread.run_start_ns.load(Ordering::Acquire);
+    if start == 0 {
+        return charged;
+    }
+    charged + Instant::now().as_nanos().saturating_sub(start)
+}
+
+extern "C" fn test_burst_share(arg: *mut u8) -> ! {
+    let (h, sleeps) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
+    let sleeps = sleeps != 0;
+    let me = current_thread().unwrap();
+
+    // The second thread up opens the window, so both run over the same one.
+    if h.burst_started.fetch_add(1, Ordering::AcqRel) + 1 == BURST_THREADS {
+        h.burst_deadline.store(
+            (Instant::now() + Duration::from_millis(BURST_WINDOW_MS)).as_nanos(),
+            Ordering::Release,
+        );
+    }
+    while h.burst_deadline.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+
+    let deadline = h.burst_deadline.load(Ordering::Acquire);
+    let started_with = cpu_time_now(&me);
+    while Instant::now().as_nanos() < deadline {
+        let burst_end = cpu_time_now(&me) + BURST_RUN.as_nanos() as u64;
+        while cpu_time_now(&me) < burst_end && Instant::now().as_nanos() < deadline {
+            core::hint::spin_loop();
+        }
+        if sleeps {
+            thread_sleep(BURST_SLEEP);
+        }
+    }
+    let served = cpu_time_now(&me).saturating_sub(started_with);
+    if sleeps {
+        h.burst_sleeper.store(served, Ordering::Release);
+    } else {
+        h.burst_steady.store(served, Ordering::Release);
+    }
+
+    // One of the two checks, after both have stopped running.
+    if h.burst_finished.fetch_add(1, Ordering::AcqRel) + 1 != BURST_THREADS {
+        thread_exit(0);
+    }
+
+    let sleeper = h.burst_sleeper.load(Ordering::Acquire);
+    let steady = h.burst_steady.load(Ordering::Acquire).max(1);
+    let ratio_x100 = sleeper.saturating_mul(100) / steady;
+    assert!(
+        ratio_x100 < BURST_MAX_RATIO_X100,
+        "[sched-test] burst-share: a thread sleeping {} us off the end of every {} us slice of CPU \
+         took {}.{:02}x the CPU of one that stayed runnable ({sleeper} ns against {steady} ns); \
+         its lag is being forgiven at every wake",
+        BURST_SLEEP.as_micros(),
+        BURST_RUN.as_micros(),
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+    );
+
+    println!(
+        "[sched-test] burst-share: sleeper took {}.{:02}x the steady thread's CPU \
+         ({sleeper} ns against {steady} ns)",
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+    );
+    test_done(&h, "burst-share");
     thread_exit(0);
 }

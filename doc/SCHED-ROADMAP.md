@@ -392,6 +392,17 @@ still a trapping MSR write.
 
 ## What has been tried and did not work
 
+- **A deadline-aware wakeup check.** Built and reverted 2026-08-15; the numbers
+  and the reading that priced it are under "the four things EEVDF left open"
+  below. 50 switches out of 2400 against a ±50 spread, because a wake is a small
+  fraction of the switches on a machine whose slices expire every millisecond.
+
+- **Bounding a carried lag by the thread's own request.** The natural reading of
+  "a thread cannot be owed more than one turn", and it silently disables the
+  slice: `vdeadline = (V - lag) + request` puts every thread carrying credit on
+  `V` exactly, whatever it asked for. p95 wake 1007 us for a thread asking a
+  quarter-slice, against 10 us with a fixed bound. Same section.
+
 - **Mirroring the thread's `CR3` to keep `switch_to_page` off a lock.** Shipped,
   because the lock is a hazard worth removing -- `execve` holds `user.write()`
   while it installs an image, and a switch to a sibling thread of that process
@@ -421,6 +432,29 @@ still a trapping MSR write.
   the time had Zen 3 adding it on the EPYC parts. **Check the CPU before
   planning around it.** Marking kernel mappings `GLOBAL` took the part of the
   same win that is reachable without it.
+
+## Latency is measured on one CPU, and against throughput
+
+`programs/latbench` is the instrument for the slice and for anything that
+decides *when* a runnable thread runs. Two CPU hogs plus a thread that sleeps in
+a loop; the report is how late its sleeps returned, at p50, p95 and max, beside
+the hogs' throughput and the switch delta from `/proc/sched`. Both prices have
+to be on the page: a shorter wait is only ever bought with more turns, and a
+reading that shows one without the other can be made to say anything.
+
+**Single CPU**, for the same reason `switchbench` wants one — with a spare CPU
+the waking thread is served immediately and there is no latency to measure.
+
+Three modes: the default prices a *per-thread* request (hogs at the kernel's
+default, only the sleeper's slice changing, in both directions); `sweep` moves
+every thread's slice together, which is the machine-wide setting; `clamp` checks
+what the kernel grants for a request outside the range it serves.
+
+**A reading must run for a fixed wall-clock window, not a fixed number of
+rounds.** A late sleep stretches the round it is in, so counting rounds hands a
+slow reading's hogs more real time and its throughput column climbs with the
+very latency it is supposed to price against. That artefact showed throughput
+rising 79% across the sweep; the honest answer is flat to within 3%.
 
 ## Balance is measured on more than one CPU
 
@@ -680,13 +714,127 @@ reason the 58x above is a measurement rather than a theory: `weighted-share`
 `starvation-three-levels` (three levels pinned to one CPU, the bottom must run).
 `thread/sched_test.rs`, 52 → 54 tests.
 
-**Not done, and deliberately.** Linux carries a task's *lag* across a sleep and
-hands it back on return; a thread here is placed at `V` with zero lag instead.
-That costs some responsiveness for a thread sleeping in short bursts, and buys
-immunity to the other side of it — a long sleeper returning with a large credit
-and monopolising a CPU until it is spent. Most of the responsiveness comes from
-the deadline anyway: a waking thread is eligible immediately. Adding lag means
-deciding its clamp and decay, and neither has an instrument here yet.
+**Left open at the time.** Lag across a sleep, a deadline-aware wakeup check,
+`BASE_SLICE` against a workload rather than a derivation, and a syscall for the
+per-thread slice. All four are answered below.
+
+### Done: the four things EEVDF left open (2026-08-15)
+
+The instrument came first, because three of the four are latency questions and
+nothing in the tree could measure latency. `programs/latbench` runs two CPU hogs
+against a thread that sleeps in a loop and reports how late its sleeps returned,
+beside the hogs' throughput and the machine's switch count — the two prices any
+answer here is paid in. **Single-CPU boot**, for the reason `switchbench` wants
+one: a spare CPU serves the waking thread at once and every reading collapses.
+`/proc/sched` gained a `SWITCHES` column to feed it.
+
+**1. Lag is carried across a sleep now, and it was closing a real hole.** A
+thread's lag — `V - vruntime`, positive for under-served — is recorded when it
+leaves the runnable set and handed back by `RunQueue::place`. Placing a waking
+thread level at `V` forgave whatever it owed, and the shape that abuses it is
+ordinary: burn a slice, sleep for a tenth of one, repeat. Each cycle hands back
+a full slice of overrun for free. Gated by `burst-share`, which measures the CPU
+each of a pair actually received: **0.94x** with the lag carried and **1.20x to
+1.72x** with `place` reverted, against a duty cycle that asks for a shade under
+1.00x.
+
+**It costs ~22 ns per park/wake pair** and nothing anywhere else. `switchbench`
+on a single-CPU boot, against trunk at `a92092c`: a cross-process pipe round
+trip 2180 → 2224 ns (median of three, spread 2215–2237), with `yield idle` at
+238 against 239, `getpid` 81 against 82 and the pipe echo 426 against 424 — the
+controls unmoved, which is what makes the round-trip figure attributable. The
+cost is one extra runqueue acquisition and one `avg_vruntime` scan on the path
+where a thread stops being runnable; `pick_next` recomputes the same `V` a
+moment later, so merging the two would take most of it back, at the price of
+threading the outgoing thread into the pick. Not worth it against 2% of a
+blocking round trip in the most delicate function in the tree.
+
+Two things that were *not* free and had to be found by measuring: reaching the
+outgoing thread through `current_thread()` costs an `Arc` refcount pair on every
+switch, including the far more common one where there is no lag to record, and
+putting the new `switches` counter in the middle of `Scheduler`'s hot fields
+moved them across a cache line. Together they read as **+43 ns on `yield idle`**
+— a case that records no lag and counts one switch — until the counter went to
+the end of the struct and the lookup went through the per-CPU slot.
+
+The clamp is one `BASE_SLICE` of virtual service either way, and **it must not
+be the thread's own request**, however natural that reads. A placement sets
+`vdeadline = (V - lag) + request`, so bounding the lag at `request` cancels the
+request out of the deadline: every thread carrying credit lands on `V` exactly,
+whatever it asked for. That cost a thread asking for a quarter-slice its entire
+latency advantage — p95 wake **1007 us**, against **10 us** once the bound
+stopped moving with the request. The fixed bound also removes the need for a
+decay, which is the other half of what made this look expensive: a sleeper of
+any length returns with at most one slice of credit.
+
+**2. The wakeup check was built, measured, and taken back out.** `enqueue_ready`
+still marks the running thread `NEED_RESCHED` on every enqueue regardless of
+whether the waking thread's deadline is earlier. The Linux-shaped fix
+(`check_preempt_wakeup_fair`: charge the running thread, compare deadlines,
+decline when it still wins) was implemented and priced against the reading built
+to expose it — a sleeper asking for four times the hogs' slice, whose deadline
+is far enough behind theirs that every preemption it requests is a save, a pick
+that chooses the hog again, and a restore:
+
+| sleeper asking 4 ms | switches over 1.8 s |
+|---|---|
+| preempt on every enqueue | 2396 |
+| preempt only on an earlier deadline | 2346 |
+
+50 switches out of 2400, on a column whose run-to-run spread is ±50 on the same
+build. Latency and throughput did not move on any reading. **A wake is a small
+fraction of the switches on this system** — two hogs alternating on a 1 ms slice
+produce a switch every millisecond whatever wakes, so there is little for the
+check to save and it is paid for on every wake. Reverted; re-run
+`latbench`'s "sleeper asking 4 ms" line before building it again, and expect a
+different answer only from a workload where wakes outnumber slice expiries.
+
+**3. `BASE_SLICE` stands at 1 ms, now measured rather than only derived.**
+`latbench sweep`, every thread at the same slice, single CPU:
+
+| slice | p50 wake | p95 wake | hog throughput | switches |
+|---|---|---|---|---|
+| 250 us | 5 us | 8 us | 39.4 chunks/ms | 7728 |
+| 500 us | 5 us | 7 us | 40.1 | 4184 |
+| **1 ms** | **5 us** | **1007 us** | **40.5** | **2382** |
+| 2 ms | 15 us | 2019 us | 40.5 | 1492 |
+| 4 ms | 6 us | 6148 us | 40.7 | 1044 |
+| 10 ms | 11016 us | 19529 us | 40.5 | 758 |
+
+**Throughput is flat to within 3% across a 40x range of slice**, which refutes
+the reason a longer one would be chosen: the switching and arming a 250 us slice
+costs are worth 2.7% of hog throughput, not the double-digit figure the
+derivation guards against. So there is no throughput pressure to raise the
+slice, and no latency reason to lower it either — the wake tail is set by the
+*difference* between the waker's request and the holder's, not by the absolute
+value, which is why 250 us and 500 us read 8 us here while 1 ms reads 1007. The
+way to get latency is to ask for less than the holder, which is item 4. What the
+sweep does settle is the ceiling: at 10 ms an ordinary sleeper misses its wake by
+more than a compositor frame, which is where `MAX_SLICE` sits.
+
+An earlier form of this table showed throughput climbing 79% with the slice and
+it was entirely an artefact — a reading that counted a fixed number of sleep
+rounds runs for longer when its sleeps return late, so its hogs got more real
+time to work in. `latbench` measures over a wall-clock window for that reason.
+
+**4. `sched_setattr`/`sched_getattr` (314/315) expose the slice and the
+priority.** Nothing set `slice_ns` before, so the knob EEVDF exists to provide
+was unreachable from userspace. The measurement that justifies it, hogs at the
+kernel's default and only the sleeper's request changing:
+
+| sleeper's request | p50 wake | p95 wake | switches | hog throughput |
+|---|---|---|---|---|
+| 1 ms (the default) | 5 us | 1008 us | 2381 | 40.3 chunks/ms |
+| 250 us | 5 us | **11 us** | 2400 | 40.4 |
+
+A hundredfold on the tail for 19 switches and no throughput taken from anyone
+else — the shortened p95 reads 7 to 11 us across runs and the switch delta 19 to
+28, both against a 1008 us baseline that does not move — which is the whole claim EEVDF makes for a slice being a request rather
+than a quantum. The request is clamped to `MIN_SLICE ..= MAX_SLICE` rather than
+rejected, and `sched_getattr` reports what was granted; `latbench clamp` checks
+that. There is no privilege check because the system has no user model, and
+EEVDF is what makes that tolerable — the top of the priority table buys 6x of a
+share, not a lockout.
 
 ### The table above is stale in two rows, and one of them was a regression
 

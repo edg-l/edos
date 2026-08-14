@@ -24,7 +24,7 @@
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
 | Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest`, `fputest` (SSE state across a context switch), `auxvtest` |
-| Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`), `balancebench` (placement across CPUs; wants a multi-CPU boot, where the other two want one CPU), `termbench` (the terminal widget with no window and no compositor) |
+| Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`), `balancebench` (placement across CPUs; wants a multi-CPU boot, where the others want one CPU), `latbench` (how long a woken thread waits for a CPU, against the throughput and switches that wait is traded for), `termbench` (the terminal widget with no window and no compositor) |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows), `edos_http` (HTTP/1.1 over TLS) |
 
 ## Done

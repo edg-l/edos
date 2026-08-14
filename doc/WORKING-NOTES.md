@@ -6,6 +6,43 @@ session.
 
 ---
 
+## Two ways a scheduler measurement lies, both found in one session
+
+Closing the four things EEVDF left open (`doc/SCHED-ROADMAP.md`) needed a
+latency instrument, and building `programs/latbench` produced two readings that
+were confidently wrong in opposite directions. Both are general.
+
+**A fixed number of rounds is not a fixed amount of time.** The sweep counted
+150 sleep-and-measure rounds per slice value and reported the hogs' work over
+that reading. A late sleep stretches the round it is in, so the readings with the
+worst latency ran for nearly twice as long and their hogs got nearly twice the
+real time to work in — and the throughput column climbed 79% across the sweep,
+in exact proportion to the latency it was supposed to be traded against. It
+reads as "a longer slice is faster", which is the answer everybody expects, and
+that is what makes it dangerous. Measured over a wall-clock window instead,
+throughput is **flat to within 3% across a 40x range of slice**. Any benchmark
+whose own subject can lengthen its window has this bug.
+
+**A test that spins for a slice of wall clock does not get a slice of CPU.** The
+`burst-share` gate needs its sleeper to leave the runnable set at the moment it
+is exactly one slice ahead, which is where the effect it gates is largest.
+Written to spin for `BASE_SLICE` of wall clock on a CPU it *shares*, it got half
+a slice ahead, so half the effect was there to be seen: the defect measured
+1.30x against a correct kernel's 1.02x, and the gate could not be set between
+them. Charging the thread's own CPU time — `cpu_time_ns` plus the stretch since
+`run_start_ns`, since the first is only settled at a switch — separated the arms
+to 0.94x and 1.20x-1.72x. On a contended CPU, wall clock is not a proxy for
+service.
+
+The third lesson is the cheapest: **rule out your own scaffolding first.** The
+new `burst-share` threads pinned to a third CPU, which took it out of the pool
+that the rest of the suite is placed across, which piled the suite onto the CPU
+`load-parked-is-not-load` compares against — and that gate started failing one
+run in three. Two kernel changes were reverted chasing it before the test
+itself was suspected.
+
+---
+
 ## `fork` under memory pressure panicked the kernel, and the unwind is the work
 
 `clone_user_page_tables_cow` (`kernel/src/memory/cow.rs`) allocated four levels
@@ -1573,7 +1610,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-14 (fpu skip, fputest)
+## Counts, remeasured 2026-08-15 (the EEVDF follow-ons, latbench)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1581,16 +1618,16 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 117 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 117 — a mismatch is the bug |
-| userspace programs | 120 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| syscalls | 119 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 119 — a mismatch is the bug |
+| userspace programs | 121 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 121 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 102,837 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,175 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,351 | `git rev-list --count HEAD` |
-| in-kernel test suite | 52 | `make test AUDIODEV=none` |
+| binaries in `filesystem/bin` | 122 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
+| Rust | 103,700 code lines across 438 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,660 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,354 | `git rev-list --count HEAD` |
+| in-kernel test suite | 55 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 155, of which 14 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 158, of which 17 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,

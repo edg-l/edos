@@ -269,18 +269,23 @@ impl Procfs {
     /// these a measure of runnable work rather than of how many threads call
     /// the CPU home — and load is the quantity placement and rebalancing
     /// balance, so a lopsided column here is a placement problem.
+    ///
+    /// `switches` is what the preemption policy costs. It only means anything
+    /// as a difference across a known workload, which is what `latbench`
+    /// reports it as.
     fn render_sched() -> String {
         use crate::thread::scheduler::SCHEDULERS;
-        let mut out = String::from("CPU  CURRENT  QUEUED  LOAD  STEALS  VTIME\n");
+        let mut out = String::from("CPU  CURRENT  QUEUED  LOAD  STEALS  SWITCHES  VTIME\n");
         for (&cpu, &sched) in SCHEDULERS.read().iter() {
             let _ = writeln!(
                 out,
-                "{:<4} {:<8} {:<7} {:<5} {:<7} {}",
+                "{:<4} {:<8} {:<7} {:<5} {:<7} {:<9} {}",
                 cpu,
                 sched.current.load(Ordering::Acquire),
                 sched.queued(),
                 sched.load(),
                 sched.steals(),
+                sched.switches(),
                 sched.vtime(),
             );
         }

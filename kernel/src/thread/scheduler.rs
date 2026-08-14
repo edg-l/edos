@@ -208,6 +208,18 @@ pub struct Scheduler {
     steal_count: AtomicU64,
     steal_scan_start: AtomicU32,
     rebalance_tick: AtomicU32,
+
+    /// Context switches this CPU has performed.
+    ///
+    /// The price side of every latency decision the scheduler makes, and the
+    /// only place the guest can see it: a shorter slice or a keener preemption
+    /// rule buys its shorter wait here and nowhere else. `programs/latbench`
+    /// reports it as a delta over a known workload, through `/proc/sched`.
+    ///
+    /// Last, and deliberately: it is written on every switch and read only by
+    /// a `/proc` reader, so it belongs behind the fields the switch path reads
+    /// rather than in the middle of them.
+    switches: AtomicU64,
 }
 
 impl Scheduler {
@@ -290,6 +302,7 @@ impl Scheduler {
             steal_count: AtomicU64::new(0),
             steal_scan_start: AtomicU32::new(0),
             rebalance_tick: AtomicU32::new(0),
+            switches: AtomicU64::new(0),
         }
     }
 
@@ -351,6 +364,11 @@ impl Scheduler {
     /// Threads this CPU has taken from another's runqueue.
     pub fn steals(&self) -> u64 {
         self.steal_count.load(Ordering::Relaxed)
+    }
+
+    /// Context switches this CPU has performed.
+    pub fn switches(&self) -> u64 {
+        self.switches.load(Ordering::Relaxed)
     }
 
     /// The thread this CPU's scheduler last published as running, or `None`
@@ -727,6 +745,11 @@ impl Scheduler {
         // stealer could grab the thread and start running it. The second
         // save would then overwrite the stolen thread's ctx with THIS CPU's
         // interrupt frame, corrupting it.
+        //
+        // The outgoing thread's clock is already charged by then — both save
+        // paths call `end_run` first — so this is the last point at which what
+        // it was owed can still be read against the queue it is leaving.
+        self.record_outgoing_lag();
         loop {
             let probe = sched_prof::now_ns();
             let next = self.with_rq(|rq| {
@@ -796,6 +819,25 @@ impl Scheduler {
                 current_thread.mark_need_resched();
             }
         })
+    }
+
+    /// Remember what the outgoing thread was owed before another takes the CPU.
+    ///
+    /// Only for a thread that is leaving the runnable set: one that is `Ready`
+    /// has been re-enqueued and keeps the clock it already has, and re-recording
+    /// it there would hand a thread its own lag back on every preemption. See
+    /// [`RunQueue::record_lag`].
+    /// Reached through the per-CPU slot rather than `current_thread`, which
+    /// hands back an `Arc`: this runs on every switch, and the common answer is
+    /// "still runnable, nothing to record", so a refcount pair either side of
+    /// that answer is the whole cost of asking.
+    fn record_outgoing_lag(&self) {
+        get_percpu_data().with_current_thread(|cur| {
+            if matches!(cur.state(), State::Ready | State::Running | State::Waking) {
+                return;
+            }
+            self.with_rq(|rq| rq.record_lag(cur));
+        });
     }
 
     /// Panic if `ctx` could not have come from `thread`.
@@ -905,6 +947,7 @@ impl Scheduler {
             });
         }
         let entry = sched_prof::now_ns();
+        self.switches.fetch_add(1, Ordering::Relaxed);
         self.current.store(next.id.0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);

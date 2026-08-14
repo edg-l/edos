@@ -1,7 +1,9 @@
 use core::{
     cell::UnsafeCell,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{
+        AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+    },
     time::Duration,
 };
 
@@ -45,7 +47,9 @@ use crate::{
         irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         paging::allocate_process_pml4,
-        runqueue::{BASE_SLICE, DEFAULT_PRIORITY, PRIORITY_LEVELS, virtual_delta, weight_of},
+        runqueue::{
+            BASE_SLICE, DEFAULT_PRIORITY, PRIORITY_LEVELS, clamp_slice, virtual_delta, weight_of,
+        },
         scheduler::switch_to_kernel_page,
         signal::SignalState,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_free},
@@ -154,8 +158,14 @@ pub struct Thread {
     /// at the moment the request was made. The pick orders by this.
     pub vdeadline: AtomicU64,
 
+    /// Virtual service this thread was owed when it last stopped being
+    /// runnable, positive for under-served. Carried across a sleep and consumed
+    /// by the placement that ends it; see `RunQueue::place`.
+    pub vlag: AtomicI64,
+
     /// What this thread asks for each time it is picked, in nanoseconds. A
     /// smaller request is an earlier deadline and so a sooner, shorter turn.
+    /// Always within `runqueue::MIN_SLICE ..= runqueue::MAX_SLICE`.
     pub slice_ns: AtomicU64,
 
     // Sleep data split to avoid locking:
@@ -903,6 +913,19 @@ impl Thread {
         self.slice_ns.load(Ordering::Acquire)
     }
 
+    /// Ask for `slice_ns` of service per pick, held to what the scheduler will
+    /// serve. Returns what was actually set.
+    ///
+    /// It takes effect at the next request rather than immediately: the current
+    /// deadline was granted for the slice in force when it was made, and moving
+    /// it under a thread that is already running would let a shrinking request
+    /// re-earn an earlier deadline every time it was called.
+    pub fn set_slice_ns(&self, slice_ns: u64) -> u64 {
+        let slice_ns = clamp_slice(slice_ns);
+        self.slice_ns.store(slice_ns, Ordering::Release);
+        slice_ns
+    }
+
     pub fn begin_run(&self, start_ns: u64) {
         self.run_start_ns.store(start_ns, Ordering::Release);
     }
@@ -998,6 +1021,7 @@ impl Thread {
             slice_deadline: AtomicU64::new(0),
             vruntime: AtomicU64::new(0),
             vdeadline: AtomicU64::new(0),
+            vlag: AtomicI64::new(0),
             slice_ns: AtomicU64::new(BASE_SLICE.as_nanos() as u64),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
@@ -1132,6 +1156,7 @@ impl Thread {
             slice_deadline: AtomicU64::new(0),
             vruntime: AtomicU64::new(0),
             vdeadline: AtomicU64::new(0),
+            vlag: AtomicI64::new(0),
             slice_ns: AtomicU64::new(BASE_SLICE.as_nanos() as u64),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),

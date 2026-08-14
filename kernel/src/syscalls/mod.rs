@@ -1,7 +1,7 @@
 use crate::thread::preempt::PreemptSpinlock;
 use core::{
     arch::naked_asm,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -435,6 +435,11 @@ const SYS_CLOCK_SETTIME: u64 = 281;
 /// Give up the rest of the timeslice, for a caller spinning on state another
 /// thread has to produce.
 const SYS_SCHED_YIELD: u64 = 282;
+/// Set a thread's scheduling attributes: its weight, and the slice it asks for
+/// each time it is picked.
+const SYS_SCHED_SETATTR: u64 = 314;
+/// Read a thread's scheduling attributes back.
+const SYS_SCHED_GETATTR: u64 = 315;
 const SYS_SYNC: u64 = 162;
 const SYS_REBOOT: u64 = 169;
 
@@ -749,6 +754,16 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SCHED_YIELD => {
             thread_yield();
             ctx.rax = 0;
+        }
+        SYS_SCHED_SETATTR => {
+            let tid = ctx.rdi;
+            let attr_ptr = ctx.rsi as *const SchedAttr;
+            ctx.rax = sys_sched_setattr(tid, attr_ptr);
+        }
+        SYS_SCHED_GETATTR => {
+            let tid = ctx.rdi;
+            let attr_ptr = ctx.rsi as *mut SchedAttr;
+            ctx.rax = sys_sched_getattr(tid, attr_ptr);
         }
         SYS_GETUID => {
             ctx.rax = current_thread_info().lock().user_id as u64;
@@ -1504,6 +1519,72 @@ impl From<FsError> for Errno {
 
 fn sys_getpid() -> u64 {
     current_thread_info().lock().pid
+}
+
+/// What a thread asks the scheduler for, as userspace states it.
+///
+/// Two dials and they are not the same dial: `priority` selects the *weight*,
+/// which is a share of the CPU, and `slice_ns` is a *request*, which is how
+/// long a turn lasts and so how soon the next one comes. Asking for a shorter
+/// slice buys latency at the price of switches and takes bandwidth from nobody;
+/// asking for a higher priority takes bandwidth from everyone. This is the knob
+/// EEVDF exists to provide, and it is `sched_attr::sched_runtime` in the shape
+/// this kernel has a use for.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SchedAttr {
+    /// `0..runqueue::PRIORITY_LEVELS`, saturating at the top.
+    priority: u32,
+    _pad: u32,
+    /// Nanoseconds of service per pick, held to `MIN_SLICE ..= MAX_SLICE`.
+    /// `sched_getattr` reports what was actually set, not what was asked for.
+    slice_ns: u64,
+}
+
+/// Resolve a `tid` argument, where 0 names the calling thread.
+fn sched_attr_target(tid: u64) -> Option<Arc<Thread>> {
+    if tid == 0 {
+        return current_thread();
+    }
+    get_thread_by_id(ThreadId(tid))
+}
+
+/// There is no privilege check here because this system has no user model to
+/// check against, and EEVDF is what makes that tolerable: the worst a thread
+/// can do to another with the top of the table is take 6x its share, which is a
+/// share and not a lockout. The slice is clamped rather than rejected on both
+/// sides, so a program written against a different scheduler's range gets the
+/// nearest thing this one will serve instead of an error it has no answer for.
+fn sys_sched_setattr(tid: u64, attr_ptr: *const SchedAttr) -> u64 {
+    current_thread_info().lock().errno = Errno::Clear;
+
+    let Some(attr) = (unsafe { try_read_user(attr_ptr) }) else {
+        return fail_with(Errno::EFAULT);
+    };
+    let Some(thread) = sched_attr_target(tid) else {
+        return fail_with(Errno::ESRCH);
+    };
+
+    thread.set_slice_ns(attr.slice_ns);
+    thread.set_priority(attr.priority.min(u8::MAX as u32) as u8);
+    0
+}
+
+fn sys_sched_getattr(tid: u64, attr_ptr: *mut SchedAttr) -> u64 {
+    current_thread_info().lock().errno = Errno::Clear;
+
+    let Some(thread) = sched_attr_target(tid) else {
+        return fail_with(Errno::ESRCH);
+    };
+    let attr = SchedAttr {
+        priority: thread.priority() as u32,
+        _pad: 0,
+        slice_ns: thread.request_ns(),
+    };
+    if !unsafe { try_write_user(attr_ptr, attr) } {
+        return fail_with(Errno::EFAULT);
+    }
+    0
 }
 
 /// `waitpid` flags. Blocking is the low bit; `UNTRACED` asks to hear about a
@@ -2843,6 +2924,7 @@ fn sys_clone(
         slice_deadline: AtomicU64::new(0),
         vruntime: AtomicU64::new(0),
         vdeadline: AtomicU64::new(0),
+        vlag: AtomicI64::new(0),
         slice_ns: AtomicU64::new(parent_thread.slice_ns.load(Ordering::Acquire)),
         priority: AtomicU8::new(parent_thread.priority()),
         parent: AtomicU64::new(parent_thread.id.0),
@@ -3108,6 +3190,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         slice_deadline: AtomicU64::new(0),
         vruntime: AtomicU64::new(0),
         vdeadline: AtomicU64::new(0),
+        vlag: AtomicI64::new(0),
         slice_ns: AtomicU64::new(parent_thread.slice_ns.load(Ordering::Acquire)),
         priority: AtomicU8::new(parent_thread.priority()),
         parent: AtomicU64::new(parent_thread.id.0),

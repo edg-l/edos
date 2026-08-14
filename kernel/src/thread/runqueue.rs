@@ -23,9 +23,15 @@
 //! - **Latency is a per-thread request, not a global constant.** A shorter
 //!   slice means an earlier deadline, so a thread that wants to run *sooner*
 //!   asks for *less*, and pays for it in switches rather than in throughput
-//!   taken from anyone else.
+//!   taken from anyone else. Measured with `programs/latbench` against two CPU
+//!   hogs: a thread asking for a quarter of the default slice took its p95 wake
+//!   from 1008 us to 11 us, for 19 extra switches and no throughput taken from
+//!   the hogs. `sched_setattr` is how a program asks.
+//! - **Service owed survives a sleep.** A thread's lag is recorded when it stops
+//!   being runnable and handed back when it is placed again, so a sleep neither
+//!   forgives a debt nor forgets a credit. See [`RunQueue::place`].
 //!
-//! **Deliberately not Linux-shaped in three places.** Linux keys an RB-tree on
+//! **Deliberately not Linux-shaped in two places.** Linux keys an RB-tree on
 //! vruntime, augmented with subtree minimum deadlines, and maintains
 //! `avg_vruntime` incrementally, because one of its runqueues can hold
 //! thousands of threads. A runqueue here holds single digits and the pick it
@@ -33,7 +39,7 @@
 //! single unsorted list and recomputes `V` in the same pass. That keeps `V` a
 //! fact about the queue rather than a running sum every enqueue, dequeue and
 //! steal has to remember to adjust — the same reason `Scheduler::load` is
-//! derived. Linux also preserves lag across a sleep; see [`RunQueue::place`].
+//! derived.
 
 use core::{cmp, sync::atomic::Ordering, time::Duration};
 
@@ -87,6 +93,28 @@ pub const BASE_SLICE: Duration = Duration::from_micros(1000);
 /// own slice, so the boost decays without anyone having to undo it.
 pub const LATENCY_SLICE: Duration = Duration::from_micros(250);
 
+/// The shortest slice a thread may ask for through `sched_setattr`.
+///
+/// [`LATENCY_SLICE`] is the shortest request the kernel makes on anyone's
+/// behalf, so it is the floor userspace gets too: below it a thread would be
+/// asking to be served sooner than an interrupt wake, and the arming cost the
+/// [`BASE_SLICE`] derivation prices would start to show — at 250 us the ~1 us
+/// APIC one-shot is 0.4% of the slice.
+pub const MIN_SLICE: Duration = LATENCY_SLICE;
+
+/// The longest slice a thread may ask for through `sched_setattr`.
+///
+/// A request is how long the holder runs before the next pick, so it is also
+/// the delay it can add to everything that becomes runnable behind it. The
+/// compositor's frame is ~13 ms; a ceiling under that keeps a thread asking for
+/// the maximum from costing the desktop a frame on its own.
+pub const MAX_SLICE: Duration = Duration::from_millis(10);
+
+/// A slice request held to what the scheduler will serve.
+pub fn clamp_slice(slice_ns: u64) -> u64 {
+    slice_ns.clamp(MIN_SLICE.as_nanos() as u64, MAX_SLICE.as_nanos() as u64)
+}
+
 /// Weight for a priority level, saturating at the top of the table.
 pub fn weight_of(priority: u8) -> u64 {
     PRIORITY_WEIGHT[cmp::min(priority as usize, PRIORITY_LEVELS - 1)]
@@ -100,6 +128,25 @@ pub fn weight_of(priority: u8) -> u64 {
 pub fn virtual_delta(delta_ns: u64, weight: u64) -> u64 {
     debug_assert!(weight > 0, "virtual_delta: zero weight");
     delta_ns.saturating_mul(NICE_0_WEIGHT) / weight.max(1)
+}
+
+/// A lag held to one [`BASE_SLICE`] of virtual service in either direction.
+///
+/// **The bound must not be the thread's own request**, however natural that
+/// reads. A placement sets `vdeadline = (V - lag) + request`, so a thread
+/// carrying more credit than its request cancels the request out of its own
+/// deadline: bound the lag at `request` and every such thread lands on `V`
+/// exactly, whatever it asked for. Measured, that cost a thread asking for a
+/// quarter-slice its entire latency advantage — p95 wake 1007 us, against 10 us
+/// once the bound stopped moving with the request.
+///
+/// A fixed unit is also the truer quantity. Lag is service *owed*, and what a
+/// thread is owed for a turn it did not get is set by how long it can be kept
+/// waiting — one holder's slice — not by how much of that turn it would have
+/// used.
+fn clamp_lag(thread: &Thread, lag: i64) -> i64 {
+    let limit = virtual_delta(BASE_SLICE.as_nanos() as u64, weight_of(thread.priority())) as i64;
+    lag.clamp(-limit, limit)
 }
 
 pub(crate) struct RunQueue {
@@ -150,18 +197,41 @@ impl RunQueue {
         self.vtime.saturating_add((weighted / total) as u64)
     }
 
+    /// Remember what a thread leaving the runnable set was owed, so that a
+    /// sleep neither forgives a debt nor forgets a credit.
+    ///
+    /// `lag = V - vruntime`: positive means under-served and owed service,
+    /// negative means it ran past its share. Without this a thread is placed at
+    /// `V` on return, which resets both — and the debt side is the one that
+    /// gets abused, because the reset is free and repeatable. A thread that
+    /// runs just under a slice and then sleeps briefly hands back its overrun
+    /// every cycle, so it takes more than its weight against a competitor that
+    /// simply stays runnable.
+    ///
+    /// Called for the outgoing thread once it is no longer runnable, with `V`
+    /// taken over the queue it is leaving behind.
+    pub(crate) fn record_lag(&mut self, thread: &Thread) {
+        let v = self.avg_vruntime();
+        self.vtime = cmp::max(self.vtime, v);
+        let vruntime = thread.vruntime.load(Ordering::Acquire);
+        let lag = (v as i64).saturating_sub(vruntime as i64);
+        thread.vlag.store(clamp_lag(thread, lag), Ordering::Release);
+    }
+
     /// Where a thread that was not runnable a moment ago joins the queue.
     ///
-    /// It starts level: `vruntime = V` is a lag of zero, so it is eligible at
-    /// once and its deadline is the only thing deciding when it runs. That is
-    /// deliberately simpler than Linux, which carries a task's lag across the
-    /// sleep and hands it back on return. Carrying lag is what compensates a
-    /// thread for service it was owed while it slept; dropping it costs some
-    /// responsiveness for a thread that sleeps in short bursts, and buys
-    /// immunity to the other side of it — a long sleeper returning with a large
-    /// credit and monopolising a CPU until it is spent. The deadline already
-    /// delivers most of the responsiveness: a waking thread is eligible
-    /// immediately, and with a short request it is picked immediately.
+    /// It is placed at `V` less whatever [`RunQueue::record_lag`] saw it owed,
+    /// so it returns as far behind or ahead of its share as it left. The lag is
+    /// consumed here: a thread placed twice without having slept in between —
+    /// a migration, a steal — is placed level the second time, because the
+    /// credit belongs to the sleep and not to the move.
+    ///
+    /// **The clamp is what makes carrying lag safe**, and it is one slice of
+    /// virtual service in either direction. A slice is the unit the scheduler
+    /// grants in, so it is the most a thread can be owed for one turn it did
+    /// not get; bounding it there is also what removes the need for a decay,
+    /// since a sleeper of any length returns with at most one slice of credit
+    /// rather than the unbounded head start an uncapped lag would give it.
     ///
     /// A migrated thread comes through here too, and must: its `vruntime` was
     /// on another CPU's virtual clock and means nothing against this one's.
@@ -169,9 +239,11 @@ impl RunQueue {
         let v = self.avg_vruntime();
         self.vtime = cmp::max(self.vtime, v);
         let weight = weight_of(thread.priority());
-        thread.vruntime.store(v, Ordering::Release);
+        let lag = clamp_lag(thread, thread.vlag.swap(0, Ordering::AcqRel));
+        let vruntime = (v as i64).saturating_sub(lag).max(0) as u64;
+        thread.vruntime.store(vruntime, Ordering::Release);
         thread.vdeadline.store(
-            v.saturating_add(virtual_delta(request_ns, weight)),
+            vruntime.saturating_add(virtual_delta(request_ns, weight)),
             Ordering::Release,
         );
     }

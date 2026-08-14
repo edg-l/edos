@@ -345,9 +345,13 @@ Beyond affinity (1.2), things that look like the next real improvements:
   pop lowers the victim and the enqueue raises the thief. `/proc/sched` reports
   the columns, and the sched-test case `load-parked-is-not-load` pins 32 threads
   to one CPU and parks them, then asserts that CPU reports less load than one
-  running six threads and takes the placement between the two. A decayed
-  utilisation average is still the better metric and is now an improvement
-  rather than a correction.
+  running twenty threads and takes the placement between the two. Twenty rather
+  than a handful because the parked CPU is where the rest of the suite's
+  unpinned threads get placed, for exactly the reason this case exists — its
+  parked threads weigh nothing, so it is the emptiest CPU on the machine — and
+  the busy side has to be unambiguous against that. A decayed utilisation
+  average is still the better metric and is now an improvement rather than a
+  correction.
 - **No priority inheritance.** EEVDF bounds how long a low-priority lock holder
   can be passed over — it falls behind `V` and its deadline expires — but a
   high-priority waiter still waits behind it. This is the classic reason to add
@@ -370,6 +374,13 @@ Beyond affinity (1.2), things that look like the next real improvements:
   than a quantum the scheduler hands out. `weighted-share` and
   `starvation-three-levels` in `thread/sched_test.rs` are the gates; both were
   watched fail against the bucket scheduler.
+
+  The four items that first pass left open are closed as of 2026-08-15, in
+  `doc/SCHED-ROADMAP.md`: lag is carried across a sleep and gated by
+  `burst-share`; `sched_setattr`/`sched_getattr` expose the per-thread slice;
+  `BASE_SLICE` is confirmed against a workload by `programs/latbench` rather
+  than only derived; and a deadline-aware wakeup check was built, measured to be
+  worth nothing here, and reverted.
 - **The idle loop polled for steals — FIXED.** `run_idle` waited for its own
   backoff to come round, up to a 100 ms halt per interval and the interval
   doubling to sixteen of them, so a burst of wakes sat in the waker's runqueue

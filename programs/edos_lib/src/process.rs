@@ -692,6 +692,43 @@ pub fn sched_yield() {
     unsafe { sys::syscall0(sys::SYS_SCHED_YIELD) };
 }
 
+/// What a thread asks the scheduler for. Mirrors the kernel's `SchedAttr` in
+/// `syscalls/mod.rs` field for field.
+///
+/// The two dials are not the same dial. `priority` selects a weight and so a
+/// *share* of the CPU, taken from everything else on it. `slice_ns` is a
+/// *request*: how long a turn lasts, and so how soon the next one comes. Asking
+/// for a shorter slice buys latency at the price of switches and takes
+/// bandwidth from nobody.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchedAttr {
+    /// 0..16, higher is a larger share. 7 is the default.
+    pub priority: u32,
+    pub _pad: u32,
+    /// Nanoseconds of service per pick. The kernel clamps it to the range it
+    /// will serve, so read it back to learn what was granted.
+    pub slice_ns: u64,
+}
+
+/// Set a thread's scheduling attributes. `tid` of 0 is the calling thread.
+pub fn sched_setattr(tid: u64, attr: &SchedAttr) -> i64 {
+    unsafe { sys::syscall2(sys::SYS_SCHED_SETATTR, tid, attr as *const SchedAttr as u64) as i64 }
+}
+
+/// Read a thread's scheduling attributes. `tid` of 0 is the calling thread.
+pub fn sched_getattr(tid: u64) -> Result<SchedAttr, i64> {
+    let mut attr = SchedAttr::default();
+    let ret = unsafe {
+        sys::syscall2(
+            sys::SYS_SCHED_GETATTR,
+            tid,
+            &mut attr as *mut SchedAttr as u64,
+        ) as i64
+    };
+    if ret < 0 { Err(ret) } else { Ok(attr) }
+}
+
 pub const SIGHUP: u32 = 1;
 pub const SIGINT: u32 = 2;
 pub const SIGKILL: u32 = 9;
