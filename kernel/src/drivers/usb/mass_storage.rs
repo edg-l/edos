@@ -3,11 +3,8 @@
 //! Implements the USB Mass Storage Class specification using the Bulk-Only Transport
 //! protocol (BBB, subclass=0x06 SCSI transparent, protocol=0x50 BOT).
 
-use alloc::sync::Arc;
-
 use crate::{
     drivers::dma::{DmaBuffer, dma},
-    fs::devfs::{self, DevFsDevice, DevFsError},
     println,
 };
 
@@ -451,78 +448,5 @@ impl UsbMassStorage {
         // residual, reported by the host controller, and the CSW residue,
         // reported by the device. Trust whichever claims less arrived.
         Ok(transferred.min(data_len.saturating_sub(residue) as usize))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DevFS stub device
-// ---------------------------------------------------------------------------
-
-/// A devfs device node that represents a detected USB mass storage device.
-///
-/// Read and write operations are not yet wired to the xHCI driver thread
-/// because BOT transfers require mutable access to the controller and transfer
-/// rings owned by that thread. The node's presence at `/dev/usbN` confirms
-/// the device was detected and identified successfully.
-pub struct UsbStorageDevFsNode {
-    pub block_size: u32,
-    pub block_count: u64,
-}
-
-impl UsbStorageDevFsNode {
-    pub fn new(block_size: u32, block_count: u64) -> Self {
-        Self {
-            block_size,
-            block_count,
-        }
-    }
-}
-
-impl DevFsDevice for UsbStorageDevFsNode {
-    fn size(&self) -> u64 {
-        self.block_count * self.block_size as u64
-    }
-
-    fn read(&self, _offset: usize, _count: usize) -> Result<alloc::vec::Vec<u8>, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Registration helper
-// ---------------------------------------------------------------------------
-
-/// Register a detected USB storage device in devfs as `/dev/usbN`.
-///
-/// `index` distinguishes multiple storage devices (0 for the first one found).
-pub fn register_usb_storage(
-    index: usize,
-    slot_id: u8,
-    block_size: u32,
-    block_count: u64,
-    inquiry_data: &[u8; 36],
-) {
-    let node = Arc::new(UsbStorageDevFsNode::new(block_size, block_count));
-
-    // INQUIRY response (SPC-4 section 6.4.2): bytes 8-15 are the vendor
-    // identification and bytes 16-31 the product identification, both padded
-    // with spaces rather than terminated.
-    let vendor = core::str::from_utf8(&inquiry_data[8..16]).unwrap_or("?");
-    let product = core::str::from_utf8(&inquiry_data[16..32]).unwrap_or("?");
-
-    let path = alloc::format!("/usb{}", index);
-    match devfs::register_device_str(&path, node) {
-        Ok(()) => println!(
-            "usb-msc: registered /dev{} (slot {}, {} {})",
-            path,
-            slot_id,
-            vendor.trim_end(),
-            product.trim_end()
-        ),
-        Err(e) => println!("usb-msc: failed to register /dev{}: {:?}", path, e),
     }
 }

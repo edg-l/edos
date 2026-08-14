@@ -75,15 +75,45 @@ Three things worth knowing before touching either half:
   `argv[0]`'s file name rather than printing `efs-fsck` at a `/bin/fsck` prompt.
 
 **The trap when verifying it in a guest**: the USB mass-storage disk is
-`/dev/sdc`, not `/dev/usb0` and not `/dev/sdb`. `sda` is the SATA root, `sdb` is
-the boot ISO and answers `superblock read failed: bad magic`, and `/dev/usb0` is
-not a block node at all — it fails to open with `other error`, which reads like
-a bug in the tool and is not one.
+`/dev/sdc`, not `/dev/sdb`. `sda` is the SATA root and `sdb` is the boot ISO,
+which answers `superblock read failed: bad magic`.
+
+There used to be a second node, `/dev/usb0`, which answered `other error` to
+every read and write and read like a bug in whatever tool touched it. See "One
+device, two nodes" below.
 
 A mounted device is refused through `BLOCK_IOCTL_IS_MOUNTED` rather than
 checked. That is not caution about the root specifically: any mounted device has
 a kernel writing under the checker, and a report read from underneath one says
 nothing.
+
+---
+
+## One device, two nodes, and the older one answered every call with an error
+
+A USB stick appeared in `/dev` twice. `/dev/sdc` is the real one: the xHCI
+driver registers a `UsbBlockDevice` in the block-io registry
+(`drivers/usb/block_dev.rs`), which reaches the driver thread over
+`USB_BLOCK_MAILBOX`, and `devfs::block::register_all` gives it a node with byte
+addressing, flush, sector-count, rescan and is-mounted ioctls, plus a partition
+scan. `dd` on it reads and writes.
+
+`/dev/usb0` was a `UsbStorageDevFsNode` whose `read` and `write` were both
+`Err(DevFsError::Unsupported)`, so `dd` reported `other error` on a node that
+advertised a size and a name. Its comment gave the reason — BOT transfers need
+mutable access to the controller and rings owned by the driver thread — and that
+reason stopped being true when the mailbox landed and made `block_dev.rs`
+possible. Nothing removed the stub, so the tree carried a device node whose only
+behaviour was to fail.
+
+The node is gone. A second node that cannot serve the device is worse than no
+second node: every tool pointed at it reports a fault in itself.
+
+The stub also outlived its own scope in a quieter way. `register_usb_storage`
+ran per enumerated device and would have made `/dev/usb1`, while
+`block_dev::register` runs only for the first (`if mass_storage_device.is_none()`).
+A second stick therefore got a node that failed and no node that worked; now it
+gets nothing, which is the honest report of a driver that handles one.
 
 ---
 

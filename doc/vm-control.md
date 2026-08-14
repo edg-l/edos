@@ -154,7 +154,8 @@ drives the guest changes.
 
 `--usb-disk` hangs a `usb-storage` device off the same `qemu-xhci` the keyboard
 and mouse use, so the guest reaches it through its own xHCI and USB mass-storage
-drivers and registers it as `/dev/usb0`. It takes an optional image path and
+drivers and registers it as `/dev/sdc`, behind `/dev/sda` (the SATA root) and
+`/dev/sdb` (the boot ISO). It takes an optional image path and
 defaults to `usb-test.img`, which `make usb-test.img` creates; this is the
 headless equivalent of `make run-storage`, which needs a display.
 

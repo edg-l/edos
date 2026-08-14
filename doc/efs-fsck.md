@@ -294,8 +294,7 @@ Two things about finding the device in a guest:
 
 - Under `make run-storage` (or `scripts/edos-vm start --usb-disk`) the USB
   mass-storage disk enumerates as **`/dev/sdc`**, behind `/dev/sda` (the SATA
-  root) and `/dev/sdb` (the boot ISO, which answers `bad magic`). `/dev/usb0` is
-  not a block node and fails to open.
+  root) and `/dev/sdb` (the boot ISO, which answers `bad magic`).
 - The device nodes are whole disks at offset 0. An image written by `efs-mkfs`
   straight onto the device needs no `--partition-offset`; one inside a partition
   table does.

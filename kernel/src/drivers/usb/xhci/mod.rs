@@ -1451,15 +1451,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                                     msc.block_size = block_size;
                                                     msc.block_count = block_count;
 
-                                                    // Register in devfs
-                                                    crate::drivers::usb::mass_storage::register_usb_storage(
-                                                        usb_storage_count,
-                                                        slot_id,
-                                                        block_size,
-                                                        block_count,
-                                                        &data,
-                                                    );
-
                                                     if mass_storage_device.is_none() {
                                                         USB_BLOCK_MAILBOX.call_once(|| {
                                                             Arc::new(Mailbox::with_capacity(4))
