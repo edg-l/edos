@@ -754,6 +754,30 @@ def cmd_log(args):
     sys.stdout.write("".join(lines[-args.n:]))
 
 
+def cmd_drag(args):
+    """Press at one pixel, move to another, release: what resizes a window.
+
+    The pointer is stepped rather than jumped, because the window manager
+    resizes by the motion it is handed while the button is down and a single
+    event landing at the far corner is one it can miss between polls.
+    """
+    q = Qmp()
+    goto(q, args.x, args.y, args.width, args.height)
+    q.cmd("input-send-event", events=[
+        {"type": "btn", "data": {"button": "left", "down": True}},
+    ])
+    time.sleep(0.05)
+    steps = max(abs(args.to_x - args.x), abs(args.to_y - args.y)) // 40 + 1
+    for i in range(1, steps + 1):
+        x = args.x + (args.to_x - args.x) * i // steps
+        y = args.y + (args.to_y - args.y) * i // steps
+        goto(q, x, y, args.width, args.height)
+        time.sleep(0.03)
+    q.cmd("input-send-event", events=[
+        {"type": "btn", "data": {"button": "left", "down": False}},
+    ])
+
+
 def cmd_qmp(args):
     payload = json.loads(args.args) if args.args else {}
     print(json.dumps(Qmp().cmd(args.command, **payload), indent=2))
@@ -828,6 +852,13 @@ def main():
             s.add_argument("--button", default="left",
                            choices=["left", "middle", "right"])
         s.set_defaults(func=fn)
+
+    s = sub.add_parser("drag", help="press at one pixel, move to another, release")
+    for name in ("x", "y", "to_x", "to_y"):
+        s.add_argument(name, type=int)
+    s.add_argument("--width", type=int)
+    s.add_argument("--height", type=int)
+    s.set_defaults(func=cmd_drag)
 
     s = sub.add_parser("launch", help="open the applications menu and choose a row")
     s.add_argument("item", nargs="?", default="terminal",

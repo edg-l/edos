@@ -97,12 +97,19 @@ without them, and each is small:
   form — is false rather than a guess, and `not` does not turn one of those into
   a match.
 
-  A media query changes the cascade, and the cascade runs at parse time, so
-  `doc::parse` takes the viewport and **a window resized after a page loads
-  keeps the styles it was parsed with** until that page is loaded again. The
-  layout still reflows on every resize; only the media-dependent styles are
-  fixed. Re-cascading on resize means keeping the DOM and the fetched sheets
-  alive past `doc::parse`, which is the change to make when that shows.
+  A media query changes the cascade, so a resized window needs the cascade run
+  again. `Document` keeps what that costs: its own bytes, its base URL, and a
+  cache of every subresource it fetched, misses included. `Document::reflow`
+  hands them back to the same build at the new viewport, so a re-cascade is one
+  parse and no network.
+
+  It rebuilds only when an answer actually moved. `Stylesheet` records every
+  `@media` prelude it read and every `<link media>` it tested, matched or not,
+  and `MediaQueries::differ` re-answers them at the new size: a document that
+  writes no query, or a resize inside one breakpoint, keeps the blocks it has
+  and only reflows its lines. `programs/edos-web/src/ui.rs` says `edos-web: ~
+  WxH - N blocks` on stdout when a rebuild happens, which is how a headless run
+  tells a re-cascade from a line-break reflow.
 
 Three deliberate limits:
 

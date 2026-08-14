@@ -6,6 +6,8 @@
 //! emphasis, the link it belongs to -- is on a `Run`, so a text dump and a
 //! window draw the same list.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -15,7 +17,7 @@ use edos_render::image::{Image, Svg, decode_bmp, looks_like_svg};
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::css::{self, Computed, Element, Stylesheet, Vars, Viewport};
+use crate::css::{self, Computed, Element, MediaQueries, Stylesheet, Vars, Viewport};
 
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -139,13 +141,34 @@ impl Block {
     }
 }
 
+/// Every subresource a document has asked for and what came back.
+///
+/// Misses are cached alongside hits: a stylesheet that could not be had once
+/// cannot be had now either, and a rebuild is not the place to spend a network
+/// timeout finding that out again.
+type Cache = Rc<RefCell<BTreeMap<String, Option<Vec<u8>>>>>;
+
+/// What a document needs to be built again at a different viewport.
+struct Source {
+    html: Rc<Vec<u8>>,
+    base: Url,
+    cache: Cache,
+    /// The media queries the build answered, and the viewport it answered them
+    /// against.
+    media: MediaQueries,
+    viewport: Viewport,
+}
+
 /// A parsed document: its title and its blocks.
 ///
 /// The document's own URL does not survive parsing because it does not need
-/// to: every link on a `Run` was resolved against it already.
+/// to: every link on a `Run` was resolved against it already. Its bytes do,
+/// because a media query is answered against the window and the window
+/// resizes.
 pub struct Document {
     pub title: String,
     pub blocks: Vec<Block>,
+    source: Source,
 }
 
 impl Document {
@@ -156,6 +179,33 @@ impl Document {
         } else {
             &self.title
         }
+    }
+
+    /// The same page built for `viewport`, or `None` when it would come out
+    /// identical -- which is every resize of a document that writes no media
+    /// query, and every resize too small to move one.
+    ///
+    /// Nothing already fetched is fetched again. `fetch` is still needed
+    /// because a widened window can make a `<link media>` match for the first
+    /// time, and that sheet has never been asked for.
+    pub fn reflow(
+        &self,
+        viewport: Viewport,
+        fetch: &dyn Fn(&str) -> Option<Vec<u8>>,
+    ) -> Option<Document> {
+        if !self.source.media.differ(&self.source.viewport, &viewport) {
+            return None;
+        }
+        Some(build(
+            Source {
+                html: Rc::clone(&self.source.html),
+                base: self.source.base.clone(),
+                cache: Rc::clone(&self.source.cache),
+                media: MediaQueries::default(),
+                viewport,
+            },
+            fetch,
+        ))
     }
 }
 
@@ -179,37 +229,63 @@ const MAX_IMAGES: usize = 12;
 /// not be had: a stylesheet that fails to load leaves the page unstyled, never
 /// unparsed.
 ///
-/// `viewport` answers the document's media queries. It is read once, here: the
-/// cascade is what a media query changes, and the cascade runs at parse time,
-/// so a window resized after a page loads keeps the styles it was parsed with
-/// until the page is loaded again.
+/// `viewport` answers the document's media queries. The cascade is what a
+/// media query changes and the cascade runs here, so a window resized
+/// afterwards asks [`Document::reflow`] for a document built at its new size.
 pub fn parse(
     html: &[u8],
     base: Url,
     fetch: &dyn Fn(&str) -> Option<Vec<u8>>,
     viewport: Viewport,
 ) -> Document {
+    build(
+        Source {
+            html: Rc::new(html.to_vec()),
+            base,
+            cache: Cache::default(),
+            media: MediaQueries::default(),
+            viewport,
+        },
+        fetch,
+    )
+}
+
+/// Parse and style `source`'s bytes, fetching what it references through its
+/// own cache so a rebuild costs no network.
+fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Document {
+    let cache = Rc::clone(&source.cache);
+    let cached = |url: &str| -> Option<Vec<u8>> {
+        if let Some(hit) = cache.borrow().get(url) {
+            return hit.clone();
+        }
+        let bytes = fetch(url);
+        cache.borrow_mut().insert(url.to_string(), bytes.clone());
+        bytes
+    };
+
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
-        .read_from(&mut &html[..])
+        .read_from(&mut &source.html[..])
         .expect("reading from a slice cannot fail");
 
+    let viewport = source.viewport;
     // The sheet has to be whole before the first element is styled, and a
     // `<style>` or a `<link>` may sit anywhere in the document, so collecting
     // it is its own pass rather than something the walk picks up as it goes.
     let mut sheets = Sheets {
         sheet: Stylesheet::new(viewport),
-        base: &base,
-        fetch,
+        base: &source.base,
+        fetch: &cached,
         fetched: 0,
         viewport,
     };
     sheets.collect(&dom.document);
     let sheet = sheets.sheet;
+    source.media = sheet.media.clone();
 
     let mut builder = Builder {
-        base,
-        fetch,
+        base: source.base.clone(),
+        fetch: &cached,
         images: 0,
         title: String::new(),
         blocks: Vec::new(),
@@ -230,6 +306,7 @@ pub fn parse(
     Document {
         title: builder.title,
         blocks: builder.blocks,
+        source,
     }
 }
 
@@ -665,10 +742,11 @@ impl Sheets<'_> {
         // A sheet for another medium is not fetched at all: a print sheet
         // applied to the screen is worse than no sheet, and fetching one this
         // will not use costs the page's load time.
-        if let Some(media) = attr(node, "media")
-            && !css::media_matches(&media, &self.viewport)
-        {
-            return;
+        if let Some(media) = attr(node, "media") {
+            self.sheet.media.record(&media);
+            if !css::media_matches(&media, &self.viewport) {
+                return;
+            }
         }
         if self.fetched >= MAX_SHEETS {
             return;

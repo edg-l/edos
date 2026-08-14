@@ -150,8 +150,26 @@ impl Browser {
         true
     }
 
+    /// Take a new window size. A media query is answered against the window, so
+    /// a resize can change the document itself and not only where its lines
+    /// break; the document decides, and says so only when an answer moved.
     fn relayout(&mut self) {
-        if self.layout.width != self.window.width {
+        if let Some(document) = self
+            .document
+            .reflow(self.viewport(), &crate::fetch_subresource)
+        {
+            self.document = document;
+            self.layout = Layout::build(&self.document, self.window.width);
+            let _ = self.window.set_title(&self.window_title());
+            // Said on stdout, as a navigation is, so a headless run can tell a
+            // re-cascade from a reflow that only moved the line breaks.
+            println!(
+                "edos-web: ~ {}x{} - {} blocks",
+                self.window.width,
+                self.viewport_h(),
+                self.document.blocks.len()
+            );
+        } else if self.layout.width != self.window.width {
             self.layout = Layout::build(&self.document, self.window.width);
         }
         self.scroll = self.scroll.min(self.max_scroll());

@@ -255,11 +255,43 @@ impl Default for Viewport {
     }
 }
 
+/// Every media query list a document has been asked about, kept so a resized
+/// window can find out whether any of the answers moved.
+///
+/// A query list is stored by its source text rather than by what it decided:
+/// the same list evaluated at two viewports is the whole question, and text is
+/// the only form that can be evaluated twice.
+#[derive(Default, Clone)]
+pub struct MediaQueries(Vec<String>);
+
+impl MediaQueries {
+    /// Note that `list` was answered, ignoring one already recorded and the
+    /// empty list that every unqualified sheet carries.
+    pub fn record(&mut self, list: &str) {
+        let list = list.trim();
+        if list.is_empty() || self.0.iter().any(|seen| seen == list) {
+            return;
+        }
+        self.0.push(list.to_string());
+    }
+
+    /// Whether any recorded query answers differently at `other` than at `at`.
+    /// False means a document built for `at` would come out identical at
+    /// `other`, so nothing needs rebuilding.
+    pub fn differ(&self, at: &Viewport, other: &Viewport) -> bool {
+        self.0
+            .iter()
+            .any(|query| media_matches(query, at) != media_matches(query, other))
+    }
+}
+
 /// Every rule from every stylesheet the document carries, in cascade order.
 #[derive(Default)]
 pub struct Stylesheet {
     rules: Vec<Rule>,
     viewport: Viewport,
+    /// The `@media` preludes read while parsing, whether or not they matched.
+    pub media: MediaQueries,
 }
 
 impl Stylesheet {
@@ -268,12 +300,13 @@ impl Stylesheet {
         Stylesheet {
             rules: Vec::new(),
             viewport,
+            media: MediaQueries::default(),
         }
     }
 
     /// Add the rules in `source`, which is one `<style>` element's text.
     pub fn add(&mut self, source: &str) {
-        parse_rules(source, &mut self.rules, &self.viewport);
+        parse_rules(source, &mut self.rules, &self.viewport, &mut self.media);
     }
 
     /// The style of the element on top of `stack`, cascading this sheet's
@@ -391,7 +424,7 @@ fn split_first_top_level(text: &str, sep: char) -> Option<(&str, &str)> {
 }
 
 /// Strip comments, then read rule after rule until the source runs out.
-fn parse_rules(source: &str, out: &mut Vec<Rule>, viewport: &Viewport) {
+fn parse_rules(source: &str, out: &mut Vec<Rule>, viewport: &Viewport, media: &mut MediaQueries) {
     let source = strip_comments(source);
     let bytes: Vec<char> = source.chars().collect();
     let mut i = 0;
@@ -416,12 +449,16 @@ fn parse_rules(source: &str, out: &mut Vec<Rule>, viewport: &Viewport) {
                 // feature, a unit with no fixed length -- drops its body rather
                 // than applying it, since a page's print or mobile rules
                 // beating its desktop ones is worse than losing them.
-                "media" => media_matches(&at_prelude(&bytes, i), viewport),
+                "media" => {
+                    let prelude = at_prelude(&bytes, i);
+                    media.record(&prelude);
+                    media_matches(&prelude, viewport)
+                }
                 // `@supports` and the rest are skipped whole, bodies included.
                 _ => false,
             };
             if descend && let Some(body) = at_rule_body(&bytes, i) {
-                parse_rules(&body, out, viewport);
+                parse_rules(&body, out, viewport, media);
             }
             i = skip_at_rule(&bytes, i);
             continue;
@@ -1042,6 +1079,30 @@ mod tests {
         let at_narrow = cascade(&sheet_in(source, narrow()), &stack, None);
         assert_eq!(at_wide.color, Some(rgb(0, 0, 255)));
         assert_eq!(at_narrow.color, Some(rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn a_sheet_records_the_queries_it_answered() {
+        let sheet = sheet_in(
+            "@media (min-width: 50em) { p { color: blue } } @media print { p { color: red } }",
+            wide(),
+        );
+        // Both are recorded, the one that did not match included, since it is
+        // the query that would start matching at another size.
+        assert!(sheet.media.differ(&wide(), &narrow()));
+        assert!(!sheet.media.differ(&wide(), &Viewport::new(1200, 700, 16)));
+        // `print` matches at neither, so it is not what made those differ.
+        assert!(
+            !sheet_in("@media print { p { color: red } }", wide())
+                .media
+                .differ(&wide(), &narrow())
+        );
+    }
+
+    #[test]
+    fn a_sheet_with_no_query_never_asks_to_be_rebuilt() {
+        let sheet = sheet_in("p { color: red } @layer base { p { color: blue } }", wide());
+        assert!(!sheet.media.differ(&wide(), &narrow()));
     }
 
     #[test]

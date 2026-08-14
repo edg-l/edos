@@ -7360,3 +7360,29 @@ module's `#[cfg(test)] mod tests` runs. The guest build never sees the harness.
 `assets/welcome.html` names its SVG `../icons/edos.svg` and its self-link
 `./welcome.html`, so the fixture fails visibly if dot-segment resolution
 regresses: the mark falls back to `[the EDOS mark]`.
+
+**A resized window re-cascades the page, and only when an answer moved.**
+`Document` keeps its own bytes, its base URL and a cache of every subresource
+it fetched (misses included), so `Document::reflow` rebuilds at a new viewport
+with no network at all. What decides whether to rebuild is
+`css::MediaQueries`: `Stylesheet` records every `@media` prelude it read and
+every `<link media>` it tested, matched or not, and `differ` re-answers them at
+the new size. A page with no query, or a drag inside one breakpoint, keeps its
+blocks and only reflows its lines. `ui.rs` prints `edos-web: ~ WxH - N blocks`
+when a rebuild happens, which is the only way a headless run can tell the two
+apart.
+
+**An `em` in a media query is `doc::ROOT_PX`, which is 14, not 16.** A fixture
+threshold written as `50em` is 700px here, and the browser window opens 760
+wide, so a query meant to flip on a resize is already on the far side of itself
+before the drag starts -- which reads exactly like a reflow that did not fire.
+`filesystem/share/web/welcome.html` writes its resize pair in px for that
+reason. The rest of the sheet keeps its `em` sizes: relative type is the point
+there, and only the breakpoint needs to be a number the test can predict.
+
+**`scripts/edos-vm drag X Y TO_X TO_Y`** presses at one pixel, steps the
+pointer to another and releases, which is what resizes a guest window: the
+right border of a window listed at `X W` in `edos-vm windows` is at `X + W`,
+about 2px wide. It steps rather than jumping because the window manager resizes
+by the motion it is handed while the button is down, and a single event landing
+at the far corner is one it can miss between polls.

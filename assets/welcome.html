@@ -17,6 +17,11 @@
       nav a { text-decoration: none; font-weight: bold }
       @media (min-width: 100em) { p { display: none } }
       @media screen and (width >= 20em) { .wide { color: #a3be8c } }
+      /* The pair a resize crosses: the window opens 760px wide, so widening it
+         past 850 swaps which of the two paragraphs the document has. Written
+         in px because an em here is the reader's own body size, not 16. */
+      @media (min-width: 850px) { .narrow-only { display: none } }
+      @media (max-width: 849px) { .wide-only { display: none } }
       @layer page { .layered { color: var(--accent); font-weight: bold } }
     </style>
   </head>
@@ -34,6 +39,8 @@
       This line is green because the window is wider than 20em, and the
       paragraphs are all still here because it is not 100em wide.
     </p>
+    <p class="narrow-only">This window is narrower than 850px.</p>
+    <p class="wide-only">This window is at least 850px wide.</p>
     <p class="layered">
       This line is styled from inside a cascade layer, in a colour a custom
       property names.
