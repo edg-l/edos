@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use alloc::{
     format,
     string::{String, ToString},
@@ -121,22 +119,30 @@ pub struct HbaFis {
 // Port signature constants
 pub const SATA_SIG_ATA: u32 = 0x00000101;
 pub const SATA_SIG_ATAPI: u32 = 0xEB140101;
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const SATA_SIG_SEMB: u32 = 0xC33C0101;
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const SATA_SIG_PM: u32 = 0x96690101;
 
 // Command header flags
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const CMD_HEADER_CFL_MASK: u16 = 0x1F; // Command FIS Length
 pub const CMD_HEADER_ATAPI: u16 = 1 << 5; // ATAPI command
 pub const CMD_HEADER_WRITE: u16 = 1 << 6; // Write direction
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const CMD_HEADER_PREFETCHABLE: u16 = 1 << 7;
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const CMD_HEADER_RESET: u16 = 1 << 8;
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const CMD_HEADER_BIST: u16 = 1 << 9;
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const CMD_HEADER_CLEAR_BUSY: u16 = 1 << 10;
 
 // Port command register bits
 pub const PORT_CMD_ST: u32 = 1 << 0; // Start
 pub const PORT_CMD_SUD: u32 = 1 << 1; // Spin-up Device
 pub const PORT_CMD_POD: u32 = 1 << 2; // Power On Device
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_CMD_CLO: u32 = 1 << 3; // Command List Override
 pub const PORT_CMD_FRE: u32 = 1 << 4; // FIS Receive Enable
 pub const PORT_CMD_FR: u32 = 1 << 14; // FIS Receive Running
@@ -152,128 +158,55 @@ pub const SSTS_DET_PRESENT: u32 = 3; // Device present and communication establi
 pub const SSTS_IPM_MASK: u32 = 0xF00; // Interface Power Management
 pub const SSTS_IPM_ACTIVE: u32 = 0x100; // Interface in active state
 
+/// Device Detection field of a port's SATA status register (AHCI 1.3.1 §3.3.10).
+pub fn ssts_det(ssts: u32) -> u32 {
+    ssts & SSTS_DET_MASK
+}
+
+/// Interface Power Management field of the same register.
+pub fn ssts_ipm(ssts: u32) -> u32 {
+    (ssts & SSTS_IPM_MASK) >> 8
+}
+
+/// A device is present with an established link and an active interface, the
+/// only state a port is brought up in.
+pub fn ssts_device_ready(ssts: u32) -> bool {
+    ssts & SSTS_DET_MASK == SSTS_DET_PRESENT && ssts & SSTS_IPM_MASK == SSTS_IPM_ACTIVE
+}
+
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_DHRS: u32 = 1 << 0; // Device to Host Register FIS
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_PSS: u32 = 1 << 1; // PIO Setup FIS
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_DSS: u32 = 1 << 2; // DMA Setup FIS
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_SDBS: u32 = 1 << 3; // Set Device Bits FIS
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_UFS: u32 = 1 << 4; // Unknown FIS
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_DPS: u32 = 1 << 5; // Descriptor Processed
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_PCS: u32 = 1 << 6; // Port Connect Change
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_DMPS: u32 = 1 << 7; // Device Mechanical Presence
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_PRCS: u32 = 1 << 22; // PhyRdy Change
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_IPMS: u32 = 1 << 23; // Incorrect Port Multiplier
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_OFS: u32 = 1 << 24; // Overflow
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_INFS: u32 = 1 << 26; // Interface Non-fatal Error
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_IFS: u32 = 1 << 27; // Interface Fatal Error
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_HBDS: u32 = 1 << 28; // Host Bus Data Error
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_HBFS: u32 = 1 << 29; // Host Bus Fatal Error
 pub const PORT_IS_TFES: u32 = 1 << 30; // Task File Error
+#[expect(dead_code, reason = "AHCI 1.3.1 register map, kept whole")]
 pub const PORT_IS_CPDS: u32 = 1 << 31; // Cold Port Detect
-
-impl HbaMemory {
-    pub fn print_structure_info() {
-        crate::println!("=== HBA Memory Structure Info ===");
-        crate::println!(
-            "HbaMemory size: {} bytes (expected: {} bytes)",
-            core::mem::size_of::<Self>(),
-            0x1100
-        );
-        crate::println!(
-            "HbaMemory alignment: {} bytes",
-            core::mem::align_of::<Self>()
-        );
-        crate::println!(
-            "HbaPort size: {} bytes (expected: {} bytes)",
-            core::mem::size_of::<HbaPort>(),
-            0x80
-        );
-        crate::println!(
-            "HbaPort alignment: {} bytes",
-            core::mem::align_of::<HbaPort>()
-        );
-
-        // Print field offsets for verification
-        crate::println!("Field offsets:");
-        crate::println!("  cap: {}", core::mem::offset_of!(Self, cap));
-        crate::println!("  ghc: {}", core::mem::offset_of!(Self, ghc));
-        crate::println!("  vs: {}", core::mem::offset_of!(Self, vs));
-        crate::println!("  pi: {}", core::mem::offset_of!(Self, pi));
-        crate::println!("  vendor: {}", core::mem::offset_of!(Self, vendor));
-        crate::println!("  ports: {}", core::mem::offset_of!(Self, ports));
-    }
-
-    pub fn print_vendor_area(&self) {
-        use alloc::string::String;
-
-        let mut output = String::new();
-        output.push_str("=== HBA Vendor Area (96 bytes at offset 0xA0) ===\n");
-        output.push_str("Vendor data: ");
-
-        for (i, &byte) in self.vendor.iter().enumerate() {
-            output.push_str(&alloc::format!("{:02x}", byte));
-            if (i + 1) % 16 == 0 {
-                output.push('\n');
-                if i < self.vendor.len() - 1 {
-                    output.push_str("             ");
-                }
-            } else if (i + 1) % 4 == 0 {
-                output.push(' ');
-            }
-        }
-
-        crate::print!("{}", output);
-    }
-
-    pub fn print_basic_registers(&self) {
-        crate::println!("=== HBA Basic Registers ===");
-        crate::println!("CAP: {:#x}", self.cap);
-        crate::println!("GHC: {:#x}", self.ghc);
-        crate::println!("IS: {:#x}", self.is);
-        crate::println!("PI: {:#x}", self.pi);
-        crate::println!("VS: {:#x}", self.vs);
-        crate::println!("CAP2: {:#x}", self.cap2);
-        crate::println!("BOHC: {:#x}", self.bohc);
-    }
-}
-
-impl HbaPort {
-    pub fn print_registers(&self, port_idx: usize) {
-        crate::println!("=== Port {} Registers ===", port_idx);
-        crate::println!("CLB: {:#x}", self.clb);
-        crate::println!("CLBU: {:#x}", self.clbu);
-        crate::println!("FB: {:#x}", self.fb);
-        crate::println!("FBU: {:#x}", self.fbu);
-        crate::println!("IS: {:#x}", self.is);
-        crate::println!("IE: {:#x}", self.ie);
-        crate::println!("CMD: {:#x}", self.cmd);
-        crate::println!("TFD: {:#x}", self.tfd);
-        crate::println!("SIG: {:#x}", self.sig);
-        crate::println!("SSTS: {:#x}", self.ssts);
-        crate::println!("SCTL: {:#x}", self.sctl);
-        crate::println!("SERR: {:#x}", self.serr);
-        crate::println!("SACT: {:#x}", self.sact);
-        crate::println!("CI: {:#x}", self.ci);
-        crate::println!("SNTF: {:#x}", self.sntf);
-        crate::println!("FBS: {:#x}", self.fbs);
-    }
-
-    pub fn print_vendor_area(&self, port_idx: usize) {
-        use alloc::string::String;
-
-        let mut output = String::new();
-        output.push_str(&alloc::format!("=== Port {} Vendor Area ===\n", port_idx));
-        output.push_str("Vendor registers: ");
-
-        for (i, &reg) in self.vendor.iter().enumerate() {
-            output.push_str(&alloc::format!("{:#x}", reg));
-            if i < self.vendor.len() - 1 {
-                output.push(' ');
-            }
-        }
-
-        crate::println!("{}", output);
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct DeviceIdentifyInfo {
@@ -289,7 +222,6 @@ pub struct DeviceIdentifyInfo {
     pub supports_power_mgmt: bool,
     pub supports_security: bool,
     pub supports_fua: bool,
-    pub raw_features: u16,
 }
 
 // SCSI Command Descriptor Block structures for ATAPI
@@ -342,21 +274,10 @@ pub struct ScsiReadCapacity10 {
     pub padding: [u8; 3],   // Pad to 12 bytes
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct ScsiTestUnitReady {
-    pub operation_code: u8, // 0x00
-    pub reserved: [u8; 4],  // 0
-    pub control: u8,        // 0
-    pub padding: [u8; 6],   // Pad to 12 bytes
-}
-
 // SCSI command operation codes
 pub const SCSI_CMD_INQUIRY: u8 = 0x12;
 pub const SCSI_CMD_READ_10: u8 = 0x28;
 pub const SCSI_CMD_READ_CAPACITY_10: u8 = 0x25;
-pub const SCSI_CMD_TEST_UNIT_READY: u8 = 0x00;
-pub const SCSI_CMD_REQUEST_SENSE: u8 = 0x03;
 
 impl ScsiInquiry {
     pub fn new() -> Self {
@@ -381,14 +302,6 @@ impl ScsiReadCapacity10 {
     pub fn new() -> Self {
         let mut cmd = Self::zeroed();
         cmd.operation_code = SCSI_CMD_READ_CAPACITY_10;
-        cmd
-    }
-}
-
-impl ScsiTestUnitReady {
-    pub fn new() -> Self {
-        let mut cmd = Self::zeroed();
-        cmd.operation_code = SCSI_CMD_TEST_UNIT_READY;
         cmd
     }
 }
@@ -440,7 +353,6 @@ impl DeviceIdentifyInfo {
             supports_power_mgmt: false,
             supports_security: false,
             supports_fua: false,
-            raw_features: 0,
         }
     }
 
@@ -458,7 +370,6 @@ impl DeviceIdentifyInfo {
             supports_power_mgmt: false,
             supports_security: false,
             supports_fua: false,
-            raw_features: 0,
         }
     }
 
@@ -537,9 +448,9 @@ impl DeviceIdentifyInfo {
         let capacity_gb = capacity_mb / 1024;
 
         // Additional capabilities
-        let raw_features = u16::from_le_bytes([identify_data[166], identify_data[167]]);
-        let supports_power_mgmt = raw_features & 0x0020 != 0;
-        let supports_security = raw_features & 0x0002 != 0;
+        let features = u16::from_le_bytes([identify_data[166], identify_data[167]]);
+        let supports_power_mgmt = features & 0x0020 != 0;
+        let supports_security = features & 0x0002 != 0;
 
         // FUA support: word 84 bit 6 (commands/features supported)
         let word84 = u16::from_le_bytes([identify_data[168], identify_data[169]]);
@@ -558,7 +469,6 @@ impl DeviceIdentifyInfo {
             supports_power_mgmt,
             supports_security,
             supports_fua,
-            raw_features,
         }
     }
 

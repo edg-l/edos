@@ -2,7 +2,6 @@
 //!
 //! This module provides safe mechanisms for copying data between kernel and user space
 //! with proper page fault handling and recovery.
-#![allow(unused)]
 
 use crate::{memory::vma::USER_VA_END, util::per_cpu::get_percpu_data};
 use core::{
@@ -40,41 +39,10 @@ impl UAccessState {
         self.fault_resume.load(Ordering::Relaxed) != 0
     }
 
-    /// Set the fault resume point
-    #[inline]
-    pub fn set_resume(&self, resume: u64) {
-        self.fault_resume.store(resume, Ordering::Relaxed);
-    }
-
     /// Clear the fault resume point
     #[inline]
     pub fn clear(&self) {
         self.fault_resume.store(0, Ordering::Relaxed);
-    }
-}
-
-/// RAII guard for user access operations
-///
-/// Automatically sets up and tears down the fault resume point.
-/// While this guard is active, page faults during user memory access
-/// will be caught and handled gracefully.
-pub struct UAccessGuard {
-    _private: (),
-}
-
-impl UAccessGuard {
-    /// Create a new user access guard
-    #[inline]
-    pub fn new(resume_addr: u64) -> Self {
-        current_cpu_uaccess().set_resume(resume_addr);
-        Self { _private: () }
-    }
-}
-
-impl Drop for UAccessGuard {
-    #[inline]
-    fn drop(&mut self) {
-        current_cpu_uaccess().clear();
     }
 }
 

@@ -1,5 +1,4 @@
 // Block-granularity page cache for metadata I/O.
-#![allow(dead_code)]
 //
 // Write semantics: WRITE-BACK. Writes update the in-memory page and mark it
 // dirty; a background writeback kthread (fs::writeback) periodically flushes
@@ -504,13 +503,6 @@ impl BlockPageCache {
     /// (Phase 5 wires this in; the method compiles but is not called in Phase 3).
     pub fn register_device(&self, device_id: u64, journal: Arc<crate::fs::journal::Journal>) {
         ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals).insert(device_id, journal);
-    }
-
-    /// Look up the journal for a device, if one has been registered.
-    pub fn journal_for_device(&self, device_id: u64) -> Option<Arc<crate::fs::journal::Journal>> {
-        ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals)
-            .get(&device_id)
-            .cloned()
     }
 
     /// Return all registered journals (for the committer kthread).

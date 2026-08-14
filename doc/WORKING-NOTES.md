@@ -1385,10 +1385,11 @@ says it ran. Grep the saved log for the thing that proves the work happened
 (`Checking edos-kernel`, `ALL 51 TESTS PASSED`) rather than reading the exit
 status of the chain.
 
-## "Warning-free" does not cover three files
+## What the blanket warning-suppression attributes were hiding
 
-`make check` being warning-free is the tree's standing claim, and three files
-under `kernel/src` still opt themselves out of it with a blanket inner attribute:
+`make check` being warning-free is the tree's standing claim, and a blanket inner
+attribute at the top of a file quietly exempts it. No file under `kernel/src`
+carries one now; this is what finding them cost and bought. The sweep:
 
 ```bash
 for f in $(grep -rl '^#!\[expect\|^#!\[allow' kernel/src); do
@@ -1446,14 +1447,39 @@ it is unused by design — so each carries a narrow `#![expect(dead_code)]` with
 so it warns if the file ever stops needing it. Two spec-table entries in
 `xhci/rings.rs` carry the same thing per item.
 
-Still carrying a blanket attribute, and each is a separate job: 38 warnings sit
-behind `drivers/ahci/structures.rs` (`#![allow(dead_code)]`, mostly AHCI status
-bit constants plus several `print_*` debug helpers), `util/uaccess.rs`
-(`#![allow(unused)]`, and an entire never-constructed `UAccessGuard`), and
-`fs/block_page_cache.rs` (`#![allow(dead_code)]`, one unused
-`journal_for_device`). `debug/lock_order.rs` needed none at all — removing its
-`#![allow(dead_code)]` produced nothing under the default build, `sched-test` or
+`debug/lock_order.rs` needed none at all — removing its `#![allow(dead_code)]`
+produced nothing under the default build, `sched-test` or
 `lock-order-self-test`.
+
+The last three files were 38 warnings between them, and only one of the three
+categories was the register-map case the attribute is legitimate for:
+
+- **`fs/block_page_cache.rs`** hid exactly one unused `journal_for_device`.
+  `register_device` and `all_journals` are the pair the committer kthread uses;
+  the per-device lookup never acquired a caller.
+- **`util/uaccess.rs`** hid `UAccessGuard`, its `new`, and
+  `UAccessState::set_resume`, which was the guard's only caller. The
+  fault-resume mechanism itself is live and is *not* what was dead: `do_user_copy`
+  arms `fault_resume` from inside its own inline assembly, via
+  `setup_fault_resume`, because the resume address is a label in that asm block
+  and no Rust caller can name it. The RAII guard was a second, unusable way in.
+  Read that before concluding the whole module is vestigial.
+- **`drivers/ahci/structures.rs`** hid three different things. The `print_*`
+  register dumpers on `HbaMemory` and `HbaPort`, `ScsiTestUnitReady` with the two
+  SCSI opcodes the driver never issues, and `DeviceIdentifyInfo::raw_features`
+  (parsed, stored, never read — the two flags derived from it are the useful
+  part) were all vestigial and are gone. The four `SSTS_*` constants were the
+  interesting case: they read as dead while `controller.rs` open-coded
+  `ssts & 0xF` and `(ssts >> 8) & 0xF` with `!= 3 || != 1` at three sites, so the
+  fix was to use them — `ssts_det`, `ssts_ipm` and `ssts_device_ready` in
+  `structures.rs` are now the one decode. Only the remaining 24 register bits
+  (`PORT_IS_*` beyond `TFES`, the unused `CMD_HEADER_*`, `PORT_CMD_CLO`, two SATA
+  signatures) are genuinely the transcribe-the-spec case, and each carries its
+  own `#[expect(dead_code, reason = ...)]` rather than one attribute over the
+  file — per item, so using one warns that its attribute is now unfulfilled.
+
+The general lesson across all seventeen files: a constant that looks dead is
+often a magic number somewhere else.
 
 ## An xHCI controller is built once, not probed then initialised
 
@@ -1484,9 +1510,9 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,609 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,026 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,320 | `git rev-list --count HEAD` |
+| Rust | 101,495 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 49,912 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,322 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 154, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |

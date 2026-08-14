@@ -15,7 +15,7 @@ use crate::{
             port::AhciPort,
             structures::{
                 GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_POD, PORT_CMD_ST,
-                PORT_CMD_SUD,
+                PORT_CMD_SUD, ssts_det, ssts_device_ready, ssts_ipm,
             },
         },
         msi,
@@ -225,15 +225,13 @@ impl AhciController {
                 let port_ptr = unsafe { &raw mut (*self.hba).ports[i] };
 
                 let ssts = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
-                let device_detection = ssts & 0xF; // DET field
-                let interface_power = (ssts >> 8) & 0xF; // IPM field
 
-                if device_detection != 3 || interface_power != 1 {
+                if !ssts_device_ready(ssts) {
                     log!(
                         "Port {}: No device present (DET={}, IPM={})",
                         i,
-                        device_detection,
-                        interface_power
+                        ssts_det(ssts),
+                        ssts_ipm(ssts)
                     );
                     continue;
                 }
@@ -299,9 +297,7 @@ impl AhciController {
             loop {
                 // Check SSTS again after spin-up
                 let ssts = ptr::read_volatile(&raw const (*port_ptr).ssts);
-                let device_detection = ssts & 0xF;
-                let interface_power = (ssts >> 8) & 0xF;
-                if device_detection != 3 || interface_power != 1 {
+                if !ssts_device_ready(ssts) {
                     if start.elapsed().as_millis() > 400 {
                         log!("Port {}: Device not ready after spin-up", port_idx);
                         return Err(AhciError::InvalidDevice);
@@ -315,17 +311,15 @@ impl AhciController {
 
             // Check SSTS again after spin-up
             let ssts = ptr::read_volatile(&raw const (*port_ptr).ssts);
-            let device_detection = ssts & 0xF;
-            let interface_power = (ssts >> 8) & 0xF;
             log!(
                 "Port {} SSTS after spin-up: {:#x} (DET={}, IPM={})",
                 port_idx,
                 ssts,
-                device_detection,
-                interface_power
+                ssts_det(ssts),
+                ssts_ipm(ssts)
             );
 
-            if device_detection != 3 || interface_power != 1 {
+            if !ssts_device_ready(ssts) {
                 log!("Port {}: Device not ready after spin-up", port_idx);
                 return Err(AhciError::InvalidDevice);
             }
