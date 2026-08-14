@@ -59,19 +59,41 @@ are separate boxes.
 Colours, font families and sizes, margins, padding, borders — the box model.
 Turns "readable" into "looks close to right".
 
-Where it stands: `css.rs` is the cascade. It reads every `<style>` element and
-every `style=` attribute, matches selectors that are comma-separated descendant
-chains of tag/`.class`/`#id` compounds, orders them by real specificity with
-the inline attribute winning, and computes `color`, `font-size` (px, pt, em,
-rem, `%` and the absolute keywords), `font-weight`, `font-style`,
-`font-family`'s monospace-or-not, `text-decoration`, the vertical and left
-margins, and `display: none`. `doc.rs` carries the computed style onto every
-`Run` and every `Block`, and `view.rs` lets it override the plan the tag alone
-implies — where it says nothing, the reader typography stands.
+Where it stands: `css.rs` is the cascade. It reads every `<style>` element,
+every `<link rel=stylesheet>` the document fetches, and every `style=`
+attribute; matches selectors that are comma-separated descendant chains of
+tag/`.class`/`#id` compounds; orders them by real specificity with the inline
+attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
+the absolute keywords), `font-weight`, `font-style`, `font-family`'s
+monospace-or-not, `text-decoration`, the vertical and left margins, and
+`display: none`. `doc.rs` carries the computed style onto every `Run` and every
+`Block`, and `view.rs` lets it override the plan the tag alone implies — where
+it says nothing, the reader typography stands.
+
+Three pieces exist because a stylesheet written this decade is unreadable
+without them, and each is small:
+
+- **Custom properties and `var()`.** `Vars` is the scope, an `Rc<BTreeMap>`
+  shared down the tree and cloned only by an element that declares something.
+  Substitution happens after the cascade, not as each declaration is read,
+  which is what the spec means by resolving at computed-value time: a `--x`
+  written by any rule matching the element is in scope for every declaration on
+  it, whatever the source order or specificity. A `var()` naming nothing falls
+  back to its second argument, and with no fallback the whole declaration is
+  dropped, leaving the inherited value — never the property's initial one.
+  Cycles stop at a depth of 8.
+- **`:root`.** The one pseudo-class implemented, because it is where a sheet
+  declares its palette; in an HTML document it is `html` and nothing else, so
+  it is rewritten to that tag.
+- **`@layer` bodies are parsed**, since a modern stylesheet puts nearly all of
+  itself inside one and skipping them drops the sheet. Layer *order* is not
+  honoured — rules keep their document order — which differs from a real
+  cascade only where two layers set the same property on the same element.
 
 Three deliberate limits:
 
-- **`@media` and `@supports` are skipped whole**, bodies included. Applying a
+- **`@media` and `@supports` are skipped whole**, bodies included, and a `<link>`
+  carrying a `media` other than `all` or `screen` is not fetched. Applying a
   rule set that is conditional on a viewport this cannot answer for would let a
   page's mobile rules beat its desktop ones.
 - **A selector using anything not implemented is dropped, not approximated.**
@@ -79,12 +101,17 @@ Three deliberate limits:
   matched loosely applies far too widely; the failure mode of dropping one is a
   style that does not appear, which is what an unimplemented property does
   anyway.
-- **`<link rel=stylesheet>` is not fetched**, so a real site's styling is still
-  absent — `edos.edgl.dev` puts everything in two external files. The hook is
-  `doc::parse`, which would take a fetcher and resolve each `href` against the
-  document's base; `main::load` already does exactly that fetch. Doing it wants
-  `var()` and cascade layers first, since a modern stylesheet expresses most of
-  its colours through custom properties and would otherwise resolve to nothing.
+- **At most `doc::MAX_SHEETS` external sheets are fetched, and each one
+  serially**, on the thread that is about to lay the page out. A page linking
+  more than six is linking print and font sheets; a browser that fetched all of
+  them would spend the page's load time on styles nothing reads. The serial
+  fetch is the same blocking-`edos_http` problem the window already has, and it
+  is now on the load path twice over.
+
+A document read from a local file has no origin — its base is a placeholder —
+so its relative `href`s resolve to a URL that does not answer and it renders
+with only its `<style>`. That is why `assets/welcome.html` carries its CSS
+inline.
 
 `css.rs` depends on nothing but `std`, so its unit tests run on the host even
 though the crate only links for `x86_64-unknown-edos`:

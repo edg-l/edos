@@ -5,16 +5,18 @@
     <style>
       /* Only what edos-web's CSS subset implements, so this page is also the
          thing to open when a style stops being honoured. */
-      body { color: #d8dee9; margin-left: 4px }
-      h1 { color: #88c0d0; font-size: 2em }
+      :root { --ink: #d8dee9; --accent: #88c0d0; --heading: var(--accent) }
+      body { color: var(--ink); margin-left: 4px }
+      h1 { color: var(--heading); font-size: 2em }
       h2 { color: #a3be8c; font-size: 1.25em; margin-top: 20px }
       p { margin-bottom: 10px }
-      .note { color: #ebcb8b; font-style: italic }
+      .note { color: var(--nothing, #ebcb8b); font-style: italic }
       .quiet { color: gray; font-size: smaller }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
       @media (min-width: 100em) { p { display: none } }
+      @layer page { .layered { color: var(--accent); font-weight: bold } }
     </style>
   </head>
   <body>
@@ -27,6 +29,10 @@
     </p>
     <p class="note">This paragraph is styled by the page, not by the browser.</p>
     <p class="hidden">If you can read this, display: none is not honoured.</p>
+    <p class="layered">
+      This line is styled from inside a cascade layer, in a colour a custom
+      property names.
+    </p>
 
     <h2>Trying things out</h2>
     <p>

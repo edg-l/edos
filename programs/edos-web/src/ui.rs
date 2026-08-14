@@ -176,7 +176,10 @@ impl Browser {
     fn navigate(&mut self, target: &str) {
         let loaded = crate::load(target).map(|(html, base)| {
             let address = base.to_string();
-            (crate::doc::parse(&html, base), address)
+            (
+                crate::doc::parse(&html, base, &crate::fetch_subresource),
+                address,
+            )
         });
         let (document, address) = match loaded {
             Ok(loaded) => loaded,

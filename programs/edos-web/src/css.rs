@@ -11,6 +11,8 @@
 //! this cannot represent is invisible, which is the same outcome the document
 //! gets from a browser that never implemented it.
 
+use std::{borrow::Cow, collections::BTreeMap, rc::Rc};
+
 /// A property value that a `Computed` carries after the cascade.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Computed {
@@ -49,37 +51,36 @@ impl Computed {
         self.font_px.unwrap_or(root_px)
     }
 
-    fn apply(&mut self, decl: &Declaration, root_px: u32, parent_px: u32) {
-        match decl.name.as_str() {
+    fn apply(&mut self, name: &str, value: &str, root_px: u32, parent_px: u32) {
+        match name {
             "color" => {
-                if let Some(color) = parse_color(&decl.value) {
+                if let Some(color) = parse_color(value) {
                     self.color = Some(color);
                 }
             }
-            "display" => self.hidden = decl.value.eq_ignore_ascii_case("none"),
+            "display" => self.hidden = value.eq_ignore_ascii_case("none"),
             "visibility" => {
-                if decl.value.eq_ignore_ascii_case("hidden") {
+                if value.eq_ignore_ascii_case("hidden") {
                     self.hidden = true;
                 }
             }
             "font-size" => {
-                if let Some(px) = parse_font_size(&decl.value, root_px, parent_px) {
+                if let Some(px) = parse_font_size(value, root_px, parent_px) {
                     self.font_px = Some(px);
                 }
             }
-            "font-weight" => self.bold = parse_weight(&decl.value).or(self.bold),
-            "font-style" => match decl.value.as_str() {
+            "font-weight" => self.bold = parse_weight(value).or(self.bold),
+            "font-style" => match value {
                 "italic" | "oblique" => self.italic = Some(true),
                 "normal" => self.italic = Some(false),
                 _ => {}
             },
-            "font-family" => self.mono = Some(decl.value.contains("monospace")),
+            "font-family" => self.mono = Some(value.contains("monospace")),
             "text-decoration" | "text-decoration-line" => {
-                self.underline = Some(decl.value.contains("underline"));
+                self.underline = Some(value.contains("underline"));
             }
             "margin" => {
-                let parts: Vec<Option<u32>> = decl
-                    .value
+                let parts: Vec<Option<u32>> = value
                     .split_whitespace()
                     .map(|p| parse_length(p, root_px, self.em(parent_px)))
                     .collect();
@@ -96,17 +97,17 @@ impl Computed {
                 self.margin_bottom = bottom.or(self.margin_bottom);
                 self.margin_left = left.or(self.margin_left);
             }
-            "margin-top" => self.margin_top = self.length(decl, root_px, parent_px),
-            "margin-bottom" => self.margin_bottom = self.length(decl, root_px, parent_px),
+            "margin-top" => self.margin_top = self.length(value, root_px, parent_px),
+            "margin-bottom" => self.margin_bottom = self.length(value, root_px, parent_px),
             "margin-left" | "padding-left" => {
-                self.margin_left = self.length(decl, root_px, parent_px)
+                self.margin_left = self.length(value, root_px, parent_px)
             }
             _ => {}
         }
     }
 
-    fn length(&self, decl: &Declaration, root_px: u32, parent_px: u32) -> Option<u32> {
-        parse_length(&decl.value, root_px, self.em(parent_px))
+    fn length(&self, value: &str, root_px: u32, parent_px: u32) -> Option<u32> {
+        parse_length(value, root_px, self.em(parent_px))
     }
 }
 
@@ -116,6 +117,34 @@ pub struct Declaration {
     pub name: String,
     pub value: String,
 }
+
+impl Declaration {
+    /// A custom property, `--name`, which carries no meaning of its own and is
+    /// only ever read back through `var()`.
+    fn is_custom(&self) -> bool {
+        self.name.starts_with("--")
+    }
+}
+
+/// The custom properties in scope on one element.
+///
+/// They inherit, and they are resolved *after* the cascade rather than as each
+/// declaration is read: a `--x` set by any rule matching this element is in
+/// scope for every declaration on it, whichever rule wrote it.
+#[derive(Clone, Default, Debug)]
+pub struct Vars(BTreeMap<String, String>);
+
+impl Vars {
+    /// A scope shared until something declares a property, since a page that
+    /// sets its palette once on `:root` would otherwise copy the whole map onto
+    /// every element in the document.
+    pub fn root() -> Rc<Vars> {
+        Rc::new(Vars::default())
+    }
+}
+
+/// How deep a `var()` may refer through another before it is called a cycle.
+const VAR_DEPTH: u32 = 8;
 
 /// One simple selector: a tag, an id and any number of classes, all of which
 /// must match the same element.
@@ -212,7 +241,8 @@ impl Stylesheet {
     }
 
     /// The style of the element on top of `stack`, cascading this sheet's
-    /// matching rules over the inherited style and then the `style` attribute.
+    /// matching rules over the inherited style and then the `style` attribute,
+    /// and the custom properties its children inherit.
     ///
     /// Rules are applied in ascending specificity, ties going to the later
     /// rule, which is the cascade order for one origin with no `!important`.
@@ -221,8 +251,9 @@ impl Stylesheet {
         stack: &[Element],
         inline: Option<&str>,
         parent: &Computed,
+        parent_vars: &Rc<Vars>,
         root_px: u32,
-    ) -> Computed {
+    ) -> (Computed, Rc<Vars>) {
         let parent_px = parent.font_px.unwrap_or(root_px);
         let mut computed = parent.inherit();
 
@@ -233,19 +264,94 @@ impl Stylesheet {
             .filter(|(_, rule)| rule.selector.matches(stack))
             .collect();
         matched.sort_by_key(|(index, rule)| (rule.selector.specificity(), *index));
-        for (_, rule) in matched {
-            for decl in &rule.declarations {
-                computed.apply(decl, root_px, parent_px);
+        let inline = inline.map(parse_declarations).unwrap_or_default();
+
+        let declarations = || {
+            matched
+                .iter()
+                .flat_map(|(_, rule)| rule.declarations.iter())
+                .chain(inline.iter())
+        };
+
+        let mut vars = Rc::clone(parent_vars);
+        if declarations().any(Declaration::is_custom) {
+            let mut scope = (**parent_vars).clone();
+            for decl in declarations().filter(|d| d.is_custom()) {
+                scope.0.insert(decl.name.clone(), decl.value.clone());
             }
+            vars = Rc::new(scope);
         }
 
-        if let Some(inline) = inline {
-            for decl in parse_declarations(inline) {
-                computed.apply(&decl, root_px, parent_px);
+        for decl in declarations().filter(|d| !d.is_custom()) {
+            // A `var()` naming nothing and carrying no fallback makes the
+            // declaration invalid at computed-value time, which leaves the
+            // inherited value standing rather than the property's initial one.
+            if let Some(value) = substitute(&decl.value, &vars, 0) {
+                computed.apply(&decl.name, &value, root_px, parent_px);
             }
         }
-        computed
+        (computed, vars)
     }
+}
+
+/// Replace every `var(--name[, fallback])` in `value`, or return `None` when
+/// one of them resolves to nothing.
+fn substitute<'a>(value: &'a str, vars: &Vars, depth: u32) -> Option<Cow<'a, str>> {
+    if !value.contains("var(") {
+        return Some(Cow::Borrowed(value));
+    }
+    if depth >= VAR_DEPTH {
+        return None;
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("var(") {
+        out.push_str(&rest[..start]);
+        let args_start = start + "var(".len();
+        let end = close_paren(rest, args_start)?;
+        let args = &rest[args_start..end];
+        let (name, fallback) = match split_first_top_level(args, ',') {
+            Some((name, fallback)) => (name, Some(fallback)),
+            None => (args, None),
+        };
+        let replacement = match vars.0.get(name.trim()) {
+            Some(value) => substitute(value, vars, depth + 1)?,
+            None => substitute(fallback?.trim(), vars, depth + 1)?,
+        };
+        out.push_str(&replacement);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    Some(Cow::Owned(out))
+}
+
+/// The byte index of the `)` closing a group that starts at `from`.
+fn close_paren(text: &str, from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in text.char_indices().skip_while(|(i, _)| *i < from) {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split at the first `sep` outside parentheses, so a `var()` fallback that is
+/// itself a function survives whole.
+fn split_first_top_level(text: &str, sep: char) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if ch == sep && depth == 0 => return Some((&text[..i], &text[i + ch.len_utf8()..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Strip comments, then read rule after rule until the source runs out.
@@ -254,11 +360,28 @@ fn parse_rules(source: &str, out: &mut Vec<Rule>) {
     let bytes: Vec<char> = source.chars().collect();
     let mut i = 0;
     while i < bytes.len() {
-        // An at-rule's body is skipped whole. `@media` and `@supports` are
-        // conditional on a viewport and a feature set this has no answer for,
-        // and applying their contents unconditionally is worse than ignoring
-        // them: a page's mobile rules would win over its desktop ones.
+        // Whitespace between rules is skipped rather than left in the next
+        // prelude, since an at-rule is recognised by starting with its `@`.
+        if bytes[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
         if bytes[i] == '@' {
+            // A cascade layer's body is ordinary rules, and a modern stylesheet
+            // puts nearly all of itself inside one, so skipping it would drop
+            // the sheet. Layer *order* is not honoured: rules keep their
+            // document order, which differs from a real cascade only where two
+            // layers set the same property on the same element.
+            if at_keyword(&bytes, i) == "layer"
+                && let Some(body) = at_rule_body(&bytes, i)
+            {
+                parse_rules(&body, out);
+            }
+            // Everything else is skipped whole. `@media` and `@supports` are
+            // conditional on a viewport and a feature set this has no answer
+            // for, and applying their contents unconditionally is worse than
+            // ignoring them: a page's mobile rules would win over its desktop
+            // ones.
             i = skip_at_rule(&bytes, i);
             continue;
         }
@@ -279,6 +402,27 @@ fn parse_rules(source: &str, out: &mut Vec<Rule>) {
         }
         i = close + 1;
     }
+}
+
+/// The at-rule's name, lowercased: the word after the `@` at `start`.
+fn at_keyword(chars: &[char], start: usize) -> String {
+    chars[start + 1..]
+        .iter()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// The text between the braces of the at-rule at `start`, or `None` when it is
+/// a statement rather than a block -- `@layer base, utils;` names layers and
+/// carries no rules.
+fn at_rule_body(chars: &[char], start: usize) -> Option<String> {
+    let open = (start..chars.len()).find(|&i| matches!(chars[i], '{' | ';'))?;
+    if chars[open] == ';' {
+        return None;
+    }
+    let close = match_brace(chars, open);
+    Some(chars[open + 1..close.min(chars.len())].iter().collect())
 }
 
 /// The index just past an at-rule: past its block, or past its `;`.
@@ -338,9 +482,13 @@ fn parse_selector(text: &str) -> Option<Selector> {
     if text.is_empty() {
         return None;
     }
-    // A combinator other than descendant, an attribute selector, a pseudo
-    // anything, or the universal selector inside a compound: all unsupported,
-    // and a selector matched without them would apply far too widely.
+    // `:root` is the one pseudo-class worth having: in an HTML document it is
+    // the `html` element and nothing else, and it is where a stylesheet
+    // declares the custom properties the rest of it reads.
+    let text = text.replace(":root", "html");
+    // A combinator other than descendant, an attribute selector, any other
+    // pseudo, or the universal selector inside a compound: all unsupported, and
+    // a selector matched without them would apply far too widely.
     if text.contains([':', '[', '>', '+', '~', '(', '*']) {
         return None;
     }
@@ -481,8 +629,10 @@ fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
 }
 
 /// `#rgb`, `#rrggbb`, `rgb()`/`rgba()` and the handful of named colours a
-/// hand-written page actually uses. Everything else, `var()` included, is
-/// refused so the inherited colour stands.
+/// hand-written page actually uses. Everything else -- `hsl()`, `oklch()`, a
+/// colour named outside this list -- is refused so the inherited colour stands.
+/// A `var()` never reaches here: it is substituted before the declaration is
+/// applied.
 fn parse_color(value: &str) -> Option<u32> {
     let value = value.trim();
     if let Some(hex) = value.strip_prefix('#') {
@@ -560,11 +710,19 @@ mod tests {
         sheet
     }
 
+    /// The computed style alone, for the cases that do not care what the
+    /// element left in scope for its children.
+    fn cascade(sheet: &Stylesheet, stack: &[Element], inline: Option<&str>) -> Computed {
+        sheet
+            .cascade(stack, inline, &Computed::default(), &Vars::root(), 14)
+            .0
+    }
+
     #[test]
     fn specificity_orders_the_cascade() {
         let sheet = sheet("p { color: red } p.lead { color: blue } .lead { color: green }");
         let stack = vec![element("p", &["lead"])];
-        let computed = sheet.cascade(&stack, None, &Computed::default(), 14);
+        let computed = cascade(&sheet, &stack, None);
         assert_eq!(computed.color, Some(rgb(0, 0, 255)));
     }
 
@@ -576,7 +734,7 @@ mod tests {
             id: Some("x".into()),
             classes: Vec::new(),
         }];
-        let computed = sheet.cascade(&stack, Some("color: #00ff00"), &Computed::default(), 14);
+        let computed = cascade(&sheet, &stack, Some("color: #00ff00"));
         assert_eq!(computed.color, Some(rgb(0, 255, 0)));
     }
 
@@ -585,23 +743,15 @@ mod tests {
         let sheet = sheet("nav a { display: none }");
         let inside = vec![element("nav", &[]), element("ul", &[]), element("a", &[])];
         let outside = vec![element("p", &[]), element("a", &[])];
-        assert!(
-            sheet
-                .cascade(&inside, None, &Computed::default(), 14)
-                .hidden
-        );
-        assert!(
-            !sheet
-                .cascade(&outside, None, &Computed::default(), 14)
-                .hidden
-        );
+        assert!(cascade(&sheet, &inside, None).hidden);
+        assert!(!cascade(&sheet, &outside, None).hidden);
     }
 
     #[test]
     fn media_queries_are_skipped_whole() {
         let sheet = sheet("@media (min-width: 50em) { p { display: none } } p { color: red }");
         let stack = vec![element("p", &[])];
-        let computed = sheet.cascade(&stack, None, &Computed::default(), 14);
+        let computed = cascade(&sheet, &stack, None);
         assert!(!computed.hidden);
         assert_eq!(computed.color, Some(rgb(255, 0, 0)));
     }
@@ -614,21 +764,69 @@ mod tests {
             ..Computed::default()
         };
         let stack = vec![element("p", &[])];
-        assert_eq!(sheet.cascade(&stack, None, &parent, 14).font_px, Some(40));
+        assert_eq!(
+            sheet
+                .cascade(&stack, None, &parent, &Vars::root(), 14)
+                .0
+                .font_px,
+            Some(40)
+        );
     }
 
     #[test]
     fn unsupported_selectors_do_not_match_too_widely() {
         let sheet = sheet("a:hover { display: none } p[hidden] { display: none }");
         let stack = vec![element("a", &[])];
-        assert!(!sheet.cascade(&stack, None, &Computed::default(), 14).hidden);
+        assert!(!cascade(&sheet, &stack, None).hidden);
+    }
+
+    #[test]
+    fn custom_properties_inherit_and_resolve() {
+        let sheet = sheet(":root { --ink: #123456 } p { color: var(--ink) }");
+        let root = vec![element("html", &[])];
+        let (computed, vars) = sheet.cascade(&root, None, &Computed::default(), &Vars::root(), 14);
+        let stack = vec![element("html", &[]), element("p", &[])];
+        let computed = sheet.cascade(&stack, None, &computed, &vars, 14).0;
+        assert_eq!(computed.color, Some(rgb(0x12, 0x34, 0x56)));
+    }
+
+    #[test]
+    fn a_var_declared_by_any_matching_rule_is_in_scope() {
+        // The declaration reading it is written before the one setting it, and
+        // by a rule of lower specificity: neither may matter.
+        let sheet = sheet("p { color: var(--ink) } p.lead { --ink: red }");
+        let stack = vec![element("p", &["lead"])];
+        assert_eq!(cascade(&sheet, &stack, None).color, Some(rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn an_unresolvable_var_takes_its_fallback_or_drops_the_declaration() {
+        let sheet = sheet("p { color: var(--missing, blue); font-size: var(--gone) }");
+        let stack = vec![element("p", &[])];
+        let computed = cascade(&sheet, &stack, None);
+        assert_eq!(computed.color, Some(rgb(0, 0, 255)));
+        assert_eq!(computed.font_px, None);
+    }
+
+    #[test]
+    fn a_var_cycle_does_not_hang() {
+        let sheet = sheet(":root { --a: var(--b); --b: var(--a) } html { color: var(--a) }");
+        let stack = vec![element("html", &[])];
+        assert_eq!(cascade(&sheet, &stack, None).color, None);
+    }
+
+    #[test]
+    fn cascade_layers_carry_their_rules() {
+        let sheet = sheet("@layer base, utils; @layer base { p { color: red } }");
+        let stack = vec![element("p", &[])];
+        assert_eq!(cascade(&sheet, &stack, None).color, Some(rgb(255, 0, 0)));
     }
 
     #[test]
     fn margin_shorthand_reads_clockwise() {
         let sheet = sheet("p { margin: 1px 2px 3px 4px }");
         let stack = vec![element("p", &[])];
-        let computed = sheet.cascade(&stack, None, &Computed::default(), 14);
+        let computed = cascade(&sheet, &stack, None);
         assert_eq!(computed.margin_top, Some(1));
         assert_eq!(computed.margin_bottom, Some(3));
         assert_eq!(computed.margin_left, Some(4));

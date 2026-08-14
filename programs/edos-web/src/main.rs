@@ -59,7 +59,7 @@ fn main() {
     };
 
     let address = base.to_string();
-    let document = doc::parse(&html, base);
+    let document = doc::parse(&html, base, &fetch_subresource);
 
     if dump {
         let rendered = text::render(&document, width, links);
@@ -120,6 +120,17 @@ pub(crate) fn load(target: &str) -> Result<(Vec<u8>, Url), String> {
     // was asked for, and every relative link on the page resolves against it.
     let base = Url::parse(&response.head.final_url).map_err(|e| e.to_string())?;
     Ok((response.body, base))
+}
+
+/// Fetch something the document refers to by absolute URL: a stylesheet today.
+///
+/// A subresource that cannot be had is not an error for the page -- it renders
+/// with whatever styling did arrive -- so this reports nothing and returns
+/// `None`. A document read from a local file has no origin, so its relative
+/// hrefs resolve against the placeholder base and fail here; a local page that
+/// wants styling carries it in a `<style>`.
+pub(crate) fn fetch_subresource(url: &str) -> Option<Vec<u8>> {
+    load(url).ok().map(|(bytes, _)| bytes)
 }
 
 fn usage() {

@@ -7209,20 +7209,55 @@ and `@supports` bodies are skipped whole, because applying rules conditional on
 a viewport this cannot answer for lets a page's mobile rules beat its desktop
 ones. A selector containing `:`, `[`, `>`, `+`, `~` or `*` is dropped rather
 than matched loosely, since a `p[hidden]` matched as `p` restyles the whole
-document. And an unparseable value — `var()` above all — leaves the inherited
-one standing rather than falling back to a default the page never asked for.
-
-**What this does not do is fetch `<link rel=stylesheet>`**, which is why
-`edos.edgl.dev` still renders unstyled: Astro emits two external files and
-nothing inline. That is a deliberate stopping point rather than an oversight.
-A modern stylesheet expresses nearly all of its colour through custom
-properties, so fetching one without `var()` support would resolve most
-declarations to nothing while its `display` rules still applied — strictly
-worse than ignoring it. `var()` and cascade layers come first; the fetch hook
-is `doc::parse` taking a fetcher, and `main::load` already performs that fetch.
+document. And an unparseable value leaves the inherited one standing rather
+than falling back to a default the page never asked for.
 
 `assets/welcome.html` is installed at `/share/web/welcome.html` by the
 `filesystem` target and uses only the implemented subset, so it is both the
 demo page and the regression fixture: open it with `edos-web
 /share/web/welcome.html` and every styled element in it should differ visibly
 from the reader defaults.
+
+## The real site renders styled, and three small things stood between (2026-08-15)
+
+`edos-web` now fetches `<link rel=stylesheet>`, and `edos.edgl.dev` comes up in
+its own monospace face and its own link colours instead of the reader defaults.
+Fetching the sheet was the last step of three, and the other two are why doing
+it earlier would have looked like a regression:
+
+**`var()` and custom properties.** A sheet written this decade puts its palette
+in `--` properties, so a fetched sheet without them resolves most of its colour
+declarations to nothing while its `display` rules still apply. `Vars` in
+`css.rs` is the scope: an `Rc<BTreeMap>` handed down the element tree and cloned
+only by an element that declares something, so a page that sets forty properties
+once on `:root` does not copy them onto every node. Substitution happens after
+the cascade, not as each declaration is read — that is what the spec means by
+resolving at computed-value time, and it is why a `--x` written by a
+lower-specificity rule is still in scope for a declaration that reads it.
+
+**`@layer` bodies are parsed rather than skipped**, because Starlight and every
+other modern generator wrap essentially the whole sheet in one and the at-rule
+skipper was eating it. Layer *order* is not honoured, which differs from a real
+cascade only where two layers set the same property on the same element.
+
+**`:root` is the one pseudo-class implemented.** Everything else with a `:` is
+still dropped, but `:root` is where a sheet declares its palette, and in an HTML
+document it is exactly the `html` element, so it is rewritten to that tag.
+
+Two traps found on the way:
+
+- **`parse_rules` recognised an at-rule only when `@` was the very next
+  character**, so `@layer a, b; @layer a { ... }` left a space before the second
+  `@` and the whole layer was read as a selector prelude with a garbage
+  declaration block. It skips inter-rule whitespace now. Anything that looks at
+  a byte at a cursor in that loop must do the same.
+- **A local file has no origin.** `main::load` gives a file-backed document the
+  placeholder base `http://localhost/`, so its relative `href`s resolve to a URL
+  nothing answers and its external sheets silently do not load. That is why the
+  fixture carries its CSS inline, and it is the reason a page that renders styled
+  from disk proves less than the same page over HTTP.
+
+The fetch is serial, capped at `doc::MAX_SHEETS`, and runs on the thread about
+to lay the page out — the same blocking-`edos_http` problem the window already
+had, now on the load path twice over. A `<link>` with a `media` other than `all`
+or `screen` is not fetched at all, for the reason `@media` is skipped.

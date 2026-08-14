@@ -6,11 +6,13 @@
 //! emphasis, the link it belongs to -- is on a `Run`, so a text dump and a
 //! window draw the same list.
 
+use std::rc::Rc;
+
 use edos_http::url::Url;
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::css::{Computed, Element, Stylesheet};
+use crate::css::{Computed, Element, Stylesheet, Vars};
 
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,18 +93,34 @@ impl Document {
 /// The font size relative lengths and the absolute keywords resolve against.
 const ROOT_PX: u32 = edos_render::font::size::BODY;
 
-/// Parse `html` as a document fetched from `base`.
-pub fn parse(html: &[u8], base: Url) -> Document {
+/// How many external stylesheets one document may pull in. A page linking more
+/// than this is linking print sheets and font sheets; a browser that fetched
+/// all of them would spend the page's load time on styles nothing reads.
+const MAX_SHEETS: usize = 6;
+
+/// Parse `html` as a document fetched from `base`, using `fetch` for the
+/// stylesheets it links.
+///
+/// `fetch` takes an absolute URL and returns the bytes, or `None` when it could
+/// not be had: a stylesheet that fails to load leaves the page unstyled, never
+/// unparsed.
+pub fn parse(html: &[u8], base: Url, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Document {
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
         .read_from(&mut &html[..])
         .expect("reading from a slice cannot fail");
 
     // The sheet has to be whole before the first element is styled, and a
-    // `<style>` may sit anywhere in the document, so collecting it is its own
-    // pass rather than something the walk picks up as it goes.
-    let mut sheet = Stylesheet::default();
-    collect_styles(&dom.document, &mut sheet);
+    // `<style>` or a `<link>` may sit anywhere in the document, so collecting
+    // it is its own pass rather than something the walk picks up as it goes.
+    let mut sheets = Sheets {
+        sheet: Stylesheet::default(),
+        base: &base,
+        fetch,
+        fetched: 0,
+    };
+    sheets.collect(&dom.document);
+    let sheet = sheets.sheet;
 
     let mut builder = Builder {
         base,
@@ -116,6 +134,7 @@ pub fn parse(html: &[u8], base: Url) -> Document {
         sheet,
         stack: Vec::new(),
         computed: Computed::default(),
+        vars: Vars::root(),
         block_css: Computed::default(),
     };
     builder.walk(&dom.document);
@@ -156,6 +175,8 @@ struct Builder {
     stack: Vec<Element>,
     /// The style of the innermost open element.
     computed: Computed,
+    /// The custom properties in scope on it.
+    vars: Rc<Vars>,
     /// The style of the element that opened the block being built.
     block_css: Computed,
 }
@@ -188,10 +209,12 @@ impl Builder {
 
                 self.stack.push(element_context(node, &tag));
                 let saved_computed = self.computed;
-                self.computed = self.sheet.cascade(
+                let saved_vars = Rc::clone(&self.vars);
+                (self.computed, self.vars) = self.sheet.cascade(
                     &self.stack,
                     attr(node, "style").as_deref(),
                     &saved_computed,
+                    &saved_vars,
                     ROOT_PX,
                 );
                 // A hidden element contributes nothing, subtree included, and
@@ -201,6 +224,7 @@ impl Builder {
                 if self.computed.hidden {
                     self.stack.pop();
                     self.computed = saved_computed;
+                    self.vars = saved_vars;
                     return;
                 }
 
@@ -261,6 +285,7 @@ impl Builder {
                 self.pre = saved_pre;
                 self.block_css = saved_block_css;
                 self.computed = saved_computed;
+                self.vars = saved_vars;
                 self.stack.pop();
             }
             _ => {
@@ -446,22 +471,77 @@ fn element_context(node: &Handle, tag: &html5ever::LocalName) -> Element {
     }
 }
 
-/// Every `<style>` element's text, wherever in the document it sits.
-fn collect_styles(node: &Handle, sheet: &mut Stylesheet) {
-    if let NodeData::Element { name, .. } = &node.data
-        && name.local == local_name!("style")
-    {
-        let mut source = String::new();
-        for child in node.children.borrow().iter() {
-            if let NodeData::Text { contents } = &child.data {
-                source.push_str(&contents.borrow());
+/// The document's stylesheets, gathered in document order: every `<style>`
+/// element's text and every `<link rel=stylesheet>`'s fetched body, wherever in
+/// the document they sit.
+///
+/// Order is what makes this one pass rather than two. A sheet later in the
+/// document wins a specificity tie against an earlier one, so a linked sheet
+/// and an inline one have to arrive in the order the document wrote them.
+struct Sheets<'a> {
+    sheet: Stylesheet,
+    base: &'a Url,
+    fetch: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    fetched: usize,
+}
+
+impl Sheets<'_> {
+    fn collect(&mut self, node: &Handle) {
+        if let NodeData::Element { name, .. } = &node.data {
+            match name.local {
+                local_name!("style") => {
+                    let mut source = String::new();
+                    for child in node.children.borrow().iter() {
+                        if let NodeData::Text { contents } = &child.data {
+                            source.push_str(&contents.borrow());
+                        }
+                    }
+                    self.sheet.add(&source);
+                    return;
+                }
+                local_name!("link") => {
+                    self.link(node);
+                    return;
+                }
+                _ => {}
             }
         }
-        sheet.add(&source);
-        return;
+        for child in node.children.borrow().iter() {
+            self.collect(child);
+        }
     }
-    for child in node.children.borrow().iter() {
-        collect_styles(child, sheet);
+
+    /// Fetch a `<link>` when it is a stylesheet for this medium.
+    fn link(&mut self, node: &Handle) {
+        let rel = attr(node, "rel").unwrap_or_default();
+        if !rel
+            .split_whitespace()
+            .any(|token| token.eq_ignore_ascii_case("stylesheet"))
+        {
+            return;
+        }
+        // A `media` this cannot evaluate is refused for the reason `@media` is
+        // skipped: a print sheet applied to the screen is worse than no sheet.
+        if let Some(media) = attr(node, "media")
+            && !matches!(media.trim().to_lowercase().as_str(), "" | "all" | "screen")
+        {
+            return;
+        }
+        if self.fetched >= MAX_SHEETS {
+            return;
+        }
+        let Some(href) = attr(node, "href") else {
+            return;
+        };
+        let Ok(url) = self.base.join(href.trim()) else {
+            return;
+        };
+        self.fetched += 1;
+        if let Some(bytes) = (self.fetch)(&url.to_string())
+            && let Ok(source) = String::from_utf8(bytes)
+        {
+            self.sheet.add(&source);
+        }
     }
 }
 
