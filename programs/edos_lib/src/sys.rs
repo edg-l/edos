@@ -17,6 +17,7 @@ pub use edos_rt::sys::{
     syscall5, syscall6,
 };
 
+pub const SYS_MPROTECT: u64 = 289;
 pub const SYS_TRUNCATE: u64 = 76;
 pub const SYS_MKDIRAT: u64 = 258;
 pub const SYS_MKFIFOAT: u64 = 283;

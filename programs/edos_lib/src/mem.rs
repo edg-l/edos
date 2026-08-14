@@ -49,6 +49,14 @@ pub fn munmap(addr: *mut u8, length: u64) -> i32 {
     unsafe { sys::syscall2(sys::SYS_MUNMAP, addr as u64, length) as i32 }
 }
 
+/// Change the protection of pages already mapped.
+///
+/// `addr` must be page-aligned and the whole range must be mapped; a hole
+/// anywhere in it leaves every page as it was and reports `ENOMEM`.
+pub fn mprotect(addr: *mut u8, length: u64, prot: u32) -> i32 {
+    unsafe { sys::syscall3(sys::SYS_MPROTECT, addr as u64, length, prot as u64) as i32 }
+}
+
 /// Flush or invalidate a range of memory-mapped file pages.
 ///
 /// `flags` should be one of `MS_ASYNC`, `MS_SYNC`, or `MS_INVALIDATE`.

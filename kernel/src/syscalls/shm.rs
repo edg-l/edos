@@ -7,22 +7,17 @@ use x86_64::{
     structures::paging::{Mapper, Page, PageTableFlags, Size4KiB},
 };
 
-use crate::syscalls::memory::claim_range;
+use crate::syscalls::memory::{PROT_EXEC, PROT_WRITE, claim_range, vma_prot_from};
 use crate::thread::scheduler::{current_thread, current_thread_info};
 use crate::{
     debug::lock_order::{RANK_USER_MM, RANK_VMAS},
     memory::{
         shared::{SharedMemory, SharedMemoryError},
-        vma::{VmaBacking, VmaFlags, VmaProt},
+        vma::{VmaBacking, VmaFlags},
     },
     ranked_lock,
     syscalls::Errno,
 };
-
-// Protection flags (match Linux)
-const PROT_READ: u64 = 0x1;
-const PROT_WRITE: u64 = 0x2;
-const PROT_EXEC: u64 = 0x4;
 
 /// Create a new shared memory region
 ///
@@ -68,7 +63,7 @@ pub fn sys_shm_create(size: u64) -> i64 {
 /// # Returns
 /// * Virtual address of the mapping on success
 /// * -1 on error (errno set)
-pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
+pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
@@ -104,16 +99,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
         return !0u64;
     }
 
-    let mut vma_prot = VmaProt::empty();
-    if prot & PROT_READ != 0 {
-        vma_prot |= VmaProt::READ;
-    }
-    if prot & PROT_WRITE != 0 {
-        vma_prot |= VmaProt::WRITE;
-    }
-    if prot & PROT_EXEC != 0 {
-        vma_prot |= VmaProt::EXEC;
-    }
+    let vma_prot = vma_prot_from(prot);
 
     // Claim the range before mapping frames into it, so a concurrent attach
     // cannot pick the same one.

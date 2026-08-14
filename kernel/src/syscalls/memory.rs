@@ -2,7 +2,9 @@ use alloc::{format, sync::Arc, vec::Vec};
 
 use x86_64::{
     PhysAddr, VirtAddr,
-    structures::paging::{Mapper, Page, PageTableFlags, Size4KiB},
+    structures::paging::{
+        Mapper, Page, PageTableFlags, Size4KiB, Translate, mapper::TranslateResult,
+    },
 };
 
 use crate::thread::scheduler::{current_thread, current_thread_info};
@@ -12,7 +14,7 @@ use crate::{
     log, log_debug,
     memory::{
         frame_allocator::frame_allocator,
-        mapper::memory_mapper,
+        mapper::{COW_BIT, memory_mapper},
         pat,
         vma::{
             PAGE_SIZE, USER_VA_END, Vma, VmaBacking, VmaError, VmaFlags, VmaProt, page_round_up,
@@ -25,9 +27,24 @@ use crate::{
 use spin::RwLock;
 
 // Protection flags (match Linux)
-const PROT_READ: u32 = 0x1;
-const PROT_WRITE: u32 = 0x2;
-const PROT_EXEC: u32 = 0x4;
+pub const PROT_READ: u32 = 0x1;
+pub const PROT_WRITE: u32 = 0x2;
+pub const PROT_EXEC: u32 = 0x4;
+
+/// The `PROT_*` bits of an `mmap`/`mprotect`/`shmat` call as a [`VmaProt`].
+pub fn vma_prot_from(prot: u32) -> VmaProt {
+    let mut vma_prot = VmaProt::empty();
+    if prot & PROT_READ != 0 {
+        vma_prot |= VmaProt::READ;
+    }
+    if prot & PROT_WRITE != 0 {
+        vma_prot |= VmaProt::WRITE;
+    }
+    if prot & PROT_EXEC != 0 {
+        vma_prot |= VmaProt::EXEC;
+    }
+    vma_prot
+}
 
 // Mapping flags
 pub const MAP_SHARED: u32 = 0x01;
@@ -189,16 +206,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             return !0u64;
         }
 
-        let mut vma_prot = VmaProt::empty();
-        if prot & PROT_READ != 0 {
-            vma_prot |= VmaProt::READ;
-        }
-        if prot & PROT_WRITE != 0 {
-            vma_prot |= VmaProt::WRITE;
-        }
-        if prot & PROT_EXEC != 0 {
-            vma_prot |= VmaProt::EXEC;
-        }
+        let vma_prot = vma_prot_from(prot);
 
         // Claim the range before mapping it, so no other thread can pick the same
         // one while these page tables are being written.
@@ -266,16 +274,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             return !0u64;
         }
 
-        let mut vma_prot = VmaProt::empty();
-        if prot & PROT_READ != 0 {
-            vma_prot |= VmaProt::READ;
-        }
-        if prot & PROT_WRITE != 0 {
-            vma_prot |= VmaProt::WRITE;
-        }
-        if prot & PROT_EXEC != 0 {
-            vma_prot |= VmaProt::EXEC;
-        }
+        let vma_prot = vma_prot_from(prot);
 
         // Lazy allocation - just record the VMA, don't allocate frames
         let map_addr = claim_range(
@@ -371,16 +370,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 
         let writable_mapping = (prot & PROT_WRITE) != 0;
 
-        let mut vma_prot = VmaProt::empty();
-        if prot & PROT_READ != 0 {
-            vma_prot |= VmaProt::READ;
-        }
-        if prot & PROT_WRITE != 0 {
-            vma_prot |= VmaProt::WRITE;
-        }
-        if prot & PROT_EXEC != 0 {
-            vma_prot |= VmaProt::EXEC;
-        }
+        let vma_prot = vma_prot_from(prot);
 
         let vma_flags = if is_shared {
             VmaFlags::SHARED | VmaFlags::LAZY
@@ -630,6 +620,135 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
                 return -1;
             }
         }
+    }
+
+    0
+}
+
+/// `mprotect(2)`: change the protection of pages already mapped.
+///
+/// The VMA is the authority, since the demand-fault path reads `vma.prot` for
+/// every page not yet faulted in, so the protection is written there and the
+/// page table is brought into line only for pages already present.
+///
+/// A present entry is edited rather than rebuilt, which is what preserves the
+/// PAT bits of a write-combining mapping and `COW_BIT` on a page still shared
+/// with a forked sibling. A COW page deliberately stays unwritable even when
+/// this call grants write: the first write faults, copies, and takes the
+/// permission from the VMA this call just updated.
+pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i32 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if length == 0
+        || !addr.is_multiple_of(PAGE_SIZE)
+        || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
+    {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let Some(end) = page_round_up(length).and_then(|len| addr.checked_add(len)) else {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    };
+    if end > USER_VA_END {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let Some(thread) = current_thread() else {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    };
+    let Some(user_arc) = thread.user.as_ref().cloned() else {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    };
+
+    let start = VirtAddr::new(addr);
+    let end = VirtAddr::new(end);
+    let new_prot = vma_prot_from(prot);
+
+    // Split at both edges so the range is a whole number of VMAs, then retag
+    // each. An unmapped hole anywhere in the range changes nothing and reports
+    // ENOMEM, so a partly-applied protection is never observable.
+    let retagged = {
+        let _user = user_arc.read();
+        let mut vmas = ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas);
+        vmas.split_at(start);
+        vmas.split_at(end);
+
+        let spans: Vec<(VirtAddr, VirtAddr)> = vmas
+            .iter()
+            .filter(|vma| vma.start >= start && vma.end <= end)
+            .map(|vma| (vma.start, vma.end))
+            .collect();
+
+        let mut cursor = start;
+        for &(vma_start, vma_end) in &spans {
+            if vma_start != cursor {
+                break;
+            }
+            cursor = vma_end;
+        }
+
+        if cursor != end {
+            None
+        } else {
+            for &(vma_start, _) in &spans {
+                if let Some(vma) = vmas.find_mut(vma_start) {
+                    vma.prot = new_prot;
+                }
+            }
+            Some(spans)
+        }
+    };
+
+    let Some(spans) = retagged else {
+        info.lock().errno = Errno::ENOMEM;
+        return -1;
+    };
+
+    let memory_manager = info.lock().memory_manager.clone();
+    {
+        let mut mm = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
+        for &(vma_start, vma_end) in &spans {
+            for virt in (vma_start.as_u64()..vma_end.as_u64()).step_by(PAGE_SIZE as usize) {
+                let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(virt));
+                let TranslateResult::Mapped { flags, .. } =
+                    mm.mapper.translate(page.start_address())
+                else {
+                    continue;
+                };
+
+                let mut new_flags = flags;
+                if new_prot.contains(VmaProt::WRITE) && !flags.contains(COW_BIT) {
+                    new_flags |= PageTableFlags::WRITABLE;
+                } else {
+                    new_flags -= PageTableFlags::WRITABLE;
+                }
+                if new_prot.contains(VmaProt::EXEC) {
+                    new_flags -= PageTableFlags::NO_EXECUTE;
+                } else {
+                    new_flags |= PageTableFlags::NO_EXECUTE;
+                }
+                if new_flags == flags {
+                    continue;
+                }
+
+                if let Ok(flush) = unsafe { mm.mapper.update_flags(page, new_flags) } {
+                    flush.ignore();
+                }
+            }
+        }
+    }
+
+    // Withdrawing a permission is only real once every CPU has dropped its
+    // cached entry, and the mapper lock must be gone before the IPI goes out.
+    for &(vma_start, vma_end) in &spans {
+        let pages = (vma_end - vma_start).div_ceil(PAGE_SIZE);
+        crate::memory::tlb::tlb_shootdown(vma_start, pages);
     }
 
     0

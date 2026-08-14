@@ -6,11 +6,14 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
+    debug::lock_order::RANK_VMAS,
     memory::{
         frame_allocator::frame_allocator,
         mapper::COW_BIT,
-        vma::{VmaBacking, VmaSet},
+        vma::{VmaBacking, VmaProt, VmaSet},
     },
+    ranked_lock,
+    thread::scheduler::current_thread,
 };
 
 /// A `&mut PageTable` over the frame's physical-memory-offset mapping.
@@ -247,6 +250,23 @@ fn is_special_mapping(virt: VirtAddr, vmas: &VmaSet) -> bool {
     false
 }
 
+/// Whether the VMA covering `fault_addr` permits writes.
+///
+/// A fault with no thread or no VMA behind it is not this path's to resolve, so
+/// both answer `false` and let the demand path name the rejection.
+fn fault_addr_is_writable(fault_addr: VirtAddr) -> bool {
+    let Some(thread) = current_thread() else {
+        return false;
+    };
+    let Some(user) = &thread.user else {
+        return false;
+    };
+    let user_read = user.read();
+    let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
+    vmas.find(fault_addr)
+        .is_some_and(|vma| vma.prot.contains(VmaProt::WRITE))
+}
+
 /// Handle a COW page fault for `fault_addr`.
 ///
 /// Returns `true` if the fault was a COW fault and has been resolved.
@@ -257,6 +277,16 @@ fn is_special_mapping(virt: VirtAddr, vmas: &VmaSet) -> bool {
 /// Must be called from the page fault handler with the current process's
 /// address space active in CR3. Interrupts may be enabled.
 pub unsafe fn handle_cow_fault(fault_addr: VirtAddr) -> bool {
+    // The VMA is the authority on what a mapping may do, and this path is the
+    // one that hands out write permission. Without the check a page that is
+    // read-only to its VMA still carries COW_BIT from the fork walk, so the
+    // copy would succeed and the write would land on a mapping that never
+    // allowed one. Declining leaves the fault to the demand path, which
+    // rejects it as WriteToReadOnly.
+    if !fault_addr_is_writable(fault_addr) {
+        return false;
+    }
+
     let phys_offset = boot_info().physical_memory_offset;
 
     let (cr3_frame, _) = Cr3::read();

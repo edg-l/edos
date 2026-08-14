@@ -3,7 +3,8 @@ use std::os::fd::AsRawFd;
 use std::time::Instant;
 
 use edos_lib::mem::{
-    MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap,
+    MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, mprotect, msync,
+    munmap,
 };
 use edos_lib::process;
 
@@ -734,6 +735,120 @@ fn test11(dir: &str) {
     pass(11, dir, "out-of-bounds mmap addresses all rejected");
 }
 
+/// Write one byte in a forked child and report whether the child survived it.
+///
+/// A write the mapping does not allow must kill the child, so the child exiting
+/// 0 is the failure: it means the store landed. Nothing else can tell the two
+/// apart from inside the process that performed it.
+fn child_survives_write(ptr: *mut u8) -> bool {
+    let pid = process::fork();
+    if pid == 0 {
+        unsafe { core::ptr::write_volatile(ptr, 0x5a) };
+        std::process::exit(0);
+    }
+    if pid < 0 {
+        return false;
+    }
+    process::waitpid(pid as u64) == 0
+}
+
+// -----------------------------------------------------------------------
+// Test 12: mprotect changes what a mapping allows, in both directions
+// -----------------------------------------------------------------------
+fn test12(dir: &str) {
+    let ptr = mmap(
+        core::ptr::null_mut(),
+        PAGE,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if ptr as u64 == u64::MAX {
+        fail(12, dir, "mmap of one anonymous page failed");
+    }
+    unsafe { core::ptr::write_volatile(ptr, 0x11) };
+
+    if mprotect(ptr, PAGE, PROT_READ) != 0 {
+        fail(12, dir, "mprotect to PROT_READ failed");
+    }
+    if unsafe { core::ptr::read_volatile(ptr) } != 0x11 {
+        fail(12, dir, "read-only mapping lost its contents");
+    }
+    if child_survives_write(ptr) {
+        fail(12, dir, "a write to a PROT_READ mapping was allowed");
+    }
+
+    // Back to writable. The page is shared with nothing now, but it carried
+    // COW_BIT while the child above was alive, so this also covers restoring
+    // write permission to a page that has been through a fork.
+    if mprotect(ptr, PAGE, PROT_READ | PROT_WRITE) != 0 {
+        fail(12, dir, "mprotect back to PROT_READ|PROT_WRITE failed");
+    }
+    unsafe { core::ptr::write_volatile(ptr, 0x22) };
+    if unsafe { core::ptr::read_volatile(ptr) } != 0x22 {
+        fail(12, dir, "write after restoring PROT_WRITE did not land");
+    }
+
+    let unmapped = (ptr as u64) + 0x1000_0000;
+    let bad: [(&str, *mut u8, u64, u32); 4] = [
+        (
+            "unaligned addr",
+            (ptr as u64 + 1) as *mut u8,
+            PAGE,
+            PROT_READ,
+        ),
+        ("zero length", ptr, 0, PROT_READ),
+        ("unknown prot bit", ptr, PAGE, 0x40),
+        ("unmapped range", unmapped as *mut u8, PAGE, PROT_READ),
+    ];
+    for (name, addr, len, prot) in bad {
+        if mprotect(addr, len, prot) == 0 {
+            fail(12, dir, &format!("mprotect({name}) succeeded, expected -1"));
+        }
+    }
+
+    munmap(ptr, PAGE);
+    pass(
+        12,
+        dir,
+        "mprotect withdraws and restores write, and rejects bad ranges",
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test 13: fork does not turn a read-only mapping into a writable one
+// -----------------------------------------------------------------------
+fn test13(dir: &str) {
+    // The fork walk marks every anonymous page COW regardless of what its VMA
+    // allows, so without a protection check on the COW path the child's write
+    // is resolved by copying the frame and the store lands on a mapping that
+    // was never writable. No mprotect is involved: PROT_READ from mmap is
+    // enough to reach it.
+    let ptr = mmap(
+        core::ptr::null_mut(),
+        PAGE,
+        PROT_READ,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if ptr as u64 == u64::MAX {
+        fail(13, dir, "mmap of one PROT_READ page failed");
+    }
+    // Fault it in read-only, so fork has a present PTE to mark.
+    if unsafe { core::ptr::read_volatile(ptr) } != 0 {
+        fail(13, dir, "anonymous page was not zero-filled");
+    }
+
+    if child_survives_write(ptr) {
+        fail(13, dir, "a forked child wrote to a PROT_READ mapping");
+    }
+
+    munmap(ptr, PAGE);
+    pass(13, dir, "a COW page stays as unwritable as its VMA");
+}
+
 fn run_suite(dir: &str) {
     println!("mmaptest: running tests on [{}]", dir);
     let suite_start = Instant::now();
@@ -760,6 +875,8 @@ fn run_suite(dir: &str) {
     run(9, &test9);
     run(10, &test10);
     run(11, &test11);
+    run(12, &test12);
+    run(13, &test13);
 
     let total_ms = suite_start.elapsed().as_millis();
     println!("mmaptest: all tests passed [{}] ({} ms)", dir, total_ms);

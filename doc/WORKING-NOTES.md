@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-15
+## Counts, remeasured 2026-08-15 (mprotect)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1581,12 +1581,12 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
+| syscalls | 117 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 117 — a mismatch is the bug |
 | userspace programs | 118 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 118 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 102,221 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 49,932 code lines | `tokei -t=Rust kernel/src` |
+| Rust | 102,423 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,033 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,340 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -6319,3 +6319,68 @@ checks with it. That red also found a weak assertion — a vector holding only
 
 `AT_RANDOM` differing across two boots (`99 37 f0 3f` then `38 06 a5 32`) is what
 distinguishes a live entropy source from a pointer into zeroed stack.
+
+## `mprotect`, and the COW hole it uncovered (2026-08-15)
+
+`SYS_MPROTECT` (289) is stage 0 item 3 of
+`doc/design/dynamic-linking-and-libc.md`. `sys_mprotect` splits the VMA set at
+both edges of the range, retags every VMA the range covers, then brings present
+PTEs into line; a hole anywhere in the range changes nothing and reports ENOMEM,
+so a partly-applied protection is never observable. `edos_lib::mem::mprotect` is
+the wrapper, and `mmaptest` tests 12 and 13 are the check.
+
+Three things about the implementation.
+
+**A present entry is edited, not rebuilt.** Reconstructing the flags from
+`vma.prot` would drop the PAT bits of a write-combining mapping and `COW_BIT` on
+a page still shared with a forked sibling. Only `WRITABLE` and `NO_EXECUTE`
+move.
+
+**A COW page stays unwritable even when this call grants write.** The first
+store faults, copies the frame, and takes its permission from the VMA that
+`mprotect` just updated. Setting `WRITABLE` directly on a page whose frame is
+shared would let two processes scribble on one frame.
+
+**Absent pages need nothing.** The demand-fault path reads `vma.prot` for every
+page not yet faulted in, so retagging the VMA is the whole of the change for
+them. Only the page table needs catching up.
+
+The `edos_lib` constant is local rather than re-exported from `edos_rt`, because
+nothing in `std` exposes `mprotect` and adding it to `edos_rt` would cost the
+whole publish-and-pin loop for no reader.
+
+### The hole
+
+Writing the syscall surfaced a live bug with no `mprotect` in it. Full
+post-mortem in `doc/bugs/2026-08-15-cow-granted-write-a-vma-refused.md`; the
+short form is that `handle_cow_fault` set `WRITABLE` from the page table alone,
+the fork walk sets `COW_BIT` on read-only anonymous pages as well as writable
+ones, and the COW handler runs ahead of the only code that reads `vma.prot`. A
+forked child could store into a `PROT_READ` mapping and the store landed.
+
+The lesson worth carrying: **the VMA is the authority on protection and a PTE is
+a lossy cache of it**, so a path that grants a permission must derive it from
+`vma.prot`. `COW_BIT` means "this frame may be shared", not "this page is
+writable".
+
+Watched go red: removing the guard and running `mmaptest /var` gives
+`FAIL test 12: a write to a PROT_READ mapping was allowed`.
+
+### Two traps in getting that red
+
+**`make all` does not regenerate `sata-disk.img`, and `scripts/edos-vm start`
+does not either.** Only the `run-*` targets do. The ISO is rebuilt, so the guest
+boots the new *kernel* while `/bin` comes off a stale disk — which reads as
+"the change had no effect" and is indistinguishable from a real green. The first
+run of `mmaptest` after adding tests 12 and 13 printed `all tests passed` after
+test 11 and nobody was any the wiser. `make clean-sata && make sata-disk.img`
+between a `make programs` and an `edos-vm start`, every time. File mtimes will
+not save you: a running guest writes to the qcow2, so `sata-disk.img` is always
+newer than the binary that is missing from it.
+
+**`> /dev/klog` does not capture a failure.** `mmaptest`'s `fail()` uses
+`eprintln!`, so the message goes to stderr and stays on the guest's terminal
+where a headless run cannot see it. The only symptom in `run_log.txt` was
+`exit: process exited with code 1`. Redirect with `2>&1`. Note the message then
+arrives unbuffered and one write per fragment, interleaved with whatever else is
+logging, so reassemble the line before reading it.

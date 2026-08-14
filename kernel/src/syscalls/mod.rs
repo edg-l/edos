@@ -43,7 +43,7 @@ use crate::{
             O_NONBLOCK, SelectFd, descriptor_open_flags, sys_chdir, sys_close, sys_getcwd,
             sys_getrandom, sys_list_dir, sys_poll, sys_read, sys_write,
         },
-        memory::{sys_mmap, sys_msync, sys_munmap},
+        memory::{sys_mmap, sys_mprotect, sys_msync, sys_munmap},
     },
     thread::{
         UserThreadInfo,
@@ -320,6 +320,7 @@ const SYS_MMAP: u64 = 9;
 const SYS_STAT: u64 = 10;
 const SYS_ACCESS: u64 = 21; // check a path against an access mode
 const SYS_MUNMAP: u64 = 11;
+const SYS_MPROTECT: u64 = 289; // change the protection of an existing mapping
 const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
 const SYS_TRUNCATE: u64 = 76; // resize a file named by path
@@ -718,6 +719,13 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 
             ctx.rax = sys_munmap(addr, length) as u64;
         }
+        SYS_MPROTECT => {
+            let addr = ctx.rdi;
+            let length = ctx.rsi;
+            let prot = ctx.rdx as u32;
+
+            ctx.rax = sys_mprotect(addr, length, prot) as u64;
+        }
         SYS_MSYNC => {
             let addr = ctx.rdi;
             let len = ctx.rsi;
@@ -868,7 +876,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SHM_MAP => {
             let shm_id = ctx.rdi;
             let addr_hint = ctx.rsi;
-            let prot = ctx.rdx;
+            let prot = ctx.rdx as u32;
             ctx.rax = shm::sys_shm_map(shm_id, addr_hint, prot);
         }
         SYS_SHM_UNMAP => {

@@ -88,12 +88,12 @@ general-dynamic and local-dynamic models do not exist.
 
 ### 1.4 The syscall surface
 
-116 numbers, all in `kernel/src/syscalls/table.rs`. Entry is `SYSCALL`/`SYSRET`
+117 numbers, all in `kernel/src/syscalls/table.rs`. Entry is `SYSCALL`/`SYSRET`
 (`syscalls/mod.rs:196`).
 
 Present and directly useful: `mmap` with `MAP_FIXED`, `MAP_PRIVATE`,
 `MAP_SHARED`, `MAP_ANONYMOUS`, file backing with an offset and `PROT_EXEC`
-honoured (`syscalls/memory.rs`); `futex_wait`/`futex_wake`; `clone`; `openat`
+honoured, and `mprotect` (`syscalls/memory.rs`); `futex_wait`/`futex_wake`; `clone`; `openat`
 and the whole `*at` family; `poll`; `readv`/`writev`; `pread`/`pwrite`; the BSD
 socket calls; `sigaction`, `sigprocmask`, `sigreturn`, `kill`.
 
@@ -101,7 +101,6 @@ Absent, and each is load-bearing for the questions here:
 
 | Missing | Who needs it |
 | --- | --- |
-| `mprotect` | RELRO; a linker protecting its own GOT; any JIT; `dlopen` |
 | `brk`/`sbrk` | newlib's allocator (can be faked over `mmap` in a port's stub) |
 | `arch_prctl`-equivalent | any libc that wants to own TLS |
 | `set_tid_address` | `pthread_join`'s usual exit notification |
@@ -156,8 +155,8 @@ is no `struct termios` anywhere in the tree.
    `PT_INTERP` as a second `ET_DYN` image at its own base, and enter *its*
    `e_entry` with the main image mapped but unrelocated. `LoadedInfo` grows from
    one `load_base`/`RelocTable` to one per image.
-3. **`mprotect`.** Without it the linker cannot apply RELRO and cannot protect
-   its own GOT after binding.
+3. ~~**`mprotect`.**~~ Present, so the linker can apply RELRO and protect its
+   own GOT after binding.
 4. **TLS ownership moves to userspace.** This is the largest change and the one
    that cannot be made additive. With shared libraries the static TLS block is
    the executable's `PT_TLS` *plus* every `DT_NEEDED` library's, laid out by the
@@ -279,8 +278,9 @@ changes, and each of those three is worth doing on its own merits:
    numbering. This removes a syscall from every failure path, removes a real
    (if rare) race against signal handlers, and is the difference between a libc
    port translating a table and a libc port guessing.
-3. **Add `mprotect`.** One syscall, needed by the linker, by `dlopen`, by RELRO,
-   and by anything that ever wants to JIT.
+3. ~~**Add `mprotect`.**~~ Done: `SYS_MPROTECT` (289), `sys_mprotect` in
+   `kernel/src/syscalls/memory.rs`, `edos_lib::mem::mprotect`, checked by
+   `mmaptest` tests 12 and 13.
 
 **Then the libc, and specifically newlib — not the dynamic linker.** The reasons,
 in order:
@@ -301,8 +301,8 @@ in order:
 
 Staged, with each stage independently landable:
 
-- **Stage 0** — the three ABI changes above. The auxv half of the first is
-  landed; negative-errno and `mprotect` are not.
+- **Stage 0** — the three ABI changes above. The auxv and `mprotect` are
+  landed; negative-errno is the remainder, along with the entry alignment.
 - **Stage 1** — `libs/libgloss-edos`, the 19-function newlib stub layer, plus a
   build recipe. Done when a C `hello world` compiles and runs in the guest.
 - **Stage 2** — termios and sockets in the port, and the first real third-party C
