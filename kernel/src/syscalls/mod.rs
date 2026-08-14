@@ -2159,9 +2159,8 @@ fn do_spawn(
         let fd_table = info.lock().fd_table.clone();
         let fds = fd_table.lock();
         let carry = |fd: u64| {
-            fds.get_fd(fd)
-                .cloned()
-                .map(|desc| (desc, fds.is_nonblock(fd)))
+            let (desc, nonblock) = fds.get_fd_nonblock(fd);
+            desc.map(|desc| (desc, nonblock))
         };
         (carry(stdin_fd), carry(stdout_fd), carry(stderr_fd))
     };

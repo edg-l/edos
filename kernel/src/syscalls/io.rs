@@ -286,10 +286,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     interrupts::enable();
 
-    let (fdinfo, nonblock) = {
-        let table = fd_table.lock();
-        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
-    };
+    let (fdinfo, nonblock) = fd_table.lock().get_fd_nonblock(fd);
 
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
@@ -720,10 +717,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     // UserThreadInfo IrqSpinlock: threads of one process share the table, and a
     // contended acquisition with interrupts off spins without answering IPIs.
     interrupts::enable();
-    let (fd_info, nonblock) = {
-        let table = fd_table.lock();
-        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
-    };
+    let (fd_info, nonblock) = fd_table.lock().get_fd_nonblock(fd);
 
     match fd_info {
         Some(FileDescriptor::StandardStream(stream)) => match stream {

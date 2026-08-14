@@ -868,14 +868,25 @@ giving up the feature, and the same bisect priced the rest of the window:
 | `4c0cffc`, before negative errno | 140 | 450 |
 | `6fbb047`, negative errno | 169 | 450 |
 | now, with the info cache | 145 | 425 |
+| one fd-table walk per call | 137 | 410 |
 
-So the error path is recovered, and **~38 ns of the pipe echo is still
-unaccounted for**: it arrived between the 2026-08-11 reading and `61a3dec`, it
-is on the *successful* fd path rather than the error one, and the only two
-commits in that window that touch the fd or pipe code are `eb4dd2f` (named
-pipes, the bounded PTY) and `f96e896` (`O_NONBLOCK` that outlives the open,
-which added a second table lookup per read and write). Bisecting those two is
-the next step in this thread; the harness is in `doc/WORKING-NOTES.md`.
+So the error path is recovered, and of the ~38 ns the pipe echo had lost on the
+*successful* path, **14 are back and ~23 are still unaccounted for.**
+
+The 14 were `f96e896`'s. `O_NONBLOCK` outliving the open meant a read and a
+write each asked the fd table two questions — `get_fd` then `is_nonblock` —
+under one lock but as two searches of the same `BTreeMap`. `get_fd_nonblock`
+answers both in one walk, and the size of the effect identifies it: the bad-fd
+read, which is one call and one lookup, fell 145 → 137, and the pipe echo, which
+is two calls and two lookups, fell 425 → 410. Two independent readings of a
+~7 ns map walk. `getpid` did not move, which is what makes both attributable.
+
+What is left is ~23 ns and the same window, so `eb4dd2f` (named pipes, the
+bounded PTY) is now the standing suspect by elimination rather than the weaker
+of two. It added a `PipeReadWrite` variant that every match on `FileDescriptor`
+in the read and write paths carries. **That is a guess, not a measurement** —
+settling it needs the whole-commit bisect this thread has always wanted, and the
+harness is in `doc/WORKING-NOTES.md`.
 
 `yield thread` also reads 1–3 ns over idle now against 55 ns then, on both
 builds. That one is probably not a regression but a correction: the idle case

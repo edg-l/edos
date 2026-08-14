@@ -191,10 +191,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
     };
 
     let fd_table = info.lock().fd_table.clone();
-    let (sock_fd, nonblock) = {
-        let table = fd_table.lock();
-        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
-    };
+    let (sock_fd, nonblock) = fd_table.lock().get_fd_nonblock(fd);
     let sock_arc = match sock_fd {
         Some(FileDescriptor::Socket(s)) => s,
         _ => {
@@ -527,10 +524,7 @@ pub fn sys_recvfrom(
     }
 
     let fd_table = info.lock().fd_table.clone();
-    let (desc, nonblock) = {
-        let table = fd_table.lock();
-        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
-    };
+    let (desc, nonblock) = fd_table.lock().get_fd_nonblock(fd);
     let sock_arc = match desc {
         Some(FileDescriptor::Socket(s)) => s,
         _ => {
@@ -692,10 +686,7 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
-    let (desc, nonblock) = {
-        let table = fd_table.lock();
-        (table.get_fd(fd).cloned(), table.is_nonblock(fd))
-    };
+    let (desc, nonblock) = fd_table.lock().get_fd_nonblock(fd);
     let sock_arc = match desc {
         Some(FileDescriptor::Socket(s)) => s,
         _ => {

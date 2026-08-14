@@ -77,6 +77,21 @@ impl FileDescriptorTable {
         self.fds.get(&fd).map(|e| &e.desc)
     }
 
+    /// The descriptor and its `O_NONBLOCK` flag, in one walk of the table.
+    ///
+    /// Every read and write wants both, and they are the two hottest lookups in
+    /// the kernel: asking for them separately searches the same `BTreeMap`
+    /// twice per call, four times per pipe round trip. The clone is here rather
+    /// than at the call site because every caller takes one — the guard is
+    /// dropped before the descriptor is used, since the work it leads to can
+    /// block.
+    pub fn get_fd_nonblock(&self, fd: u64) -> (Option<FileDescriptor>, bool) {
+        match self.fds.get(&fd) {
+            Some(entry) => (Some(entry.desc.clone()), entry.nonblock),
+            None => (None, false),
+        }
+    }
+
     pub fn close_fd(&mut self, fd: u64) -> Option<FileDescriptor> {
         self.fds.remove(&fd).map(|e| e.desc)
     }
