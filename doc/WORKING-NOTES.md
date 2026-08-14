@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-14 (runnable load)
+## Counts, remeasured 2026-08-14 (runnable load, balancebench)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1582,12 +1582,12 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 117 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 117 — a mismatch is the bug |
-| userspace programs | 118 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| userspace programs | 119 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 118 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 102,533 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| binaries in `filesystem/bin` | 120 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
+| Rust | 102,679 code lines across 436 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,123 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,347 | `git rev-list --count HEAD` |
+| commits | 1,348 | `git rev-list --count HEAD` |
 | in-kernel test suite | 52 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 155, of which 14 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -6648,3 +6648,45 @@ the wrong instrument for the same reason.
 What this does not fix: a parked thread still does not migrate, so it wakes back
 onto the CPU it parked on. That is now a separate defect about locality rather
 than the same one about placement.
+
+### What it is worth, and the instrument that can say so
+
+Nothing in the tree could measure placement. `switchbench` is explicitly a
+single-CPU instrument and says so; `/proc/sched_prof` measures inside a call.
+So "does this make anything faster" had no answer until `programs/balancebench`,
+which is a straggler test: one worker per CPU bar one, each doing an identical
+lump, with eight blocked threads per CPU as ballast, against what one worker
+alone costs with a CPU to itself. `slowest / solo` is the report.
+
+Three runs each side, 4-CPU boot, same host:
+
+| | imbalance | wall |
+|---|---|---|
+| membership | 1.75, 1.93, 1.94 | 273, 299, 300 ms |
+| runnable load | 0.99, 0.98, 0.99 | 150, 150, 151 ms |
+
+Twice the throughput. Before the change two of three workers shared a CPU and
+took 294 ms against a 152 ms solo while a fourth CPU stood empty, because the 32
+blocked threads counted as work.
+
+Two calibration steps were needed before that number meant anything, and both
+are the reason to distrust the first reading of any new benchmark. At the
+original size one worker took 17 ms, which is three timeslices, so a single
+preemption moved the result; it is 180 ms now. And asking for a worker per CPU
+measured oversubscription rather than placement, because the compositor, the
+panel and the benchmark's own main thread are runnable too — one worker per CPU
+*bar one* reads 0.99 when placement is right, which is what makes 1.93 mean
+something.
+
+The switch path pays nothing for it: `switchbench` on a single-CPU boot, five
+runs each side, moved every metric by less than its own run-to-run spread
+(yield idle 308 → 304 ns, `getpid` 94 → 94, pipe echo 451 → 450). The
+`total_len()` sum and atomic store in `with_rq` are invisible against a 300 ns
+yield, so tracking the length inside `RunQueue` would buy nothing.
+
+**Found while re-measuring, and not this change:** `read` of a bad fd is 169 ns
+against the 128 recorded on 2026-08-11, the pipe echo 450 against 387, and the
+cross-process round trip 2266 against 2016 — on both builds either side of the
+load change, on a comparably quiet host. `getpid` is unchanged at 94, so the
+syscall boundary did not move; the error return did. `doc/SCHED-ROADMAP.md` has
+the table and names the negative-errno conversion as the first suspect.

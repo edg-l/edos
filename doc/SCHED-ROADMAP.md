@@ -417,8 +417,15 @@ still a trapping MSR write.
 The single-CPU rule at the top of this file is about the switch and wake paths.
 It is exactly wrong for placement and rebalancing, where a second CPU is the
 thing under test, and `switchbench` is the wrong instrument for the same reason.
-Read `/proc/sched` (per-CPU `CURRENT QUEUED LOAD STEALS`) and `/proc/processes`
-on a `make run-big` boot instead.
+
+`programs/balancebench` is the instrument. It is a straggler test: one worker
+per CPU bar one, each doing an identical lump of arithmetic, with eight blocked
+threads per CPU as ballast. One worker alone establishes what the lump costs
+with a CPU to itself, so `slowest / solo` is the whole report — 1.00 means every
+worker had a CPU, 2.00 means two shared one while another stood empty. It leaves
+a CPU spare deliberately: the desktop is not idle, and a spare CPU is also what
+makes a bad placement visible. Read `/proc/sched` (per-CPU
+`CURRENT QUEUED LOAD STEALS`) beside it, which is what placement believed.
 
 ### Done: load is runnable work, not membership (2026-08-14)
 
@@ -430,6 +437,28 @@ runqueue's length plus the thread running now, republished from the queue itself
 by the two helpers that own every access to it, so a parked thread is in no term
 of it. The steal paths kept no counts at all afterwards.
 
+**What it is worth, measured** — `balancebench`, 4-CPU boot, three runs each,
+same host, the two builds either side of the change:
+
+| | imbalance | wall for the same work |
+|---|---|---|
+| membership (before) | 1.75, 1.93, 1.94 | 273, 299, 300 ms |
+| runnable load (after) | 0.99, 0.98, 0.99 | 150, 150, 151 ms |
+
+Three workers, four CPUs, 32 blocked threads in the machine. Before the change
+two of the three workers landed on one CPU and took 294 ms against a 152 ms
+solo, while a CPU stood empty; after it, each finished in 149 ms. **Twice the
+throughput on this workload**, and the reason is that the blocked threads were
+being counted as work.
+
+It costs nothing on the switch path. `switchbench`, single-CPU boot, five runs
+each side, medians: yield idle 308 → 304 ns, yield thread 304 → 303, yield
+process 418 → 417, `getpid` 94 → 94, bad-fd read 169 → 169, pipe echo 451 →
+450, cross-process round trip 2255 → 2266, one address space 2044 → 2029. Every
+delta is inside its own run-to-run spread, so the `total_len()` sum and the
+atomic store `with_rq` adds are invisible against a 300 ns yield. Tracking the
+length inside `RunQueue` instead would buy nothing.
+
 Watched fail first: 32 threads pinned to one CPU and parked there took **0 of
 16** placements before the change. The gate is the `load-parked-is-not-load`
 sched-test case; `doc/WORKING-NOTES.md` has why its first form was flaky green
@@ -439,6 +468,31 @@ Still open in the same area, and now separate defects rather than one: parked
 threads never migrate, so a thread wakes back onto the CPU it parked on; and
 `REBALANCE_THRESHOLD = 2` and `REBALANCE_INTERVAL = 10` are picked numbers that
 nothing has measured against the new quantity.
+
+### The table above is stale in two rows, and one of them is a regression
+
+Re-measuring the whole of `switchbench` on 2026-08-14 against a comparably quiet
+host (the same resident devnet, load average 1.4) found two figures that have
+moved since 2026-08-11, in **both** builds either side of the load change, so
+neither is that change:
+
+| | 2026-08-11 | 2026-08-14 |
+|---|---|---|
+| `read` of a bad fd | 128 ns | 169 ns |
+| pipe echo, nothing blocks | 387 ns | 450 ns |
+| cross-process round trip | 2016 ns | 2266 ns |
+| `getpid` | 94 ns | 94 ns |
+
+`getpid` is unchanged, so the syscall boundary itself did not move; what moved
+is what happens on top of it, and most sharply on the **error** return. The
+negative-errno conversion (6fbb047) landed inside that window and is the first
+place to look. Not chased yet.
+
+`yield thread` also reads 1–3 ns over idle now against 55 ns then, on both
+builds. That one is probably not a regression but a correction: the idle case
+already performs a full save and restore, so handing over to a sibling in the
+same address space should cost about the same, and the 2026-08-11 figure was
+taken when the APIC one-shot was re-armed on every switch.
 
 ## Recently closed
 
