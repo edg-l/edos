@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 edos_http = { path = "../edos_http" }
+edos_lib = { path = "../edos_lib" }
+edos_render = { path = "../edos_render" }
 html5ever = "0.39"
 markup5ever_rcdom = "0.39.0-unofficial"

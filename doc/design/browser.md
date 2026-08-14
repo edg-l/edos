@@ -39,6 +39,21 @@ Done when EDOS can read its own documentation at `edos.edgl.dev`. That is the
 demo, and it is a real one: the site is Starlight-generated HTML with no
 hand-holding for us.
 
+Where it stands: fetch, parse and the block list are in `doc.rs`; the text
+rendering is in `text.rs` behind `-d`; the window, its header and its scrolling
+are in `ui.rs`, and the layout that feeds it is in `view.rs`. Driving the guest
+renders `edos.edgl.dev` in a window with its headings at the right sizes, its
+links underlined and its lists marked. What is left in this stage is the click:
+`view::Fragment` already carries an index into `Layout::links`, so following one
+is a hit test against the fragment boxes, a re-fetch, and a stack for the back
+action.
+
+Two limits are stage-2 work, not defects. Images contribute their `alt` text in
+brackets because nothing decodes them yet. And an element set the page lays out
+with CSS -- a `nav` of bare `<a>` with no whitespace between them -- renders
+run-together, because without CSS there is nothing in the document to say those
+are separate boxes.
+
 ### Stage 2 — a CSS subset
 
 Colours, font families and sizes, margins, padding, borders — the box model.

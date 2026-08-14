@@ -1,5 +1,6 @@
-//! A web browser for EDOS. Stage 1: fetch a URL, parse the HTML, and print
-//! the document as text.
+//! A web browser for EDOS. Stage 1: fetch a URL, parse the HTML, and show the
+//! document in a window -- or print it as text with `-d`, which is the only
+//! rendering a headless run can assert on.
 //!
 //! See `doc/design/browser.md` for the stages and what each one is for.
 
@@ -9,6 +10,8 @@ use edos_http::{Options, url::Url};
 
 mod doc;
 mod text;
+mod ui;
+mod view;
 
 const DEFAULT_WIDTH: usize = 80;
 
@@ -17,6 +20,7 @@ fn main() {
 
     let mut width = DEFAULT_WIDTH;
     let mut links = false;
+    let mut dump = false;
     let mut target: Option<String> = None;
     let mut i = 1;
 
@@ -26,6 +30,7 @@ fn main() {
                 usage();
                 process::exit(0);
             }
+            "-d" | "--dump" => dump = true,
             "-l" | "--links" => links = true,
             "-w" | "--width" => {
                 i += 1;
@@ -52,16 +57,38 @@ fn main() {
         Err(message) => fail(&message),
     };
 
+    let address = base.to_string();
     let document = doc::parse(&html, base);
-    let rendered = text::render(&document, width, links);
 
-    // Writing the whole rendering in one go: a redirect to /dev/klog turns
-    // every write into a log line, and a per-line write would interleave with
-    // whatever else the kernel is logging.
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    if out.write_all(rendered.as_bytes()).is_err() {
-        process::exit(1);
+    if dump {
+        let rendered = text::render(&document, width, links);
+        // Writing the whole rendering in one go: a redirect to /dev/klog turns
+        // every write into a log line, and a per-line write would interleave
+        // with whatever else the kernel is logging.
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if out.write_all(rendered.as_bytes()).is_err() {
+            process::exit(1);
+        }
+        return;
+    }
+
+    // Said on stdout as well as drawn, so a headless run can tell a page that
+    // arrived empty from one that never loaded.
+    println!(
+        "edos-web: {} - {} blocks from {}",
+        if document.title.is_empty() {
+            "untitled"
+        } else {
+            &document.title
+        },
+        document.blocks.len(),
+        address
+    );
+
+    match ui::Browser::open(document, address) {
+        Ok(mut browser) => browser.run(),
+        Err(err) => fail(&format!("cannot create a window: {err}")),
     }
 }
 
@@ -99,12 +126,14 @@ fn load(target: &str) -> Result<(Vec<u8>, Url), String> {
 }
 
 fn usage() {
-    eprintln!("usage: edos-web [-l] [-w COLUMNS] URL|FILE");
+    eprintln!("usage: edos-web [-d [-l] [-w COLUMNS]] URL|FILE");
+    eprintln!("  -d, --dump      print the page as text instead of opening a window");
     eprintln!("  -l, --links     number links and list their targets");
     eprintln!(
         "  -w, --width N   wrap to N columns (default {})",
         DEFAULT_WIDTH
     );
+    eprintln!("in the window: arrows, PageUp/PageDown, Home/End scroll; q closes");
 }
 
 fn fail(message: &str) -> ! {

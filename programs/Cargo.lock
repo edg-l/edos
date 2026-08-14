@@ -498,6 +498,8 @@ name = "edos-web"
 version = "0.1.0"
 dependencies = [
  "edos_http",
+ "edos_lib",
+ "edos_render",
  "html5ever",
  "markup5ever_rcdom",
 ]

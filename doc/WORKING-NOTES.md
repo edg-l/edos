@@ -6995,3 +6995,35 @@ What it does not do yet, and none of it is a bug: no CSS, no images decoded
 a `nav` with no whitespace between them render run-together — which is what
 every text browser does with that markup, because the whitespace genuinely is
 not in the document.
+
+---
+
+## The browser draws a page, and `edos-web` without a flag is now a window
+
+`edos-web URL` opens a window: a header carrying the page title and the address
+it ended up at, the blocks laid out below it, and scrolling by wheel, arrows,
+PageUp/PageDown and Home/End. The text rendering did not go away, it moved
+behind `-d`/`--dump` — **so the headless assertion is
+`edos-web -d https://edos.edgl.dev/ > /dev/klog 2>&1`, and the same command
+without `-d` opens a window and puts one summary line on stdout instead.**
+Anything that greps `run_log.txt` for page text and does not pass `-d` will see
+only that summary line and read it as a parse failure.
+
+Layout lives in `view.rs` and is one pass over the block list producing
+positioned lines of fragments, rebuilt only when the window width changes; a
+scroll costs a blit. Two things it does that are not obvious:
+
+- **A word carries its own style, and the space before it is measured in that
+  style.** Emphasis, code and links change appearance partway through a line,
+  so a line cannot be one string, and none of it can be positioned from a
+  character count — `edos_render`'s faces are proportional.
+- **Whether a word is glued to the one before it cannot be read off its own
+  run.** The space between two `<a>` elements is a *third* run carrying neither
+  link, so it contributes no words at all; the flag has to be carried across
+  runs. Getting this wrong glues `<b>bold</b> <b>face</b>` into one word while
+  leaving the run-together nav case above unchanged, which is why the two look
+  like the same bug and are not.
+
+The theme has no italic face. `<i>`/`<em>` without `<b>` borrows
+`title_accent` rather than being silently dropped, which is the honest
+degradation until a face exists.
