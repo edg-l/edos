@@ -34,20 +34,38 @@ single `Arc<RelocTable>`.
 
 ### 1.2 The entry convention
 
-`kernel/src/thread/thread.rs:999` sets `context.rdi = argc`, with `argv` and
-`envp` pointers in the following argument registers. The process entry point is
-called as an ordinary SysV **function**.
+`setup_user_stack` (`kernel/src/thread/mod.rs:89`) builds the SysV prefix. The
+argument and environment strings go at the top of the stack, then, descending:
+the `envp` NULL, the `envp` pointers, the `argv` NULL, the `argv` pointers, and
+`argc` last, so `argc` sits at `[rsp]` (`mod.rs:207`) exactly as the psABI wants.
 
-This is not the SysV process entry ABI, which puts `argc` at `[rsp]`, then the
-`argv` array, a NULL, the `envp` array, a NULL, and then the **auxiliary
-vector**. There is no auxv in EDOS at all: no `AT_PHDR`, `AT_PHNUM`, `AT_ENTRY`,
-`AT_BASE`, `AT_PAGESZ`, `AT_RANDOM`.
+Three things separate that from the SysV process entry ABI (psABI §3.4.1).
 
-This single fact blocks both questions. A dynamic linker learns where the main
-image's program headers are, and where it was itself loaded, from `AT_PHDR` and
-`AT_BASE`; there is no other channel. Every libc's `crt1.o`/`_start` reads `argc`
-off the stack and hands the auxv to `__libc_start_main`; musl additionally
-requires `AT_RANDOM` for its stack guard.
+**There is no auxiliary vector.** The stack ends after the `envp` NULL: no
+`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_BASE`, `AT_PAGESZ`,
+`AT_RANDOM`, `AT_SECURE`, `AT_EXECFN`.
+
+**The registers are the live channel, not the stack.**
+`kernel/src/thread/thread.rs:999` sets `rdi = argc`, `rsi = argv`, `rdx = envp`,
+and the entry point is entered as an ordinary SysV **function** — the fork's is
+`extern "C" fn _start(argc, argv, envp)` in
+`library/std/src/sys/pal/edos/start.rs`. Nothing reads the stack copy today.
+Note that `rdx` is where the psABI puts a function pointer for the process to
+register with `atexit`: glibc's `_start` moves it to `%r9` and calls it as
+`rtld_fini`, so a glibc binary entered this way would call the `envp` array.
+
+**The alignment is the function-call convention.** `mod.rs:141-166` pads to
+`rsp % 16 == 8`, the state a callee sees after `call` pushes a return address,
+because `_start` is treated as a function. Process entry wants `rsp % 16 == 0`
+with `argc` at `[rsp]`. Both glibc's and musl's `_start` begin by masking `%rsp`
+down, so in practice they tolerate it, but the padding rule has to invert to be
+conforming.
+
+The missing auxv is what blocks both questions. A dynamic linker learns where the
+main image's program headers are, and where it was itself loaded, from `AT_PHDR`
+and `AT_BASE`; there is no other channel. Every libc's `crt1.o`/`_start` reads
+`argc` off the stack, walks past the `envp` NULL, and hands the auxv to
+`__libc_start_main`; musl additionally requires `AT_RANDOM` for its stack guard.
 
 ### 1.3 TLS is owned by the kernel
 
@@ -121,13 +139,17 @@ is no `struct termios` anywhere in the tree.
 
 ### 2.1 What has to change in the kernel
 
-1. **The initial process stack.** Build the SysV stack — `argc`, `argv[]`, NULL,
-   `envp[]`, NULL, auxv — in `setup_user_stack`, carrying at minimum `AT_PHDR`,
-   `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_BASE`, `AT_PAGESZ`, `AT_RANDOM`,
-   `AT_SECURE`, `AT_EXECFN`, `AT_NULL`. This can be **additive**: keep
-   `rdi`/`rsi`/`rdx` set as they are, so every existing binary and the `edos_rt`
-   `_start` keep working unchanged, and let a new binary read the stack instead.
-   That matters because changing `_start` means changing the Rust fork.
+1. **The initial process stack.** `setup_user_stack` already lays down
+   `argc`, `argv[]`, NULL, `envp[]`, NULL; what it does not lay down is the
+   auxiliary vector, so append one after the `envp` NULL carrying at minimum
+   `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_BASE`, `AT_PAGESZ`,
+   `AT_RANDOM`, `AT_SECURE`, `AT_EXECFN`, `AT_NULL`, and reserve room in the
+   string area for `AT_RANDOM`'s 16 bytes and `AT_EXECFN`'s path. This can be
+   **additive**: keep `rdi`/`rsi`/`rdx` set as they are, so every existing binary
+   and the `edos_rt` `_start` keep working unchanged, and let a new binary read
+   the stack instead. That matters because changing `_start` means changing the
+   Rust fork. The entry alignment (§1.2) is the part that cannot stay additive
+   forever — an interpreter's own `_start` is entitled to a 16-aligned `%rsp`.
 2. **Two images in one address space.** Load the interpreter named by
    `PT_INTERP` as a second `ET_DYN` image at its own base, and enter *its*
    `e_entry` with the main image mapped but unrelocated. `LoadedInfo` grows from
@@ -248,7 +270,7 @@ scoped to 19 functions with a specification, and with a tested libc on top of it
 **Neither first.** Both questions are blocked behind the same three small ABI
 changes, and each of those three is worth doing on its own merits:
 
-1. **Build the SysV initial process stack with a real auxv**, additively, keeping
+1. **Finish the SysV initial process stack with a real auxv**, additively, keeping
    the register convention. Nothing else in either project can start without it,
    and it is the only item here that also has to be understood by the Rust fork
    later.
