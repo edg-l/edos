@@ -7301,10 +7301,9 @@ relative reference on it resolved to a URL nothing answered — which is why the
 fixture had to carry its CSS inline, and why an `<img src>` on it would have
 been dead on arrival. The base is now the file's own path under `localhost`,
 and `main::local_path` maps that host back to the filesystem, so a local page
-resolves its siblings and absolute paths like any other. Two things to know
-about it: `Url::join` does not implement RFC 3986 §5.2.4, so a `../` in a
-subresource still fails, and a real HTTP server on the guest's own port 80
-would be shadowed by the filesystem.
+resolves its siblings and absolute paths like any other. One thing to know
+about it: a real HTTP server on the guest's own port 80 would be shadowed by
+the filesystem.
 
 `view::Line` carries a `LineKind` now instead of a `rule: bool`. An image line
 still holds one empty `Fragment` the width of the picture, so `link_at` finds a
@@ -7313,3 +7312,51 @@ linked image with no knowledge that pictures exist.
 The fixture at `assets/welcome.html` shows all three paths — a linked SVG, a
 downscaled BMP wallpaper, and a PNG that renders as its alt text — which makes
 it what to open when an image stops drawing.
+
+## `Url::join` is RFC 3986 now, and a module can be tested on the host (2026-08-15)
+
+`edos_http::url::Url::join` was three `starts_with` cases and a string
+concatenation. It now implements RFC 3986 §5.2 and passes all 34 of the §5.4
+examples: `.` and `..` are resolved, climbing past the root is absorbed rather
+than an error, an interior empty segment survives while the separators either
+end does not, a fragment is stripped before anything reads the reference, and
+an empty or query-only reference keeps the base's path.
+
+Two behaviour changes fall out of the spec rather than out of taste:
+
+- **A reference naming a scheme is not a relative path.** `mailto:someone@x`
+  and `javascript:void(0)` used to be merged onto the base directory and
+  fetched as HTTP; they are now an error, and `doc.rs` drops the link. The rule
+  is positional, not a list of schemes: a colon in the *first* segment makes
+  one (RFC 3986 §4.2), so a relative reference that wants a colon has to write
+  `./notes:2026/x`.
+- **A query-only reference replaces the base's query** instead of being
+  appended to the base's directory, which is what `?page=2` on a paginated
+  index means.
+
+**A crate that only links for `x86_64-unknown-edos` can still have host unit
+tests** — the trick `css.rs` uses generalises to any module that borrows only
+a name or two from its crate. `css.rs` compiles with `rustc --test` directly
+because it depends on nothing; `url.rs` needs `crate::Error`, and an `include!`
+does not work (its `//!` becomes an inner doc comment on a `use`, and the
+re-import collides). A `#[path]` module does:
+
+```rust
+// /tmp/urltest.rs
+#[derive(Debug)]
+pub enum Error { Url(String) }
+#[path = "<repo>/programs/edos_http/src/url.rs"]
+mod url;
+fn main() {}
+```
+
+```
+rustc +nightly --edition 2024 --test /tmp/urltest.rs -o /tmp/urltest && /tmp/urltest
+```
+
+`use crate::Error` then resolves to the harness's own definition, and the
+module's `#[cfg(test)] mod tests` runs. The guest build never sees the harness.
+
+`assets/welcome.html` names its SVG `../icons/edos.svg` and its self-link
+`./welcome.html`, so the fixture fails visibly if dot-segment resolution
+regresses: the mark falls back to `[the EDOS mark]`.

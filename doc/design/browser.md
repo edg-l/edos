@@ -143,10 +143,31 @@ Four rules:
 
 A locally-read document's base is its own path under `http://localhost`, and
 `load` reads that host back off the filesystem. So a page opened from disk
-resolves what it refers to relative to itself: `/share/icons/edos.svg` and a
-sibling `style.css` both work, and only the network is out of reach.
-`Url::join` does not resolve `..` segments, so a subresource that climbs out of
-its directory still fails.
+resolves what it refers to relative to itself: `/share/icons/edos.svg`, a
+sibling `style.css` and `../icons/edos.svg` all work, and only the network is
+out of reach.
+
+`Url::join` is RFC 3986 §5.2 whole: `.` and `..` are resolved, climbing past
+the root is absorbed rather than an error, a fragment is stripped before the
+reference is read, an empty or query-only reference keeps the base's path, and
+a reference naming a scheme this client cannot fetch — `mailto:`,
+`javascript:` — is an error, so `doc.rs` drops the link instead of turning it
+into a nonsense HTTP request. Its 34 RFC §5.4 examples run on the host the same
+way `css.rs`'s do, through a harness that supplies the one item the module
+borrows from its crate:
+
+```rust
+// /tmp/urltest.rs
+#[derive(Debug)]
+pub enum Error { Url(String) }
+#[path = "<repo>/programs/edos_http/src/url.rs"]
+mod url;
+fn main() {}
+```
+
+```
+rustc +nightly --edition 2024 --test /tmp/urltest.rs -o /tmp/urltest && /tmp/urltest
+```
 
 `css.rs` depends on nothing but `std`, so its unit tests run on the host even
 though the crate only links for `x86_64-unknown-edos`:
