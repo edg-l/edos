@@ -121,11 +121,17 @@ HTTP/1.1, `Host`, `Connection: close`. Three deliberate choices:
 Redirects are followed to a depth of 5, including `http://` → `https://`, with
 the certificate re-verified at each hop.
 
-`grab` itself still connects blocking, so an unreachable host costs it the
-kernel's five-second handshake wait. A descriptor in `O_NONBLOCK` now gets the
-POSIX shape instead -- `EINPROGRESS`, then `poll` reporting writable when the
-handshake resolves and `SO_ERROR` saying which way -- so a caller that wants its
-own timeout has one available.
+**The connect deadline is the caller's**, not the kernel's. A blocking
+`connect` waits its own five seconds for a host that is not answering and takes
+no shorter number, which was the whole cost of an unreachable repository.
+`Options::connect_timeout` replaces it: the descriptor goes into `O_NONBLOCK`,
+the handshake reports `EINPROGRESS`, `poll` reports writable exactly when it
+resolves, and `SO_ERROR` says which way it went — POSIX connect(3p), and now
+`TcpStream::connect_timeout` in the std fork rather than something this client
+hand-rolls. Resolution happens first, since a deadline is only meaningful
+against a concrete address, and each address gets the full timeout the way a
+blocking `connect` gives each one a full attempt. The default is five seconds,
+so a program has to ask to be more impatient than the system is.
 
 ## Compression
 
@@ -281,8 +287,7 @@ could not create before. `enabled_by` still gates it, so a seeded service is
 known to init and not started until the file it names exists — which is why a
 package must ship the declaration and never the credential it points at.
 
-An install writes in exactly two cases, and the second is what keeps a corrected
-default from being stranded:
+An install writes in three cases:
 
 - **Nothing is there.** The default becomes the machine's starting point.
 - **This package put the previous default there and it is still byte for byte
@@ -290,19 +295,46 @@ default from being stranded:
   forward loses nothing. Both halves are required: a file the package never
   created is not its to refresh even where the bytes happen to match, and one
   that differs from what was left there is a decision someone made.
+- **Both have changed since**, and every change is attributable to one side.
+  The machine's copy and the new default are merged over the default they came
+  from, and the merge is written.
 
-Anything else is left alone, which is what makes a setting stick. The residual
-cost is narrower than dpkg's conffile trade but the same shape: **a corrected
-default does not reach a machine whose copy was edited.** The packaged copy
-under `share/defaults/` is upgraded like any other file, so what the default now
-says is always readable there; what `/etc` says is what the machine uses. A
-three-way merge between the old default, the new one and the local edit would
-close that last gap and is the obvious next step, not something this design
-forecloses.
+A file this package never created is none of its business in any of the three,
+whatever it holds; so is one where the merge found both sides changing the same
+setting, which stays exactly as the machine has it.
 
-**Every write is announced** through `Progress`, and the two cases read
-differently — `wrote ...` against `updated ...`. An install that changes what
-the machine runs at boot must not do it quietly.
+#### The merge
+
+`programs/grab/src/merge.rs`, in two stages, because the obvious one alone would
+close almost nothing here.
+
+The first is diff3: line up each side against the base through a longest common
+subsequence, take the lines all three agree on as anchors, resolve each region
+between them from whichever side changed it. That handles a settings file with
+several lines in it, as long as one line neither side touched separates the two
+edits.
+
+The second is what the format buys. A setting is one value with its comment
+above it, so the case this exists for — the package rewords the comment, the
+machine changed the value — is two edits on adjacent lines with nothing
+unchanged between them, and diff3 calls that a conflict. GNU diff3 and git both
+do; it is a property of the algorithm and not of this implementation. So when
+one side changed no significant line at all, its edit was documentation and
+cannot mean anything else, and the other side's values are grafted into it. A
+significant line is one that is neither blank nor a `#` comment, which is what
+both `/etc` formats read: `edos_lib::config`'s one-value files and the `keyword
+value` files `edos-init` reads out of `/etc/services`.
+
+What is left is a genuine disagreement, and the answer is the machine's copy
+untouched. **Nothing prompts.** This runs on `edos-grab`'s worker thread with no
+terminal attached, so the two outcomes have to be a result nobody needs to check
+and a refusal that says so.
+
+**Every outcome is announced** through `Progress`, and the four read differently
+— `wrote ...`, `updated ...`, `merged ... keeping its edits`, and a `kept ...`
+that names where under `share/defaults/` the new default can be read. An install
+that changes what the machine runs at boot must not do it quietly, and one that
+declined to must not do that quietly either.
 
 Removal is the mirror: `grab remove` deletes a seeded file only while it is
 still byte-identical to the default it came from, and keeps and reports one that
@@ -530,9 +562,9 @@ Each step is independently useful and independently committable.
   because of X.509, not the handshake.
 - **Baked-in CA roots expire.** `webpki-roots` is a compiled-in snapshot, so root
   rotation eventually needs a rebuild of everything linking it.
-- **No timeout on an unreachable repo.** The kernel offers one now (a
-  non-blocking connect plus `poll`); `edos_http` has not been moved onto it, so
-  an unreachable host still costs the handshake wait.
+- ~~**No timeout on an unreachable repo.**~~ **Closed**: `edos_http` connects
+  through `TcpStream::connect_timeout` on `Options::connect_timeout`. See
+  "Transport" above for the shape and what the default is.
 
 ## What it does not do
 

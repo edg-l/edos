@@ -6,7 +6,7 @@
 //! first, and nothing is moved into place until the whole archive has been
 //! read and every destination has been cleared.
 
-use crate::{Error, Result, db, repo};
+use crate::{Error, Result, db, merge, repo};
 use flate2::read::GzDecoder;
 use std::{
     collections::BTreeMap,
@@ -211,19 +211,28 @@ fn check_ownership(name: &str, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// One `/etc` path an install wrote, and why it was allowed to.
+/// One `/etc` path an install considered, and what it did about it.
 pub enum Seeded {
     /// Nothing was there.
     Created(String),
     /// This install had put the previous default there and nobody had since
     /// changed it.
     Refreshed(String),
+    /// Both the default and the machine's copy had changed, in places that do
+    /// not overlap, and the result carries both.
+    Merged(String),
+    /// Both had changed the same setting, differently. The machine's copy is
+    /// untouched and the new default is readable under [`DEFAULTS`].
+    Conflicted(String),
 }
 
 impl Seeded {
     pub fn path(&self) -> &str {
         match self {
-            Seeded::Created(path) | Seeded::Refreshed(path) => path,
+            Seeded::Created(path)
+            | Seeded::Refreshed(path)
+            | Seeded::Merged(path)
+            | Seeded::Conflicted(path) => path,
         }
     }
 }
@@ -232,20 +241,23 @@ impl Seeded {
 /// anyone decided. `ours` is the set of `/etc` paths earlier installs of this
 /// package created; see [`crate::Progress`] for how the result is reported.
 ///
-/// This is the whole of the machine-versus-package split, and it writes in
-/// exactly two cases:
+/// This is the whole of the machine-versus-package split:
 ///
 /// - **Nothing is there.** The default becomes the machine's starting point.
 /// - **This package put the previous default there and it is still byte for
-///   byte that default.** Nobody has expressed a preference, so carrying the
-///   corrected default forward loses nothing. Both halves are required: a file
-///   the package never created is not its to refresh even if the bytes happen
-///   to match, and one that differs is a decision someone made.
+///   byte that default.** Nobody has expressed a preference, so the corrected
+///   default is carried forward whole.
+/// - **Both have changed since.** The two are merged over the default they came
+///   from ([`crate::merge`]), and the result is written only where every change
+///   is attributable to one side. A file the machine and the package changed in
+///   the same place is left exactly as the machine has it and reported as
+///   [`Seeded::Conflicted`]: with no terminal to ask at, the machine's own copy
+///   is the only safe answer, and the new default stays readable under
+///   [`DEFAULTS`].
 ///
-/// Anything else is left alone, which is what makes a setting stick. The cost
-/// is that a corrected default never reaches a machine whose copy was edited;
-/// the package's own copy under [`DEFAULTS`] is where to read what the default
-/// now says.
+/// A file this package never created is none of its business in any of those
+/// cases, whatever its contents: it belongs to the base system or to whoever
+/// wrote it, and is left alone.
 ///
 /// The destination is the packaged path with [`DEFAULTS`] cut off, so it
 /// inherits the `..`, absolute-path and symlink refusals [`validate`] already
@@ -262,18 +274,43 @@ pub fn seed_etc(applied: &Applied, ours: &[String]) -> Result<Vec<Seeded>> {
         }
 
         let destination = format!("/etc/{}", relative);
-        let outcome = match fs::read(&destination) {
-            Err(_) => Seeded::Created(destination.clone()),
+        let packaged = format!("/{}", path);
+
+        // What to write, if anything, and what to call it afterwards.
+        let (contents, outcome) = match fs::read(&destination) {
+            Err(_) => (None, Seeded::Created(destination.clone())),
             Ok(current) => {
-                let untouched = ours.iter().any(|p| *p == destination)
-                    && applied
-                        .superseded
-                        .get(relative)
-                        .is_some_and(|previous| *previous == current);
-                if !untouched {
+                // Both halves are required before this may touch the file at
+                // all: the previous default is what says what the machine
+                // started from, and without it there is nothing to merge over.
+                let mine = ours.iter().any(|p| *p == destination);
+                let Some(previous) = applied.superseded.get(relative).filter(|_| mine) else {
                     continue;
+                };
+
+                if *previous == current {
+                    (None, Seeded::Refreshed(destination.clone()))
+                } else {
+                    let default = fs::read(&packaged)
+                        .map_err(|e| Error::Io(format!("{}: {}", packaged, e)))?;
+                    // The default did not move, so there is nothing to carry
+                    // onto a machine that edited its copy.
+                    if default == *previous {
+                        continue;
+                    }
+                    match merge::merge(previous, &current, &default) {
+                        // A merge that reproduces what is already there says
+                        // nothing worth announcing.
+                        merge::Merged::Clean(merged) if merged == current => continue,
+                        merge::Merged::Clean(merged) => {
+                            (Some(merged), Seeded::Merged(destination.clone()))
+                        }
+                        merge::Merged::Conflict => {
+                            seeded.push(Seeded::Conflicted(destination.clone()));
+                            continue;
+                        }
+                    }
                 }
-                Seeded::Refreshed(destination.clone())
             }
         };
 
@@ -282,8 +319,11 @@ pub fn seed_etc(applied: &Applied, ours: &[String]) -> Result<Vec<Seeded>> {
                 .map_err(|e| Error::Io(format!("{}: {}", parent.display(), e)))?;
         }
 
-        let from = format!("/{}", path);
-        fs::copy(&from, &destination).map_err(|e| Error::Io(format!("{}: {}", destination, e)))?;
+        match contents {
+            Some(merged) => fs::write(&destination, merged),
+            None => fs::copy(&packaged, &destination).map(|_| ()),
+        }
+        .map_err(|e| Error::Io(format!("{}: {}", destination, e)))?;
         seeded.push(outcome);
     }
 

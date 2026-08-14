@@ -7,7 +7,8 @@
 use std::{
     fmt,
     io::{self, BufReader, Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
+    time::Duration,
 };
 
 pub mod tls;
@@ -64,6 +65,14 @@ pub struct Options {
     /// actually arrives.
     pub max_body: u64,
     pub max_redirects: u8,
+    /// How long to wait for a connection before giving up on an address.
+    ///
+    /// The deadline is the caller's rather than the kernel's: a blocking
+    /// `connect` waits its own five seconds for a host that is not answering
+    /// and cannot be told a shorter number, which is the whole cost of an
+    /// unreachable repository. The default matches that wait, so a program has
+    /// to ask to be more impatient than the system is.
+    pub connect_timeout: Duration,
     pub user_agent: String,
     /// Correct an unset clock over SNTP before a TLS handshake. See
     /// [`tls::ensure_clock_usable`].
@@ -76,6 +85,7 @@ impl Default for Options {
         Options {
             max_body: 256 * 1024 * 1024,
             max_redirects: 5,
+            connect_timeout: Duration::from_secs(5),
             user_agent: concat!("grab/", env!("CARGO_PKG_VERSION"), " (EDOS)").to_string(),
             fix_clock: true,
             extra_headers: Vec::new(),
@@ -171,11 +181,35 @@ fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+/// Connect to `authority`, giving up on an address after `timeout` instead of
+/// waiting out the kernel's own handshake wait.
+///
+/// Resolution comes first, because a deadline is only meaningful against a
+/// concrete address. Each address gets the full timeout, the way the blocking
+/// `TcpStream::connect` gives each one a full attempt: a host that answers on
+/// its second address is reachable, and a deadline shared out among them would
+/// make how reachable it is depend on how many addresses it publishes.
+fn connect(authority: &str, timeout: Duration) -> io::Result<TcpStream> {
+    let mut last = None;
+    for addr in authority.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "the name resolved to no usable address",
+        )
+    }))
+}
+
 /// Open a connection and write the request, returning a reader positioned at
 /// the response.
 fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String), Error> {
     let addr = target.authority();
-    let tcp = TcpStream::connect(addr.as_str()).map_err(|source| Error::Connect {
+    let tcp = connect(&addr, opts.connect_timeout).map_err(|source| Error::Connect {
         addr: addr.clone(),
         source,
     })?;

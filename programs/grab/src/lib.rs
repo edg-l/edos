@@ -3,6 +3,7 @@
 
 pub mod db;
 pub mod install;
+pub mod merge;
 pub mod repo;
 pub mod trust;
 
@@ -124,7 +125,8 @@ pub fn install_package(base: &str, package: &Package, progress: &mut dyn Progres
     Ok(())
 }
 
-/// Copy the package's defaults into `/etc` and report every one that landed.
+/// Copy the package's defaults into `/etc`, reporting every one that landed and
+/// every one that was kept back.
 ///
 /// Each is announced rather than done quietly: a seeded
 /// `/etc/services/<name>.conf` is what makes `edos-init` supervise a packaged
@@ -149,6 +151,16 @@ fn seed(
             install::Seeded::Refreshed(path) => {
                 format!("updated {}, which still held the previous default", path)
             }
+            install::Seeded::Merged(path) => {
+                format!("merged the new default into {}, keeping its edits", path)
+            }
+            install::Seeded::Conflicted(path) => format!(
+                "kept {}, which changed the same setting the new default did; \
+                 the new one is in /{}{}",
+                path,
+                install::DEFAULTS,
+                path.strip_prefix("/etc/").unwrap_or(path)
+            ),
         });
         if !seeded.iter().any(|p| p == outcome.path()) {
             seeded.push(outcome.path().to_string());
