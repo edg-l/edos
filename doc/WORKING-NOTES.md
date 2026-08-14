@@ -1585,9 +1585,9 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,625 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 101,960 code lines across 434 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 49,869 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,336 | `git rev-list --count HEAD` |
+| commits | 1,340 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 152, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -6088,3 +6088,177 @@ through `write_fat_sectors`, which repeats the write at `backup_fat_lba` when
 `boot_info.bytes_per_sector`. They agree only because every volume tried so far
 has 512-byte sectors. A 4096-byte-sector volume would have the two halves
 disagree about which sector an entry is in. Pre-existing, not touched here.
+
+---
+
+## A partial transfer reaches one page of two, and the panel was the proof (2026-08-14)
+
+`doc/design/wm-damage.md` predicted this and the taskbar demonstrated it: booting
+`scripts/edos-vm start --vga std` left the panel drawn on some boots and missing
+on others, two of four on an unmodified tree.
+
+**Mechanism.** The compositor composites into a shadow buffer that always holds
+the whole screen, and `Screen::flip_rect` copies one rectangle of it into VRAM
+before flipping. On the Bochs VBE path VRAM is two pages and the flip swaps
+them, so a rectangle only ever reaches the page that happened to be back at the
+time. The panel paints itself once at startup and never again, so that one paint
+landed on one page and the first flip showed the other. The clock repaints every
+minute and so reaches both, which is why it survived and the rest of the panel
+did not.
+
+**Fix**, in `Screen::flip_rect` (`edos_render/src/graphics.rs`): when the mapping
+reports two pages, publish the union of this frame's rectangle and the previous
+one, because the page about to be shown is exactly one frame behind. It starts
+with the whole screen pending, since a page nothing has been published to is
+missing all of it. The compositor needed no change: which rectangle to copy out
+of a complete shadow is knowledge `Screen` has and the compositor does not.
+
+**The test is deterministic, and counting boots is not.** Each flip alternates
+pages, so with the defect present a region painted once is visible on every other
+frame. Force frames with pointer moves and sample the panel row after each:
+
+```
+scripts/edos-vm start --vga std
+for i in 1..8: scripts/edos-vm move $((300 + i * 7)) 300; scripts/edos-vm shot mv$i.png
+```
+
+Reverted, that printed MISSING, DRAWN, MISSING, DRAWN, ... for eight moves in a
+row. With the fix, DRAWN eight times out of eight. Sample the row rather than
+reading a screenshot by eye: `im.getpixel((x, h - 20))` for a handful of x,
+compared against the same x at `h - 200`, which is desktop.
+
+---
+
+## Packaged defaults merge now, and a plain diff3 would have closed almost nothing (2026-08-14)
+
+`grab` used to write a packaged default into `/etc` in two cases: nothing there,
+or the file still byte-identical to the default this package seeded. The gap was
+a corrected default never reaching a machine whose copy had been edited.
+
+`programs/grab/src/merge.rs` closes it, in **two** stages, and the second is the
+one that matters here.
+
+The first is diff3: longest common subsequence against the base from each side,
+the lines all three agree on as anchors, each region between them resolved from
+whichever side changed it. That handles a multi-line settings file as long as one
+untouched line separates the two edits.
+
+The second exists because diff3 alone would close almost nothing on this system.
+A setting is one value with its comment above it, so the case the whole feature
+is for — the package rewords the comment, the machine changed the value — is two
+edits on adjacent lines with nothing unchanged between them, and diff3 calls that
+a conflict. **GNU diff3 and git both do**; it was checked against `diff3 -m`
+rather than assumed. So when one side changed no significant line at all, its
+edit was documentation and can mean nothing else, and the other side's values are
+grafted into its comment scaffold. A significant line is one that is neither
+blank nor a `#` comment, which is what both `/etc` formats read.
+
+Anything left is a real disagreement: the machine's file stands untouched and the
+install says so, naming the copy under `share/defaults/` where the new default
+can be read. Nothing prompts — this runs on `edos-grab`'s worker thread with no
+terminal.
+
+**Verified in the guest**, with three archives whose names differ only in
+version so they are the same package (`cfgtest-1.0.tar.gz`, `-2.0`, `-3.0`;
+naming them `v1`/`v2` makes them two packages and the ownership check refuses the
+second, which is a trap already recorded here). Install 1.0, edit the value line
+by hand, install 2.0 whose comment moved: `merged the new default into
+/etc/cfgtest, keeping its edits`, and the file holds the new comment over the
+local value. Install 3.0, whose value also moved: `kept /etc/cfgtest, which
+changed the same setting the new default did`, with `/etc` unchanged and
+`/share/defaults/cfgtest` holding the new one.
+
+---
+
+## `edos_http` connects on a deadline, and that took a change in the std fork (2026-08-14)
+
+An unreachable repository used to cost the caller the kernel's own five-second
+handshake wait with no way to shorten it. The kernel had grown the POSIX
+mechanism (non-blocking `connect` → `EINPROGRESS` → `poll` for writable →
+`SO_ERROR`), but nothing above it could reach the mechanism, and the layers
+explain why the fix is three commits in three repositories:
+
+1. **`edos_rt` 0.0.48** adds `EINPROGRESS`, `EALREADY` and `EISCONN`. The kernel
+   appends new codes after its own `UNKNOWN` so existing numbers do not move, and
+   this list mirrors it; before this, `Errno::from_raw` turned all three into
+   `UNKNOWN` and std could not tell a handshake in flight from a failure.
+2. **The Rust fork** maps the first two to `ErrorKind::InProgress` and
+   implements `TcpStream::connect_timeout`, which was `unsupported()` with a
+   comment saying there was no non-blocking connect to drive a deadline from.
+   That comment was true when it was written and is not any more.
+3. **`edos_http`** gains `Options::connect_timeout`, resolves first because a
+   deadline is only meaningful against a concrete address, and gives each address
+   the full timeout the way a blocking `connect` gives each one a full attempt.
+   The default is five seconds, so a program has to ask to be more impatient than
+   the system is.
+
+**The observable is which error comes back.** The kernel's blocking connect
+reports `ECONNREFUSED` when its wait runs out; the new path reports its own
+timeout. In the guest, `http http://192.0.2.1/` — TEST-NET-1, black-holed —
+answers `connect to 192.0.2.1:80: connection timed out`, and `grab update` still
+completes a TLS session against the real repository.
+
+---
+
+## `sccache` serves stale artifacts after the std fork is rebuilt (2026-08-14)
+
+Cost most of an hour, so it is written down. After `./x install`, `make programs`
+failed with `can't find crate for getrandom` and `found possibly newer version of
+crate std which simd_adler32 depends on` — and kept failing across `cargo clean`
+and a full `rm -rf programs/target`.
+
+`~/.cargo/config.toml` sets `rustc-wrapper = "sccache"` for every build on this
+machine. `libstd`'s filename hash is derived from version and flags, not
+contents, so a rebuilt std keeps the name `libstd-750f271b2d6830a9.rlib` while
+its SVH changes. sccache's key does not include the sysroot's contents, so it
+served registry dependencies compiled against the old std, and rustc rejected
+them against the new one. Deleting `target/` does not help: the next build takes
+the same poisoned entries straight back out of the cache.
+
+**The fix is one run with the cache refreshed rather than read:**
+
+```bash
+rm -rf programs/target
+SCCACHE_RECACHE=1 make programs
+```
+
+Both halves are needed — `SCCACHE_RECACHE=1` alone leaves whatever the poisoned
+run already wrote into `target/` looking fresh to cargo, so nothing recompiles.
+Add this to the `edos_rt` publish loop: patch, bump, publish, move the fork's
+pin, `./x install`, then **that** pair of commands.
+
+---
+
+## `edos-grab` never handled a key release, so its modifier set was a latch (2026-08-14)
+
+Found while verifying the Alt guard that was the point of the change, which is
+the useful part: the guard is what made a dormant defect fatal.
+
+`edos-grab` called `update_modifiers(.., true)` on `KeyPress` and had no
+`KeyRelease` arm at all, so every modifier ever pressed stayed pressed for the
+life of the process. Nothing depended on `self.mods` before, so nothing showed.
+Adding `if !self.mods.alt` around its shortcuts turned that into: the first Alt
+chord to arrive kills F5, the arrows and Page Up/Down for the rest of the
+session.
+
+`edos-edit`, `edos-files`, `imgview` and `WidgetContainer` all had the release
+arm already; `edos-grab` was the only one without it, checked by counting
+`update_modifiers(.., true)` against `(.., false)` in every file that calls it.
+
+**Instrument rather than infer.** Three screenshot-based attempts each gave an
+answer consistent with two different explanations. One `klog_dump` per key event
+settled it in a single boot, because the log carries what the app actually saw:
+
+```
+grabdbg press code=95 alt=false      <- LAlt
+grabdbg press code=5 alt=true        <- F5, skipped by the guard
+grabdbg release code=5
+grabdbg release code=95              <- clears alt, with the fix
+grabdbg press code=5 alt=false       <- and now it refreshes
+```
+
+Two traps around that measurement. `scripts/edos-vm key f5` works — F-keys do
+reach the guest, proven separately by `alt+f4` closing a window — so a
+non-reacting app is not a swallowed key. And a second `Refresh` sets the same
+status text as the first, so "the status did not change" only means something
+against a status that was going to change.

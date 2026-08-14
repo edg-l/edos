@@ -259,12 +259,7 @@ fn udp_loopback_case(passed: &mut u32, failed: &mut u32) {
     let mut buf = [0u8; 128];
     let mut addr = SockAddrIn::new([0; 4], 0);
     let mut addr_len = SOCKADDR_LEN;
-    let got = net::recvfrom_flags(
-        fd,
-        &mut buf,
-        MSG_DONTWAIT,
-        Some((&mut addr, &mut addr_len)),
-    );
+    let got = net::recvfrom_flags(fd, &mut buf, MSG_DONTWAIT, Some((&mut addr, &mut addr_len)));
 
     check(
         passed,
