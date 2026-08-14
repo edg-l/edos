@@ -58,12 +58,11 @@ impl DentryCache {
         }
 
         // Evict oldest if at capacity.
-        if cache.entries.len() >= DENTRY_CACHE_MAX {
-            if let Some((&oldest_ord, _)) = cache.order.iter().next() {
-                if let Some((mid, p)) = cache.order.remove(&oldest_ord) {
-                    cache.entries.remove(&(mid, p));
-                }
-            }
+        if cache.entries.len() >= DENTRY_CACHE_MAX
+            && let Some((&oldest_ord, _)) = cache.order.iter().next()
+            && let Some((mid, p)) = cache.order.remove(&oldest_ord)
+        {
+            cache.entries.remove(&(mid, p));
         }
 
         let ord = cache.next_order;

@@ -138,6 +138,10 @@ impl CachedBlockPage {
     ///
     /// # Safety
     /// Caller must hold write_lock to exclude other writers.
+    // The page frame is shared interior-mutable storage reached through an `Arc`,
+    // so `&self` is the only handle callers have; `write_lock` is what provides
+    // exclusion, not the borrow checker.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
         unsafe { &mut *(self.virt_addr() as *mut [u8; PAGE_SIZE]) }
     }
@@ -220,6 +224,8 @@ impl BlockPageGuard {
     ///
     /// # Safety
     /// Caller must hold the page's write_lock.
+    // See `CachedBlockPage::as_mut_slice`: exclusion comes from `write_lock`.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
         unsafe { self.page.as_mut_slice() }
     }
@@ -389,7 +395,7 @@ fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(
 /// Issue one write covering `data`, which spans consecutive pages starting at
 /// `first_page`. `data.len()` must be a whole number of pages.
 fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), AhciError> {
-    debug_assert!(!data.is_empty() && data.len() % PAGE_SIZE == 0);
+    debug_assert!(!data.is_empty() && data.len().is_multiple_of(PAGE_SIZE));
     let lba = first_page * SECTORS_PER_PAGE as u64;
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
     let h = dev.submit_write(
@@ -873,10 +879,10 @@ impl BlockPageCache {
     /// fills: commits then fail forever with no way to reclaim space.
     fn note_checkpointed(&self, key: Key) {
         let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
-        if let Some(j) = journals.get(&key.0) {
-            if let Some(seq) = j.enrolled_seq(key.0, key.1) {
-                j.note_checkpointed(key.0, key.1, seq);
-            }
+        if let Some(j) = journals.get(&key.0)
+            && let Some(seq) = j.enrolled_seq(key.0, key.1)
+        {
+            j.note_checkpointed(key.0, key.1, seq);
         }
     }
 

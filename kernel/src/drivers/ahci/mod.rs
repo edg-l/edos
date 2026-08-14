@@ -267,11 +267,10 @@ pub extern "C" fn ahci_driver_main() -> ! {
                     if let Some(device) = detected_devices.iter().find(|d| {
                         d.controller_pci_address == controller.pci_device.address
                             && d.port_idx == port_idx
-                    }) {
-                        if let Some(port) = AHCI_PORTS.get().and_then(|p| p.get(device.id as usize))
-                        {
-                            port.on_port_irq(port_is);
-                        }
+                    }) && let Some(port) =
+                        AHCI_PORTS.get().and_then(|p| p.get(device.id as usize))
+                    {
+                        port.on_port_irq(port_is);
                     }
                 }
             }

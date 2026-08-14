@@ -265,10 +265,8 @@ extern "x86-interrupt" fn page_fault_handler(
             && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
             && error_code.contains(PageFaultErrorCode::USER_MODE);
 
-        if is_cow_candidate {
-            if unsafe { handle_cow_fault(address) } {
-                return;
-            }
+        if is_cow_candidate && unsafe { handle_cow_fault(address) } {
+            return;
         }
 
         // Demand paging: handle non-present pages backed by VMAs

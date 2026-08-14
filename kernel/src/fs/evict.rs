@@ -158,7 +158,7 @@ pub fn post_evict(mount_id: usize, ino: u64) {
                     ino,
                     e
                 );
-            } else if n % EVICT_FALLBACK_LOG_INTERVAL == 0 {
+            } else if n.is_multiple_of(EVICT_FALLBACK_LOG_INTERVAL) {
                 crate::log!(
                     "WARNING: evict queue full, synchronous fallback \
                      (mount={}, ino={}); {} so far",

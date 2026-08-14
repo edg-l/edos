@@ -42,6 +42,7 @@
 //!     frame (the kernel never sees individual stores), the page is marked
 //!     dirty on the first fault, and data is flushed by msync(MS_SYNC),
 //!     munmap, fsync, or the periodic writeback kthread.
+//!
 //!   This does NOT break the "file data bypasses BlockPageCache" invariant:
 //!   `PageCacheOps::flush_page` routes through direct AHCI, not BlockPageCache.
 //!
@@ -109,6 +110,10 @@ impl CachedPage {
 
     /// # Safety
     /// Caller must ensure exclusive access to this frame.
+    // The frame is shared interior-mutable storage reached through an `Arc`, so
+    // `&self` is the only handle callers have; exclusion is the caller's
+    // contract, not the borrow checker's.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.virt_addr(), PAGE_SIZE) }
     }

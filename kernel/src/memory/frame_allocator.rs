@@ -341,11 +341,11 @@ impl BitmapFrameAllocator {
             return Some(idx);
         }
         // Wrap around: scan from beginning up to where we started
-        if self.next_free_hint > 0 {
-            if let Some(idx) = self.scan_free_from(0) {
-                self.next_free_hint = idx + 1;
-                return Some(idx);
-            }
+        if self.next_free_hint > 0
+            && let Some(idx) = self.scan_free_from(0)
+        {
+            self.next_free_hint = idx + 1;
+            return Some(idx);
         }
         None
     }

@@ -32,8 +32,8 @@ use crate::{
 pub static KEY_EVENT_BROADCAST: Broadcaster<KeyEvent> = Broadcaster::new();
 /// Set to true when a USB HID keyboard is active; suppresses PS/2 keyboard broadcasting.
 pub static USB_KEYBOARD_ACTIVE: AtomicBool = AtomicBool::new(false);
-static KEYBOARD_POLLERS: BlockingMutex<Vec<(PollKey, PollRef, Arc<Subscriber<KeyEvent>>)>> =
-    BlockingMutex::new(Vec::new());
+type KeyboardPoller = (PollKey, PollRef, Arc<Subscriber<KeyEvent>>);
+static KEYBOARD_POLLERS: BlockingMutex<Vec<KeyboardPoller>> = BlockingMutex::new(Vec::new());
 static KEYBOARD_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();

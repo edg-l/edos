@@ -502,10 +502,9 @@ impl MemoryManager {
                     let slot = ((page_addr - vma_start) / 4096) as usize;
                     if let crate::memory::vma::VmaBacking::FileBacked { pages, .. } =
                         &mut vma.backing
+                        && slot < pages.len()
                     {
-                        if slot < pages.len() {
-                            pages[slot] = Some(cached_page);
-                        }
+                        pages[slot] = Some(cached_page);
                     }
                 }
             }

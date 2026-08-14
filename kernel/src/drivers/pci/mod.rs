@@ -1,6 +1,6 @@
 use spin::{Once, RwLock};
 
-use alloc::format;
+use alloc::{format, string::String};
 
 use crate::{drivers::pci::manager::PciManager, log};
 
@@ -23,7 +23,7 @@ pub fn init() {
         let (class, subclass) =
             PciManager::decode_class(device.header.class_code, device.header.subclass);
         let irq = if device.header.interrupt_line == 255 {
-            format!("no IRQ")
+            String::from("no IRQ")
         } else {
             format!("IRQ {}", device.header.interrupt_line)
         };

@@ -695,7 +695,7 @@ pub extern "C" fn hda_driver_main() -> ! {
     // Enable global and stream interrupts in INTCTL.
     // Output stream 0 interrupt bit = ISS + 0.
     let iss = controller.iss as u32;
-    let intctl = INTCTL_GIE | INTCTL_CIE | (1u32 << (iss + 0));
+    let intctl = INTCTL_GIE | INTCTL_CIE | (1u32 << iss);
     controller.write32(INTCTL, intctl);
 
     // Wrap controller in shared state for the /dev/dsp device.

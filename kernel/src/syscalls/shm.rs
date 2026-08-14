@@ -164,7 +164,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> u64 {
         // Rollback: unmap all pages we just mapped
         let memory_manager = info.lock().memory_manager.clone();
         let mut manager = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
-        let page_count = (size + 0xFFF) / 4096;
+        let page_count = size.div_ceil(4096);
         for i in 0..page_count {
             let virt_addr = VirtAddr::new(map_addr.as_u64() + i * 4096);
             let page: Page<Size4KiB> = Page::containing_address(virt_addr);
@@ -228,7 +228,7 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 
                     // Unmap the pages (but don't deallocate the frames - they're shared)
                     let memory_manager = info.lock().memory_manager.clone();
-                    let page_count = (vma.size() + 0xFFF) / 4096;
+                    let page_count = vma.size().div_ceil(4096);
                     {
                         let mut manager = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
                         for i in 0..page_count {

@@ -98,8 +98,8 @@ pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> u64 {
         }
     };
     let fd_table = info.lock().fd_table.clone();
-    let fd_num = fd_table.lock().allocate_fd(FileDescriptor::Socket(sock));
-    fd_num as u64
+
+    fd_table.lock().allocate_fd(FileDescriptor::Socket(sock))
 }
 
 pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
@@ -768,10 +768,10 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
     }
 
     // Allocate a new fd for the connected socket
-    let new_fd = fd_table
+
+    fd_table
         .lock()
-        .allocate_fd(FileDescriptor::Socket(new_sock_arc));
-    new_fd as u64
+        .allocate_fd(FileDescriptor::Socket(new_sock_arc))
 }
 
 /// Timeval struct matching the C layout for SO_RCVTIMEO/SO_SNDTIMEO.
@@ -817,7 +817,7 @@ pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
     };
 
     let how = how as i32;
-    if how < 0 || how > 2 {
+    if !(0..=2).contains(&how) {
         info.lock().errno = Errno::EINVAL;
         return !0u64;
     }
@@ -829,18 +829,19 @@ pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
     }
 
     // For TCP, send FIN if shutting down write side
-    if s.sock_type == SOCK_STREAM && (how == 1 || how == 2) {
-        if let Some(ref conn) = s.tcp_conn {
-            let fin = ranked_lock!(RANK_TCP_CONN, "sys_shutdown", conn).build_fin();
-            if let Some(fin_seg) = fin {
-                let remote_ip = ranked_lock!(RANK_TCP_CONN, "sys_shutdown", conn).remote_ip;
-                drop(s);
-                if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
-                    let mut stack = ranked_lock!(RANK_NET_STACK, "sys_shutdown", stack_mutex);
-                    let _ = stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
-                }
-                return 0;
+    if s.sock_type == SOCK_STREAM
+        && (how == 1 || how == 2)
+        && let Some(ref conn) = s.tcp_conn
+    {
+        let fin = ranked_lock!(RANK_TCP_CONN, "sys_shutdown", conn).build_fin();
+        if let Some(fin_seg) = fin {
+            let remote_ip = ranked_lock!(RANK_TCP_CONN, "sys_shutdown", conn).remote_ip;
+            drop(s);
+            if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                let mut stack = ranked_lock!(RANK_NET_STACK, "sys_shutdown", stack_mutex);
+                let _ = stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
             }
+            return 0;
         }
     }
 
@@ -962,11 +963,11 @@ pub fn sys_getsockopt(
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }
-            if !val_len_ptr.is_null() {
-                if !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<Timeval>() as u32) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
+            if !val_len_ptr.is_null()
+                && !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<Timeval>() as u32) }
+            {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
             }
             0
         }
@@ -979,12 +980,11 @@ pub fn sys_getsockopt(
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }
-            if !val_len_ptr.is_null() {
-                if !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<LingerVal>() as u32) }
-                {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
+            if !val_len_ptr.is_null()
+                && !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<LingerVal>() as u32) }
+            {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
             }
             0
         }
@@ -998,11 +998,9 @@ pub fn sys_getsockopt(
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }
-            if !val_len_ptr.is_null() {
-                if !unsafe { try_write_user(val_len_ptr, 4u32) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
+            if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
             }
             0
         }
@@ -1015,11 +1013,9 @@ pub fn sys_getsockopt(
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }
-            if !val_len_ptr.is_null() {
-                if !unsafe { try_write_user(val_len_ptr, 4u32) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
+            if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
             }
             0
         }
@@ -1030,11 +1026,9 @@ pub fn sys_getsockopt(
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }
-            if !val_len_ptr.is_null() {
-                if !unsafe { try_write_user(val_len_ptr, 4u32) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
+            if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
             }
             0
         }

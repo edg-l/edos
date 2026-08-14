@@ -118,7 +118,7 @@ impl<T: Clone> Broadcaster<T> {
 
     pub fn broadcast(&self, msg: T) {
         let count = self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed);
-        if count > 0 && count % 128 == 0 {
+        if count > 0 && count.is_multiple_of(128) {
             self.cleanup();
         }
         let sched = sched();
@@ -145,7 +145,7 @@ impl<T: Clone> Broadcaster<T> {
             return;
         }
         let count = self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed);
-        if count > 0 && count % 128 == 0 {
+        if count > 0 && count.is_multiple_of(128) {
             self.cleanup();
         }
         let sched = sched();

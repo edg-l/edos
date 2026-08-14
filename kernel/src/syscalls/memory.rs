@@ -233,7 +233,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             phys_flags |= pat::WRITE_COMBINING;
         }
 
-        let page_count = (length + 0xFFF) / 4096;
+        let page_count = length.div_ceil(4096);
         let memory_manager = info.lock().memory_manager.clone();
         let mut mm = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
         for i in 0..page_count {
@@ -441,10 +441,10 @@ pub fn flush_shared_vma_pages(
     let base_idx = file_offset / 4096;
     let mut work: Vec<(u64, Arc<CachedPage>)> = Vec::new();
     for (slot, maybe_page) in pages.iter().enumerate() {
-        if let Some(page) = maybe_page {
-            if page.is_dirty() {
-                work.push((base_idx + slot as u64, Arc::clone(page)));
-            }
+        if let Some(page) = maybe_page
+            && page.is_dirty()
+        {
+            work.push((base_idx + slot as u64, Arc::clone(page)));
         }
     }
     if work.is_empty() {
@@ -551,15 +551,15 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
             let effective_end = range_end.min(vma.end);
 
             let first_slot = ((effective_start.as_u64() - vma.start.as_u64()) / 4096) as usize;
-            let last_slot = ((effective_end.as_u64() - vma.start.as_u64() + 4095) / 4096) as usize;
+            let last_slot = (effective_end.as_u64() - vma.start.as_u64()).div_ceil(4096) as usize;
             let last_slot = last_slot.min(pages.len());
 
             for slot in first_slot..last_slot {
-                if let Some(page) = &pages[slot] {
-                    if page.is_dirty() {
-                        let page_idx = (file_offset + slot as u64 * 4096) / 4096;
-                        work.push((Arc::clone(inode), page_idx, Arc::clone(page)));
-                    }
+                if let Some(page) = &pages[slot]
+                    && page.is_dirty()
+                {
+                    let page_idx = (file_offset + slot as u64 * 4096) / 4096;
+                    work.push((Arc::clone(inode), page_idx, Arc::clone(page)));
                 }
             }
         }
@@ -807,7 +807,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     for vma in removed_vmas {
         let vma_start = vma.start;
         let vma_length = vma.size();
-        let vma_page_count = (vma_length + 0xFFF) / 4096;
+        let vma_page_count = vma_length.div_ceil(4096);
 
         match vma.backing {
             VmaBacking::Anonymous => {
@@ -817,11 +817,11 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                     for i in 0..vma_page_count {
                         let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
                         let page: Page<Size4KiB> = Page::containing_address(virt);
-                        if let Ok(phys) = mm.mapper.translate_page(page) {
-                            if let Ok((_, flush)) = mm.mapper.unmap(page) {
-                                flush.ignore();
-                                frames.push(phys);
-                            }
+                        if let Ok(phys) = mm.mapper.translate_page(page)
+                            && let Ok((_, flush)) = mm.mapper.unmap(page)
+                        {
+                            flush.ignore();
+                            frames.push(phys);
                         }
                     }
                 }
@@ -868,11 +868,11 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                     for i in 0..vma_page_count {
                         let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
                         let page: Page<Size4KiB> = Page::containing_address(virt);
-                        if let Ok(phys) = mm.mapper.translate_page(page) {
-                            if let Ok((_, flush)) = mm.mapper.unmap(page) {
-                                flush.ignore();
-                                frames.push(phys);
-                            }
+                        if let Ok(phys) = mm.mapper.translate_page(page)
+                            && let Ok((_, flush)) = mm.mapper.unmap(page)
+                        {
+                            flush.ignore();
+                            frames.push(phys);
                         }
                     }
                 }

@@ -279,10 +279,11 @@ impl Pollable for PollableSocket {
 
 /// Global port table: maps (protocol, port) -> bound socket reference.
 /// For UDP, protocol=17. For TCP (future), protocol=6.
-pub static PORT_TABLE: spin::Once<Mutex<BTreeMap<(u8, u16), Arc<Mutex<Socket>>>>> =
-    spin::Once::new();
+/// (protocol, port) -> bound socket.
+type PortTable = Mutex<BTreeMap<(u8, u16), Arc<Mutex<Socket>>>>;
+pub static PORT_TABLE: spin::Once<PortTable> = spin::Once::new();
 
-pub fn port_table() -> &'static Mutex<BTreeMap<(u8, u16), Arc<Mutex<Socket>>>> {
+pub fn port_table() -> &'static PortTable {
     PORT_TABLE.call_once(|| Mutex::new(BTreeMap::new()))
 }
 

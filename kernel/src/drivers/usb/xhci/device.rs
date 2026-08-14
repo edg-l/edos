@@ -142,6 +142,10 @@ impl UsbSpeed {
     }
 
     /// xHCI Slot Context speed encoding.
+    // Taking `self` by value here would force every call site through a copy of
+    // the enum for no gain; the receiver stays borrowed for consistency with the
+    // other accessors on this type.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_slot_speed(&self) -> u32 {
         match self {
             UsbSpeed::Full => 1,

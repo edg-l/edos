@@ -190,17 +190,17 @@ pub fn fault_in_page(
 
         // Past-EOF check: if the faulting page starts at or beyond the file
         // size, return false (SIGBUS-equivalent — caller kills the thread).
-        if let Ok(file_size) = fs.file_size_ino(inode.ino) {
-            if page_idx * 4096 >= file_size {
-                return FaultOutcome {
-                    mapped: false,
-                    reject: Some(FaultReject::PastEof {
-                        page_idx: *page_idx,
-                        file_size,
-                    }),
-                    cached_page: None,
-                };
-            }
+        if let Ok(file_size) = fs.file_size_ino(inode.ino)
+            && page_idx * 4096 >= file_size
+        {
+            return FaultOutcome {
+                mapped: false,
+                reject: Some(FaultReject::PastEof {
+                    page_idx: *page_idx,
+                    file_size,
+                }),
+                cached_page: None,
+            };
         }
 
         // Get or fill the page from the inode page cache.
@@ -368,10 +368,10 @@ unsafe fn fault_in_reloc_page(
     };
 
     // Past-EOF check: same as normal FileBacked path.
-    if let Ok(file_size) = fs.file_size_ino(inode.ino) {
-        if page_idx * 4096 >= file_size {
-            return Some(false);
-        }
+    if let Ok(file_size) = fs.file_size_ino(inode.ino)
+        && page_idx * 4096 >= file_size
+    {
+        return Some(false);
     }
 
     // Get the cache page (pins it).
@@ -514,8 +514,8 @@ pub unsafe fn handle_demand_fault(
     let phys_offset = boot_info().physical_memory_offset;
 
     // If this is a reloc-bearing page, handle it with the lazy reloc path.
-    if let Some((reloc_table, page_vaddr_offset, load_base)) = reloc_info {
-        if let Some(mapped) = unsafe {
+    if let Some((reloc_table, page_vaddr_offset, load_base)) = reloc_info
+        && let Some(mapped) = unsafe {
             fault_in_reloc_page(
                 fault_addr,
                 &fault_info,
@@ -525,18 +525,18 @@ pub unsafe fn handle_demand_fault(
                 page_vaddr_offset,
                 load_base,
             )
-        } {
-            if !mapped {
-                return Err(FaultReject::RelocFailed);
-            }
-            if let Some(t) = current_thread() {
-                t.demand_faults
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
-            return Ok(());
         }
-        // Fall through to normal path if reloc path declines (e.g. not FileBacked).
+    {
+        if !mapped {
+            return Err(FaultReject::RelocFailed);
+        }
+        if let Some(t) = current_thread() {
+            t.demand_faults
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        return Ok(());
     }
+    // Fall through to normal path if reloc path declines (e.g. not FileBacked).
 
     let outcome = fault_in_page(fault_addr, &fault_info, cr3_frame, phys_offset);
 
@@ -603,11 +603,11 @@ pub fn store_cached_page_on_vma(
         return false;
     }
     let slot = ((page_addr - vma_start) / 4096) as usize;
-    if let VmaBacking::FileBacked { pages, .. } = &mut vma.backing {
-        if slot < pages.len() {
-            pages[slot] = Some(cached_page);
-            return true;
-        }
+    if let VmaBacking::FileBacked { pages, .. } = &mut vma.backing
+        && slot < pages.len()
+    {
+        pages[slot] = Some(cached_page);
+        return true;
     }
     false
 }

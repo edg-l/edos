@@ -72,7 +72,7 @@ fn virt_buffer_to_sg_list(
         return Some(heapless::Vec::new());
     }
     // AHCI PRDT DBA must be word-aligned (2-byte). Fall back to pool path if not.
-    if buf as usize % 2 != 0 {
+    if !(buf as usize).is_multiple_of(2) {
         return None;
     }
 
@@ -755,10 +755,8 @@ impl AhciPort {
         }
 
         // Deregister from owned_ops.
-        if push_ok {
-            if let Some(ref t) = current {
-                t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
-            }
+        if push_ok && let Some(ref t) = current {
+            t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
         }
 
         // Idempotent cleanup: only free the slot if it is still ours.
@@ -1168,16 +1166,15 @@ impl AhciPort {
             self.ncq_waiters[slot]
         ) = Some(Arc::clone(&op));
 
-        if let Some(t) = current_thread() {
-            if t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
+        if let Some(t) = current_thread()
+            && t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
                 .is_err()
-            {
-                log!(
-                    "AHCI port {}: owned_ops full for NCQ slot {}; cancel hookup skipped",
-                    self.port_idx,
-                    slot
-                );
-            }
+        {
+            log!(
+                "AHCI port {}: owned_ops full for NCQ slot {}; cancel hookup skipped",
+                self.port_idx,
+                slot
+            );
         }
         (slot, op)
     }

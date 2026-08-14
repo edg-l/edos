@@ -29,6 +29,9 @@ pub mod rwlock;
 pub mod sched_prof;
 pub mod scheduler;
 pub mod signal;
+// `thread::thread` holds the Thread type itself; the parent module is the
+// subsystem, not a re-export facade.
+#[allow(clippy::module_inception)]
 pub mod thread;
 pub mod util;
 pub mod waitqueue;

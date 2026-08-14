@@ -350,20 +350,18 @@ fn select_root_partition(partitions: &[Partition], root: Option<&str>) -> Option
         return found;
     }
 
-    let candidates = || -> alloc::vec::Vec<usize> {
-        match root.split_once('=') {
-            Some(("UUID", value)) => partitions
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| format_uuid(&p.unique_partition_guid).eq_ignore_ascii_case(value))
-                .map(|(i, _)| i)
-                .collect(),
-            _ => {
-                log!("Unsupported root {root:?}, only UUID= and live are supported");
-                alloc::vec::Vec::new()
-            }
+    let candidates = match root.split_once('=') {
+        Some(("UUID", value)) => partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| format_uuid(&p.unique_partition_guid).eq_ignore_ascii_case(value))
+            .map(|(i, _)| i)
+            .collect(),
+        _ => {
+            log!("Unsupported root {root:?}, only UUID= and live are supported");
+            alloc::vec::Vec::new()
         }
-    }();
+    };
 
     // An installed disk wins over the live image that booted it.
     let chosen = candidates
@@ -416,7 +414,7 @@ pub fn mount_system_fs() -> ! {
         log!("Mounting root filesystem (EFS)");
         fs::api::mount_partition(
             part.device_id as usize,
-            part.index as usize,
+            part.index,
             root.clone(),
             part.filesystem.as_ref().expect("expected fs type").clone(),
         )

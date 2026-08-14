@@ -50,7 +50,7 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
     // NOTE: The interrupt is targeted at the current CPU (the one running this init code).
     // If the xHCI driver thread later runs on a different CPU, the interrupt still fires on
     // this CPU and wake_thread_irq posts to the scheduler — that is safe across CPUs.
-    let lapic_id = unsafe { get_lapic().id() } as u32;
+    let lapic_id = unsafe { get_lapic().id() };
     let msg_addr_low: u32 = 0xFEE0_0000 | ((lapic_id & 0xFF) << 12);
     let msg_addr_high: u32 = 0; // xAPIC mode
 

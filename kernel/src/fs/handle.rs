@@ -18,6 +18,9 @@ struct PollSlot {
 }
 
 impl PollSlot {
+    // Used only as the repeated element of an array initializer, where each copy
+    // is a fresh value rather than a shared one.
+    #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY: Self = Self {
         interests: PollState::none(),
         state: AtomicU8::new(0),

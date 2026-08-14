@@ -7085,3 +7085,46 @@ rebuild.
 The general rule the menu makes concrete: a launcher entry is only real if the
 program it names does something useful with the arguments the launcher can
 give it. Check that before adding the row.
+
+## Kernel clippy went 199 warnings to 33, and `cargo fix` needs two things
+
+`cargo clippy --fix` on this crate does nothing at all under normal conditions,
+and reports success while doing it. Two separate reasons:
+
+- **sccache.** `RUSTC_WRAPPER` is set globally on this machine, and a wrapped
+  `rustc` never hands the fix machinery its suggestions. The run finishes in a
+  few seconds, prints "generated N warnings (run `cargo clippy --fix` to apply
+  M suggestions)" -- the very command just run -- and leaves the tree clean.
+  `touch src/main.rs` first, so the crate actually recompiles rather than
+  replaying a cached result.
+- **One bad suggestion aborts the whole crate.** Fix applies every suggestion,
+  recompiles, and reverts *all* of them if the result does not build. Two lints
+  poison the batch here: `useless_format` rewrites `format!("literal")` to
+  `"literal".to_string()` without adding the `alloc::string` import a `no_std`
+  crate needs, and `map_entry` produced a suggestion referencing `std`. Both
+  fail the recompile, so a whole-crate fix run reverts the other 140 good edits
+  and prints a "this likely indicates a bug in rustc or cargo" wall.
+
+The way through is to drive it per lint: `-- -A clippy::all -W clippy::<lint>`,
+one lint (or one small group) per invocation, so a poisoned suggestion costs
+only its own lint. That took 199 to 73 mechanically.
+
+The rest is judgement, and the pattern for it is an `#[allow]` carrying the
+reason:
+
+- **`mut_from_ref`** on the six `&self -> &mut T` accessors (`PerCpuCacheCell`,
+  `PerCpuData::tss_mut`, `CachedPage`, `CachedBlockPage` x2, `FrameDrop`) is
+  deliberate. All six reach interior-mutable storage that `&self` is the only
+  handle to -- a per-CPU cell, or a frame behind an `Arc` -- and exclusion comes
+  from the documented safety contract (owning CPU with interrupts off, or the
+  page's `write_lock`), not from the borrow checker. Changing the signatures
+  would mean handing out `&mut self` to shared state, which is worse.
+- **`declare_interior_mutable_const`** on `const ZERO: AtomicU32` and friends is
+  the array-initializer idiom: each repeat is a fresh value, not a shared one.
+- **`large_enum_variant`**, **`too_many_arguments`** and **`module_inception`**
+  are all cases where the fix moves the same complexity one level out.
+
+What is left is 33 warnings, all needing real thought rather than a rewrite:
+`needless_range_loop` over hardware tables, `manual_memcpy` in FAT32 writes,
+`type_complexity` on `read_thread_info`'s return tuple, and the loop-counter
+lints in `graphics`.

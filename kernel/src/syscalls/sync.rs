@@ -37,10 +37,11 @@ fn cleanup_if_empty(key: &FutexKey, queue: &Arc<WaitQueue>) {
     }
 
     let mut map = FUTEX_REGISTRY.lock();
-    if let Some(existing) = map.get(key) {
-        if Arc::ptr_eq(existing, queue) && existing.is_empty() {
-            map.remove(key);
-        }
+    if let Some(existing) = map.get(key)
+        && Arc::ptr_eq(existing, queue)
+        && existing.is_empty()
+    {
+        map.remove(key);
     }
 }
 

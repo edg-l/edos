@@ -213,11 +213,9 @@ pub fn parse_pointer(descriptor: &[u8]) -> Option<PointerReport> {
             }
             (TYPE_GLOBAL, 9) => globals.report_count = data as u8,
 
-            (TYPE_LOCAL, 0) => {
-                if usage_count < MAX_USAGES {
-                    usages[usage_count] = data as u16;
-                    usage_count += 1;
-                }
+            (TYPE_LOCAL, 0) if usage_count < MAX_USAGES => {
+                usages[usage_count] = data as u16;
+                usage_count += 1;
             }
             (TYPE_LOCAL, 1) => usage_min = Some(data as u16),
 

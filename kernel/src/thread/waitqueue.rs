@@ -198,8 +198,8 @@ impl WaitQueue {
     ///
     /// **Protocol invariant**: each call performs exactly one push + one park
     /// + one remove. The producer's `wake_one`/`wake_all` pops the handle as
-    /// part of waking it, so the post-park `retain` is a no-op in the common
-    /// case (spurious-pop self-remove safety only).
+    ///   part of waking it, so the post-park `retain` is a no-op in the common
+    ///   case (spurious-pop self-remove safety only).
     ///
     /// Because `thread_park_while` may return spuriously (Rust std-style
     /// contract — see CLAUDE.md "Park/wake protocol"), this function may

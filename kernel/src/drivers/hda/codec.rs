@@ -5,6 +5,9 @@ use crate::log;
 use alloc::string::String;
 
 // HDA verb helpers (12-bit verb ID + 8-bit payload format)
+// The literals are grouped verb-then-payload, which is what the hardware encoding
+// means; equal-sized groups would hide it.
+#[allow(clippy::unusual_byte_groupings)]
 const GET_PARAM: u32 = 0xF00_00; // Get Parameter (verb 0xF00, param in low 8 bits)
 const SET_POWER_STATE: u32 = 0x705_00; // Set Power State
 const SET_STREAM_FORMAT: u32 = 0x200_00; // Set Converter Format (verb 0x200)
@@ -83,7 +86,7 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
     let afg_nid = afg_nid.ok_or_else(|| String::from("HDA: no Audio Function Group found"))?;
 
     // Power on the AFG (D0 = full power)
-    ctrl.codec_command(cad, afg_nid, SET_POWER_STATE | 0x00)?;
+    ctrl.codec_command(cad, afg_nid, SET_POWER_STATE)?;
 
     // Get widget node range under AFG
     let widget_count = ctrl.codec_command(cad, afg_nid, GET_PARAM | PARAM_NODE_COUNT)?;
@@ -100,11 +103,9 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
         let wtype = ((wcaps >> 20) & 0xF) as u8;
 
         match wtype {
-            WIDGET_AUD_OUT => {
-                if dac_nid.is_none() {
-                    dac_nid = Some(nid);
-                    log!("hda: DAC at nid {}", nid);
-                }
+            WIDGET_AUD_OUT if dac_nid.is_none() => {
+                dac_nid = Some(nid);
+                log!("hda: DAC at nid {}", nid);
             }
             WIDGET_PIN => {
                 // Check pin capabilities for output
@@ -123,7 +124,7 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
     let pin_nid = pin_nid.ok_or_else(|| String::from("HDA: no output pin found"))?;
 
     // Configure DAC: set stream tag=1, channel=0
-    ctrl.codec_command(cad, dac_nid, SET_CHANNEL_STREAM | (1 << 4) | 0)?;
+    ctrl.codec_command(cad, dac_nid, SET_CHANNEL_STREAM | (1 << 4))?;
 
     // Set DAC format: 48kHz, 16-bit, stereo
     // Format word: base=48k (bit14=0), mult=1x, div=1x, bits=16 (bits[6:4]=001), channels=2 (bits[3:0]=1)

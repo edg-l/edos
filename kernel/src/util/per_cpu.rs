@@ -90,6 +90,10 @@ impl PerCpuData {
     }
 
     /// Mutable ref to TSS. Only call from owning CPU.
+    // Per-CPU interior-mutable state: the owning CPU is the only accessor, and
+    // `&self` is the only handle it has, so the aliasing the lint warns about
+    // cannot arise.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn tss_mut(&self) -> &mut TaskStateSegment {
         unsafe { &mut *self.tss.get() }
     }

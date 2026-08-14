@@ -221,7 +221,7 @@ impl PageCacheOps for Fatfs {
             let read_bytes = sectors_to_read as usize * SECTOR_SIZE;
 
             let mut scratch = vec![0u8; read_bytes];
-            let dev = block_io::lookup(self.partition.device_id as u64).ok_or(Error::IoError)?;
+            let dev = block_io::lookup(self.partition.device_id).ok_or(Error::IoError)?;
             let h = dev
                 .submit_read(
                     lba,
@@ -341,7 +341,7 @@ impl PageCacheOps for Fatfs {
             let mut scratch = vec![0u8; write_bytes];
             scratch[src_start..src_end].copy_from_slice(&buf[buf_pos..buf_pos + take]);
 
-            let dev = block_io::lookup(self.partition.device_id as u64).ok_or(Error::IoError)?;
+            let dev = block_io::lookup(self.partition.device_id).ok_or(Error::IoError)?;
             let h = dev
                 .submit_write(
                     lba,
@@ -361,7 +361,7 @@ impl PageCacheOps for Fatfs {
             let first_page = lba / 8;
             let last_page = (lba + sectors_to_write as u64 - 1) / 8;
             crate::fs::block_page_cache::BlockPageCache::global().invalidate_pages(
-                self.partition.device_id as u64,
+                self.partition.device_id,
                 first_page,
                 last_page - first_page + 1,
             );

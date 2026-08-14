@@ -330,9 +330,7 @@ impl WindowRegistry {
     /// when the registry already names the window clicked, so an undelivered
     /// gain leaves it dropping keystrokes for the rest of the session.
     pub fn destroy_window(&mut self, id: WindowId) -> Option<WindowId> {
-        if self.windows.remove(&id).is_none() {
-            return None;
-        }
+        self.windows.remove(&id)?;
         if self.focused_window != Some(id) {
             return None;
         }

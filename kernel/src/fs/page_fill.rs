@@ -312,10 +312,10 @@ pub fn in_flight_remove_all(inode: &VfsInode, handle: &Arc<PageFillHandle>) {
         .in_flight
         .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (remove_all)");
     for idx in handle.page_idx..(handle.page_idx + handle.len) {
-        if let Some(existing) = inflight.get(&idx) {
-            if Arc::ptr_eq(existing, handle) {
-                inflight.remove(&idx);
-            }
+        if let Some(existing) = inflight.get(&idx)
+            && Arc::ptr_eq(existing, handle)
+        {
+            inflight.remove(&idx);
         }
     }
 }
@@ -328,10 +328,10 @@ fn in_flight_remove_by_ptr(inode: &VfsInode, ptr: *const PageFillHandle, page_id
         .in_flight
         .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (cancel)");
     for idx in page_idx..(page_idx + len) {
-        if let Some(existing) = inflight.get(&idx) {
-            if Arc::as_ptr(existing) == ptr {
-                inflight.remove(&idx);
-            }
+        if let Some(existing) = inflight.get(&idx)
+            && Arc::as_ptr(existing) == ptr
+        {
+            inflight.remove(&idx);
         }
     }
 }
@@ -552,10 +552,7 @@ pub fn inline_fill_no_handle(
         fill_fn(slice)
     };
 
-    if let Err(e) = fill_result {
-        // fd drops here, frame is returned.
-        return Err(e);
-    }
+    fill_result?;
 
     let frame = fd.forget();
     let page = Arc::new(CachedPage::new(frame));
@@ -739,9 +736,9 @@ pub fn get_or_fill_async_sync(
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                current_thread().map(|t| {
+                if let Some(t) = current_thread() {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                });
+                }
                 return Err(Error::IoError);
             }
         };
@@ -774,9 +771,9 @@ pub fn get_or_fill_async_sync(
                         handle.finish_success();
                         in_flight_remove_all(inode, &handle);
                         INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                        current_thread().map(|t| {
+                        if let Some(t) = current_thread() {
                             t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                        });
+                        }
                         // Drop our guard and page; CachedPage::drop returns the frame.
                         drop(guard);
                         drop(page);
@@ -790,9 +787,9 @@ pub fn get_or_fill_async_sync(
                 handle.finish_success();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                current_thread().map(|t| {
+                if let Some(t) = current_thread() {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                });
+                }
                 return Ok(guard);
             }
             Err(e) => {
@@ -804,9 +801,9 @@ pub fn get_or_fill_async_sync(
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                current_thread().map(|t| {
+                if let Some(t) = current_thread() {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                });
+                }
                 return Err(e);
             }
         }
@@ -954,9 +951,9 @@ pub fn get_or_fill_bulk_async_sync(
                     handle.finish_failed();
                     in_flight_remove_all(inode, &handle);
                     INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                    current_thread().map(|t| {
+                    if let Some(t) = current_thread() {
                         t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                    });
+                    }
                     // frames Vec drops here, returning all partially-allocated frames.
                     return Err(Error::IoError);
                 }
@@ -1005,9 +1002,9 @@ pub fn get_or_fill_bulk_async_sync(
                 handle.finish_success();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                current_thread().map(|t| {
+                if let Some(t) = current_thread() {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                });
+                }
                 return Ok(());
             }
             Err(e) => {
@@ -1016,9 +1013,9 @@ pub fn get_or_fill_bulk_async_sync(
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                current_thread().map(|t| {
+                if let Some(t) = current_thread() {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
-                });
+                }
                 return Err(e);
             }
         }

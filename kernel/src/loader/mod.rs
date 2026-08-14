@@ -176,11 +176,11 @@ fn prefault_elf_tail_page_from_cache(
 
     // ELF tail-zero: bytes past p_filesz within the last file page must read
     // as zero (they are the start of the BSS region that shares this page).
-    if let Some(off) = zero_from {
-        if off < 4096 {
-            unsafe {
-                core::ptr::write_bytes(frame_ptr.add(off), 0, 4096 - off);
-            }
+    if let Some(off) = zero_from
+        && off < 4096
+    {
+        unsafe {
+            core::ptr::write_bytes(frame_ptr.add(off), 0, 4096 - off);
         }
     }
 

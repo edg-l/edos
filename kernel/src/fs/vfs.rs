@@ -147,19 +147,19 @@ fn lookup(path: &Path) -> Option<VfsLookup> {
 /// Look up for FileInfo specifically - handles the case where the path itself is a mount point
 /// by resolving through the parent filesystem.
 fn lookup_for_info(path: &Path) -> Option<VfsLookup> {
-    if ranked_read!(RANK_VFS, "VFS", VFS).contains_key(path) {
-        if let Some(parent) = path.parent() {
-            return lookup(&parent).map(|lk| {
-                let name = path.last_component().unwrap_or("");
-                let relative = lk.relative.join(name).normalize();
-                VfsLookup {
-                    fs: lk.fs,
-                    relative,
-                    mount_id: lk.mount_id,
-                    mount_path: lk.mount_path,
-                }
-            });
-        }
+    if ranked_read!(RANK_VFS, "VFS", VFS).contains_key(path)
+        && let Some(parent) = path.parent()
+    {
+        return lookup(&parent).map(|lk| {
+            let name = path.last_component().unwrap_or("");
+            let relative = lk.relative.join(name).normalize();
+            VfsLookup {
+                fs: lk.fs,
+                relative,
+                mount_id: lk.mount_id,
+                mount_path: lk.mount_path,
+            }
+        });
     }
     lookup(path)
 }
@@ -335,6 +335,12 @@ pub fn read(
     page_cache_read(inode, pc_ops, ra, file_size, offset, clamped)
 }
 
+/// Receives one page's worth of file data: (page index, bytes, in-page offset,
+/// destination offset).
+type PageSink<'a> = dyn FnMut(usize, &[u8], usize, usize) -> Result<(), Error> + 'a;
+/// Fills one page's worth of file data at the given page index.
+type PageSource<'a> = dyn FnMut(usize, &mut [u8]) -> Result<(), Error> + 'a;
+
 fn page_cache_read(
     inode: &Arc<VfsInode>,
     pc_ops: &dyn super::page_cache::PageCacheOps,
@@ -402,7 +408,7 @@ fn page_cache_read_core(
     file_size: usize,
     offset: usize,
     count: usize,
-    output: &mut dyn FnMut(usize, &[u8], usize, usize) -> Result<(), Error>,
+    output: &mut PageSink<'_>,
 ) -> Result<(), Error> {
     if count == 0 {
         return Ok(());
@@ -916,7 +922,7 @@ fn page_cache_write_core(
     pc_ops: &dyn super::page_cache::PageCacheOps,
     offset: usize,
     count: usize,
-    source: &mut dyn FnMut(usize, &mut [u8]) -> Result<(), Error>,
+    source: &mut PageSource<'_>,
 ) -> Result<u64, Error> {
     if count == 0 {
         return Ok(0);
@@ -1001,7 +1007,7 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
     // picks up whatever state the FS landed in.
     dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
     if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-        let from_page = (size as usize + 4095) / 4096;
+        let from_page = (size as usize).div_ceil(4096);
         // D.2: Unmap PTEs past new_size from every process that has a
         // FileBacked VMA on this inode, before freeing the cache frames.
         // Lock ordering: inode.lock (held above) > mappers.lock > vmas.lock
@@ -1213,7 +1219,7 @@ pub fn rename(old_op: &VfsOp, new_op: &VfsOp) -> Result<(), Error> {
         if let Some(replaced) = new_op
             .inode
             .as_ref()
-            .filter(|i| i.ino != 0 && !old_op.inode.as_ref().is_some_and(|o| o.ino == i.ino))
+            .filter(|i| i.ino != 0 && old_op.inode.as_ref().is_none_or(|o| o.ino != i.ino))
         {
             replaced.mark_orphan();
         }
@@ -1311,10 +1317,11 @@ pub fn child_mount_points(parent: &Path) -> Vec<(String, Path)> {
     let parent_depth = parent.component_count();
     let mut children = Vec::new();
     for (mount_path, _) in registry.iter() {
-        if mount_path.starts_with(parent) && mount_path.component_count() == parent_depth + 1 {
-            if let Some(name) = mount_path.last_component() {
-                children.push((name.to_string(), mount_path.clone()));
-            }
+        if mount_path.starts_with(parent)
+            && mount_path.component_count() == parent_depth + 1
+            && let Some(name) = mount_path.last_component()
+        {
+            children.push((name.to_string(), mount_path.clone()));
         }
     }
     children
@@ -1454,7 +1461,7 @@ pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
                 0usize
             } else {
                 let bytes_before_cut = new_size - file_offset;
-                ((bytes_before_cut + 4095) / 4096) as usize
+                bytes_before_cut.div_ceil(4096) as usize
             };
 
             if first_invalid_slot >= num_slots {
@@ -1470,13 +1477,13 @@ pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
                 let virt = VirtAddr::new(vma.start.as_u64() + slot as u64 * 4096);
                 let page: Page<Size4KiB> = Page::containing_address(virt);
 
-                if let Ok(phys) = mm.mapper.translate_page(page) {
-                    if let Ok((_, flush)) = mm.mapper.unmap(page) {
-                        flush.ignore();
-                        // Decrement the refcount bumped at fault-in time.
-                        frame_allocator().dec_refcount(phys);
-                        invalidated_pages += 1;
-                    }
+                if let Ok(phys) = mm.mapper.translate_page(page)
+                    && let Ok((_, flush)) = mm.mapper.unmap(page)
+                {
+                    flush.ignore();
+                    // Decrement the refcount bumped at fault-in time.
+                    frame_allocator().dec_refcount(phys);
+                    invalidated_pages += 1;
                 }
                 // Drop the Arc<CachedPage> for this slot; the inode's page
                 // cache entry will be freed by invalidate_from() after we return.

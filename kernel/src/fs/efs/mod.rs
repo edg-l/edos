@@ -152,6 +152,9 @@ enum NewBlock {
 }
 
 /// Where a path walk stopped.
+// The large variant is the common one and the value is consumed immediately by
+// the caller, so boxing it would add an allocation to every successful walk.
+#[allow(clippy::large_enum_variant)]
 enum Walk {
     Node((u64, EfsInode)),
     /// A symbolic link named a path outside this filesystem.
@@ -249,7 +252,7 @@ impl EfsDriver {
         let bgd_count = superblock.block_group_count as usize;
         // How many pages do we need for the BGD table?
         let bgd_bytes_needed = bgd_count * BGD_SIZE;
-        let bgd_pages = ((bgd_bytes_needed + 4095) / 4096).max(1);
+        let bgd_pages = bgd_bytes_needed.div_ceil(4096).max(1);
         let bgd_page_guards = device.read_pages(bgd_lba / sectors_per_block as u64, bgd_pages)?;
         // Flatten pages into a contiguous slice for parsing.
         let bgd_flat: Vec<u8> = bgd_page_guards
@@ -1189,10 +1192,10 @@ impl EfsDriver {
 
         // (e) Write updated inode ONCE with final extent list.
         self.store_extent_map(&mut inode, &extents, tx)?;
-        if let Some(sz) = new_size {
-            if sz > inode.size {
-                inode.size = sz;
-            }
+        if let Some(sz) = new_size
+            && sz > inode.size
+        {
+            inode.size = sz;
         }
         inode.mtime_sec = current_unix_time();
         inode.checksum = checksum_inode(&inode);
@@ -1717,42 +1720,37 @@ impl EfsDriver {
             if hdr.inode != 0 {
                 let name_start = offset + DIR_ENTRY_HEADER_SIZE;
                 let name_end = name_start + hdr.name_len as usize;
-                if name_end <= dir_data.len() {
-                    if &dir_data[name_start..name_end] == name.as_bytes() {
-                        // Mark as deleted.
-                        dir_data[offset] = 0;
-                        dir_data[offset + 1] = 0;
-                        dir_data[offset + 2] = 0;
-                        dir_data[offset + 3] = 0;
-                        dir_data[offset + 4] = 0;
-                        dir_data[offset + 5] = 0;
-                        dir_data[offset + 6] = 0;
-                        dir_data[offset + 7] = 0;
+                if name_end <= dir_data.len() && &dir_data[name_start..name_end] == name.as_bytes()
+                {
+                    // Mark as deleted.
+                    dir_data[offset] = 0;
+                    dir_data[offset + 1] = 0;
+                    dir_data[offset + 2] = 0;
+                    dir_data[offset + 3] = 0;
+                    dir_data[offset + 4] = 0;
+                    dir_data[offset + 5] = 0;
+                    dir_data[offset + 6] = 0;
+                    dir_data[offset + 7] = 0;
 
-                        // Try to merge with previous entry (extend its rec_len).
-                        if prev_end > 0 {
-                            let prev_off = prev_end
-                                - find_prev_entry_len(
-                                    &dir_data,
-                                    prev_end,
-                                    self.block_size() as usize,
-                                );
-                            let prev_hdr: EfsDirEntryHeader = unsafe {
-                                core::ptr::read_unaligned(
-                                    dir_data[prev_off..].as_ptr() as *const EfsDirEntryHeader
-                                )
-                            };
-                            let new_rec_len = prev_hdr.rec_len as usize + rec_len;
-                            dir_data[prev_off + 8] = (new_rec_len & 0xFF) as u8;
-                            dir_data[prev_off + 9] = (new_rec_len >> 8) as u8;
-                        }
-
-                        self.write_dir_blocks(dir_ino, &dir_data, tx)?;
-                        let mut updated = self.read_inode(dir_ino)?;
-                        updated.mtime_sec = current_unix_time();
-                        updated.checksum = checksum_inode(&updated);
-                        return self.write_inode(dir_ino, &updated, tx);
+                    // Try to merge with previous entry (extend its rec_len).
+                    if prev_end > 0 {
+                        let prev_off = prev_end
+                            - find_prev_entry_len(&dir_data, prev_end, self.block_size() as usize);
+                        let prev_hdr: EfsDirEntryHeader = unsafe {
+                            core::ptr::read_unaligned(
+                                dir_data[prev_off..].as_ptr() as *const EfsDirEntryHeader
+                            )
+                        };
+                        let new_rec_len = prev_hdr.rec_len as usize + rec_len;
+                        dir_data[prev_off + 8] = (new_rec_len & 0xFF) as u8;
+                        dir_data[prev_off + 9] = (new_rec_len >> 8) as u8;
                     }
+
+                    self.write_dir_blocks(dir_ino, &dir_data, tx)?;
+                    let mut updated = self.read_inode(dir_ino)?;
+                    updated.mtime_sec = current_unix_time();
+                    updated.checksum = checksum_inode(&updated);
+                    return self.write_inode(dir_ino, &updated, tx);
                 }
             }
             prev_end = offset + rec_len;
@@ -2891,7 +2889,7 @@ impl EfsDriver {
         // Write BGD table starting at block 2.
         let bgd_count = m.bgd_table.len();
         let bgds_per_block = block_size / BGD_SIZE;
-        let bgd_blocks = (bgd_count + bgds_per_block - 1) / bgds_per_block;
+        let bgd_blocks = bgd_count.div_ceil(bgds_per_block);
 
         let mut bgd_blocks_data: Vec<Vec<u8>> = Vec::with_capacity(bgd_blocks);
         for blk_idx in 0..bgd_blocks {
@@ -2949,8 +2947,8 @@ impl EfsDriver {
 
         // Shrinking: free excess blocks.
         if inode.flags & INODE_FLAG_INLINE_DATA == 0 {
-            let block_size = self.block_size() as u64;
-            let new_blocks = (size + block_size - 1) / block_size;
+            let block_size = self.block_size();
+            let new_blocks = size.div_ceil(block_size);
             // An inode with no readable extent node has no blocks to release;
             // fall through to the plain size update rather than failing the
             // truncate.
@@ -2996,6 +2994,9 @@ impl EfsDriver {
         self.write_inode(ino, &updated, tx)
     }
 
+    // Every argument is a distinct field of the operation; grouping them into a
+    // struct would only move the same list one level out.
+    #[allow(clippy::too_many_arguments)]
     fn rename_inner(
         &self,
         old_parent_ino: u64,

@@ -91,10 +91,11 @@ impl ArpCache {
         // A full cache drops its lowest address to make room. Entries carry no
         // age, so this is not an LRU and not an RFC 1122 §2.3.2.1 timeout; it
         // only bounds the map.
-        if self.entries.len() >= MAX_ARP_ENTRIES && !self.entries.contains_key(&ip) {
-            if let Some(&evicted) = self.entries.keys().next() {
-                self.entries.remove(&evicted);
-            }
+        if self.entries.len() >= MAX_ARP_ENTRIES
+            && !self.entries.contains_key(&ip)
+            && let Some(&evicted) = self.entries.keys().next()
+        {
+            self.entries.remove(&evicted);
         }
         self.entries.insert(ip, mac);
     }

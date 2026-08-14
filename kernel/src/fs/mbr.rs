@@ -194,13 +194,13 @@ fn detect_filesystem(
 
     // Check for EFS first: superblock is at block 1 (4 KiB blocks = 8 sectors).
     let efs_lba = partition_start_lba + 8;
-    if let Ok(efs_data) = read_sectors_vec(device_id, efs_lba, 8, Vec::new()) {
-        if efs_data.len() >= 4 {
-            let magic = u32::from_le_bytes([efs_data[0], efs_data[1], efs_data[2], efs_data[3]]);
-            if magic == EFS_MAGIC {
-                log!("Detected EFS filesystem");
-                return Ok(Some(FilesystemType::Efs));
-            }
+    if let Ok(efs_data) = read_sectors_vec(device_id, efs_lba, 8, Vec::new())
+        && efs_data.len() >= 4
+    {
+        let magic = u32::from_le_bytes([efs_data[0], efs_data[1], efs_data[2], efs_data[3]]);
+        if magic == EFS_MAGIC {
+            log!("Detected EFS filesystem");
+            return Ok(Some(FilesystemType::Efs));
         }
     }
 

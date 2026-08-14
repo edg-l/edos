@@ -66,13 +66,13 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
 
                 let mut buffer: Vec<u8> = vec![0u8; arg_len];
 
-                if copy_in {
-                    if !unsafe {
+                if copy_in
+                    && !unsafe {
                         try_copy_from_user(buffer.as_mut_ptr(), user_ptr as *const u8, arg_len)
-                    } {
-                        info.lock().errno = Errno::EFAULT;
-                        return -1;
                     }
+                {
+                    info.lock().errno = Errno::EFAULT;
+                    return -1;
                 }
 
                 interrupts::enable();
@@ -81,18 +81,18 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                     device
                         .ioctl(request, buffer.as_mut_ptr() as u64)
                         .map(|v| v as i64)
-                        .map_err(|e| crate::fs::Error::from(e))
+                        .map_err(crate::fs::Error::from)
                 } else {
                     fs_api::ioctl(&file.path, request, buffer.as_mut_ptr() as u64).map(|v| v as i64)
                 };
 
                 match result {
                     Ok(value) => {
-                        if copy_out {
-                            if !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) } {
-                                info.lock().errno = Errno::EFAULT;
-                                return -1;
-                            }
+                        if copy_out
+                            && !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) }
+                        {
+                            info.lock().errno = Errno::EFAULT;
+                            return -1;
                         }
                         value
                     }
@@ -108,7 +108,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                     device
                         .ioctl(request, arg)
                         .map(|v| v as i64)
-                        .map_err(|e| crate::fs::Error::from(e))
+                        .map_err(crate::fs::Error::from)
                 } else {
                     fs_api::ioctl(&file.path, request, arg).map(|v| v as i64)
                 };

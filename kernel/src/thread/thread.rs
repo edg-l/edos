@@ -550,7 +550,7 @@ pub(crate) fn release_mappings(
             }
             VmaBacking::SharedMemory { shm_id } => {
                 use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                let page_count = (vma.size() + 0xFFF) / 4096;
+                let page_count = vma.size().div_ceil(4096);
                 for i in 0..page_count {
                     let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
                     let page: Page<Size4KiB> = Page::containing_address(virt_addr);
@@ -564,7 +564,7 @@ pub(crate) fn release_mappings(
             }
             VmaBacking::Physical { .. } => {
                 use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                let page_count = (vma.size() + 0xFFF) / 4096;
+                let page_count = vma.size().div_ceil(4096);
                 for i in 0..page_count {
                     let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
                     let page: Page<Size4KiB> = Page::containing_address(virt_addr);
@@ -592,16 +592,16 @@ pub(crate) fn release_mappings(
                 // refs are released last; the BTreeMap entry in
                 // inode.pages keeps the cache frame alive.
                 use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                let page_count = (vma.size() + 0xFFF) / 4096;
+                let page_count = vma.size().div_ceil(4096);
                 let mut fa = frame_allocator();
                 for i in 0..page_count {
                     let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
                     let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                    if let Ok(phys) = memory_manager.mapper.translate_page(page) {
-                        if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                            flush.ignore();
-                            fa.dec_refcount(phys);
-                        }
+                    if let Ok(phys) = memory_manager.mapper.translate_page(page)
+                        && let Ok((_, flush)) = memory_manager.mapper.unmap(page)
+                    {
+                        flush.ignore();
+                        fa.dec_refcount(phys);
                     }
                 }
                 // VMA (including its inode Arc) drops at end of this
@@ -695,7 +695,7 @@ fn align_up_u64(value: u64, align: u64) -> u64 {
     if align <= 1 {
         value
     } else {
-        value.checked_add(align - 1).unwrap_or(u64::MAX) / align * align
+        value.saturating_add(align - 1) / align * align
     }
 }
 
@@ -1057,6 +1057,9 @@ impl Thread {
     }
 
     /// Must provide entry point and cr3 page table.
+    // Every argument is a distinct field of the operation; grouping them into a
+    // struct would only move the same list one level out.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_user(
         inode: Arc<VfsInode>,
         path: &Path,

@@ -25,6 +25,9 @@ static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
 /// Maps sequential CPU index to LAPIC ID. Supports up to 64 CPUs.
 static CPU_LAPIC_IDS: [AtomicU32; 64] = {
     // AtomicU32 is not Copy so we must use a const initializer trick.
+    // Used only as the repeated element of an array initializer, where each copy
+    // is a fresh value rather than a shared one.
+    #[allow(clippy::declare_interior_mutable_const)]
     const ZERO: AtomicU32 = AtomicU32::new(0);
     [ZERO; 64]
 };

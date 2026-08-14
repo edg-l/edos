@@ -358,6 +358,9 @@ impl UsbMassStorage {
     /// parses the buffer must bound itself by that count: the buffer comes from
     /// a pool that does not zero on reuse, so bytes past it belong to whoever
     /// held it last.
+    // Every argument is a distinct field of the operation; grouping them into a
+    // struct would only move the same list one level out.
+    #[allow(clippy::too_many_arguments)]
     fn bot_transfer(
         &mut self,
         controller: &mut XhciController,
@@ -389,28 +392,28 @@ impl UsbMassStorage {
 
         // 2. Data phase (optional).
         let mut transferred = 0usize;
-        if data_len > 0 {
-            if let Some(phys) = data_phys {
-                transferred = if direction_in {
-                    controller.bulk_transfer(
-                        self.slot_id,
-                        in_ring,
-                        self.ep_in_dci,
-                        phys,
-                        data_len,
-                        true,
-                    )?
-                } else {
-                    controller.bulk_transfer(
-                        self.slot_id,
-                        out_ring,
-                        self.ep_out_dci,
-                        phys,
-                        data_len,
-                        false,
-                    )?
-                };
-            }
+        if data_len > 0
+            && let Some(phys) = data_phys
+        {
+            transferred = if direction_in {
+                controller.bulk_transfer(
+                    self.slot_id,
+                    in_ring,
+                    self.ep_in_dci,
+                    phys,
+                    data_len,
+                    true,
+                )?
+            } else {
+                controller.bulk_transfer(
+                    self.slot_id,
+                    out_ring,
+                    self.ep_out_dci,
+                    phys,
+                    data_len,
+                    false,
+                )?
+            };
         }
 
         // 3. Read CSW on bulk IN using the pre-allocated buffer.

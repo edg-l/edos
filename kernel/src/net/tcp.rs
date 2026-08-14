@@ -112,6 +112,9 @@ pub fn parse_mss(data: &[u8], data_offset: u8) -> Option<u16> {
 
 /// Build a TCP segment with checksum.
 /// `options` is optional raw TCP options bytes (for MSS in SYN).
+// Every argument is a distinct field of the operation; grouping them into a
+// struct would only move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     src_port: u16,
     dst_port: u16,
@@ -124,7 +127,7 @@ pub fn build(
     options: &[u8],
     payload: &[u8],
 ) -> Vec<u8> {
-    let data_offset = ((20 + options.len() + 3) / 4) as u8; // Round up to 32-bit words
+    let data_offset = (20 + options.len()).div_ceil(4) as u8; // Round up to 32-bit words
     let total_hdr = data_offset as usize * 4;
     let mut pkt = Vec::with_capacity(total_hdr + payload.len());
 
@@ -132,7 +135,7 @@ pub fn build(
     pkt.extend_from_slice(&dst_port.to_be_bytes());
     pkt.extend_from_slice(&seq.to_be_bytes());
     pkt.extend_from_slice(&ack.to_be_bytes());
-    pkt.push((data_offset << 4) | 0); // data offset + reserved
+    pkt.push(data_offset << 4); // data offset + reserved
     pkt.push(flags);
     pkt.extend_from_slice(&window.to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
@@ -435,24 +438,21 @@ impl TcpConnection {
                     self.state_wq.wake_all();
                 }
             }
-            TcpState::CloseWait => {
+            TcpState::CloseWait
                 // We're waiting for the app to close. Just process ACKs.
-                if hdr.flags & ACK != 0 {
+                if hdr.flags & ACK != 0 => {
                     self.process_ack(hdr.ack_num, hdr.window);
                 }
-            }
-            TcpState::Closing => {
-                if hdr.flags & ACK != 0 && self.fin_acked(hdr.ack_num) {
+            TcpState::Closing
+                if hdr.flags & ACK != 0 && self.fin_acked(hdr.ack_num) => {
                     self.enter_time_wait();
                     self.state_wq.wake_all();
                 }
-            }
-            TcpState::LastAck => {
-                if hdr.flags & ACK != 0 && self.fin_acked(hdr.ack_num) {
+            TcpState::LastAck
+                if hdr.flags & ACK != 0 && self.fin_acked(hdr.ack_num) => {
                     self.set_state(TcpState::Closed);
                     self.state_wq.wake_all();
                 }
-            }
             _ => {}
         }
 
@@ -519,7 +519,7 @@ impl TcpConnection {
             }
             Some(srtt) => {
                 // |srtt - rtt|, then rttvar = 3/4 rttvar + 1/4 delta
-                let delta = if srtt > rtt { srtt - rtt } else { rtt - srtt };
+                let delta = srtt.abs_diff(rtt);
                 self.rttvar = (self.rttvar * 3 + delta) / 4;
                 // srtt = 7/8 srtt + 1/8 rtt
                 self.srtt = Some((srtt * 7 + rtt) / 8);

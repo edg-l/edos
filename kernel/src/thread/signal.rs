@@ -73,6 +73,9 @@ pub struct SignalState {
 impl SignalState {
     pub const fn new() -> Self {
         // Must use const initialization for all 32 elements
+        // Used only as the repeated element of an array initializer, where each
+        // copy is a fresh value rather than a shared one.
+        #[allow(clippy::declare_interior_mutable_const)]
         const INIT: AtomicU64 = AtomicU64::new(0);
         Self {
             pending: AtomicU32::new(0),

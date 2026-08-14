@@ -203,7 +203,7 @@ impl E1000e {
 
         // Configure IVAR: map RXQ0, TXQ0, and OTHER all to MSI-X vector 0.
         // Each field: [2:0]=vector number, [3]=valid bit.
-        let ivar_entry = 0 | IVAR_VALID; // vector 0, valid
+        let ivar_entry = IVAR_VALID; // vector 0, valid
         nic.write_reg(IVAR, ivar_entry | (ivar_entry << 8) | (ivar_entry << 16));
 
         // Set EIAC to auto-clear ICR bits on MSI-X delivery. Without this,

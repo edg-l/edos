@@ -184,10 +184,11 @@ pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> KeyEve
             if let Some(code) = usb_hid_to_keycode(usage) {
                 events.push(KeyEvent::new(code, KeyState::Down));
             }
-        } else if !is_pressed && was_pressed {
-            if let Some(code) = usb_hid_to_keycode(usage) {
-                events.push(KeyEvent::new(code, KeyState::Up));
-            }
+        } else if !is_pressed
+            && was_pressed
+            && let Some(code) = usb_hid_to_keycode(usage)
+        {
+            events.push(KeyEvent::new(code, KeyState::Up));
         }
     }
 
@@ -196,10 +197,10 @@ pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> KeyEve
         if key == 0 {
             continue;
         }
-        if !prev[2..8].contains(&key) {
-            if let Some(code) = usb_hid_to_keycode(key) {
-                events.push(KeyEvent::new(code, KeyState::Down));
-            }
+        if !prev[2..8].contains(&key)
+            && let Some(code) = usb_hid_to_keycode(key)
+        {
+            events.push(KeyEvent::new(code, KeyState::Down));
         }
     }
 
@@ -208,10 +209,10 @@ pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> KeyEve
         if key == 0 {
             continue;
         }
-        if !current[2..8].contains(&key) {
-            if let Some(code) = usb_hid_to_keycode(key) {
-                events.push(KeyEvent::new(code, KeyState::Up));
-            }
+        if !current[2..8].contains(&key)
+            && let Some(code) = usb_hid_to_keycode(key)
+        {
+            events.push(KeyEvent::new(code, KeyState::Up));
         }
     }
 

@@ -40,10 +40,10 @@ pub fn committer_thread() -> ! {
             if let Err(e) = j.advance_tail() {
                 log!("journal_committer: advance_tail error: {:?}", e);
             }
-            if j.has_pending_work() {
-                if let Err(e) = j.seal_and_commit_if_needed() {
-                    log!("journal_committer: seal_and_commit error: {:?}", e);
-                }
+            if j.has_pending_work()
+                && let Err(e) = j.seal_and_commit_if_needed()
+            {
+                log!("journal_committer: seal_and_commit error: {:?}", e);
             }
         }
     }

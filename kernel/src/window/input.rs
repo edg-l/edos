@@ -101,7 +101,7 @@ impl WindowEvent {
             x,
             y,
             code: 0,
-            data: delta as i8 as i32 as u32,
+            data: delta as i32 as u32,
         }
     }
 
@@ -371,89 +371,88 @@ fn handle_mouse_event(event: MouseEvent) {
 
     // Handle focus change on mouse button press (uses decorated bounds so
     // clicking title bars, borders, and resize handles also changes focus).
-    if button_pressed != 0 {
-        if let Some(target_window) = window_under_decorated {
-            if focused != Some(target_window) {
-                // Capture client-area coords before dropping the lock (for click event).
-                let window_info = registry
-                    .get_window(target_window)
-                    .map(|w| (w.x, w.y, w.frame));
-                drop(registry);
+    if button_pressed != 0
+        && let Some(target_window) = window_under_decorated
+        && focused != Some(target_window)
+    {
+        // Capture client-area coords before dropping the lock (for click event).
+        let window_info = registry
+            .get_window(target_window)
+            .map(|w| (w.x, w.y, w.frame));
+        drop(registry);
 
-                {
-                    let mut registry = ranked_write!(
-                        RANK_WINDOW_REGISTRY,
-                        "window::focus_change",
-                        WINDOW_REGISTRY
-                    );
-                    // Re-verify window still exists under write lock
-                    if registry.get_window(target_window).is_some() {
-                        registry.set_focused(target_window);
-                    }
-                }
-
-                // Send focus events outside the lock
-                if let Some(old_focused) = focused {
-                    send_event(old_focused, WindowEvent::focus_lost());
-                }
-                send_event(target_window, WindowEvent::focus_gained());
-
-                // Send click event only if the click was in the client area
-                if window_under_cursor == Some(target_window) {
-                    if let Some((wx, wy, wframe)) = window_info {
-                        let local_x = event.x - wx - wframe.left;
-                        let local_y = event.y - wy - wframe.top;
-
-                        for bit in 0..3 {
-                            if button_pressed & (1 << bit) != 0 {
-                                send_event(
-                                    target_window,
-                                    WindowEvent::mouse_button(local_x, local_y, bit, true),
-                                );
-                            }
-                        }
-                    }
-                }
-                return;
+        {
+            let mut registry = ranked_write!(
+                RANK_WINDOW_REGISTRY,
+                "window::focus_change",
+                WINDOW_REGISTRY
+            );
+            // Re-verify window still exists under write lock
+            if registry.get_window(target_window).is_some() {
+                registry.set_focused(target_window);
             }
         }
+
+        // Send focus events outside the lock
+        if let Some(old_focused) = focused {
+            send_event(old_focused, WindowEvent::focus_lost());
+        }
+        send_event(target_window, WindowEvent::focus_gained());
+
+        // Send click event only if the click was in the client area
+        if window_under_cursor == Some(target_window)
+            && let Some((wx, wy, wframe)) = window_info
+        {
+            let local_x = event.x - wx - wframe.left;
+            let local_y = event.y - wy - wframe.top;
+
+            for bit in 0..3 {
+                if button_pressed & (1 << bit) != 0 {
+                    send_event(
+                        target_window,
+                        WindowEvent::mouse_button(local_x, local_y, bit, true),
+                    );
+                }
+            }
+        }
+        return;
     }
 
     // Route mouse events to window under cursor (for move/scroll) or focused window (for buttons)
-    if let Some(target) = window_under_cursor {
-        if let Some(window) = registry.get_window(target) {
-            // Calculate coordinates relative to client area (excluding decorations)
-            let local_x = event.x - window.x - window.frame.left;
-            let local_y = event.y - window.y - window.frame.top;
+    if let Some(target) = window_under_cursor
+        && let Some(window) = registry.get_window(target)
+    {
+        // Calculate coordinates relative to client area (excluding decorations)
+        let local_x = event.x - window.x - window.frame.left;
+        let local_y = event.y - window.y - window.frame.top;
 
-            // Always send move events if there's movement
-            if event.dx != 0 || event.dy != 0 {
-                send_event(target, WindowEvent::mouse_move(local_x, local_y));
-            }
+        // Always send move events if there's movement
+        if event.dx != 0 || event.dy != 0 {
+            send_event(target, WindowEvent::mouse_move(local_x, local_y));
+        }
 
-            // Send scroll events
-            if event.scroll != 0 {
-                send_event(
-                    target,
-                    WindowEvent::mouse_scroll(local_x, local_y, event.scroll),
-                );
-            }
+        // Send scroll events
+        if event.scroll != 0 {
+            send_event(
+                target,
+                WindowEvent::mouse_scroll(local_x, local_y, event.scroll),
+            );
+        }
 
-            // Send button events
-            if buttons_changed {
-                for bit in 0..3 {
-                    if button_pressed & (1 << bit) != 0 {
-                        send_event(
-                            target,
-                            WindowEvent::mouse_button(local_x, local_y, bit, true),
-                        );
-                    }
-                    if button_released & (1 << bit) != 0 {
-                        send_event(
-                            target,
-                            WindowEvent::mouse_button(local_x, local_y, bit, false),
-                        );
-                    }
+        // Send button events
+        if buttons_changed {
+            for bit in 0..3 {
+                if button_pressed & (1 << bit) != 0 {
+                    send_event(
+                        target,
+                        WindowEvent::mouse_button(local_x, local_y, bit, true),
+                    );
+                }
+                if button_released & (1 << bit) != 0 {
+                    send_event(
+                        target,
+                        WindowEvent::mouse_button(local_x, local_y, bit, false),
+                    );
                 }
             }
         }

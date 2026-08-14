@@ -214,8 +214,8 @@ impl XhciController {
         // 7. Handle scratchpad buffers if required by the controller.
         //    xHCI spec §5.3.3: HCSPARAMS2 bits [31:27] = Hi, bits [25:21] = Lo
         //    count = (Hi << 5) | Lo
-        let scratch_lo = ((hcsparams2 >> 21) & 0x1F) as u32;
-        let scratch_hi = ((hcsparams2 >> 27) & 0x1F) as u32;
+        let scratch_lo = (hcsparams2 >> 21) & 0x1F;
+        let scratch_hi = (hcsparams2 >> 27) & 0x1F;
         let num_scratch = (scratch_hi << 5) | scratch_lo;
         let mut scratch_pages: Vec<DmaBuffer> = Vec::new();
         let mut scratch_array_buf = None;
@@ -290,16 +290,15 @@ impl XhciController {
 
         // 10. Enable MSI-X (with MSI fallback) so the controller can signal interrupts.
         let devices = pci_manager().read().get_devices().to_vec();
-        if let Some(dev) = devices.iter().find(|d| d.address == pci_addr) {
-            if let Err(e) =
+        if let Some(dev) = devices.iter().find(|d| d.address == pci_addr)
+            && let Err(e) =
                 crate::drivers::msi::enable_msix_for_device(dev, InterruptIndex::Xhci.as_u8(), 0)
+        {
+            println!("xhci: MSI-X setup failed: {:?}, trying MSI", e);
+            if let Err(e2) =
+                crate::drivers::msi::enable_msi_for_device(dev, InterruptIndex::Xhci.as_u8())
             {
-                println!("xhci: MSI-X setup failed: {:?}, trying MSI", e);
-                if let Err(e2) =
-                    crate::drivers::msi::enable_msi_for_device(dev, InterruptIndex::Xhci.as_u8())
-                {
-                    println!("xhci: MSI setup also failed: {:?}", e2);
-                }
+                println!("xhci: MSI setup also failed: {:?}", e2);
             }
         }
 
@@ -398,14 +397,12 @@ impl XhciController {
                     reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
                 }
 
-                if event.trb_type() == TRB_TYPE_COMMAND_COMPLETION {
-                    if event.parameter == cmd_phys {
-                        let comp_code = ((event.status >> 24) & 0xFF) as u8;
-                        if comp_code == COMP_SUCCESS {
-                            return Ok(event);
-                        } else {
-                            return Err(XhciError::TransferError(comp_code));
-                        }
+                if event.trb_type() == TRB_TYPE_COMMAND_COMPLETION && event.parameter == cmd_phys {
+                    let comp_code = ((event.status >> 24) & 0xFF) as u8;
+                    if comp_code == COMP_SUCCESS {
+                        return Ok(event);
+                    } else {
+                        return Err(XhciError::TransferError(comp_code));
                     }
                 }
 
@@ -460,16 +457,16 @@ impl XhciController {
         ring.push(setup_trb);
 
         // 2. Data Stage TRB (only present when there is a data phase).
-        if data_len > 0 {
-            if let Some(buf_phys) = data_buf_phys {
-                let dir_bit = if direction_in { TRB_DIR_IN } else { 0 };
-                let data_trb = Trb {
-                    parameter: buf_phys,
-                    status: data_len as u32,
-                    control: ((TRB_TYPE_DATA_STAGE as u32) << 10) | dir_bit,
-                };
-                ring.push(data_trb);
-            }
+        if data_len > 0
+            && let Some(buf_phys) = data_buf_phys
+        {
+            let dir_bit = if direction_in { TRB_DIR_IN } else { 0 };
+            let data_trb = Trb {
+                parameter: buf_phys,
+                status: data_len as u32,
+                control: ((TRB_TYPE_DATA_STAGE as u32) << 10) | dir_bit,
+            };
+            ring.push(data_trb);
         }
 
         // 3. Status Stage TRB — direction is the complement of the data stage
@@ -1612,10 +1609,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
                         // Determine which device this event belongs to by slot ID.
                         let is_keyboard = keyboard_device
                             .as_ref()
-                            .map_or(false, |(dev, _, _)| dev.slot_id == event_slot_id);
+                            .is_some_and(|(dev, _, _)| dev.slot_id == event_slot_id);
                         let is_mouse = mouse_device
                             .as_ref()
-                            .map_or(false, |(dev, _, _)| dev.slot_id == event_slot_id);
+                            .is_some_and(|(dev, _, _)| dev.slot_id == event_slot_id);
 
                         if is_keyboard {
                             // Read the 8-byte keyboard report from the DMA buffer

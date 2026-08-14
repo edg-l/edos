@@ -214,13 +214,13 @@ impl NetStack {
             // This covers: data arrival, FIN (CloseWait), RST (Closed), state transitions.
             {
                 let c = ranked_lock!(RANK_TCP_CONN, "stack::notify_owner", conn);
-                if let Some(ref owner_weak) = c.owner {
-                    if let Some(owner) = owner_weak.upgrade() {
-                        drop(c);
-                        let notif = ranked_lock!(RANK_SOCKET, "stack::notify_owner_sock", owner)
-                            .notify_pollers();
-                        self.pending_socket_notifs.push(notif);
-                    }
+                if let Some(ref owner_weak) = c.owner
+                    && let Some(owner) = owner_weak.upgrade()
+                {
+                    drop(c);
+                    let notif = ranked_lock!(RANK_SOCKET, "stack::notify_owner_sock", owner)
+                        .notify_pollers();
+                    self.pending_socket_notifs.push(notif);
                 }
             }
 
@@ -240,11 +240,11 @@ impl NetStack {
                         for queued in ls.accept_queue.iter() {
                             let mut qs =
                                 ranked_lock_same!(RANK_SOCKET, "stack::estab_queued", queued);
-                            if let Some(ref qconn) = qs.tcp_conn {
-                                if Arc::ptr_eq(qconn, &conn) {
-                                    qs.state = socket::SocketState::Connected;
-                                    break;
-                                }
+                            if let Some(ref qconn) = qs.tcp_conn
+                                && Arc::ptr_eq(qconn, &conn)
+                            {
+                                qs.state = socket::SocketState::Connected;
+                                break;
                             }
                         }
                         // Notify listening socket's pollers (accept queue now has Connected entry)
@@ -714,11 +714,9 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
         Some(timeout),
     );
 
-    let rtt = net_stack()
+    net_stack()
         .lock()
         .ping_waiters
         .remove(&key)
-        .and_then(|w| w.rtt_us);
-
-    rtt
+        .and_then(|w| w.rtt_us)
 }

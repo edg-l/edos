@@ -2023,6 +2023,9 @@ fn parse_user_string_array(
 /// `envp_storage` contains the environment strings (may be empty).
 /// `depth` is the shebang recursion depth; pass 0 from callers. Shebang interpretation
 /// is only performed at depth 0 to prevent infinite recursion.
+// Every argument is a distinct field of the operation; grouping them into a
+// struct would only move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 fn do_spawn(
     path: &crate::fs::path::Path,
     path_str: &str,
@@ -2077,7 +2080,7 @@ fn do_spawn(
             .trim();
 
         // Split into interpreter path and optional argument
-        let mut tokens = shebang_line.splitn(2, |c: char| c == ' ' || c == '\t');
+        let mut tokens = shebang_line.splitn(2, [' ', '\t']);
         let interp_path_str = match tokens.next() {
             Some(s) if !s.is_empty() => s.trim(),
             _ => {
@@ -2570,8 +2573,8 @@ fn sys_execve(
     // still addressable for anything their teardown needs.
     let cloexec = {
         let fd_table = info.lock().fd_table.clone();
-        let doomed = fd_table.lock().take_cloexec();
-        doomed
+
+        fd_table.lock().take_cloexec()
     };
     let pid = info.lock().pid;
     for (_fd, desc) in cloexec {
@@ -2784,7 +2787,7 @@ fn sys_clone(
         // address space, so two concurrent spawns searching for a free range
         // without claiming it would both land on the same stack.
         let Some(stack_bottom) = crate::syscalls::memory::claim_range(
-            &parent_user,
+            parent_user,
             &parent_info,
             0,
             stack_size,
@@ -2813,7 +2816,7 @@ fn sys_clone(
             return !0u64;
         }
 
-        let top = (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT as u64 - 1);
+        let top = (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT - 1);
         (top, Some((stack_bottom, stack_size)))
     } else {
         (child_stack, None)
@@ -3284,7 +3287,7 @@ pub type PathBuf = [u8; MAX_PATH_LEN];
 /// The buffer belongs to the caller and is meant to be a stack array: a path is
 /// bounded by `MAX_PATH_LEN`, so `open`, `stat`, `mkdir`, `unlink`, `rename`
 /// and friends have no reason to reach the allocator on every call.
-pub fn copy_user_path<'a>(buf: &'a mut PathBuf, ptr: *const u8) -> Result<&'a str, Errno> {
+pub fn copy_user_path(buf: &mut PathBuf, ptr: *const u8) -> Result<&str, Errno> {
     if ptr.is_null() {
         return Err(Errno::EFAULT);
     }
@@ -3308,10 +3311,7 @@ fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccess
     }
 
     let mut buf = vec![0u8; max_len];
-    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), ptr, max_len) } {
-        Ok(len) => len,
-        Err(err) => return Err(err),
-    };
+    let len = unsafe { try_copy_string_from_user(buf.as_mut_ptr(), ptr, max_len) }?;
 
     buf.truncate(len);
     Ok(buf)
@@ -3352,10 +3352,7 @@ fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u
     let timeout_ms = if timeout_ms == 0 { 5000 } else { timeout_ms };
     let timeout = Duration::from_millis(timeout_ms);
 
-    match crate::net::stack::syscall_ping(dst_ip, id, seq, timeout) {
-        Some(rtt_us) => rtt_us,
-        None => !0u64,
-    }
+    crate::net::stack::syscall_ping(dst_ip, id, seq, timeout).unwrap_or(!0u64)
 }
 
 /// SYS_NETINFO: write network interface information as text into a user buffer.
@@ -3382,8 +3379,8 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
         //       \x1b[36m = cyan, \x1b[0m = reset
 
         // lo - loopback
-        let _ = write!(out, "1: \x1b[1mlo\x1b[0m: <LOOPBACK,\x1b[32mUP\x1b[0m>\n");
-        let _ = write!(out, "    inet \x1b[36m127.0.0.1/8\x1b[0m\n");
+        let _ = writeln!(out, "1: \x1b[1mlo\x1b[0m: <LOOPBACK,\x1b[32mUP\x1b[0m>");
+        let _ = writeln!(out, "    inet \x1b[36m127.0.0.1/8\x1b[0m");
 
         // eth0 - e1000e
         if let Some(stack) = crate::net::stack::NET_STACK.get() {

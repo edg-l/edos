@@ -350,7 +350,7 @@ impl Journal {
     /// exclusively by this caller. Runs are cut where the ring wraps back to
     /// its first block, and at the most one command can carry.
     fn submit_journal_blocks(&self, start_idx: u64, data: &[u8], q: &mut RingWrites) {
-        debug_assert!(data.len() % BLOCK_SIZE == 0);
+        debug_assert!(data.len().is_multiple_of(BLOCK_SIZE));
         let ring_size = self.block_count as u64 - 1;
         let total = (data.len() / BLOCK_SIZE) as u64;
         let mut done = 0u64;
@@ -671,12 +671,13 @@ impl Journal {
                 changed = true;
             }
             // If nothing remains, tail catches up to head.
-            if state.committed_pending.is_empty() && state.sealed.is_empty() {
-                if state.tail_seq < state.head_seq {
-                    state.tail_seq = state.head_seq;
-                    state.tail_block = state.head_block;
-                    changed = true;
-                }
+            if state.committed_pending.is_empty()
+                && state.sealed.is_empty()
+                && state.tail_seq < state.head_seq
+            {
+                state.tail_seq = state.head_seq;
+                state.tail_block = state.head_block;
+                changed = true;
             }
         }
 

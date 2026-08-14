@@ -28,8 +28,8 @@
 //!
 //! Lock ordering: inode.lock (write) > inode.pages.lock > inode.mappers.lock
 //! > vmas.lock > memory_manager.lock.  Truncate acquires in this order.
-//! Fault paths drop the mm mapper lock before touching the page cache.
-//! See doc/invariants/lock-order.md for the full rank table and enforcement.
+//! > Fault paths drop the mm mapper lock before touching the page cache.
+//! > See doc/invariants/lock-order.md for the full rank table and enforcement.
 
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

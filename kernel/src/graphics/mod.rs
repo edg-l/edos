@@ -100,6 +100,9 @@ fn try_init_virtio_gpu() -> Option<Display> {
 
 // -------- Display enum --------
 
+// Exactly one `Display` exists for the life of the system, so the size of the
+// unused variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Display {
     Vbe(DirectFramebuffer),
     VirtioGpu(VirtioGpuDisplay),
@@ -393,7 +396,7 @@ impl DirectFramebuffer {
             && fb.green_mask_shift == 8
             && fb.blue_mask_size == 8
             && fb.blue_mask_shift == 0
-            && pitch % 4 == 0;
+            && pitch.is_multiple_of(4);
 
         println!(
             "Framebuffer: {}x{} bpp={} identity={} (R={}@{} G={}@{} B={}@{})",
@@ -412,7 +415,7 @@ impl DirectFramebuffer {
         let two_page_bytes = 2 * height * pitch;
         let vram_64k = dispi_read(DISPI_INDEX_VIDEO_MEMORY_64K) as usize;
         let vram_bytes = vram_64k * 64 * 1024;
-        let double_buffered = vram_bytes >= two_page_bytes && pitch % 4 == 0;
+        let double_buffered = vram_bytes >= two_page_bytes && pitch.is_multiple_of(4);
 
         if double_buffered {
             // Map the second VRAM page into the kernel's address space.

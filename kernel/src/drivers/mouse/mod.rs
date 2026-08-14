@@ -107,8 +107,8 @@ pub fn push_mouse_byte(byte: u8) {
 }
 
 // Polling support
-static MOUSE_POLLERS: BlockingMutex<Vec<(PollKey, PollRef, Arc<Subscriber<MouseEvent>>)>> =
-    BlockingMutex::new(Vec::new());
+type MousePoller = (PollKey, PollRef, Arc<Subscriber<MouseEvent>>);
+static MOUSE_POLLERS: BlockingMutex<Vec<MousePoller>> = BlockingMutex::new(Vec::new());
 static MOUSE_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
 /// Set the screen bounds for mouse position clamping

@@ -130,6 +130,10 @@ impl PerCpuCacheCell {
     }
 
     /// Get mutable access. Only call from owning CPU with interrupts disabled.
+    // The cache is per-CPU interior-mutable state: `&self` is the only handle a
+    // CPU ever has to its own cell, and the safety contract restricts callers to
+    // the owning CPU with interrupts off, so no second reference can exist.
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub unsafe fn get_mut(&self) -> &mut PerCpuCache {
         unsafe { &mut *self.0.get() }
@@ -171,10 +175,10 @@ pub fn mark_gs_ready() {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Try per-CPU cache first (interrupts disabled for the duration).
-        if gs_ready() {
-            if let Some(ptr) = self.try_percpu_alloc(layout) {
-                return ptr;
-            }
+        if gs_ready()
+            && let Some(ptr) = self.try_percpu_alloc(layout)
+        {
+            return ptr;
         }
 
         // Fall through to global allocator.
@@ -183,10 +187,8 @@ unsafe impl GlobalAlloc for Allocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // Try per-CPU cache first.
-        if gs_ready() {
-            if self.try_percpu_dealloc(ptr, layout) {
-                return;
-            }
+        if gs_ready() && self.try_percpu_dealloc(ptr, layout) {
+            return;
         }
 
         // Fall through to global allocator.

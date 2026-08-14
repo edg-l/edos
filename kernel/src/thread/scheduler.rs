@@ -636,7 +636,7 @@ impl Scheduler {
             // was asked for, which the backoff must not sit on. The poll is the
             // backstop for a claim that raced, not the mechanism.
             let steal_interval = 1u32 << cmp::min(steal_backoff, 4);
-            if poked || idle_ticks % steal_interval == 0 {
+            if poked || idle_ticks.is_multiple_of(steal_interval) {
                 disable();
                 if self.try_steal_and_run(context) {
                     return true;
@@ -1126,11 +1126,11 @@ impl Scheduler {
         // returns a CPU the affinity allows, so this recurses at most once; a
         // mask naming no registered CPU falls through and runs here, because
         // losing the thread is worse than ignoring the pin.
-        if !self.thread_can_run_here(&thread) {
-            if let Some(target) = pick_sched_for(&thread) {
-                target.spawn_thread(thread);
-                return;
-            }
+        if !self.thread_can_run_here(&thread)
+            && let Some(target) = pick_sched_for(&thread)
+        {
+            target.spawn_thread(thread);
+            return;
         }
         without_interrupts(|| {
             debug_assert!(
@@ -1222,7 +1222,7 @@ impl Scheduler {
     /// on_tick.
     fn try_rebalance(&self) {
         let tick = self.rebalance_tick.fetch_add(1, Ordering::Relaxed);
-        if tick % REBALANCE_INTERVAL != 0 {
+        if !tick.is_multiple_of(REBALANCE_INTERVAL) {
             return;
         }
 
@@ -1333,10 +1333,10 @@ impl Scheduler {
     /// dangling (thread exited) or the self-skip fired.
     pub fn wake_thread(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
         // Self-skip: compare control-block pointers before paying for upgrade.
-        if let Some(current_weak) = current_thread_weak() {
-            if Weak::ptr_eq(handle, &current_weak) {
-                return false;
-            }
+        if let Some(current_weak) = current_thread_weak()
+            && Weak::ptr_eq(handle, &current_weak)
+        {
+            return false;
         }
         if let Some(thread) = handle.upgrade() {
             self.do_wake(thread, priority);

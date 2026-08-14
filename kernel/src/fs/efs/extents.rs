@@ -150,20 +150,19 @@ impl ExtentMap {
         }
 
         // Prepend to the extent immediately after it.
-        if let Some(next) = self.extents.get_mut(pos) {
-            if logical_block + 1 == next.logical_block
-                && phys_block + 1 == next.physical_start()
-                && next.length < u16::MAX >> 1
-            {
-                next.logical_block = logical_block;
-                next.length += 1;
-                next.start_hi = (phys_block >> 32) as u16;
-                next.start_lo = phys_block as u32;
-                if pos > 0 {
-                    self.merge_forward(pos - 1);
-                }
-                return;
+        if let Some(next) = self.extents.get_mut(pos)
+            && logical_block + 1 == next.logical_block
+            && phys_block + 1 == next.physical_start()
+            && next.length < u16::MAX >> 1
+        {
+            next.logical_block = logical_block;
+            next.length += 1;
+            next.start_hi = (phys_block >> 32) as u16;
+            next.start_lo = phys_block as u32;
+            if pos > 0 {
+                self.merge_forward(pos - 1);
             }
+            return;
         }
 
         self.extents.insert(

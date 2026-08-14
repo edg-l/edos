@@ -239,8 +239,8 @@ fn file_attrs_to_u8(attrs: crate::fs::FileAttrs) -> u8 {
 /// and a contended acquisition there parks with them off.
 pub(super) fn current_cwd(info: &Arc<IrqSpinlock<UserThreadInfo>>) -> Path {
     let cwd = info.lock().cwd.clone();
-    let path = cwd.lock().clone();
-    path
+
+    cwd.lock().clone()
 }
 
 /// Replace the calling thread's working directory, taking the locks in the
@@ -1266,11 +1266,12 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
             kind = existing.kind;
             // POSIX: O_TRUNC has no effect on anything but a regular file, so
             // `> /dev/klog` must not fail on a filesystem with no truncate.
-            if truncate && existing.kind == FileKind::File {
-                if let Err(e) = fs_api::truncate(&path, 0) {
-                    info.lock().errno = Errno::from(e);
-                    return -1;
-                }
+            if truncate
+                && existing.kind == FileKind::File
+                && let Err(e) = fs_api::truncate(&path, 0)
+            {
+                info.lock().errno = Errno::from(e);
+                return -1;
             }
         }
         Err(e) => {

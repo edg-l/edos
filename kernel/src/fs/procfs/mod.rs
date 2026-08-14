@@ -810,7 +810,7 @@ impl Procfs {
         }
     }
 
-    fn find_snapshot<'a>(snapshots: &'a [ThreadSnapshot], tid: u64) -> Option<&'a ThreadSnapshot> {
+    fn find_snapshot(snapshots: &[ThreadSnapshot], tid: u64) -> Option<&ThreadSnapshot> {
         snapshots.iter().find(|snap| snap.tid == tid)
     }
 
@@ -1201,6 +1201,9 @@ fn parse_tid(component: &str) -> Option<u64> {
     component.parse().ok()
 }
 
+// The tuple is destructured immediately by its single caller; naming a struct
+// for it would only add a type to read one line further away.
+#[allow(clippy::type_complexity)]
 fn read_thread_info(
     tid: ThreadId,
 ) -> (
@@ -1338,7 +1341,8 @@ const FD_TABLE_LOCK_SPINS: u32 = 1024;
 /// `FileNotFound` means the thread went away between lookup and read.
 ///
 /// A table for the same reason `GLOBAL_FILES` is one.
-const PROCESS_FILES: &[(&str, fn(u64) -> Result<String, Error>)] = &[
+type ProcessFile = (&'static str, fn(u64) -> Result<String, Error>);
+const PROCESS_FILES: &[ProcessFile] = &[
     ("status", |tid| {
         Procfs::with_snapshot(tid, ThreadSnapshot::status_text)
     }),
@@ -1354,7 +1358,8 @@ const PROCESS_FILES: &[(&str, fn(u64) -> Result<String, Error>)] = &[
 /// One table rather than a variant and four match arms per file: lookup,
 /// listing, read and stat all walk it, so adding a counter is one line and
 /// cannot land in three of the four places.
-const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
+type GlobalFile = (&'static str, fn() -> String);
+const GLOBAL_FILES: &[GlobalFile] = &[
     ("processes", || {
         Procfs::render_process_table(&Procfs::collect_snapshots())
     }),
