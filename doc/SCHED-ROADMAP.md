@@ -603,3 +603,91 @@ The lesson generalises past this test: **`thread_park` is not a counting
 semaphore**, and any caller pairing parks against wakes one for one has the
 same latent bug. It is worth grepping for bare `thread_park()` outside a
 condition loop.
+
+## Measure on a quiet host, and check rather than assume
+
+The rule at the top of this file said "do not measure while anything is
+building". On 2026-08-14 that was not enough: a DDNet build and its test run
+took ~7 of this machine's 12 threads in bursts of about a minute, twice landing
+in the middle of a five-run measurement. The signature is unmistakable once
+seen — the *minimum* of the runs matches or beats the baseline while the maximum
+is 30% worse, because interference only ever adds time:
+
+```
+yield idle       244 300 286 318 299      <- one clean run, four contaminated
+round trip     2184 ... 3007              <- baseline was 2184
+```
+
+`switchbench` already takes the best of six batches *inside* a run, so
+cross-run spread that wide is always the host.
+
+**The harness samples the host now.** Percent of the machine busy over one
+second from `/proc/stat`, taken before the first run and around every run
+after it: it refuses to start above 40%, and flags any individual run that went
+busy. The one-minute load average is the wrong instrument — it lags a burst by
+minutes in *both* directions, so it misses one starting and then refuses to
+measure for minutes after one ends.
+
+### Done: the FPU reload is skipped when the registers already hold it (2026-08-14)
+
+`fxsave` and `fxrstor` were the largest single item in a switch — ~74 ns of a
+292 ns yield between them, three times what the `CpuContext` copies cost. The
+restore is now skipped when the CPU's registers already hold the incoming
+thread's state, which is what happens on a self-switch (a yield with nothing
+else Ready) and on user → kernel thread → the same user thread, the shape every
+interrupt-driven wake takes.
+
+**What makes it sound is the target spec**: `x86_64-unknown-none` is built
+`-sse,-sse2,…,+soft-float`, so kernel code cannot touch an FPU register and a
+user thread's state survives arbitrary kernel execution. The only thing that
+overwrites those registers is another restore here.
+
+The claim has two halves and needs both. This CPU's `fpu_owner` alone would miss
+the thread having run on another CPU and changed its registers there; the
+thread's `fpu_cpu` alone would miss this CPU having loaded somebody else's state
+since. The save stays eager, which is what keeps a migrated thread's saved area
+current — deferring it would let a stealer restore from an area the previous CPU
+never wrote.
+
+| | before | after |
+|---|---|---|
+| `sched_yield`, nothing else Ready | 292 ns | 252 ns |
+| `sched_yield`, handover to a sibling | 300 ns | 310 ns |
+| everything else in `switchbench` | | unchanged |
+
+The sibling handover alternates ownership every switch, so it cannot skip and
+does not move; the round trips and the syscall floor are unaffected.
+
+**The gate is `programs/fputest`**, which nothing in the tree had: four threads
+seed `xmm0`-`xmm7` with distinct patterns and read them back across 20,000
+yields each, with the load, the syscall and the read-back in one `asm!` block so
+the compiler cannot use an `XMM` register in between and hide a failure. Watched
+fail: with the restore skipped unconditionally, all four threads report their
+lanes back as zero at round 0.
+
+**What it does not cover, stated plainly:** dropping the `fpu_cpu` half — the
+migration race — still passes, at 4 threads and at 16 threads on a 4-CPU boot.
+That case needs a CPU to keep its claim while the thread runs elsewhere and
+comes back, which wants few threads and idle CPUs rather than many, and no
+arrangement tried here reproduced it. The second half of the check rests on
+reading, not on a red test.
+
+## Refuted: two of three switch optimisations bought nothing
+
+Sized from `/proc/sched_prof` stage numbers and then measured, which is the
+right order and produced two negatives worth recording:
+
+- **Caching the active `CR3` per CPU** instead of reading `CR3` to compare.
+  The `page` stage reads 25.8 ns/call on a switch that does not change address
+  space, which is nothing but a `Cr3::read` and a compare — so it looked like
+  ~18 ns of real cost. Measured: no change outside noise on any of the eight
+  figures. `Cr3::read` is cheap, and that stage number is mostly its own probe.
+  Not kept: it made `write_cr3` the only permitted writer of `CR3` in the
+  kernel, which is a real invariant to maintain for a win that does not exist.
+- **`wake_sleepers` returning early on the atomic `earliest_deadline`** instead
+  of taking the sleepers lock to find an empty heap. Also no measurable change.
+
+The lesson is the one this file already records about the `page` stage and then
+failed to apply: **a stage number is one `rdtsc` wide before it measures
+anything, so it ranks the parts of a call and cannot size one.** Anything under
+about 20 ns/call in that table is indistinguishable from its own probe.

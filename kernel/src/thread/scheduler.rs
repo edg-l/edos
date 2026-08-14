@@ -875,15 +875,33 @@ impl Scheduler {
         write_fs_base(VirtAddr::new(next_fs_base));
         let probe = sched_prof::record(Stage::RestoreTls, probe);
 
+        // The registers may already hold this thread's FPU state, in which case
+        // reloading it is 500 bytes of `fxrstor` for nothing — the largest
+        // single item in a switch. The kernel is built `+soft-float` with every
+        // SSE feature off, so kernel code cannot disturb what a user thread
+        // left in those registers however long it runs in between; the only
+        // thing that overwrites them is another restore here.
+        //
+        // Both halves of the claim have to agree. This CPU's `fpu_owner` alone
+        // would miss the thread having run on another CPU and changed its
+        // registers there; the thread's `fpu_cpu` alone would miss this CPU
+        // having loaded somebody else's state since.
         if next.user.is_some() {
-            unsafe {
-                let fpu = &mut *next.fpu.get();
-                if !next.fpu_init.load(Ordering::Relaxed) {
-                    init_fpu_state(fpu);
-                    next.fpu_init.store(true, Ordering::Relaxed);
-                } else {
-                    restore_fpu_state(fpu);
+            let percpu = get_percpu_data();
+            let owned_here = percpu.fpu_owner.get() == next.id.0
+                && next.fpu_cpu.load(Ordering::Acquire) == self.cpu;
+            if !owned_here {
+                unsafe {
+                    let fpu = &mut *next.fpu.get();
+                    if !next.fpu_init.load(Ordering::Relaxed) {
+                        init_fpu_state(fpu);
+                        next.fpu_init.store(true, Ordering::Relaxed);
+                    } else {
+                        restore_fpu_state(fpu);
+                    }
                 }
+                percpu.fpu_owner.set(next.id.0);
+                next.fpu_cpu.store(self.cpu, Ordering::Release);
             }
         }
         sched_prof::record(Stage::RestoreFpu, probe);

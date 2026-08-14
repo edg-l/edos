@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-14 (per-CPU thread info)
+## Counts, remeasured 2026-08-14 (fpu skip, fputest)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1582,12 +1582,12 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 117 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 117 — a mismatch is the bug |
-| userspace programs | 119 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| userspace programs | 120 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 120 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 102,710 code lines across 436 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,154 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,349 | `git rev-list --count HEAD` |
+| binaries in `filesystem/bin` | 121 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
+| Rust | 102,837 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,175 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,351 | `git rev-list --count HEAD` |
 | in-kernel test suite | 52 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 155, of which 14 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -6764,3 +6764,80 @@ for `sleep worst overshoot` to appear once per run. Bisect by checking out whole
 commits in place rather than kernel-only: an old kernel under current userspace
 crosses the negative-errno boundary in the middle of the range, and the two
 disagree about what a failure looks like.
+
+
+## The biggest thing in a context switch was the FPU, not the frame (2026-08-14)
+
+`doc/SCHED-ROADMAP.md` §3 has proposed for a while that the voluntary switch
+drop its 160-byte `CpuContext` and its kernel-to-kernel `iretq` for a
+Linux-shaped six-register save. Measuring the switch before rewriting it says
+that is not where the time is:
+
+| stage | ns/call | less ~8 ns of probe |
+|---|---|---|
+| `restore_fpu` (`fxrstor`) | 57.8 | ~50 |
+| `save_fpu` (`fxsave`) | 32.1 | ~24 |
+| `page` (`Cr3::read` + compare) | 25.8 | ~18 |
+| `restore_ctx` (clone + write under a Mutex) | 23.9 | ~16 |
+| `save_ctx` | 8.4 | ~0 |
+
+The FPU pair is ~74 ns of a 292 ns yield; the frame copies the roadmap blames
+are ~16, and the save side of them is free.
+
+**The skip, and why it is allowed.** The kernel target is built
+`-sse,-sse2,…,+soft-float`, so kernel code cannot touch an FPU register: a user
+thread's state survives arbitrary kernel execution, and the only thing that
+overwrites those registers is another restore. So the restore can be skipped
+when the CPU's registers already hold the incoming thread's state. `sched_yield`
+with nothing else Ready went **292 → 252 ns**, and the case is not exotic — it
+is every self-switch, and every user → driver kthread → same user thread hop.
+
+Both halves of the claim are needed, which took a moment to see: this CPU's
+`fpu_owner` alone misses the thread having run elsewhere and changed its
+registers there, and the thread's `fpu_cpu` alone misses this CPU having loaded
+someone else's state since. The **save stays eager**: deferring it until the
+next thread is known would be sound only if nobody could resume the thread in
+between, and `save_transition_switch` publishes the thread precisely because
+somebody can.
+
+**`programs/fputest` is the gate, and it was watched fail** — with the restore
+skipped unconditionally, four threads read their `xmm` lanes back as zero at
+round 0. The load, the `syscall` and the read-back are one `asm!` block so the
+compiler cannot use an `XMM` register in between and mask the failure.
+
+It does **not** cover the migration half: dropping the `fpu_cpu` check passes at
+4 threads and at 16 on a 4-CPU boot, because that race wants few threads and
+idle CPUs (a CPU keeping its claim while the thread runs elsewhere and returns),
+not many. Recorded rather than glossed: half of this check rests on reading.
+
+### Two things that measured as nothing
+
+Both were sized off `/proc/sched_prof` stage numbers and then measured, which is
+the right order and produced two negatives:
+
+- Caching the active `CR3` per CPU rather than reading `CR3` to compare. The
+  `page` stage suggested ~18 ns; measured, no change on any of eight figures.
+  Not kept — it made one function the only permitted writer of `CR3` in the
+  kernel, which is a real invariant to maintain for a win that is not there.
+- `wake_sleepers` returning early on the atomic `earliest_deadline` instead of
+  taking the sleepers lock to find an empty heap. Also nothing.
+
+**The lesson is one this repo already wrote down and I still walked into:** a
+`sched_prof` stage is one `rdtsc` wide before it measures anything, so it ranks
+the parts of a call and cannot size one. Anything under ~20 ns/call in that
+table is indistinguishable from its own probe.
+
+### The host was lying twice, and the harness checks it now
+
+Two five-run measurements were thrown away because a DDNet build and its test
+run took ~7 of this machine's 12 threads in bursts of about a minute. The
+signature: the *minimum* of the runs matches the baseline while the maximum is
+30% worse, because interference only ever adds time. `switchbench` already takes
+the best of six batches inside a run, so wide cross-run spread is always the
+host.
+
+The bench harness samples `/proc/stat` for percent-of-machine-busy over one
+second, refuses to start above 40%, and flags any run that went busy while it
+ran. The one-minute load average is the wrong instrument: it lagged the burst by
+minutes in both directions, missing one starting and then refusing to measure
+for minutes after one ended.

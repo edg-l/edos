@@ -2865,6 +2865,7 @@ fn sys_clone(
         context_saved: AtomicBool::new(true),
         fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
         fpu_init: AtomicBool::new(false),
+        fpu_cpu: AtomicU32::new(u32::MAX),
         owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
         #[cfg(debug_assertions)]
         lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
@@ -3131,6 +3132,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             core::cell::UnsafeCell::new(fpu_state)
         },
         fpu_init: AtomicBool::new(true),
+        fpu_cpu: AtomicU32::new(u32::MAX),
         owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
         #[cfg(debug_assertions)]
         lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),

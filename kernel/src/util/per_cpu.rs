@@ -43,6 +43,9 @@ pub struct PerCpuData {
     /// cache stays correct even if some path publishes a thread without going
     /// through `set_current_thread`.
     current_info: UnsafeCell<Option<(ThreadId, Arc<IrqSpinlock<UserThreadInfo>>)>>,
+    /// Thread id whose FPU state is loaded in this CPU's registers, or 0 for
+    /// none. See `Thread::fpu_cpu` for why one side is not enough.
+    pub fpu_owner: Cell<u64>,
     pub uaccess: UAccessState,
     /// Top of the per-CPU scheduler stack. The voluntary context-switch
     /// trampoline pivots RSP here before calling the transition fn and
@@ -73,6 +76,7 @@ impl PerCpuData {
             scheduler: Cell::new(core::ptr::null_mut()),
             current_thread: UnsafeCell::new(None),
             current_info: UnsafeCell::new(None),
+            fpu_owner: Cell::new(0),
             uaccess: UAccessState::new(),
             scheduler_stack_top: Cell::new(0),
             heap_cache: PerCpuCacheCell::new(),

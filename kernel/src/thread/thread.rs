@@ -247,6 +247,14 @@ pub struct Thread {
     // UnsafeCell because it's accessed without a lock (only current CPU writes).
     pub fpu: UnsafeCell<FpuState>,
     pub fpu_init: AtomicBool,
+    /// The CPU that last loaded this thread's FPU state into its registers, or
+    /// `u32::MAX` for none.
+    ///
+    /// Paired with that CPU's `fpu_owner`, and both halves are needed to skip a
+    /// reload: this side alone cannot see that the CPU has since run another
+    /// thread, and that side alone cannot see that this thread has since run
+    /// somewhere else and changed its registers there.
+    pub fpu_cpu: AtomicU32,
 
     /// Async operations the thread currently owns.  On wake-after-completion
     /// the op unregisters itself (`owned_ops_remove`).  On death, `Thread::free`
@@ -967,6 +975,7 @@ impl Thread {
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
+            fpu_cpu: AtomicU32::new(u32::MAX),
             owned_ops: IrqSpinlock::new(heapless::Vec::new()),
             #[cfg(debug_assertions)]
             lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
@@ -1099,6 +1108,7 @@ impl Thread {
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
+            fpu_cpu: AtomicU32::new(u32::MAX),
             owned_ops: IrqSpinlock::new(heapless::Vec::new()),
             #[cfg(debug_assertions)]
             lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
