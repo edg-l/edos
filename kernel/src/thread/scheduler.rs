@@ -28,7 +28,7 @@ use crate::{
     memory::{
         KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, mapper::memory_mapper, valloc::vmalloc,
     },
-    println,
+    println, smp,
     thread::{
         UserThreadInfo,
         context::CpuContext,
@@ -47,6 +47,49 @@ use crate::{
 const REBALANCE_INTERVAL: u32 = 10;
 /// Only steal if the busiest CPU has this many more threads than us.
 const REBALANCE_THRESHOLD: u64 = 2;
+
+/// CPUs halted in [`Scheduler::run_idle`], by dense CPU index.
+///
+/// A wake enqueues on the *waker's* CPU (see [`Scheduler::complete_wake`]), so a
+/// thread that wakes several others buries them all in one runqueue however much
+/// of the machine is asleep. Spreading them is work-stealing's job, and an idle
+/// CPU used to learn there was anything to steal only when its own backoff poll
+/// came round — up to a 100 ms halt per interval, and the interval grows. This
+/// is the set an enqueue can poke instead.
+///
+/// Keyed like [`smp::online_cpu_mask`]: bit N is the CPU whose LAPIC id is
+/// `smp::lapic_id_for_cpu(N)`, and only the first 64 CPUs are tracked, which is
+/// the same ceiling the topology tables already have. A CPU past it never sets a
+/// bit, is never poked, and keeps the poll.
+static IDLE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
+
+/// A CPU with no bit in [`IDLE_CPU_MASK`]: it is never poked and keeps the poll.
+const NOT_TRACKED: usize = usize::MAX;
+
+/// CPUs tracked by [`IDLE_CPU_MASK`], bounded by its width.
+const IDLE_TRACKED_CPUS: usize = u64::BITS as usize;
+
+/// Take one CPU out of the idle set, or `None` when nobody is halted.
+///
+/// The claim *is* the message. Clearing the bit is what tells that CPU it was
+/// asked for — nothing else clears another CPU's bit — and it also stops two
+/// enqueues in a row from both shouting at the same CPU while others sleep.
+fn claim_idle_cpu() -> Option<usize> {
+    let mut mask = IDLE_CPU_MASK.load(Ordering::Acquire);
+    while mask != 0 {
+        let idx = mask.trailing_zeros() as usize;
+        match IDLE_CPU_MASK.compare_exchange_weak(
+            mask,
+            mask & !(1 << idx),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(idx),
+            Err(observed) => mask = observed,
+        }
+    }
+    None
+}
 
 pub fn init() {
     println!("Initializing scheduler");
@@ -121,6 +164,13 @@ impl WakePriority {
 pub struct Scheduler {
     pub cpu: u32,
 
+    /// This CPU's bit position in [`IDLE_CPU_MASK`], resolved once at
+    /// registration. LAPIC ids are not contiguous on real hardware, so `cpu`
+    /// cannot index a bitmask; this is the dense index the topology tables in
+    /// `smp` already assign, and [`NOT_TRACKED`] marks a CPU past the 64 they
+    /// hold.
+    cpu_index: usize,
+
     // Ready queue. Simple round-robin with priority buckets is enough.
     // Keep it small and predictable.
     rq: Mutex<RunQueue>,
@@ -176,6 +226,7 @@ impl Scheduler {
                 tid: thread.id.0
             });
             sc.mark_running_thread_need_resched();
+            sc.poke_idle_cpu();
         })
     }
 
@@ -205,8 +256,21 @@ impl Scheduler {
     }
 
     pub fn new(cpu: u32) -> Self {
+        // Runs on the CPU it describes, and after `smp` has registered it, so
+        // the index this resolves to is that CPU's own.
+        let cpu_index = smp::current_cpu_index();
+        debug_assert_eq!(
+            smp::lapic_id_for_cpu(cpu_index),
+            cpu,
+            "scheduler cpu index {cpu_index} does not name lapic {cpu}"
+        );
         Self {
             cpu,
+            cpu_index: if cpu_index < IDLE_TRACKED_CPUS {
+                cpu_index
+            } else {
+                NOT_TRACKED
+            },
             rq: Mutex::new(RunQueue::new()),
             current: AtomicU64::new(0),
             default_timeslice: Duration::from_millis(5),
@@ -526,6 +590,7 @@ impl Scheduler {
 
         let mut idle_ticks: u32 = 0;
         let mut steal_backoff: u32 = 0;
+        let mut poked = false;
 
         loop {
             // Break out if any work is available on our own runqueue.
@@ -534,14 +599,23 @@ impl Scheduler {
             }
 
             // Poll for stealable work on an exponential backoff, so an idle CPU
-            // that finds nothing keeps halting rather than spinning.
+            // that finds nothing keeps halting rather than spinning — unless it
+            // was asked for, which the backoff must not sit on. The poll is the
+            // backstop for a claim that raced, not the mechanism.
             let steal_interval = 1u32 << cmp::min(steal_backoff, 4);
-            if idle_ticks % steal_interval == 0 {
+            if poked || idle_ticks % steal_interval == 0 {
                 disable();
                 if self.try_steal_and_run(context) {
                     return true;
                 }
-                steal_backoff = steal_backoff.saturating_add(1);
+                // Being asked is evidence the machine has work, so a CPU that
+                // was poked and found nothing starts its backoff over rather
+                // than letting the next ask land inside a 16-tick sleep.
+                steal_backoff = if poked {
+                    0
+                } else {
+                    steal_backoff.saturating_add(1)
+                };
                 enable();
             }
 
@@ -556,8 +630,13 @@ impl Scheduler {
                 self.arm_timer_until(now, next);
             });
 
-            // Halt until next interrupt (timer, IPI, device)
+            // Halt until next interrupt (timer, IPI, device). `sti; hlt` is one
+            // unit against a claim that lands in between: an IPI raised while
+            // interrupts were off is delivered after the `hlt` begins rather
+            // than before it, so the wakeup cannot be missed.
+            self.publish_idle();
             x86_64::instructions::interrupts::enable_and_hlt();
+            poked = !self.take_idle();
 
             idle_ticks += 1;
         }
@@ -922,6 +1001,54 @@ impl Scheduler {
         cpu.user_rsp.set(user_rsp);
         sched_prof::record(Stage::Switch, entry);
         // return handles context switch
+    }
+
+    /// Join the set of CPUs an enqueue may poke.
+    ///
+    /// Published only across the halt and taken back immediately after, because
+    /// the bit means *halted*: a CPU that is awake and already looking for work
+    /// has nothing to be told, and telling it would spend a wakeup on nobody.
+    fn publish_idle(&self) {
+        if self.cpu_index != NOT_TRACKED {
+            IDLE_CPU_MASK.fetch_or(1 << self.cpu_index, Ordering::Release);
+        }
+    }
+
+    /// Leave the idle set, reporting whether this CPU was still in it.
+    ///
+    /// `false` means somebody claimed it while it slept, which is the whole
+    /// message: a CPU with more work than it can run wants this one to come and
+    /// steal. Nothing else clears another CPU's bit.
+    fn take_idle(&self) -> bool {
+        if self.cpu_index == NOT_TRACKED {
+            return true;
+        }
+        let bit = 1u64 << self.cpu_index;
+        IDLE_CPU_MASK.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    }
+
+    /// Wake one halted CPU to come and take some of this runqueue.
+    ///
+    /// The threshold is [`Scheduler::try_steal`]'s own rule read from the other
+    /// side: it refuses to take a CPU's only queued thread, so a queue of one
+    /// has nothing to offer and poking anybody for it only spends a wakeup.
+    ///
+    /// Costs two atomic loads when the machine is busy, since a queue below the
+    /// threshold or a mask of zero ends it before any lookup.
+    fn poke_idle_cpu(&self) {
+        if self.queued() < 2 {
+            return;
+        }
+        let Some(idx) = claim_idle_cpu() else {
+            return;
+        };
+        let target = smp::lapic_id_for_cpu(idx);
+        // Claiming this CPU itself is not a mistake to undo: it is on its way
+        // out of the halt already, and `take_idle` hands it the same message an
+        // IPI would have carried.
+        if target != get_percpu_data().lapic_id.get() {
+            self.send_reschedule_ipi(target);
+        }
     }
 
     pub fn send_reschedule_ipi(&self, target_cpu: u32) {

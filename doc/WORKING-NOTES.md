@@ -6841,3 +6841,43 @@ second, refuses to start above 40%, and flags any run that went busy while it
 ran. The one-minute load average is the wrong instrument: it lagged the burst by
 minutes in both directions, missing one starting and then refusing to measure
 for minutes after one ended.
+
+## A benchmark reported 140x too good, because LLVM hoisted the work out of it
+
+`balancebench wake` parks a worker per spare CPU and times a burst of wakes, and
+its first form reported a burst of **0.02 ms against a 4.2 ms lump** — a fanout
+of 0.01 where 1.00 is theoretically perfect. The impossible direction is the
+tell: a broken measurement usually looks bad, and this one looked like a
+scheduler with nothing left to fix.
+
+The worker loop was:
+
+```rust
+for _ in 0..rounds {
+    read(req_read, &mut byte);
+    let checksum = work(WAKE_ROUNDS, seed);   // pure, and `seed` never changes
+    write(ack_write, &[checksum as u8 | 1]);
+}
+```
+
+`work` is a pure function of `(rounds, seed)` and both arguments are
+loop-invariant, so LLVM hoisted the **call** out of the loop: the arithmetic ran
+once and the remaining nine rounds were a bare pipe round trip.
+`#[inline(never)]` does not prevent this — it stops inlining, not licm, and a
+pure call is exactly what licm is allowed to move. The default `balancebench`
+mode never hit it because each of its threads calls `work` once.
+
+Two things worth copying:
+
+- **Give the inner call a loop-carried dependency** (`state = work(rounds,
+  state)`), rather than relying on a side effect that happens to sit next to it.
+  The bug was first *masked* by adding an `Instant::now()` inside the loop for
+  diagnostics, which is not a fix: it works only as long as nobody removes the
+  diagnostic.
+- **Measure the same interval from both ends.** Making each worker report the
+  microseconds it spent in its own loop, beside the waker's wall clock for the
+  burst, is what turned "the number is impossible" into "the arithmetic is not
+  happening". A single clock cannot tell you the work is missing.
+
+The scaffolding was suspect before the kernel was, which is the rule: the
+harness had been written in the same session, the kernel had not.

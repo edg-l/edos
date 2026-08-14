@@ -354,9 +354,15 @@ Beyond affinity (1.2), things that look like the next real improvements:
   rank table already gives a place to hang it.
 - **The timeslice is a flat 5ms** regardless of priority, so priority affects
   pick order but never share of CPU.
-- **The idle loop polls for steals** on a backoff (`run_idle`) rather than being
-  told. An IPI from a CPU that just enqueued work onto a long runqueue would cut
-  steal latency and let idle CPUs stay halted.
+- **The idle loop polled for steals — FIXED.** `run_idle` waited for its own
+  backoff to come round, up to a 100 ms halt per interval and the interval
+  doubling to sixteen of them, so a burst of wakes sat in the waker's runqueue
+  while the rest of the machine slept. An enqueue that leaves two or more threads
+  queued now claims a CPU out of `IDLE_CPU_MASK` and sends it a reschedule IPI.
+  The claim *is* the message: clearing the bit is what tells that CPU it was
+  asked for, so the poll survives only as the backstop for a claim that raced.
+  `balancebench wake` reports the cost — a seven-way wake burst on an eight-CPU
+  boot went from 4.25× to 1.97× the solo lump.
 
 ---
 

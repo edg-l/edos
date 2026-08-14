@@ -22,6 +22,14 @@
 //! by where its waker ran rather than by where it was spawned, which is how a
 //! long-lived system's threads actually end up distributed.
 //!
+//! `balancebench wake` prices the other half of placement. The straggler test
+//! above spawns its workers, and a spawn already picks the least-loaded CPU; a
+//! *wake* deliberately does not, because `complete_wake` enqueues on the waker's
+//! CPU for cache locality. That mode parks a worker per spare CPU, lets the
+//! machine go fully idle, and times a burst of wakes from one thread — which is
+//! work-stealing's problem alone, and so measures how fast an idle CPU notices
+//! there is something to steal.
+//!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
 use std::io::Write;
@@ -107,20 +115,27 @@ fn blocked_thread(idle_read: u64, ack_write: u64) {
 
 fn main() {
     let mut klog = false;
+    let mut wake_mode = false;
     let mut workers_arg: Option<u64> = None;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "-l" => klog = true,
+            "wake" => wake_mode = true,
             other => match other.parse::<u64>() {
                 Ok(n) if n > 0 => workers_arg = Some(n),
                 _ => {
-                    eprintln!("usage: balancebench [workers] [-l]");
+                    eprintln!("usage: balancebench [wake] [workers] [-l]");
                     std::process::exit(2);
                 }
             },
         }
     }
     let mut out = Out::new(klog);
+
+    if wake_mode {
+        wake_burst(&mut out, workers_arg);
+        return;
+    }
 
     let cpus = cpus_online();
     // One fewer worker than there are CPUs, because the machine is not empty:
@@ -202,6 +217,156 @@ fn main() {
 
     let _ = close(ack_read);
     let _ = close(ack_write);
+}
+
+/// Rounds of the work loop for one woken worker, sized against the solo cost of
+/// [`WORK_ROUNDS`] so the lump takes about one 5 ms timeslice. That size is the
+/// point: a worker that gets a CPU of its own finishes inside its first slice,
+/// so anything slower is time it spent waiting for a CPU rather than working.
+const WAKE_ROUNDS: u64 = 3_300_000;
+
+/// Burst wake-ups per round.
+const WAKE_BURSTS: u32 = 10;
+
+/// How long the machine is left alone before each burst, so every CPU reaches
+/// the idle loop and halts. Without this the CPUs are still spinning down from
+/// the previous burst and the wake lands on a machine that is not actually idle.
+const WAKE_SETTLE: Duration = Duration::from_millis(60);
+
+/// A worker that is woken by a byte, works for one timeslice, and answers.
+///
+/// The answer carries the microseconds the worker itself spent in the loop, so
+/// the burst can be read from both ends: the waker's wall clock says how long
+/// the fan-out took, and this says how much of that was arithmetic.
+fn wake_worker(req_read: u64, ack_write: u64, rounds: u32, seed: u64) {
+    let mut byte = [0u8; 1];
+    // Each round seeds the next. `work` is a pure function of its arguments and
+    // `#[inline(never)]` does not stop LLVM hoisting a pure call whose arguments
+    // never change clean out of the loop: with a fixed seed the arithmetic ran
+    // once, every round after it was a bare pipe round trip, and the burst
+    // measured 0.02 ms against a 4 ms lump. The loop-carried dependency is what
+    // makes each round do the work, and it has to stay.
+    let mut state = seed;
+    for _ in 0..rounds {
+        if read(req_read, &mut byte) != 1 {
+            return;
+        }
+        let t0 = Instant::now();
+        state = work(WAKE_ROUNDS, state);
+        let micros = t0.elapsed().as_micros() as u32;
+        let _ = write(ack_write, &micros.to_le_bytes());
+    }
+}
+
+/// Block until this worker answers, and refuse to report a time for a burst
+/// that did not happen.
+///
+/// One ack pipe per worker rather than one shared queue: a shared queue is read
+/// N times and cannot say *which* worker answered, so a worker that died, or one
+/// that answered twice, still lets the burst look complete and fast. Here a
+/// missing answer is a hang and a broken one is a panic, and neither can be
+/// mistaken for a good measurement.
+fn await_ack(ack_read: u64, worker: usize) -> u32 {
+    let mut buf = [0u8; 4];
+    let n = read(ack_read, &mut buf);
+    assert!(
+        n == 4,
+        "balancebench wake: worker {worker} answered {n} bytes, not 4"
+    );
+    u32::from_le_bytes(buf)
+}
+
+/// Prices the *wake* path's placement, which the default mode cannot reach.
+///
+/// The default mode spawns its workers, and a spawn already goes to the
+/// least-loaded CPU. A wake does not: `complete_wake` enqueues the woken thread
+/// on the **waker's** CPU for cache locality, so a thread that wakes N workers
+/// in a burst puts all N on one runqueue no matter how much of the machine is
+/// idle. Getting them anywhere else is work-stealing's job, and an idle CPU only
+/// looks for something to steal when its own backoff poll comes round.
+///
+/// So: park one worker per spare CPU, let the machine go fully idle, then wake
+/// them all from one thread and time how long until the last one answers. Each
+/// does one timeslice of arithmetic, which is what makes the fan-out necessary —
+/// with no work in them, one CPU could serve the whole burst and a perfect score
+/// would mean nothing. `wall / solo` is the report: 1.00 is every worker running
+/// at once, N is the burst served one worker at a time.
+fn wake_burst(out: &mut Out, workers_arg: Option<u64>) {
+    let cpus = cpus_online();
+    let workers = workers_arg.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
+    out.line(&format!(
+        "balancebench wake {cpus} cpus online, {workers} workers, {WAKE_BURSTS} bursts"
+    ));
+    if cpus < 2 {
+        out.line("balancebench wake: NOT a multi-CPU boot, there is nowhere for a wake to go");
+    }
+
+    // What one worker's lump costs with a CPU to itself, measured the same way
+    // the workers measure it so the ratio below compares like with like.
+    let t0 = Instant::now();
+    let checksum = work(WAKE_ROUNDS, 1);
+    let solo = t0.elapsed();
+    out.line(&format!(
+        "balancebench wake solo {:.2} ms for one worker alone (checksum {checksum:#x})",
+        solo.as_secs_f64() * 1000.0
+    ));
+
+    let mut req_writes = Vec::new();
+    let mut ack_reads = Vec::new();
+    for i in 0..workers {
+        let (req_read, req_write) = pipe().expect("balancebench: request pipe");
+        let (ack_read, ack_write) = pipe().expect("balancebench: ack pipe");
+        req_writes.push(req_write);
+        ack_reads.push(ack_read);
+        thread::spawn(move || wake_worker(req_read, ack_write, WAKE_BURSTS, i + 2));
+    }
+
+    let mut walls: Vec<Duration> = Vec::new();
+    for _ in 0..WAKE_BURSTS {
+        // Every worker is parked on its read and every other CPU has run out of
+        // work; this is the sleep that gets them all the way into `hlt`.
+        thread::sleep(WAKE_SETTLE);
+
+        let burst = Instant::now();
+        for &req_write in &req_writes {
+            let n = write(req_write, &[1u8]);
+            assert!(n == 1, "balancebench wake: request write returned {n}");
+        }
+        let mut slowest_worker = 0u32;
+        for (worker, &ack_read) in ack_reads.iter().enumerate() {
+            slowest_worker = slowest_worker.max(await_ack(ack_read, worker));
+        }
+        let wall = burst.elapsed();
+        out.line(&format!(
+            "balancebench wake   burst {:.2} ms, slowest worker's own loop {:.2} ms",
+            wall.as_secs_f64() * 1000.0,
+            slowest_worker as f64 / 1000.0
+        ));
+        walls.push(wall);
+    }
+    walls.sort_unstable();
+
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let median = walls[walls.len() / 2];
+    out.line(&format!(
+        "balancebench wake burst fastest {:.2} ms median {:.2} ms slowest {:.2} ms",
+        ms(walls[0]),
+        ms(median),
+        ms(walls[walls.len() - 1])
+    ));
+    out.line(&format!(
+        "balancebench wake fanout {:.2} (median burst over solo; 1.00 is every worker at once, \
+         {workers}.00 is one at a time)",
+        ms(median) / ms(solo)
+    ));
+    report_sched(out, "after the bursts");
+
+    for req_write in req_writes {
+        let _ = close(req_write);
+    }
+    for ack_read in ack_reads {
+        let _ = close(ack_read);
+    }
 }
 
 /// The kernel's own view of what it thinks each CPU is carrying.

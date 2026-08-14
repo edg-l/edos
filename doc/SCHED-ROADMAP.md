@@ -437,6 +437,26 @@ a CPU spare deliberately: the desktop is not idle, and a spare CPU is also what
 makes a bad placement visible. Read `/proc/sched` (per-CPU
 `CURRENT QUEUED LOAD STEALS`) beside it, which is what placement believed.
 
+`balancebench wake` prices the other half. The straggler test above *spawns* its
+workers, and a spawn already goes to the least-loaded CPU through
+`pick_sched_for`; a **wake** deliberately does not, because `complete_wake`
+enqueues on the waker's CPU for cache locality. So it parks a worker per spare
+CPU, lets the machine go fully idle, and times a burst of wakes from one thread.
+Everything that spreads that burst is work-stealing, which makes the mode a
+direct measure of how fast an idle CPU learns there is something to steal.
+`median burst / solo` is its report on the same scale.
+
+**A benchmark whose inner call is pure must break loop invariance itself.**
+`work` is a pure function of `(rounds, seed)` and `#[inline(never)]` does not
+stop LLVM hoisting a pure call whose arguments never change clean out of the
+loop around it. The first `wake` mode passed a fixed seed every round: the
+arithmetic ran **once**, every round after it was a bare pipe round trip, and
+the burst measured 0.02 ms against a 4 ms lump — a 140× speedup that read
+exactly like a scheduler that had nothing to fix. Each round seeds the next now.
+The tell was the ratio being *impossibly good* rather than bad, and the thing
+that caught it was making the worker report its own loop time so the two ends of
+the burst could be compared.
+
 ### Done: load is runnable work, not membership (2026-08-14)
 
 `thread_count` counted the threads that called a CPU home and was adjusted only
@@ -531,6 +551,68 @@ anyway.
 Two wakes per round trip, so ~11–20 ns off each against a `do_wake` measured at
 51 ns. The two controls take no wake at all and did not move, which is what
 makes the rest attributable.
+
+### Done: an enqueue wakes a halted CPU instead of waiting for its poll (2026-08-15)
+
+`complete_wake` enqueues on the **waker's** CPU for cache locality, so a thread
+that wakes several others buries them all in one runqueue however much of the
+machine is asleep. Spreading them is work-stealing's job alone — and an idle CPU
+learned there was anything to steal only when its own backoff poll came round.
+`run_idle` halts for up to 100 ms at a time when it has no sleeper of its own,
+and polls at ticks 0, 2, 4, 8, 16, then every sixteenth, so the tail of that
+backoff is *seconds* of a runnable thread sitting in a queue beside seven idle
+CPUs.
+
+An enqueue that leaves two or more threads queued now claims a CPU out of
+`IDLE_CPU_MASK` and sends it a reschedule IPI. Three things make it small:
+
+- **The claim is the message.** Clearing the bit is the only thing that clears
+  another CPU's bit, so the woken CPU reads "I was asked for" out of finding its
+  own bit gone — no second flag, and no registry lookup to set one. It also
+  stops two enqueues in a row from both shouting at the same CPU while others
+  sleep.
+- **The threshold is `try_steal`'s own rule, read from the other side.** That
+  function refuses to take a CPU's only queued thread, so a queue of one has
+  nothing to offer and poking anybody for it only spends a wakeup.
+- **The bit is published across the halt and taken back on the way out**, so it
+  means *halted* rather than *idle*. `sti; hlt` is one unit against a claim that
+  lands in between: an IPI raised while interrupts were off is delivered after
+  the `hlt` begins, not before it, so the wakeup cannot be missed.
+
+The poll survives as the backstop for a claim that raced, not as the mechanism.
+A CPU that was poked and found nothing restarts its backoff, because being asked
+is evidence the machine has work and the next ask must not land in the middle of
+a sixteen-tick sleep.
+
+**What it is worth, measured** — `balancebench wake`, 8-CPU boot, 7 workers,
+median of 10 bursts, same host and the same userspace binary either side:
+
+| | fanout (median burst / solo) |
+|---|---|
+| poll only (before) | 4.25, 4.44 |
+| poked (after) | 1.97, 2.02, 2.03, 2.00 |
+
+Watched fail first, by deleting the one `poke_idle_cpu()` call and rebuilding:
+17.47 ms median burst against 8.39 ms with it. The worker-side number is what
+says *why*: before the change a worker's own loop took 4.3–8.2 ms against a
+4.1 ms solo, because workers were sharing CPUs; after it every worker reports
+~4.3 ms, so each had a CPU to itself. `/proc/sched` agrees from the other end —
+steals went from 44 on a single CPU and 0–2 everywhere else to 8/11/13/11 spread
+across four.
+
+It costs nothing on the switch path. `switchbench`, single-CPU boot, against the
+2026-08-14 figures: `getpid` 85 → 81 ns, bad-fd read 145 → 146, pipe echo 425 →
+422, yield idle 252 → 255, yield process 417 → 420. Every delta is inside the
+run-to-run spread, which is what the threshold buys: a busy machine ends the
+whole thing on one relaxed load of a zero mask.
+
+**Still open in the same area.** The residual 2.0 is one CPU running two lumps
+back to back, not seven CPUs each running one: by the last wake of a burst the
+queue has already drained below the threshold and that wake pokes nobody. Whether
+to spend a wakeup there is a real question and this leaves it conservative.
+`tick_finish` re-enqueues a preempted thread without poking either, and
+`spawn_thread` still only IPIs the CPU it chose. Both are the same one-line
+extension; neither is measured.
 
 ### The table above is stale in two rows, and one of them was a regression
 
