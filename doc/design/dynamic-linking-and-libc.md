@@ -127,6 +127,15 @@ yet are present so a port has something to map to.
 The numbering is not load-bearing for the kernel itself and was chosen for the
 port's benefit; nothing about EDOS's design depends on `EINVAL` being 22.
 
+It buys less than it looks like it should, and the newlib port measured it:
+newlib has its own numbering, agreeing with POSIX across the classic UNIX range
+and diverging above it. 36 of the 54 codes are identical and 18 are not —
+`ENOSYS` is 38 here and 88 there, and every socket error differs. So the
+translation table in `libs/libgloss-edos` is two thirds shorter than it would
+have been against a private numbering, rather than absent. A port that assumes
+"POSIX numbering means no table" reports the wrong failure for anything above
+`ERANGE`.
+
 ### 1.6 Threads and signals
 
 `sys_clone` (`syscalls/mod.rs:2608`) takes `(func_ptr, arg, flags, child_stack)`
@@ -248,10 +257,15 @@ this situation. newlib's OS dependency is a documented ~19-function stub layer
 `_link`, `_unlink`, `_times`, `gettimeofday`.
 
 Against section 1.4, **every one of those maps onto a syscall that already
-exists**, with two exceptions: `_sbrk`, which the stub can implement over
-`mmap` (the standard approach for an mmap-only kernel), and `_times`, which needs
-per-process CPU accounting the kernel does not expose — it can return -1 with
-`ENOSYS`, which is what the missing errno value in section 1.5 is for.
+exists**, with two exceptions: `_sbrk`, which the stub implements over `mmap`
+(the standard approach for an mmap-only kernel), and `_times`, which needs
+per-process CPU accounting the kernel does not expose — it returns -1 with
+`ENOSYS`, which is what that errno value was added for.
+
+That held up when the port was built. What did *not* carry across is the
+**constants**: newlib's open flags and errno values are its own, and both
+mismatches are silent rather than a compile error. See
+`libs/libgloss-edos/README.md`.
 
 What newlib does not give: pthreads (a separate layer, buildable on the existing
 `clone` + futexes) and sockets (newlib has none; the port adds them, and the BSD
@@ -306,8 +320,11 @@ Staged, with each stage independently landable:
 
 - **Stage 0** — complete. The auxv, `mprotect`, negative-errno returns with
   POSIX numbering, and the psABI entry alignment have all landed.
-- **Stage 1** — `libs/libgloss-edos`, the 19-function newlib stub layer, plus a
-  build recipe. Done when a C `hello world` compiles and runs in the guest.
+- **Stage 1** — complete. `libs/libgloss-edos` is the 19-function stub layer,
+  `crt0.c` the process entry, and `README.md` the build recipe; newlib is built
+  from source with clang and no gcc cross-toolchain. `test/ctest.c` passes 15 of
+  15 in the guest, covering `malloc`, file I/O, `stat`, `errno`, `gettimeofday`,
+  `qsort`, `strtod` and float `printf`.
 - **Stage 2** — termios and sockets in the port, and the first real third-party C
   program in `packages/`.
 - **Stage 3** — `PT_INTERP`, userspace TLS ownership, and `programs/edos-ld` with

@@ -6463,3 +6463,82 @@ seconds and catches the compile errors; only the *behavioural* ones need the
 full install. And `rm -rf programs/target` really is required alongside
 `SCCACHE_RECACHE=1`: skipping it gives `can't find crate for rustls` and
 `found possibly newer version of crate std`.
+
+## C runs on EDOS: the newlib port (2026-08-15)
+
+Stage 1 of `doc/design/dynamic-linking-and-libc.md`. `libs/libgloss-edos` is the
+19-function layer newlib is written against, plus a `crt0` that turns the SysV
+initial stack into `main(argc, argv, envp)`. Build recipe and the full set of
+gotchas are in that directory's `README.md`; this is what is worth knowing
+before reading it.
+
+**No gcc cross-toolchain was needed.** clang targets `x86_64-unknown-elf`
+directly, and newlib's build system takes it through `CC_FOR_TARGET` with
+`llvm-ar` and `llvm-ranlib`. That removes the multi-hour binutils-and-gcc build
+that a port like this usually starts with.
+
+**Prove the compiler before pulling in the libc.** The first milestone was a
+freestanding `hello.c` with one inline `syscall` and no library at all, linked
+`ET_EXEC` and run in the guest. It exercises the whole path — clang, lld, the
+ELF loader, the syscall ABI — and is a two-minute loop, where a newlib failure
+is a twenty-minute one. It printed `hello from C on edos` and that was the first
+non-Rust program this system has ever run.
+
+### The two mismatches, both silent
+
+The design note's claim that all 19 functions land on existing syscalls held up.
+What does not carry across is the **constants**, and neither mismatch is a
+compile error.
+
+**Open flags.** `O_RDONLY`/`O_WRONLY`/`O_RDWR` are 0/1/2 on both sides and
+nothing above them agrees. newlib's `O_CREAT` is `0x200` where the kernel uses
+`0x40`, and newlib's `O_TRUNC` is `0x400`, which the kernel reads as
+`O_APPEND`. Symptom: `fopen(path, "w")` fails with `ENOENT` on a file it was
+asked to create.
+
+**errno.** This one corrects the reasoning that chose POSIX numbering in the
+first place. newlib has its own numbering. It agrees with POSIX across the
+classic UNIX range and diverges above it: **36 of the kernel's 54 codes are
+identical, 18 are not.** `ENOSYS` is 38 to the kernel and 88 to newlib, `ELOOP`
+40 against 92, and every socket error differs. Choosing Linux's numbering
+shortened the translation table by two thirds rather than deleting it. Still the
+right call, but the argument as originally made was too strong.
+
+Both tables live in `edos_syscall.h` and are written against newlib's own
+macros rather than its numbers, so neither can drift from the headers it is
+compiled with.
+
+### `%zu` is not free
+
+newlib's `printf` does not understand `%zu` unless it is configured with
+`--enable-newlib-io-c99-formats`. Worse than printing wrong: it emits a literal
+`zu` and **does not consume the argument**, so every later conversion reads the
+wrong slot. A `%s` after a `%zu` then dereferences an integer. The symptom was
+`KILL: PF addr=0x12` — a byte count of 18 used as a pointer — which reads like
+memory corruption and is a printf configuration flag. Any real C program hits
+this, so the flag is not optional.
+
+### What the stubs decide
+
+- **`sbrk` over one `mmap`.** There is no `brk`. The break lives inside a single
+  64 MiB anonymous reservation made on first use, because a second `mmap` need
+  not land adjacent to the first and `sbrk` must be contiguous. It costs a VMA
+  and no memory: anonymous mappings here are demand-faulted, which is what makes
+  reserving large the cheap option rather than the expensive one.
+- **`link` and `times` report `ENOSYS`** rather than approximating. EDOS has no
+  hard links, so faking one from a symlink would make `st_nlink` and `unlink`
+  lie; and there is no per-process CPU accounting to answer `times` from. This
+  is exactly what widening the errno list was for.
+- **`isatty` cannot report an error** — it answers 0 or 1 — so a failed syscall
+  becomes "not a terminal".
+
+### Verification
+
+`make -C libs/libgloss-edos install-test` puts `ctest` in the image.
+15 of 15 in the guest: `malloc` of 1 MiB and 4 MiB with the last byte checked,
+`fopen`/`fwrite`/`fread` round trip, `stat` on a file and a directory,
+`fseek`/`ftell`, `errno == ENOENT` on a missing file, `getpid`,
+`gettimeofday`, `times` reporting `ENOSYS`, `unlink`, float `printf`, `qsort`
+and `strtod`. Everything goes through a C library function rather than a raw
+syscall, because the point is that newlib's own machinery works on top of the
+stubs.
