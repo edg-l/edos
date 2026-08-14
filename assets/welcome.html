@@ -6,7 +6,9 @@
       /* Only what edos-web's CSS subset implements, so this page is also the
          thing to open when a style stops being honoured. */
       :root { --ink: #d8dee9; --accent: #88c0d0; --heading: var(--accent) }
-      body { color: var(--ink); margin-left: 4px }
+      /* A measure of its own, centred: what a text page asks for, and what
+         every block below inherits since none of them sets a width. */
+      body { color: var(--ink); max-width: 38em; margin: 0 auto }
       h1 { color: var(--heading); font-size: 2em }
       h2 { color: #a3be8c; font-size: 1.25em; margin-top: 20px }
       p { margin-bottom: 10px }
@@ -44,6 +46,11 @@
     <p class="layered">
       This line is styled from inside a cascade layer, in a colour a custom
       property names.
+    </p>
+
+    <p class="quiet">
+      This column is 38em wide and centred in the window rather than filling
+      it, and the rule at the foot of the page stops where the column does.
     </p>
 
     <h2>Pictures</h2>

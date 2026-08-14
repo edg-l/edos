@@ -2,7 +2,8 @@
 //!
 //! Stage 2 of `doc/design/browser.md`. What is here is chosen by what the block
 //! list can already express -- colour, size, weight, face, decoration and the
-//! vertical margins between blocks -- plus `display: none`, which is the one
+//! vertical margins between blocks, the measure a box asks for with `width` or
+//! `max-width` -- plus `display: none`, which is the one
 //! declaration a document needs honoured before anything else, since a page
 //! that hides its skip-links and its mobile navigation with CSS renders them as
 //! stray text otherwise.
@@ -27,6 +28,17 @@ pub struct Computed {
     pub margin_top: Option<u32>,
     pub margin_bottom: Option<u32>,
     pub margin_left: Option<u32>,
+    /// The measure `width` and `max-width` put on this box, in pixels, already
+    /// narrowed by every ancestor's.
+    ///
+    /// It inherits, unlike the property it comes from, because the block list
+    /// is flat: a wrapper that constrains its column is not a box any later
+    /// stage sees, so its measure has no other way to reach the paragraphs
+    /// inside it.
+    pub measure: Option<u32>,
+    /// A horizontal margin written `auto`, which centres the box in its column.
+    /// Inherited for the same reason `measure` is.
+    pub center: bool,
     /// `display: none`. Not inherited: a hidden element hides its subtree by
     /// not being walked at all, which is not the same thing as its children
     /// inheriting a value.
@@ -51,7 +63,9 @@ impl Computed {
         self.font_px.unwrap_or(root_px)
     }
 
-    fn apply(&mut self, name: &str, value: &str, root_px: u32, parent_px: u32) {
+    /// `basis` is the containing block's measure, which is what a percentage
+    /// width is a percentage of.
+    fn apply(&mut self, name: &str, value: &str, root_px: u32, parent_px: u32, basis: u32) {
         match name {
             "color" => {
                 if let Some(color) = parse_color(value) {
@@ -80,8 +94,9 @@ impl Computed {
                 self.underline = Some(value.contains("underline"));
             }
             "margin" => {
-                let parts: Vec<Option<u32>> = value
-                    .split_whitespace()
+                let written: Vec<&str> = value.split_whitespace().collect();
+                let parts: Vec<Option<u32>> = written
+                    .iter()
                     .map(|p| parse_length(p, root_px, self.em(parent_px)))
                     .collect();
                 // One value sets all four, two set vertical then horizontal,
@@ -93,14 +108,39 @@ impl Computed {
                     4 => (parts[0], parts[2], parts[3]),
                     _ => (None, None, None),
                 };
+                let horizontal = match written.len() {
+                    1 => Some(written[0]),
+                    2 | 3 => Some(written[1]),
+                    4 => Some(written[3]),
+                    _ => None,
+                };
+                if horizontal.is_some_and(is_auto) {
+                    self.center = true;
+                }
                 self.margin_top = top.or(self.margin_top);
                 self.margin_bottom = bottom.or(self.margin_bottom);
                 self.margin_left = left.or(self.margin_left);
             }
             "margin-top" => self.margin_top = self.length(value, root_px, parent_px),
             "margin-bottom" => self.margin_bottom = self.length(value, root_px, parent_px),
+            // A box with only one auto horizontal margin is pushed to the other
+            // side rather than centred, but a page that writes one means the
+            // pair: the other half is in the shorthand or in a rule this cannot
+            // see, and a centred box is what it was after either way.
+            "margin-right" if is_auto(value) => self.center = true,
             "margin-left" | "padding-left" => {
-                self.margin_left = self.length(value, root_px, parent_px)
+                if is_auto(value) {
+                    self.center = true;
+                } else {
+                    self.margin_left = self.length(value, root_px, parent_px);
+                }
+            }
+            // Neither can widen the box: an ancestor's measure is the bound,
+            // and `auto`, `none` and anything unparseable leave it alone.
+            "width" | "max-width" => {
+                if let Some(px) = parse_measure(value, root_px, self.em(parent_px), basis) {
+                    self.measure = Some(self.measure.map_or(px, |narrower| narrower.min(px)));
+                }
             }
             _ => {}
         }
@@ -324,6 +364,9 @@ impl Stylesheet {
         root_px: u32,
     ) -> (Computed, Rc<Vars>) {
         let parent_px = parent.font_px.unwrap_or(root_px);
+        // The window is the outermost containing block, so a page whose only
+        // measure is a percentage still resolves it against something real.
+        let basis = parent.measure.unwrap_or(self.viewport.width_px);
         let mut computed = parent.inherit();
 
         let mut matched: Vec<(usize, &Rule)> = self
@@ -356,7 +399,7 @@ impl Stylesheet {
             // declaration invalid at computed-value time, which leaves the
             // inherited value standing rather than the property's initial one.
             if let Some(value) = substitute(&decl.value, &vars, 0) {
-                computed.apply(&decl.name, &value, root_px, parent_px);
+                computed.apply(&decl.name, &value, root_px, parent_px, basis);
             }
         }
         (computed, vars)
@@ -917,6 +960,21 @@ fn parse_font_size(value: &str, root_px: u32, parent_px: u32) -> Option<u32> {
 /// A length in pixels. Relative units resolve against `em_px`; anything with a
 /// unit that depends on a viewport or a container is refused, since guessing
 /// one produces a size the document never asked for.
+fn is_auto(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("auto")
+}
+
+/// A `width`, whose percentage is of the containing block rather than of the
+/// font size a `parse_length` percentage resolves against.
+fn parse_measure(value: &str, root_px: u32, em_px: u32, basis: u32) -> Option<u32> {
+    let value = value.trim();
+    if let Some(number) = value.strip_suffix('%') {
+        let percent: f32 = number.trim().parse().ok()?;
+        return Some((basis as f32 * percent.max(0.0) / 100.0).round() as u32);
+    }
+    parse_length(value, root_px, em_px)
+}
+
 fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
     let value = value.trim();
     if value == "0" || value == "auto" || value == "inherit" {
@@ -1217,5 +1275,53 @@ mod tests {
         assert_eq!(computed.margin_top, Some(1));
         assert_eq!(computed.margin_bottom, Some(3));
         assert_eq!(computed.margin_left, Some(4));
+    }
+
+    #[test]
+    fn max_width_sets_the_measure() {
+        let sheet = sheet("div { max-width: 40rem }");
+        let computed = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(computed.measure, Some(40 * 14));
+    }
+
+    #[test]
+    fn a_percentage_width_is_of_the_containing_block() {
+        // Nothing constrains the outer box, so its half is half the window.
+        let sheet = sheet("div { width: 50% } p { width: 50% }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(outer.measure, Some(Viewport::default().width_px / 2));
+
+        let stack = vec![element("div", &[]), element("p", &[])];
+        let inner = sheet
+            .cascade(&stack, None, &outer, &Vars::root(), 14)
+            .0
+            .measure;
+        assert_eq!(inner, Some(Viewport::default().width_px / 4));
+    }
+
+    #[test]
+    fn a_child_cannot_widen_past_its_container() {
+        let sheet = sheet("div { max-width: 300px } p { width: 900px }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        let stack = vec![element("div", &[]), element("p", &[])];
+        let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
+        assert_eq!(inner.measure, Some(300));
+    }
+
+    #[test]
+    fn auto_horizontal_margins_centre_the_box() {
+        let sheet = sheet("div { margin: 0 auto } section { margin-left: auto } p { margin: 1px }");
+        assert!(cascade(&sheet, &[element("div", &[])], None).center);
+        assert!(cascade(&sheet, &[element("section", &[])], None).center);
+        assert!(!cascade(&sheet, &[element("p", &[])], None).center);
+    }
+
+    #[test]
+    fn width_auto_leaves_the_inherited_measure_standing() {
+        let sheet = sheet("div { max-width: 300px } p { width: auto }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        let stack = vec![element("div", &[]), element("p", &[])];
+        let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
+        assert_eq!(inner.measure, Some(300));
     }
 }

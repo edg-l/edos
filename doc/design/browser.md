@@ -64,8 +64,8 @@ attribute; matches selectors that are comma-separated descendant chains of
 tag/`.class`/`#id` compounds; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
-monospace-or-not, `text-decoration`, the vertical and left margins, and
-`display: none`. `doc.rs` carries the computed style onto every `Run` and every
+monospace-or-not, `text-decoration`, the vertical and left margins, the measure
+a box asks for with `width`/`max-width`, and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
 `Block`, and `view.rs` lets it override the plan the tag alone implies — where
 it says nothing, the reader typography stands.
 
@@ -110,6 +110,29 @@ without them, and each is small:
   and only reflows its lines. `programs/edos-web/src/ui.rs` says `edos-web: ~
   WxH - N blocks` on stdout when a rebuild happens, which is how a headless run
   tells a re-cascade from a line-break reflow.
+
+**A page's own measure is honoured.** `width` and `max-width` resolve to
+`Computed::measure`, and `margin: 0 auto` sets `Computed::center`, which
+`view.rs` reads as "lay this block out in `measure` pixels and centre what is
+left of the column". A horizontal rule is drawn to the same box, so the `<hr>`
+of a narrow column stops where the column does.
+
+Both fields **inherit, unlike the properties they come from**, and that is the
+whole reason they work: the block list is flat, so the `<div>` or `<body>` that
+carries the measure is not a box any later stage sees. Inheriting it is how a
+wrapper reaches the paragraphs inside it. Three consequences follow:
+
+- **Neither can widen a box.** A measure is min-ed with the one already in
+  force, and the column is min-ed over that, since there is no horizontal
+  scroll. A child that asks to be wider than its container is clamped to it,
+  which is where this parts company with a real browser's overflow.
+- **A percentage is of the containing block**, resolved during the cascade
+  against the parent's measure, falling back to the window width at the root.
+  This is the one place a percentage is not the font-size percentage
+  `parse_length` computes.
+- **`auto` on either horizontal margin centres**, rather than only the pair
+  doing so. A page that writes one means the pair; a box pushed to one side by
+  a single `auto` is not a layout anything here can express anyway.
 
 Three deliberate limits:
 

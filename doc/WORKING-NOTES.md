@@ -7386,3 +7386,38 @@ right border of a window listed at `X W` in `edos-vm windows` is at `X + W`,
 about 2px wide. It steps rather than jumping because the window manager resizes
 by the motion it is handed while the button is down, and a single event landing
 at the far corner is one it can miss between polls.
+
+## A page's own measure, and why width has to inherit (2026-08-15)
+
+`width` and `max-width` are honoured: they resolve to `css::Computed::measure`
+in pixels, `margin: 0 auto` sets `Computed::center`, and `view.rs` lays the
+block out in that measure and centres what is left of the column. A `<hr>`
+carries its box on `LineKind::Rule` so it stops where the column does rather
+than crossing the window.
+
+**Both fields inherit, unlike the CSS properties they come from, and that is
+the whole mechanism.** The block list is flat: the `<div>` or `<body>` that
+carries a page's measure is not a box any later stage ever sees, so a
+non-inherited `measure` would be computed for a wrapper and then thrown away,
+and the paragraphs inside it would still fill the window. Inheriting it is what
+carries the constraint down to the blocks that are laid out. Three things fall
+out of that:
+
+- **Nothing can widen a box.** A measure is min-ed with the one already in
+  force and clamped to the column, so a child asking to be wider than its
+  container is pinned to it. That is where this parts company with a real
+  browser, which would overflow -- but there is no horizontal scroll here, so
+  overflow has nowhere to go.
+- **A percentage width is of the containing block, not of the font size.**
+  `parse_length`'s `%` is em-relative, which is right for a margin and wrong for
+  a width, so `width`/`max-width` go through `parse_measure` with the parent's
+  measure as the basis, falling back to the window width at the root. Resolving
+  it during the cascade is what makes the basis available at all: the layout
+  pass has no parent to ask.
+- **`auto` on either horizontal margin centres**, not only the pair. A page
+  writing one means the pair, and a box pushed to one side by a single `auto`
+  is not something the flat block list can express anyway.
+
+`assets/welcome.html` now sets `body { max-width: 38em; margin: 0 auto }`, so a
+regression here is visible on the first screen: the column goes back to filling
+the window and the rule at the foot of the page crosses the whole of it.

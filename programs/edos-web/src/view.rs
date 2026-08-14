@@ -43,8 +43,12 @@ pub struct Fragment {
 /// What a line draws.
 pub enum LineKind {
     Text,
-    /// `hr`, a hairline across the column.
-    Rule,
+    /// `hr`, a hairline across the box it was laid out in, which is the column
+    /// unless the page narrowed it.
+    Rule {
+        x: i32,
+        width: u32,
+    },
     /// A picture rasterised for this column: the pixels and the size they were
     /// rendered at, which is also the line's own size.
     Image {
@@ -100,8 +104,20 @@ impl Layout {
         let mut y = PAGE_PAD as i32;
 
         for block in &document.blocks {
-            let plan = plan(block);
+            let mut plan = plan(block);
             y += plan.gap_before as i32;
+
+            // The measure the page asked for, never wider than the column it
+            // sits in: there is no horizontal scroll, so the window is the
+            // outer bound whatever the document says.
+            let mut avail = column.saturating_sub(plan.indent).max(1);
+            if let Some(measure) = plan.measure {
+                avail = avail.min(measure).max(1);
+            }
+            // `margin: 0 auto` centres the box in what is left of the column.
+            if plan.center {
+                plan.indent += column.saturating_sub(plan.indent + avail) / 2;
+            }
 
             if block.kind == BlockKind::Rule {
                 let height = space(1);
@@ -109,13 +125,14 @@ impl Layout {
                     y,
                     height,
                     items: Vec::new(),
-                    kind: LineKind::Rule,
+                    kind: LineKind::Rule {
+                        x: (PAGE_PAD + plan.indent) as i32,
+                        width: avail,
+                    },
                 });
                 y += height as i32 + plan.gap_after as i32;
                 continue;
             }
-
-            let avail = column.saturating_sub(plan.indent).max(1);
 
             // A picture that rasterises is the block; one that does not falls
             // through to the alt text it carries, which is what the block would
@@ -352,6 +369,10 @@ struct Plan {
     gap_after: u32,
     marker: Option<String>,
     preformatted: bool,
+    /// The measure `width`/`max-width` asked for, already resolved to pixels
+    /// by the cascade. `None` is the whole column.
+    measure: Option<u32>,
+    center: bool,
 }
 
 fn plan(block: &Block) -> Plan {
@@ -379,6 +400,8 @@ fn plan(block: &Block) -> Plan {
         plan.gap_after = bottom;
     }
     plan.indent += css.margin_left.unwrap_or(0);
+    plan.measure = css.measure;
+    plan.center = css.center;
     plan
 }
 
@@ -391,6 +414,8 @@ fn default_plan(block: &Block) -> Plan {
         gap_after: space(2),
         marker: None,
         preformatted: false,
+        measure: None,
+        center: false,
     };
     match block.kind {
         BlockKind::Heading(level) => Plan {
@@ -504,17 +529,17 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             continue;
         }
         match &line.kind {
-            LineKind::Rule => {
+            LineKind::Rule { x, width: rule_w } => {
                 fill(
                     surface.pixels,
                     width,
                     height,
                     0,
                     y + line.height as i32 / 2,
-                    width.saturating_sub(PAGE_PAD * 2).max(1),
+                    *rule_w,
                     1,
                     rule_color,
-                    PAGE_PAD as i32,
+                    *x,
                 );
                 continue;
             }
