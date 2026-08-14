@@ -295,7 +295,8 @@ fn spawn_envp(
         stdout_fd,
         stderr_fd,
     };
-    unsafe { sys::syscall1(sys::SYS_SPAWN2, &spawn_args as *const SpawnArgs as u64) }
+    let pid = unsafe { sys::syscall1(sys::SYS_SPAWN2, &spawn_args as *const SpawnArgs as u64) };
+    if sys::is_err(pid) { u64::MAX } else { pid }
 }
 
 /// The caller's environment as NUL-terminated `KEY=VALUE` byte strings, ready
@@ -331,7 +332,7 @@ pub fn waitpid(pid: u64) -> i32 {
             &mut status as *mut i32 as u64,
         )
     };
-    if ret == u64::MAX { -1 } else { status }
+    if sys::is_err(ret) { -1 } else { status }
 }
 
 /// `waitpid` flags.
@@ -453,7 +454,7 @@ impl ChildProcess {
         // Parent closes the slave end regardless of spawn outcome
         close(slave_fd);
 
-        if pid == u64::MAX {
+        if sys::is_err(pid) {
             close(master_fd);
             return None;
         }
@@ -553,7 +554,7 @@ pub fn spawn_program_with_fds(
             stderr_fd,
         };
         let pid = unsafe { sys::syscall1(sys::SYS_SPAWN2, &spawn_args as *const SpawnArgs as u64) };
-        if pid != u64::MAX {
+        if !sys::is_err(pid) {
             return Some(pid);
         }
     }
@@ -846,7 +847,7 @@ const SYS_WINDOW_GRANT_SHELL: u64 = 234;
 /// process that reuses the number does not inherit it.
 pub fn grant_shell(pid: u64) -> Result<(), i64> {
     let ret = unsafe { crate::sys::syscall1(SYS_WINDOW_GRANT_SHELL, pid) };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         return Err(-1);
     }
     Ok(())

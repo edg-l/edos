@@ -31,7 +31,7 @@ pub fn set_bytes(buffer: Buffer, bytes: &[u8]) -> Result<(), i64> {
             bytes.len() as u64,
         )
     };
-    if result as i64 == -1 { Err(-1) } else { Ok(()) }
+    if sys::is_err(result) { Err(-1) } else { Ok(()) }
 }
 
 /// Replace the contents of `buffer` with text.

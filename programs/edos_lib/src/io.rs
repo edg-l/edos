@@ -571,8 +571,13 @@ pub fn pty_set_canonical(fd: u64) {
 }
 
 /// Map memory. Returns the mapped virtual address, or `!0` on error.
+///
+/// A failing syscall returns a negated errno, which is a plausible-looking
+/// address; collapsing it to `!0` is what keeps this function's contract, and
+/// the code stays readable through [`errno`].
 pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, phys_addr: u64) -> u64 {
-    unsafe { sys::syscall5(sys::SYS_MMAP, addr, length, prot, flags, phys_addr) }
+    let ret = unsafe { sys::syscall5(sys::SYS_MMAP, addr, length, prot, flags, phys_addr) };
+    if sys::is_err(ret) { u64::MAX } else { ret }
 }
 
 /// Unmap memory. Returns 0 on success.

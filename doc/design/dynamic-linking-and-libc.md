@@ -48,7 +48,7 @@ something honours `PT_INTERP`. `programs/auxvtest` reads the vector back the way
 a `crt1.o` does and checks every entry, including that `AT_PHDR` lands on this
 image's own ELF magic.
 
-Two things still separate the result from the SysV process entry ABI
+One thing still separates the result from the SysV process entry ABI
 (psABI §3.4.1).
 
 **The registers are the live channel, not the stack.**
@@ -60,12 +60,13 @@ Note that `rdx` is where the psABI puts a function pointer for the process to
 register with `atexit`: glibc's `_start` moves it to `%r9` and calls it as
 `rtld_fini`, so a glibc binary entered this way would call the `envp` array.
 
-**The alignment is the function-call convention.** `mod.rs:141-166` pads to
-`rsp % 16 == 8`, the state a callee sees after `call` pushes a return address,
-because `_start` is treated as a function. Process entry wants `rsp % 16 == 0`
-with `argc` at `[rsp]`. Both glibc's and musl's `_start` begin by masking `%rsp`
-down, so in practice they tolerate it, but the padding rule has to invert to be
-conforming.
+The alignment is the psABI's: `%rsp` is 16-byte aligned at entry with `argc` at
+`[rsp]`. That is only possible because `_start` in the fork is a **naked**
+function that masks `%rsp` and zeroes `%rbp` before calling anything, the way
+every libc's `crt1.o` does. An entry point that is an ordinary compiled
+function cannot be entered on a 16-aligned stack — its prologue assumes the
+post-`call` state and the first `movaps` spill would fault — which is what the
+kernel used to accommodate by padding to `rsp % 16 == 8`.
 
 The auxv is what both questions rest on. A dynamic linker learns where the main
 image's program headers are, and where it was itself loaded, from `AT_PHDR` and
@@ -110,18 +111,21 @@ Absent, and each is load-bearing for the questions here:
 
 ### 1.5 Errors
 
-A failing syscall returns `u64::MAX` and the caller then issues a **second
-syscall**, `SYS_ERRNO`, to find out why. `Errno` (`syscalls/mod.rs:1294`) is a
-dense EDOS-private enum of 26 values in its own numbering, beginning
-`Clear = 0, EINVAL = 1, ENOMEM = 2`.
+A failing syscall returns a **negated errno**: a return in `[-4095, -1]` is an
+error code, anything else is a result. Bounding the window is what lets a call
+return a pointer or a count with its top bit set without being read as a
+failure. `SYS_ERRNO` still answers from the thread's errno field, which the
+kernel keeps setting, so a runtime that has not moved off it keeps working.
 
-Both halves are a problem for a libc. Every C library expects the Linux
-convention of a negative errno in the return register, so a shim must translate;
-the translation costs an extra kernel entry on every failure, and it is not
-atomic — a signal handler that makes a syscall between the failed call and
-`SYS_ERRNO` overwrites the value. And 26 errno values against POSIX's ~130 means
-`ENOSYS`, `ERANGE`, `EDOM`, `EOVERFLOW`, `ENOTSUP`, `ETIMEDOUT` and the rest have
-nothing to map to. `ERANGE`/`EDOM` alone are required by C99 `math.h`.
+`Errno` uses **POSIX's numbering**, matching Linux's `asm-generic/errno.h`, so a
+C library reads the code straight out of the return register with no
+translation table to keep in step. The list covers 54 codes including the ones a
+port cannot do without: `ENOSYS` for a stub that is not implemented, and `EDOM`
+and `ERANGE`, which C99 `math.h` requires. Codes with no producer in the kernel
+yet are present so a port has something to map to.
+
+The numbering is not load-bearing for the kernel itself and was chosen for the
+port's benefit; nothing about EDOS's design depends on `EINVAL` being 22.
 
 ### 1.6 Threads and signals
 
@@ -274,10 +278,9 @@ changes, and each of those three is worth doing on its own merits:
 1. ~~**Finish the SysV initial process stack with a real auxv**, additively,
    keeping the register convention.~~ Done; `programs/auxvtest` is the check.
    The entry alignment is the remainder and is not additive (§2.1 item 1).
-2. **Return `-errno` from the syscall entry** and widen `Errno` to POSIX
-   numbering. This removes a syscall from every failure path, removes a real
-   (if rare) race against signal handlers, and is the difference between a libc
-   port translating a table and a libc port guessing.
+2. ~~**Return `-errno` from the syscall entry** and widen `Errno` to POSIX
+   numbering.~~ Done. One substitution in `syscall_handler` covers all 117
+   calls, because every implementation already reported failure the same way.
 3. ~~**Add `mprotect`.**~~ Done: `SYS_MPROTECT` (289), `sys_mprotect` in
    `kernel/src/syscalls/memory.rs`, `edos_lib::mem::mprotect`, checked by
    `mmaptest` tests 12 and 13.
@@ -301,8 +304,8 @@ in order:
 
 Staged, with each stage independently landable:
 
-- **Stage 0** — the three ABI changes above. The auxv and `mprotect` are
-  landed; negative-errno is the remainder, along with the entry alignment.
+- **Stage 0** — complete. The auxv, `mprotect`, negative-errno returns with
+  POSIX numbering, and the psABI entry alignment have all landed.
 - **Stage 1** — `libs/libgloss-edos`, the 19-function newlib stub layer, plus a
   build recipe. Done when a C `hello world` compiles and runs in the guest.
 - **Stage 2** — termios and sockets in the port, and the first real third-party C

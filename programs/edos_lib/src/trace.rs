@@ -55,7 +55,7 @@ pub fn read(buf: &mut [TraceRecord], timeout_ms: u64) -> usize {
             timeout_ms,
         )
     };
-    if n == u64::MAX { 0 } else { n as usize }
+    if sys::is_err(n) { 0 } else { n as usize }
 }
 
 /// One row of `/proc/syscalls`: what the kernel calls a number, and what its

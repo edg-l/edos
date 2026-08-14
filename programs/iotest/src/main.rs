@@ -777,7 +777,7 @@ fn test11() {
     }
 
     // An unknown operation is refused and leaves the mask alone.
-    if sigprocmask(99, 0) != -1 {
+    if !failed(sigprocmask(99, 0) as i64) {
         fail(11, "an unknown how was accepted");
     }
     if sigprocmask(SIG_SETMASK, original as u32) != sigmask(SIGINT) as i64 {
@@ -861,7 +861,7 @@ fn test12(dir: &str) {
     // A buffer too small for the next entry is refused, so a caller cannot
     // mistake it for the end and lose the tail.
     let mut tiny = [0u8; 8];
-    if getdents(&base, &mut tiny, 0) != -1 {
+    if !failed(getdents(&base, &mut tiny, 0) as i64) {
         fail(12, "a buffer too small for one entry was accepted");
     }
 
@@ -952,11 +952,11 @@ fn test13(dir: &str) {
     if filefd < 0 {
         fail(13, "cannot create a plain file");
     }
-    if openat(filefd, "x", 0) != -1 {
+    if !failed(openat(filefd, "x", 0) as i64) {
         fail(13, "openat accepted a descriptor that is not a directory");
     }
     close(filefd as u64);
-    if openat(4242, "x", 0) != -1 {
+    if !failed(openat(4242, "x", 0) as i64) {
         fail(13, "openat accepted a closed descriptor");
     }
     if fstatat(AT_FDCWD, &base, 0).is_none() {
@@ -1269,7 +1269,7 @@ fn test17(dir: &str) {
     if readlinkat(dirfd, "long", &mut small) != 2 || &small != b"ab" {
         fail(17, "readlinkat did not truncate into a short buffer");
     }
-    if readlinkat(dirfd, "a", &mut buf) != -1 {
+    if !failed(readlinkat(dirfd, "a", &mut buf) as i64) {
         fail(17, "readlinkat read a file that is not a link");
     }
 
@@ -1299,7 +1299,7 @@ fn test17(dir: &str) {
     if fstatat(dirfd, "back", 0).is_none() {
         fail(17, "renameat back to the parent did not land");
     }
-    if renameat(4242, "back", dirfd, "nope") != -1 {
+    if !failed(renameat(4242, "back", dirfd, "nope") as i64) {
         fail(17, "renameat accepted a closed descriptor");
     }
 
@@ -1389,7 +1389,7 @@ fn test18(dir: &str) {
 
     // More buffers than IOV_MAX is refused outright.
     let too_many: Vec<&[u8]> = vec![&b"x"[..]; 1025];
-    if writev(fd, &too_many) != -1 {
+    if !failed(writev(fd, &too_many) as i64) {
         fail(18, "writev accepted more buffers than IOV_MAX");
     }
 
@@ -1877,6 +1877,14 @@ fn test23(dir: &str) {
         23,
         "O_NONBLOCK governs reads and writes, and F_SETFL changes it",
     );
+}
+
+/// Whether a syscall wrapper reported failure.
+///
+/// A failing call returns a negated errno, so the whole `[-4095, -1]` window is
+/// a failure and not only the legacy `-1`.
+fn failed(ret: i64) -> bool {
+    edos_lib::sys::is_err(ret as u64)
 }
 
 fn main() {

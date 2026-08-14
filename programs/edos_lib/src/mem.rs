@@ -31,7 +31,7 @@ pub fn mmap(
     fd: i32,
     file_offset: u64,
 ) -> *mut u8 {
-    unsafe {
+    let ret = unsafe {
         sys::syscall6(
             sys::SYS_MMAP,
             addr as u64,
@@ -40,7 +40,14 @@ pub fn mmap(
             flags as u64,
             fd as u64,
             file_offset,
-        ) as *mut u8
+        )
+    };
+    // A negated errno is a plausible-looking address, so it is collapsed to the
+    // `!0` this function has always reported; `errno` still carries the code.
+    if sys::is_err(ret) {
+        u64::MAX as *mut u8
+    } else {
+        ret as *mut u8
     }
 }
 

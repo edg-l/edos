@@ -5,7 +5,7 @@
 //! each followed by a variable-length path, and `statfs` answers with a struct
 //! whose two string fields are NUL-padded rather than terminated.
 
-use crate::sys::{SYS_LIST_MOUNTS, SYS_STATFS, syscall2, syscall3};
+use crate::sys::{self, SYS_LIST_MOUNTS, SYS_STATFS, syscall2, syscall3};
 
 /// Which filesystem is behind a mount.
 ///
@@ -227,7 +227,7 @@ pub fn statfs(path: &str) -> Option<StatFs> {
             buf.len() as u64,
         )
     };
-    if ret as i64 == -1 {
+    if sys::is_err(ret) {
         return None;
     }
 

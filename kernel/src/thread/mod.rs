@@ -206,27 +206,22 @@ pub fn setup_user_stack(
     aux_entries.push((auxv::AT_EXECFN, execfn_ptr));
     aux_entries.push((auxv::AT_NULL, 0));
 
-    // CRITICAL: x86_64 System V ABI stack alignment for `_start`.
+    // Entry alignment. The psABI (§3.4.1) says `%rsp` is 16-byte aligned at
+    // process entry, with `argc` at `[rsp]` — not the post-`call` state a
+    // compiled function assumes, because entry is a jump and no return address
+    // was pushed. An entry point that is an ordinary compiled function
+    // therefore cannot be entered directly: its prologue would misalign by 8
+    // and the first `movaps` spill would fault. Every libc's `crt1.o` masks
+    // `%rsp` down before calling anything, and `_start` in the Rust fork is a
+    // naked function that does the same, which is what lets this be correct
+    // rather than accommodating.
     //
-    // The ABI requires RSP % 16 == 0 *before* a `call` instruction. After
-    // `call` pushes the 8-byte return address, RSP % 16 == 8 inside the
-    // callee. The callee's prologue (`push rbp`) then restores 16-alignment.
-    //
-    // `_start` is entered directly via iretq (no `call`), so we must set
-    // RSP as if a `call` just happened: RSP % 16 == 8. If we get this
-    // wrong, `_start`'s `push rbp` makes RSP % 16 == 0 instead of 8,
-    // and the subsequent `call main` produces RSP % 16 == 8 inside main
-    // instead of 0. The compiler emits `movaps` (requires 16-byte aligned
-    // operands) for stack spills, which GPFs on the misaligned stack.
-    //
-    // Math: sp is 16-aligned here (from the & mask above). We push
-    // total_words * 8 bytes below. After that:
-    //   sp % 16 == (total_words % 2) * 8
-    // We need sp % 16 == 8, so we add 8 bytes of padding when
-    // total_words is EVEN (would give sp % 16 == 0 without padding).
+    // Math: sp is 16-aligned here (from the mask above) and total_words * 8
+    // bytes go below it, leaving sp % 16 == (total_words % 2) * 8. Padding an
+    // odd count with one more word brings it back to zero.
     // argc + argv ptrs + null + env ptrs + null + two words per auxv entry
     let total_words = 1 + argc + 1 + env_ptrs.len() + 1 + aux_entries.len() * 2;
-    if total_words % 2 == 0 {
+    if total_words % 2 == 1 {
         push_u64(&mut sp, 0)?;
     }
 

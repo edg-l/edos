@@ -31,7 +31,7 @@ pub fn create_udp_socket() -> Result<u64, ()> {
             0,
         )
     };
-    if fd == u64::MAX { Err(()) } else { Ok(fd) }
+    if sys::is_err(fd) { Err(()) } else { Ok(fd) }
 }
 
 pub fn create_tcp_socket() -> Result<u64, ()> {
@@ -43,7 +43,7 @@ pub fn create_tcp_socket() -> Result<u64, ()> {
             0,
         )
     };
-    if fd == u64::MAX { Err(()) } else { Ok(fd) }
+    if sys::is_err(fd) { Err(()) } else { Ok(fd) }
 }
 
 pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
@@ -55,7 +55,7 @@ pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if ret == u64::MAX { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(()) } else { Ok(()) }
 }
 
 /// `getsockopt(SOL_SOCKET, SO_ERROR)`: the socket's pending error code, and
@@ -75,7 +75,7 @@ pub fn so_error(fd: u64) -> Result<u32, ()> {
             &mut len as *mut u32 as u64,
         )
     };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         Err(())
     } else {
         Ok(val as u32)
@@ -91,14 +91,14 @@ pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if ret == u64::MAX { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(()) } else { Ok(()) }
 }
 
 /// Mark a bound TCP socket as accepting connections. `backlog` is the number of
 /// completed connections the kernel queues before it answers a SYN with RST.
 pub fn listen(fd: u64, backlog: u32) -> Result<(), ()> {
     let ret = unsafe { sys::syscall2(sys::SYS_LISTEN, fd, backlog as u64) };
-    if ret == u64::MAX { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(()) } else { Ok(()) }
 }
 
 /// Take the next completed connection off a listening socket, blocking until one
@@ -114,7 +114,7 @@ pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), ()> {
             &mut addr_len as *mut u32 as u64,
         )
     };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         Err(())
     } else {
         Ok((ret, addr))
@@ -147,7 +147,7 @@ pub fn set_recv_timeout(fd: u64, millis: u64) -> Result<(), ()> {
             core::mem::size_of::<Timeval>() as u64,
         )
     };
-    if ret == u64::MAX { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(()) } else { Ok(()) }
 }
 
 pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, ()> {
@@ -169,7 +169,7 @@ pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, 
             addr_len,
         )
     };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         Err(())
     } else {
         Ok(ret as usize)
@@ -209,7 +209,7 @@ pub fn recvfrom_flags(
             addr_len_ptr,
         )
     };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         Err(())
     } else {
         Ok(ret as usize)
@@ -228,7 +228,7 @@ pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
             0,
         )
     };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         Err(())
     } else {
         Ok(ret as usize)
@@ -238,7 +238,7 @@ pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
 pub fn send(fd: u64, data: &[u8]) -> Result<usize, ()> {
     // Use write syscall for connected sockets
     let ret = unsafe { sys::syscall3(sys::SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64) };
-    if ret == u64::MAX {
+    if sys::is_err(ret) {
         Err(())
     } else {
         Ok(ret as usize)
@@ -289,7 +289,7 @@ pub const SHUT_RDWR: u64 = 2;
 /// which discards the reply along with the connection.
 pub fn shutdown(fd: u64, how: u64) -> Result<(), ()> {
     let ret = unsafe { sys::syscall2(sys::SYS_SHUTDOWN, fd, how) };
-    if ret == u64::MAX { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(()) } else { Ok(()) }
 }
 
 pub fn close(fd: u64) {
@@ -335,5 +335,5 @@ pub fn ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> Option<u64> 
             timeout_ms,
         )
     };
-    if rtt == u64::MAX { None } else { Some(rtt) }
+    if sys::is_err(rtt) { None } else { Some(rtt) }
 }

@@ -1,7 +1,7 @@
 use std::{fs::File, os::edos::io::FileExt};
 
 // Re-export noto-sans-mono-bitmap types for user programs
-use edos_lib::sys::{SYS_MMAP, syscall5};
+use edos_lib::sys::{SYS_MMAP, is_err, syscall5};
 pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 use std::fmt;
@@ -210,7 +210,7 @@ impl Framebuffer {
             )
         } as *mut u32;
 
-        if ptr.is_null() || (ptr as u64) >= u64::MAX - 1 {
+        if ptr.is_null() || is_err(ptr as u64) {
             return Err(GraphicsError::Fault);
         }
 

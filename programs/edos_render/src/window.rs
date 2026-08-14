@@ -1,6 +1,6 @@
 //! Window and shared memory syscall wrappers for the EDOS window server.
 
-use edos_lib::sys::{syscall1, syscall2, syscall3, syscall4, syscall5};
+use edos_lib::sys::{is_err, syscall1, syscall2, syscall3, syscall4, syscall5};
 
 /// Window identifier type.
 pub type WindowId = u64;
@@ -454,7 +454,7 @@ impl Woke {
 /// the interval.
 pub fn wait(id: WindowId, seen_frame: u64, timeout_ms: u64) -> Result<Woke, i64> {
     let result = unsafe { syscall3(SYS_WINDOW_WAIT, id, seen_frame, timeout_ms) };
-    if result == u64::MAX {
+    if is_err(result) {
         return Err(result as i64);
     }
     Ok(Woke {

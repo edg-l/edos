@@ -324,7 +324,7 @@ pub fn cmd_ifconfig(_args: &[String]) {
             buf.len() as u64,
         )
     };
-    if len != u64::MAX {
+    if !edos_lib::sys::is_err(len) {
         let s = std::str::from_utf8(&buf[..len as usize]).unwrap_or("invalid");
         print!("{}", s);
     } else {

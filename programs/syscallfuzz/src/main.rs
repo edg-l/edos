@@ -292,9 +292,12 @@ fn errno() -> u32 {
     unsafe { syscall0(SYS_ERRNO) as u32 }
 }
 
-/// Failure convention: the syscall returns `u64::MAX` and leaves the reason in
-/// the thread's errno slot.
-const FAILED: u64 = u64::MAX;
+/// Failure convention: the syscall returns a negated errno, so any return in
+/// `[-4095, -1]` is a failure and the code is readable from it. The thread's
+/// errno slot still carries the same value.
+fn failed(ret: u64) -> bool {
+    edos_lib::sys::is_err(ret)
+}
 
 #[derive(Default)]
 struct Tally {
@@ -492,7 +495,7 @@ fn main() {
             }
             let ret = invoke(nr, &args);
             tally.calls += 1;
-            if ret == FAILED {
+            if failed(ret) {
                 tally.record_errno(errno());
             } else if poisoned {
                 if tally.returned.is_empty() {
@@ -545,7 +548,7 @@ fn main() {
             let _ = io::stdout().flush();
             let ret = invoke(nr, &[0x0000_5000_0000_0000; 6]);
             total_calls += 1;
-            if ret == FAILED {
+            if failed(ret) {
                 unknown_rejected += 1;
                 let value = errno();
                 total.record_errno(value);

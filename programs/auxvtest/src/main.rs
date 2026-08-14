@@ -117,6 +117,18 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         format!("argc={argc}, std reports {}", std::env::args().count()),
     );
 
+    // argc sits one word below argv[0], so the initial rsp is recoverable even
+    // though the runtime's `_start` masked it before any Rust code ran. The
+    // psABI wants that address 16-aligned at process entry.
+    let entry_rsp = (argv as u64).wrapping_sub(8);
+    check(
+        &mut passed,
+        &mut failed,
+        "entry alignment",
+        entry_rsp % 16 == 0,
+        format!("initial rsp {entry_rsp:#x}, rsp % 16 = {}", entry_rsp % 16),
+    );
+
     check(
         &mut passed,
         &mut failed,

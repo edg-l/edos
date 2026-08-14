@@ -487,6 +487,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         trace::record_enter(call);
     }
 
+    // Each arm overwrites `ctx.rax` with its result, so the number has to be
+    // kept if anything after the match wants to name the call.
+    let syscall_number = ctx.rax;
+
     match ctx.rax {
         SYS_WRITE => {
             let fd = ctx.rdi;
@@ -1208,8 +1212,30 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = trace::sys_trace_read(buf, max, timeout_ms);
         }
         _ => {
+            current_thread_info().lock().errno = Errno::ENOSYS;
             ctx.rax = !0u64;
         }
+    }
+
+    // A failure leaves the entry as a negated errno, which is what every C
+    // library expects: a return in `[-4095, -1]` is an error code and anything
+    // else is a result. Bounding the window is what lets a call return a
+    // pointer or a count with its top bit set without being read as a failure.
+    //
+    // The substitution happens here rather than in each implementation because
+    // all of them already report failure the same way — a bare `-1` with the
+    // code left on the thread — so there is one place to change instead of 117.
+    // The thread's errno stays set as well: `SYS_ERRNO` still answers from it,
+    // and a runtime that has not moved off that call keeps working.
+    if ctx.rax == u64::MAX {
+        let mut code = current_thread_info().lock().errno;
+        if code == Errno::Clear {
+            // A path that failed without saying why. Reporting UNKNOWN is worse
+            // than the truth and better than -1, which a libc reads as EPERM.
+            log!("syscall {syscall_number} returned -1 with no errno set");
+            code = Errno::UNKNOWN;
+        }
+        ctx.rax = (code as u64).wrapping_neg();
     }
 
     if let Some(call) = &traced_call {
@@ -1296,147 +1322,162 @@ fn sys_clock_settime(buf_ptr: *const u8) -> u64 {
     0
 }
 
-/// Error codes as userspace sees them: the discriminant is what `SYS_ERRNO`
-/// returns, so it is ABI. A code beyond the last one a program's runtime knows
-/// reads there as `UNKNOWN`, which is why new codes go on the end rather than
-/// beside their relatives.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(clippy::upper_case_acronyms, unused)]
-#[repr(u64)]
-pub enum Errno {
-    /// No error; used to clear the errno field.
-    Clear,
-    /// Invalid argument passed to a syscall.
-    EINVAL,
-    /// Memory allocation failed or memory exhausted.
-    ENOMEM,
-    /// Bad memory address provided by userspace.
-    EFAULT,
-    /// Invalid or closed file descriptor.
-    EBADF,
-    /// Operation requires permissions the caller lacks.
-    EACCES,
-    /// Operation not permitted for the current caller.
-    EPERM,
-    /// Requested file or directory does not exist.
-    ENOENT,
-    /// Attempted to create an entry that already exists.
-    EEXIST,
-    /// Expected a directory but encountered a non-directory entry.
-    ENOTDIR,
-    /// Operation required a regular file but encountered a directory.
-    EISDIR,
-    /// Device or filesystem has no space left for the operation.
-    ENOSPC,
-    /// Write attempted on a read-only filesystem or device.
-    EROFS,
-    /// Generic I/O failure surfaced from the filesystem or storage layer.
-    EIO,
-    /// System call interrupted (e.g. by a signal or kill).
-    EINTR,
-    /// File format is not recognized as an executable.
-    ENOEXEC,
-    /// Resource temporarily unavailable; operation would block.
-    EAGAIN,
-    /// Socket is not connected.
-    ENOTCONN,
-    /// Connection was refused by the remote host.
-    ECONNREFUSED,
-    /// Address already in use (bind).
-    EADDRINUSE,
-    /// Broken pipe: write to a closed connection.
-    EPIPE,
-    /// Address family not supported (e.g. IPv6 on IPv4-only system).
-    EAFNOSUPPORT,
-    /// Seek on a descriptor that has no file offset (pipe, socket, tty).
-    ESPIPE,
-    /// Device or resource is in use, e.g. a disk that backs a live mount.
-    EBUSY,
-    /// Too many symbolic links were traversed resolving one path.
-    ELOOP,
-    /// No such device or address: a named pipe opened for writing with
-    /// `O_NONBLOCK` and no reader on the other side.
-    ENXIO,
-    /// Placeholder for unknown or unmapped kernel error codes.
-    UNKNOWN,
-    /// A non-blocking `connect` has started its handshake and has not finished.
-    EINPROGRESS,
-    /// A `connect` is already under way on this socket.
-    EALREADY,
-    /// The socket is already connected.
-    EISCONN,
+/// Error codes as userspace sees them.
+///
+/// The discriminants are POSIX's, matching Linux's `asm-generic/errno.h`, so a
+/// C library ported to this system reads them straight through instead of
+/// carrying a translation table that has to be kept in step as codes are
+/// added. Nothing about the numbering is load-bearing for the kernel itself;
+/// it is chosen for the port's benefit.
+///
+/// The value is ABI twice over: `SYS_ERRNO` returns it, and a failing syscall
+/// returns its negation. Every code therefore has to fit the `[-4095, -1]`
+/// window that separates an error return from a large valid one, which is what
+/// `UNKNOWN` sits at the far end of.
+///
+/// Codes with no producer yet are here so that a port has something to map to.
+/// `ENOSYS` in particular is what an unimplemented stub should report rather
+/// than inventing a nearby lie, and C99 `math.h` requires `EDOM` and `ERANGE`.
+macro_rules! errnos {
+    ($($(#[$attr:meta])* $name:ident = $value:expr,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[allow(clippy::upper_case_acronyms, unused)]
+        #[repr(u64)]
+        pub enum Errno {
+            $($(#[$attr])* $name = $value,)*
+        }
+
+        /// Every `Errno`, so the values and names reach userspace without a
+        /// second copy of the list.
+        pub const ALL_ERRNOS: &[Errno] = &[$(Errno::$name,)*];
+
+        impl Errno {
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Errno::$name => stringify!($name),)*
+                }
+            }
+        }
+    };
 }
 
-/// Every `Errno`, so the values and names can be published to userspace
-/// without a second copy of the list. Order is the discriminant order.
-pub const ALL_ERRNOS: &[Errno] = &[
-    Errno::Clear,
-    Errno::EINVAL,
-    Errno::ENOMEM,
-    Errno::EFAULT,
-    Errno::EBADF,
-    Errno::EACCES,
-    Errno::EPERM,
-    Errno::ENOENT,
-    Errno::EEXIST,
-    Errno::ENOTDIR,
-    Errno::EISDIR,
-    Errno::ENOSPC,
-    Errno::EROFS,
-    Errno::EIO,
-    Errno::EINTR,
-    Errno::ENOEXEC,
-    Errno::EAGAIN,
-    Errno::ENOTCONN,
-    Errno::ECONNREFUSED,
-    Errno::EADDRINUSE,
-    Errno::EPIPE,
-    Errno::EAFNOSUPPORT,
-    Errno::ESPIPE,
-    Errno::EBUSY,
-    Errno::ELOOP,
-    Errno::ENXIO,
-    Errno::UNKNOWN,
-    Errno::EINPROGRESS,
-    Errno::EALREADY,
-    Errno::EISCONN,
-];
-
-impl Errno {
-    pub fn name(self) -> &'static str {
-        match self {
-            Errno::Clear => "OK",
-            Errno::EINVAL => "EINVAL",
-            Errno::ENOMEM => "ENOMEM",
-            Errno::EFAULT => "EFAULT",
-            Errno::EBADF => "EBADF",
-            Errno::EACCES => "EACCES",
-            Errno::EPERM => "EPERM",
-            Errno::ENOENT => "ENOENT",
-            Errno::EEXIST => "EEXIST",
-            Errno::ENOTDIR => "ENOTDIR",
-            Errno::EISDIR => "EISDIR",
-            Errno::ENOSPC => "ENOSPC",
-            Errno::EROFS => "EROFS",
-            Errno::EIO => "EIO",
-            Errno::EINTR => "EINTR",
-            Errno::ENOEXEC => "ENOEXEC",
-            Errno::EAGAIN => "EAGAIN",
-            Errno::ENOTCONN => "ENOTCONN",
-            Errno::ECONNREFUSED => "ECONNREFUSED",
-            Errno::EADDRINUSE => "EADDRINUSE",
-            Errno::EPIPE => "EPIPE",
-            Errno::EAFNOSUPPORT => "EAFNOSUPPORT",
-            Errno::ESPIPE => "ESPIPE",
-            Errno::EBUSY => "EBUSY",
-            Errno::ELOOP => "ELOOP",
-            Errno::ENXIO => "ENXIO",
-            Errno::UNKNOWN => "UNKNOWN",
-            Errno::EINPROGRESS => "EINPROGRESS",
-            Errno::EALREADY => "EALREADY",
-            Errno::EISCONN => "EISCONN",
-        }
-    }
+errnos! {
+    /// No error; used to clear the errno field.
+    Clear = 0,
+    /// Operation not permitted for the current caller.
+    EPERM = 1,
+    /// Requested file or directory does not exist.
+    ENOENT = 2,
+    /// No such process.
+    ESRCH = 3,
+    /// System call interrupted (e.g. by a signal or kill).
+    EINTR = 4,
+    /// Generic I/O failure surfaced from the filesystem or storage layer.
+    EIO = 5,
+    /// No such device or address: a named pipe opened for writing with
+    /// `O_NONBLOCK` and no reader on the other side.
+    ENXIO = 6,
+    /// Argument list too long.
+    E2BIG = 7,
+    /// File format is not recognized as an executable.
+    ENOEXEC = 8,
+    /// Invalid or closed file descriptor.
+    EBADF = 9,
+    /// No child processes to wait for.
+    ECHILD = 10,
+    /// Resource temporarily unavailable; operation would block.
+    EAGAIN = 11,
+    /// Memory allocation failed or memory exhausted.
+    ENOMEM = 12,
+    /// Operation requires permissions the caller lacks.
+    EACCES = 13,
+    /// Bad memory address provided by userspace.
+    EFAULT = 14,
+    /// Device or resource is in use, e.g. a disk that backs a live mount.
+    EBUSY = 16,
+    /// Attempted to create an entry that already exists.
+    EEXIST = 17,
+    /// Link or rename across two filesystems.
+    EXDEV = 18,
+    /// No such device.
+    ENODEV = 19,
+    /// Expected a directory but encountered a non-directory entry.
+    ENOTDIR = 20,
+    /// Operation required a regular file but encountered a directory.
+    EISDIR = 21,
+    /// Invalid argument passed to a syscall.
+    EINVAL = 22,
+    /// Too many open files in the system.
+    ENFILE = 23,
+    /// Too many open files in this process.
+    EMFILE = 24,
+    /// Inappropriate ioctl for the device.
+    ENOTTY = 25,
+    /// File too large.
+    EFBIG = 27,
+    /// Device or filesystem has no space left for the operation.
+    ENOSPC = 28,
+    /// Seek on a descriptor that has no file offset (pipe, socket, tty).
+    ESPIPE = 29,
+    /// Write attempted on a read-only filesystem or device.
+    EROFS = 30,
+    /// Too many links.
+    EMLINK = 31,
+    /// Broken pipe: write to a closed connection.
+    EPIPE = 32,
+    /// Argument outside a mathematical function's domain. Required by C99
+    /// `math.h`; no kernel path produces it.
+    EDOM = 33,
+    /// Result outside the representable range. Required by C99 `math.h`.
+    ERANGE = 34,
+    /// Path or component too long.
+    ENAMETOOLONG = 36,
+    /// Function not implemented. What a stub should report rather than
+    /// choosing a nearby code that means something else.
+    ENOSYS = 38,
+    /// Directory not empty.
+    ENOTEMPTY = 39,
+    /// Too many symbolic links were traversed resolving one path.
+    ELOOP = 40,
+    /// Value too large for its type.
+    EOVERFLOW = 75,
+    /// Socket operation on something that is not a socket.
+    ENOTSOCK = 88,
+    /// Message too long for the transport.
+    EMSGSIZE = 90,
+    /// Operation not supported on this object.
+    EOPNOTSUPP = 95,
+    /// Address family not supported (e.g. IPv6 on IPv4-only system).
+    EAFNOSUPPORT = 97,
+    /// Address already in use (bind).
+    EADDRINUSE = 98,
+    /// Address not available on any local interface.
+    EADDRNOTAVAIL = 99,
+    /// No route to the network.
+    ENETUNREACH = 101,
+    /// Connection aborted before it was established.
+    ECONNABORTED = 103,
+    /// Connection reset by the peer.
+    ECONNRESET = 104,
+    /// No buffer space available.
+    ENOBUFS = 105,
+    /// The socket is already connected.
+    EISCONN = 106,
+    /// Socket is not connected.
+    ENOTCONN = 107,
+    /// Operation timed out.
+    ETIMEDOUT = 110,
+    /// Connection was refused by the remote host.
+    ECONNREFUSED = 111,
+    /// No route to the host.
+    EHOSTUNREACH = 113,
+    /// A `connect` is already under way on this socket.
+    EALREADY = 114,
+    /// A non-blocking `connect` has started its handshake and has not finished.
+    EINPROGRESS = 115,
+    /// A kernel error with no code of its own. Sits at the top of the error
+    /// window so it can never collide with a code POSIX may add.
+    UNKNOWN = 4095,
 }
 
 impl From<FsError> for Errno {

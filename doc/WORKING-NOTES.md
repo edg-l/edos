@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-15 (mprotect)
+## Counts, remeasured 2026-08-15 (negative errno)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1585,8 +1585,8 @@ does not have to invent them.
 | userspace programs | 118 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 118 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 102,423 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,033 code lines | `tokei -t=Rust kernel/src` |
+| Rust | 102,422 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,016 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,340 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -6384,3 +6384,82 @@ where a headless run cannot see it. The only symptom in `run_log.txt` was
 `exit: process exited with code 1`. Redirect with `2>&1`. Note the message then
 arrives unbuffered and one write per fragment, interleaved with whatever else is
 logging, so reassemble the line before reading it.
+
+## A failing syscall returns a negated errno (2026-08-15)
+
+Stage 0 of `doc/design/dynamic-linking-and-libc.md` is complete. A failure now
+leaves `[-4095, -1]` in the return register and anything outside that window is
+a result; `Errno` uses POSIX's numbering, matching Linux's
+`asm-generic/errno.h`, and carries 54 codes where it carried 26. `SYS_ERRNO`
+still answers from the thread's errno field, which the kernel keeps setting, so
+a runtime that has not moved off it keeps working.
+
+**Why POSIX numbers, stated plainly.** They are not required — newlib's stub
+layer would translate a private numbering in a `switch`. They delete that
+switch, and nothing about EDOS's design depends on `EINVAL` being 22. What a
+libc genuinely needs is the *width*: `ENOSYS` so a stub can say it is not
+implemented instead of choosing a nearby lie, and `EDOM`/`ERANGE`, which C99
+`math.h` requires and which had nothing to map from.
+
+**One substitution covers all 117 calls.** Every implementation already reported
+failure the same way — a bare `-1` with the code on the thread — so
+`syscall_handler` rewrites `u64::MAX` into the negated code once, after the
+match. Nothing per-syscall changed. An implementation that returns `-1` without
+setting errno now logs and reports `UNKNOWN` (4095, the top of the window),
+because `-1` read as a code means `EPERM` and silently blaming the wrong thing
+is worse.
+
+A macro generates the enum, `ALL_ERRNOS` and `name()` from one list, in the
+kernel and again in `edos_rt`. They were three parallel lists that had to be
+edited together. `edos_rt`'s `from_raw` also had to stop being a `transmute`:
+the values are sparse now, so a code the crate does not know would have been UB.
+
+### What broke, and the shape of it
+
+Every failure was the same defect in a different place: **a check that tested
+the sentinel rather than the window.** `x == -1` and `x == u64::MAX` stop being
+true the moment the code is anything but `EPERM`, and the value then flows on as
+a valid result — a byte count, a length, an address.
+
+- `edos_rt`'s `cvt` tested `t == -1`. A failed read returned `-22` and
+  `read_to_end` indexed a 32-byte probe buffer with it:
+  `range end index 18446744073709551594 out of range for slice of length 32`.
+  `edos-wm` and `sshd` crash-looped at boot.
+- The fork's std has its **own** `cvt` in `sys/pal/edos/common.rs`, and three
+  more copies of the test in `sys/stdio/edos.rs`. Fixing `edos_rt` did not touch
+  them, which is why `rmdir` on a symlink returned 0 while `strace` plainly
+  showed `rmdir("/var/t10l") = -20 ENOTDIR`. Four separate `cvt`s is the real
+  finding; `sys/net/connection/edos.rs` had a fifth and was already correct
+  because it tested `ret < 0`.
+- `iotest` asserts that certain calls *fail*, with `!= -1`. Those assertions
+  invert under the new convention: a real failure is `-9`, so the test reports
+  a failure that did not happen.
+
+`< 0` was correct everywhere it appeared — 97 sites needed no change at all. The
+16 that used an exact `-1` were the whole problem. When adding a new error path,
+test the window (`edos_rt::sys::is_err`, or `sys_result` when the code is
+wanted), never a specific value.
+
+`edos_lib` is the translation boundary for programs: wrappers that documented
+`u64::MAX` on error still return it, so `spawn`, `mmap` and their callers needed
+no edit. Only the wrappers themselves and the few programs that issue raw
+syscalls (`edos_render`, `edos-sh`, `syscallfuzz`) changed.
+
+### The entry alignment went with it
+
+`_start` in the fork is now a **naked** function that zeroes `%rbp` and masks
+`%rsp` before calling anything, the way every libc's `crt1.o` does. That is what
+let the kernel move to the psABI's 16-aligned process entry instead of padding
+to the post-`call` state a compiled function assumes. `auxvtest` checks it: the
+initial `rsp` is recoverable as `argv - 8`, because `argc` sits one word below
+`argv[0]`, and it must be 16-aligned.
+
+### Cost, for the next person who has to do this
+
+Three `./x install` cycles, because each layer's copy of the sentinel test was
+only found once the one above it was fixed and the guest got far enough to reach
+it. Check `./x check library/std --target x86_64-unknown-edos` first — it takes
+seconds and catches the compile errors; only the *behavioural* ones need the
+full install. And `rm -rf programs/target` really is required alongside
+`SCCACHE_RECACHE=1`: skipping it gives `can't find crate for rustls` and
+`found possibly newer version of crate std`.
