@@ -500,6 +500,28 @@ runs with interrupts off so the thread cannot migrate between the read and the
 store. Dropping the entry on switch is what keeps a dead thread's fd table and
 address space from being held alive by a CPU that has moved on.
 
+### Done: a wake no longer looks its target's CPU up in the registry (2026-08-14)
+
+`mark_running_thread_need_resched` ran on every `enqueue_ready`, every sleeper
+woken, every `spawn_thread` and every steal, and reached the thread to mark
+through `get_thread_by_id` — an `RwLock` read over `THREADS`, a `BTreeMap` walk
+and an `Arc` clone. The CPU being marked is almost always the one running the
+code, because `complete_wake` enqueues on the waker's CPU for locality, so the
+thread was already in that CPU's own slot. It reads the slot now and keeps the
+lookup only for a genuinely remote CPU, which every caller follows with an IPI
+anyway.
+
+| | before | after |
+|---|---|---|
+| pipe round trip, cross-process | 2206 ns | 2184 ns |
+| pipe round trip, one address space | 2006 ns | 1966 ns |
+| pipe echo, nothing blocks (control) | 425 ns | 424 ns |
+| `getpid` (control) | 85 ns | 83 ns |
+
+Two wakes per round trip, so ~11–20 ns off each against a `do_wake` measured at
+51 ns. The two controls take no wake at all and did not move, which is what
+makes the rest attributable.
+
 ### The table above is stale in two rows, and one of them was a regression
 
 Re-measuring the whole of `switchbench` on 2026-08-14 against a comparably quiet

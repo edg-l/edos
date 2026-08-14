@@ -678,12 +678,30 @@ impl Scheduler {
         t.allows_cpu(self.cpu)
     }
 
+    /// Ask whatever this scheduler's CPU is running to reschedule.
+    ///
+    /// The waker's own CPU is the common case by construction: `complete_wake`
+    /// enqueues on it for cache locality, and `spawn_thread`, `wake_sleepers`
+    /// and the steal paths all mark the CPU they are running on. That thread is
+    /// already in this CPU's own slot, so reaching it is a field read; going
+    /// through the registry instead is an `RwLock` read, a `BTreeMap` walk and
+    /// an `Arc` clone, on a path a wake takes every time.
+    ///
+    /// The remote case keeps the lookup, and every caller that has one also
+    /// sends a reschedule IPI, which is what actually makes that CPU look.
     fn mark_running_thread_need_resched(&self) {
-        if let Some(current_tid) = self.running_tid() {
-            if let Some(current_thread) = self.get_thread_by_id(current_tid) {
+        without_interrupts(|| {
+            let cpu = get_percpu_data();
+            if self.cpu == cpu.lapic_id.get() {
+                cpu.with_current_thread(|t| t.mark_need_resched());
+                return;
+            }
+            if let Some(current_tid) = self.running_tid()
+                && let Some(current_thread) = self.get_thread_by_id(current_tid)
+            {
                 current_thread.mark_need_resched();
             }
-        }
+        })
     }
 
     /// Panic if `ctx` could not have come from `thread`.
