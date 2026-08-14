@@ -1515,7 +1515,7 @@ does not have to invent them.
 | commits | 1,322 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 154, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 152, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
@@ -1569,12 +1569,31 @@ so the build publishes before any commit does. Commit and push the source too.
 
 The `unwrap` figure includes 19 in test code that is not worth converting: 11 in
 `thread/sched_test.rs` and all 8 in `drivers/usb/hid/report.rs`, whose unwraps
-are in its own descriptor-parsing tests and not on any driver path. The file that
-would still move the number is `acpi/mod.rs` (7): `OnceCell`-shaped plus three
-boot-time table lookups where the machine genuinely cannot continue — a firmware
-with no MADT does not boot this kernel, and an `expect` that says so is the
-honest form. `drivers/usb/xhci/mod.rs` came off this list at 19 → 5 by folding
-`init()` into `find_and_init()`, not by rewriting call sites.
+are in its own descriptor-parsing tests and not on any driver path.
+`drivers/usb/xhci/mod.rs` came off this list at 19 → 5 by folding `init()` into
+`find_and_init()`, not by rewriting call sites, and `acpi/mod.rs` came off it at
+7 → 3 the same way (below). What is left is spread thin: no file holds more than
+six, and the largest — `thread/scheduler.rs`, `thread/preempt.rs`,
+`syscalls/mod.rs`, `serial.rs`, `memory/frame_allocator.rs`,
+`drivers/virtio/gpu.rs` at five or six each — are boot-time or structurally
+impossible and want a comment rather than a conversion.
+
+### A `Once` accessor can initialise itself
+
+`acpi_tables()` and `apic_info()` were `Once::get().unwrap()`, and the unwrap was
+the whole ordering invariant: every caller was asserting that `init_acpi()` had
+already run, with nothing enforcing it. Having each accessor be its own
+`call_once` deletes the invariant instead of documenting it — a caller that
+arrives first initialises, the rest get the same reference, and `init_acpi()`
+becomes an eager warm-up that keeps the boot ordering and the log line it
+already had.
+
+The three that remain are the honest ones: the RSDP parse, the interrupt model
+and the MADT lookup all describe a machine this kernel cannot run on, and an
+`expect` naming what the firmware failed to provide is more useful than an error
+the single caller could only panic on. Same lesson as AHCI and xHCI, one layer
+up: ask what the unwrap is asserting before converting it, because it is often
+asserting a phase that need not exist.
 
 ### An `expect` can be a two-phase constructor wearing a disguise
 

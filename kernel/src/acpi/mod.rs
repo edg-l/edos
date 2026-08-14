@@ -16,27 +16,20 @@ static ACPI_TABLES: Once<AcpiTables<AcpiHandler>> = Once::new();
 static APIC_INFO: Once<Apic> = Once::new();
 
 pub fn init_acpi() {
-    ACPI_TABLES.call_once(|| {
-        let info = boot_info();
-
-        unsafe { AcpiTables::from_rsdp(AcpiHandler, info.rdsp).expect("failed to get acpi tables") }
-    });
-
+    acpi_tables();
     println!("Acpi tables initialized");
-
-    // The processor info alongside the model describes the MADT's view of the
-    // APs; the ones this kernel starts come from Limine's MP response instead.
-    let (interrupt_model, _) = InterruptModel::new(acpi_tables()).expect("interrupt model");
-
-    APIC_INFO.call_once(|| match interrupt_model {
-        InterruptModel::Unknown => unimplemented!(),
-        InterruptModel::Apic(apic) => apic,
-        _ => unimplemented!(),
-    });
+    apic_info();
 }
 
 pub fn acpi_tables() -> &'static AcpiTables<AcpiHandler> {
-    ACPI_TABLES.get().unwrap()
+    ACPI_TABLES.call_once(|| {
+        let info = boot_info();
+
+        // A machine whose firmware describes no usable ACPI tables cannot be
+        // brought up at all: the APIC, the HPET and the PCI enumeration all
+        // read them.
+        unsafe { AcpiTables::from_rsdp(AcpiHandler, info.rdsp).expect("failed to get acpi tables") }
+    })
 }
 
 pub fn acpi_madt() -> PhysicalMapping<AcpiHandler, Madt> {
@@ -46,7 +39,17 @@ pub fn acpi_madt() -> PhysicalMapping<AcpiHandler, Madt> {
 }
 
 pub fn apic_info() -> &'static Apic {
-    APIC_INFO.get().unwrap()
+    APIC_INFO.call_once(|| {
+        // The processor info alongside the model describes the MADT's view of
+        // the APs; the ones this kernel starts come from Limine's MP response
+        // instead.
+        let (interrupt_model, _) = InterruptModel::new(acpi_tables()).expect("interrupt model");
+
+        match interrupt_model {
+            InterruptModel::Apic(apic) => apic,
+            _ => panic!("edos needs an APIC interrupt model"),
+        }
+    })
 }
 
 /// Returns the raw current APIC ID via CPUID topology.
