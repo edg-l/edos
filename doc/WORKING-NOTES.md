@@ -7421,3 +7421,45 @@ out of that:
 `assets/welcome.html` now sets `body { max-width: 38em; margin: 0 auto }`, so a
 regression here is visible on the first screen: the column goes back to filling
 the window and the rule at the foot of the page crosses the whole of it.
+
+## A block paints its own box: background, padding, border (2026-08-15)
+
+`background-color` (and the colour token of a `background` shorthand),
+`padding` and `border` — both the shorthands and the per-edge longhands —
+compute onto `css::Computed` as `background`, `padding: Sides<Option<u32>>` and
+`borders: Sides<Border>`, and `view.rs` emits a `Decor` per block into
+`Layout::decor`, painted before any line.
+
+**None of the three inherits**, unlike `measure`, and the difference is worth
+knowing because it caps what this can do. A measure inherits so a wrapper's
+column reaches paragraphs the flat block list dropped the wrapper for; a
+background cannot use that trick, because a background inherited onto the
+children would paint each of them separately rather than painting the wrapper
+once. So a `<div class="card">` wrapping `<p>` elements paints nothing: the div
+opens a block that is flushed empty, and the paragraphs carry their own boxes.
+A block that is *itself* styled — `pre`, `blockquote`, a `<p class="...">`, a
+heading — is what works. Making the wrapper case work means a box tree, which
+is stage 3, not another inherited field.
+
+**A border needs a style, not just a width.** `border-width: 6px` alone paints
+nothing, which is CSS (`border-style` starts at `none`); `Border::on` tracks
+that separately from the thickness, and `Border::px()` is the only thing layout
+and drawing look at. A style written without a width is `medium`, 3px. A border
+with no colour is `currentColor`, kept as `None` through the cascade and
+resolved in `view::plan` against the colour the block ended up with — `css.rs`
+has no access to the theme and must not guess one.
+
+**The measure bounds the border box**, i.e. `box-sizing: border-box`, not the
+CSS default. A padded box sized to the column would otherwise run past the edge
+it was told to stop at, and there is no horizontal scroll to reveal it.
+
+**`view::fill` clips to the top of the page area now, not just to the buffer.**
+It always should have — a `<hr>` or an underline scrolled under the toolbar was
+painted over the chrome — but a one-pixel rule made it invisible where a
+full-block background makes it a solid bar across the toolbar. The `x_offset`
+parameter it carried went away in the same change: the rule case passed `x` in
+it and every other caller passed 0.
+
+`assets/welcome.html` carries a `.card` paragraph (background, padding on all
+four edges, a 1px border) and a `blockquote` (a 4px left bar with
+`padding-left`), so a regression shows on the first screen.

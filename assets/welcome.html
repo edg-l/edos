@@ -17,6 +17,14 @@
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
+      /* The box model: a background and a padded box with a border on one
+         edge, which is how a page marks an aside off from its own text. */
+      .card {
+        background: #3b4252;
+        padding: 10px 12px;
+        border: 1px solid var(--accent);
+      }
+      blockquote { border-left: 4px solid #a3be8c; padding-left: 12px }
       @media (min-width: 100em) { p { display: none } }
       @media screen and (width >= 20em) { .wide { color: #a3be8c } }
       /* The pair a resize crosses: the window opens 760px wide, so widening it
@@ -52,6 +60,15 @@
       This column is 38em wide and centred in the window rather than filling
       it, and the rule at the foot of the page stops where the column does.
     </p>
+
+    <p class="card">
+      This paragraph paints its own box: a background behind it, twelve pixels
+      of padding around it, and a hairline border on every edge.
+    </p>
+    <blockquote>
+      A quote sits behind a bar on its left edge, drawn from a border rather
+      than from the reader's own indent.
+    </blockquote>
 
     <h2>Pictures</h2>
     <p>

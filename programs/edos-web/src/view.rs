@@ -12,6 +12,7 @@ use edos_render::metrics::space;
 use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 
+use crate::css::{self, Sides};
 use crate::doc::{Block, BlockKind, Document, Marker, Picture, Run};
 
 /// Margin between the page and the window edge.
@@ -69,9 +70,32 @@ pub struct Line {
     pub kind: LineKind,
 }
 
+/// One edge of a box as it is painted: its thickness and its resolved colour.
+#[derive(Clone, Copy, Default)]
+pub struct Edge {
+    pub px: u32,
+    pub color: u32,
+}
+
+/// The box a block paints behind and around its own lines.
+///
+/// It is a separate list rather than a field on a line because it spans every
+/// line the block produced, and because it is painted first: a background is
+/// under the text of its own block, and blocks do not overlap.
+pub struct Decor {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub background: Option<u32>,
+    pub border: Sides<Edge>,
+}
+
 /// A document laid out for one column width.
 pub struct Layout {
     pub lines: Vec<Line>,
+    /// The boxes to paint before the lines, in document order.
+    pub decor: Vec<Decor>,
     /// Every link target on the page, in document order.
     pub links: Vec<String>,
     /// Total page height, which is what scrolling is bounded by.
@@ -96,6 +120,7 @@ impl Layout {
     pub fn build(document: &Document, width: u32) -> Layout {
         let mut out = Layout {
             lines: Vec::new(),
+            decor: Vec::new(),
             links: Vec::new(),
             height: 0,
             width,
@@ -110,15 +135,35 @@ impl Layout {
             // The measure the page asked for, never wider than the column it
             // sits in: there is no horizontal scroll, so the window is the
             // outer bound whatever the document says.
-            let mut avail = column.saturating_sub(plan.indent).max(1);
+            let mut box_w = column.saturating_sub(plan.indent).max(1);
             if let Some(measure) = plan.measure {
-                avail = avail.min(measure).max(1);
+                box_w = box_w.min(measure).max(1);
             }
             // `margin: 0 auto` centres the box in what is left of the column.
             if plan.center {
-                plan.indent += column.saturating_sub(plan.indent + avail) / 2;
+                plan.indent += column.saturating_sub(plan.indent + box_w) / 2;
             }
 
+            // The measure bounds the border box, the way `box-sizing:
+            // border-box` behaves: a padded box sized to the column would
+            // otherwise run past the edge it was told to stop at.
+            let box_x = (PAGE_PAD + plan.indent) as i32;
+            let box_top = y;
+            let left = plan.border.left.px + plan.pad.left;
+            let right = plan.border.right.px + plan.pad.right;
+            let avail = box_w.saturating_sub(left + right).max(1);
+            // Everything below places content at `PAGE_PAD + indent`, so the
+            // inset the box wears is folded into the indent once here.
+            plan.indent += left;
+            y += (plan.border.top.px + plan.pad.top) as i32;
+
+            let picture_drawn = match &block.picture {
+                // A picture that rasterises is the block; one that does not
+                // falls through to the alt text it carries, which is what the
+                // block would have been had the fetch failed.
+                Some(picture) => out.picture(picture, block, &plan, avail, &mut y),
+                None => false,
+            };
             if block.kind == BlockKind::Rule {
                 let height = space(1);
                 out.lines.push(Line {
@@ -126,46 +171,54 @@ impl Layout {
                     height,
                     items: Vec::new(),
                     kind: LineKind::Rule {
-                        x: (PAGE_PAD + plan.indent) as i32,
+                        x: box_x + left as i32,
                         width: avail,
                     },
                 });
-                y += height as i32 + plan.gap_after as i32;
-                continue;
+                y += height as i32;
+            } else if !picture_drawn {
+                let marker = plan.marker.as_ref().map(|text| Fragment {
+                    x: 0,
+                    width: text::width(text, plan.style),
+                    text: text.clone(),
+                    style: plan.style,
+                    link: None,
+                    underline: false,
+                });
+
+                let start = out.lines.len();
+                if plan.preformatted {
+                    out.preformatted(block, &plan, &mut y);
+                } else {
+                    let words = out.words(&block.runs, plan.style);
+                    out.flow(words, &plan, avail, &mut y);
+                }
+
+                // The marker hangs in the left margin of the first line, which
+                // is what makes a wrapped list item's continuation align under
+                // its text rather than under its bullet.
+                if let (Some(marker), Some(line)) = (marker, out.lines.get_mut(start)) {
+                    let x = (PAGE_PAD + plan.indent).saturating_sub(marker.width) as i32;
+                    line.items.insert(0, Fragment { x, ..marker });
+                }
             }
 
-            // A picture that rasterises is the block; one that does not falls
-            // through to the alt text it carries, which is what the block would
-            // have been had the fetch failed.
-            if let Some(picture) = &block.picture
-                && out.picture(picture, block, &plan, avail, &mut y)
-            {
-                y += plan.gap_after as i32;
-                continue;
-            }
-            let marker = plan.marker.as_ref().map(|text| Fragment {
-                x: 0,
-                width: text::width(text, plan.style),
-                text: text.clone(),
-                style: plan.style,
-                link: None,
-                underline: false,
-            });
-
-            let start = out.lines.len();
-            if plan.preformatted {
-                out.preformatted(block, &plan, &mut y);
-            } else {
-                let words = out.words(&block.runs, plan.style);
-                out.flow(words, &plan, avail, &mut y);
-            }
-
-            // The marker hangs in the left margin of the first line, which is
-            // what makes a wrapped list item's continuation align under its
-            // text rather than under its bullet.
-            if let (Some(marker), Some(line)) = (marker, out.lines.get_mut(start)) {
-                let x = (PAGE_PAD + plan.indent).saturating_sub(marker.width) as i32;
-                line.items.insert(0, Fragment { x, ..marker });
+            y += (plan.pad.bottom + plan.border.bottom.px) as i32;
+            let edges = [
+                plan.border.top,
+                plan.border.right,
+                plan.border.bottom,
+                plan.border.left,
+            ];
+            if plan.background.is_some() || edges.iter().any(|edge| edge.px > 0) {
+                out.decor.push(Decor {
+                    x: box_x,
+                    y: box_top,
+                    width: box_w,
+                    height: (y - box_top).max(0) as u32,
+                    background: plan.background,
+                    border: plan.border,
+                });
             }
             y += plan.gap_after as i32;
         }
@@ -373,6 +426,9 @@ struct Plan {
     /// by the cascade. `None` is the whole column.
     measure: Option<u32>,
     center: bool,
+    background: Option<u32>,
+    pad: Sides<u32>,
+    border: Sides<Edge>,
 }
 
 fn plan(block: &Block) -> Plan {
@@ -402,6 +458,25 @@ fn plan(block: &Block) -> Plan {
     plan.indent += css.margin_left.unwrap_or(0);
     plan.measure = css.measure;
     plan.center = css.center;
+    plan.background = css.background;
+    plan.pad = Sides {
+        top: css.padding.top.unwrap_or(0),
+        right: css.padding.right.unwrap_or(0),
+        bottom: css.padding.bottom.unwrap_or(0),
+        left: css.padding.left.unwrap_or(0),
+    };
+    // A border written without a colour is `currentColor`, which is the text
+    // colour the block ended up with rather than the one it inherited.
+    let edge = |border: css::Border| Edge {
+        px: border.px(),
+        color: border.color.unwrap_or(plan.style.color),
+    };
+    plan.border = Sides {
+        top: edge(css.borders.top),
+        right: edge(css.borders.right),
+        bottom: edge(css.borders.bottom),
+        left: edge(css.borders.left),
+    };
     plan
 }
 
@@ -416,6 +491,9 @@ fn default_plan(block: &Block) -> Plan {
         preformatted: false,
         measure: None,
         center: false,
+        background: None,
+        pad: Sides::default(),
+        border: Sides::default(),
     };
     match block.kind {
         BlockKind::Heading(level) => Plan {
@@ -523,6 +601,43 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
     surface.clip = Some((0, top as i32, width as i32, height as i32));
     let rule_color = Theme::DEFAULT.window_border_highlight.raw();
 
+    for decor in &layout.decor {
+        let y = decor.y - scroll as i32 + top as i32;
+        if y + decor.height as i32 <= top as i32 || y >= height as i32 {
+            continue;
+        }
+        let (w, h) = (decor.width, decor.height);
+        if let Some(color) = decor.background {
+            fill(surface.pixels, width, height, top, decor.x, y, w, h, color);
+        }
+        // Borders sit inside the box, so a background and a border of the same
+        // colour are one shape rather than two.
+        let border = &decor.border;
+        let sides = [
+            (decor.x, y, w, border.top.px, border.top.color),
+            (
+                decor.x,
+                y + h.saturating_sub(border.bottom.px) as i32,
+                w,
+                border.bottom.px,
+                border.bottom.color,
+            ),
+            (decor.x, y, border.left.px, h, border.left.color),
+            (
+                decor.x + w.saturating_sub(border.right.px) as i32,
+                y,
+                border.right.px,
+                h,
+                border.right.color,
+            ),
+        ];
+        for (x, y, w, h, color) in sides {
+            if w > 0 && h > 0 {
+                fill(surface.pixels, width, height, top, x, y, w, h, color);
+            }
+        }
+    }
+
     for line in &layout.lines {
         let y = line.y - scroll as i32 + top as i32;
         if y + line.height as i32 <= top as i32 || y >= height as i32 {
@@ -534,12 +649,12 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                     surface.pixels,
                     width,
                     height,
-                    0,
+                    top,
+                    *x,
                     y + line.height as i32 / 2,
                     *rule_w,
                     1,
                     rule_color,
-                    *x,
                 );
                 continue;
             }
@@ -571,12 +686,12 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                     surface.pixels,
                     width,
                     height,
+                    top,
                     item.x,
                     underline,
                     item.width,
                     1,
                     item.style.color,
-                    0,
                 );
             }
         }
@@ -603,12 +718,12 @@ fn draw_scrollbar(
         buffer,
         width,
         height,
+        top,
         track_x,
         top as i32,
         SCROLLBAR_W,
         view_h,
         Theme::DEFAULT.slider_track.raw(),
-        0,
     );
     let thumb_h = (view_h as u64 * view_h as u64 / content_h as u64).max(space(4) as u64) as u32;
     let span = content_h.saturating_sub(view_h).max(1);
@@ -618,12 +733,12 @@ fn draw_scrollbar(
         buffer,
         width,
         height,
+        top,
         track_x,
         (top + offset) as i32,
         SCROLLBAR_W,
         thumb_h,
         Theme::DEFAULT.slider_thumb.raw(),
-        0,
     );
 }
 
@@ -657,27 +772,27 @@ fn blit(
     }
 }
 
-/// Fill a rectangle, clipped to the buffer. `x_offset` shifts the whole rect,
-/// which is how a full-width rule keeps the page's own margin.
+/// Fill a rectangle, clipped to the buffer and to the page area: a background
+/// scrolled under the chrome is cut at `top` rather than painted over it.
 #[allow(clippy::too_many_arguments)]
 fn fill(
     buffer: &mut [u32],
     width: u32,
     height: u32,
+    top: u32,
     x: i32,
     y: i32,
     w: u32,
     h: u32,
     color: u32,
-    x_offset: i32,
 ) {
     for row in 0..h as i32 {
         let py = y + row;
-        if py < 0 || py >= height as i32 {
+        if py < top as i32 || py >= height as i32 {
             continue;
         }
         for col in 0..w as i32 {
-            let px = x + col + x_offset;
+            let px = x + col;
             if px < 0 || px >= width as i32 {
                 continue;
             }

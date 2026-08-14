@@ -1,9 +1,10 @@
 //! A CSS subset: the cascade, and the declarations that change how text is set.
 //!
 //! Stage 2 of `doc/design/browser.md`. What is here is chosen by what the block
-//! list can already express -- colour, size, weight, face, decoration and the
+//! list can already express -- colour, size, weight, face, decoration, the
 //! vertical margins between blocks, the measure a box asks for with `width` or
-//! `max-width` -- plus `display: none`, which is the one
+//! `max-width`, and the box a block paints for itself with `background-color`,
+//! `padding` and `border` -- plus `display: none`, which is the one
 //! declaration a document needs honoured before anything else, since a page
 //! that hides its skip-links and its mobile navigation with CSS renders them as
 //! stray text otherwise.
@@ -13,6 +14,43 @@
 //! gets from a browser that never implemented it.
 
 use std::{borrow::Cow, collections::BTreeMap, rc::Rc};
+
+/// What CSS calls `medium`, the width a border written with a style but no
+/// width is painted at.
+const MEDIUM_BORDER: u32 = 3;
+
+/// The four edges of a box, in the order the 1-to-4 value shorthands write
+/// them: top, right, bottom, left.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Sides<T> {
+    pub top: T,
+    pub right: T,
+    pub bottom: T,
+    pub left: T,
+}
+
+/// One edge's border. Nothing is painted without a style, whatever the width
+/// says, which is why the style is tracked separately from the thickness.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Border {
+    pub width: Option<u32>,
+    /// A `border-style` other than `none` or `hidden` was written.
+    pub on: bool,
+    /// `None` is `currentColor`, resolved against the text colour by whoever
+    /// paints it, since the colour a theme sets is not known here.
+    pub color: Option<u32>,
+}
+
+impl Border {
+    /// The thickness this is painted at, zero when it is not painted at all.
+    pub fn px(&self) -> u32 {
+        if self.on {
+            self.width.unwrap_or(MEDIUM_BORDER)
+        } else {
+            0
+        }
+    }
+}
 
 /// A property value that a `Computed` carries after the cascade.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -39,6 +77,10 @@ pub struct Computed {
     /// A horizontal margin written `auto`, which centres the box in its column.
     /// Inherited for the same reason `measure` is.
     pub center: bool,
+    /// `background-color`, painted behind the block's own box.
+    pub background: Option<u32>,
+    pub padding: Sides<Option<u32>>,
+    pub borders: Sides<Border>,
     /// `display: none`. Not inherited: a hidden element hides its subtree by
     /// not being walked at all, which is not the same thing as its children
     /// inheriting a value.
@@ -54,6 +96,9 @@ impl Computed {
             margin_top: None,
             margin_bottom: None,
             margin_left: None,
+            background: None,
+            padding: Sides::default(),
+            borders: Sides::default(),
             ..*self
         }
     }
@@ -95,19 +140,7 @@ impl Computed {
             }
             "margin" => {
                 let written: Vec<&str> = value.split_whitespace().collect();
-                let parts: Vec<Option<u32>> = written
-                    .iter()
-                    .map(|p| parse_length(p, root_px, self.em(parent_px)))
-                    .collect();
-                // One value sets all four, two set vertical then horizontal,
-                // and three or four start at the top and go clockwise.
-                let (top, bottom, left) = match parts.len() {
-                    1 => (parts[0], parts[0], parts[0]),
-                    2 => (parts[0], parts[0], parts[1]),
-                    3 => (parts[0], parts[2], parts[1]),
-                    4 => (parts[0], parts[2], parts[3]),
-                    _ => (None, None, None),
-                };
+                let sides = quad(&self.lengths(&written, root_px, parent_px));
                 let horizontal = match written.len() {
                     1 => Some(written[0]),
                     2 | 3 => Some(written[1]),
@@ -117,9 +150,9 @@ impl Computed {
                 if horizontal.is_some_and(is_auto) {
                     self.center = true;
                 }
-                self.margin_top = top.or(self.margin_top);
-                self.margin_bottom = bottom.or(self.margin_bottom);
-                self.margin_left = left.or(self.margin_left);
+                self.margin_top = sides.top.or(self.margin_top);
+                self.margin_bottom = sides.bottom.or(self.margin_bottom);
+                self.margin_left = sides.left.or(self.margin_left);
             }
             "margin-top" => self.margin_top = self.length(value, root_px, parent_px),
             "margin-bottom" => self.margin_bottom = self.length(value, root_px, parent_px),
@@ -128,12 +161,67 @@ impl Computed {
             // pair: the other half is in the shorthand or in a rule this cannot
             // see, and a centred box is what it was after either way.
             "margin-right" if is_auto(value) => self.center = true,
-            "margin-left" | "padding-left" => {
+            "margin-left" => {
                 if is_auto(value) {
                     self.center = true;
                 } else {
                     self.margin_left = self.length(value, root_px, parent_px);
                 }
+            }
+            "padding" => {
+                let written: Vec<&str> = value.split_whitespace().collect();
+                let sides = quad(&self.lengths(&written, root_px, parent_px));
+                self.padding = Sides {
+                    top: sides.top.or(self.padding.top),
+                    right: sides.right.or(self.padding.right),
+                    bottom: sides.bottom.or(self.padding.bottom),
+                    left: sides.left.or(self.padding.left),
+                };
+            }
+            "padding-top" => self.padding.top = self.length(value, root_px, parent_px),
+            "padding-right" => self.padding.right = self.length(value, root_px, parent_px),
+            "padding-bottom" => self.padding.bottom = self.length(value, root_px, parent_px),
+            "padding-left" => self.padding.left = self.length(value, root_px, parent_px),
+            "background" | "background-color" => {
+                // A `background` shorthand is mostly things this cannot paint
+                // -- images, gradients, positions -- so its colour is taken
+                // from whichever token is one and the rest is dropped.
+                let color =
+                    parse_color(value).or_else(|| value.split_whitespace().find_map(parse_color));
+                if let Some(color) = color {
+                    self.background = Some(color);
+                }
+            }
+            "border" => {
+                let border = self.border_shorthand(value, root_px, parent_px);
+                self.borders = Sides {
+                    top: border,
+                    right: border,
+                    bottom: border,
+                    left: border,
+                };
+            }
+            "border-top" => self.borders.top = self.border_shorthand(value, root_px, parent_px),
+            "border-right" => self.borders.right = self.border_shorthand(value, root_px, parent_px),
+            "border-bottom" => {
+                self.borders.bottom = self.border_shorthand(value, root_px, parent_px)
+            }
+            "border-left" => self.borders.left = self.border_shorthand(value, root_px, parent_px),
+            "border-width" => {
+                let written: Vec<&str> = value.split_whitespace().collect();
+                let parts: Vec<Option<u32>> = written
+                    .iter()
+                    .map(|p| border_width(p, root_px, self.em(parent_px)))
+                    .collect();
+                self.each_border(quad(&parts), |border, px| border.width = Some(px));
+            }
+            "border-color" => {
+                let parts: Vec<Option<u32>> = value.split_whitespace().map(parse_color).collect();
+                self.each_border(quad(&parts), |border, color| border.color = Some(color));
+            }
+            "border-style" => {
+                let parts: Vec<Option<bool>> = value.split_whitespace().map(border_style).collect();
+                self.each_border(quad(&parts), |border, on| border.on = on);
             }
             // Neither can widen the box: an ancestor's measure is the bound,
             // and `auto`, `none` and anything unparseable leave it alone.
@@ -148,6 +236,102 @@ impl Computed {
 
     fn length(&self, value: &str, root_px: u32, parent_px: u32) -> Option<u32> {
         parse_length(value, root_px, self.em(parent_px))
+    }
+
+    fn lengths(&self, written: &[&str], root_px: u32, parent_px: u32) -> Vec<Option<u32>> {
+        written
+            .iter()
+            .map(|part| self.length(part, root_px, parent_px))
+            .collect()
+    }
+
+    /// `border: <width> || <style> || <color>`, in any order and with any of
+    /// the three left out.
+    fn border_shorthand(&self, value: &str, root_px: u32, parent_px: u32) -> Border {
+        let mut border = Border::default();
+        for token in value.split_whitespace() {
+            if let Some(on) = border_style(token) {
+                border.on = on;
+            } else if let Some(px) = border_width(token, root_px, self.em(parent_px)) {
+                border.width = Some(px);
+            } else if let Some(color) = parse_color(token) {
+                border.color = Some(color);
+            }
+        }
+        border
+    }
+
+    /// Apply the written sides of a per-edge longhand, leaving the edges the
+    /// declaration said nothing about alone.
+    fn each_border<T: Copy>(&mut self, values: Sides<Option<T>>, set: impl Fn(&mut Border, T)) {
+        let edges = [
+            (&mut self.borders.top, values.top),
+            (&mut self.borders.right, values.right),
+            (&mut self.borders.bottom, values.bottom),
+            (&mut self.borders.left, values.left),
+        ];
+        for (border, value) in edges {
+            if let Some(value) = value {
+                set(border, value);
+            }
+        }
+    }
+}
+
+/// The 1-to-4 value shorthand `margin`, `padding` and the `border-*` longhands
+/// are all written in: one value sets all four edges, two set vertical then
+/// horizontal, and three or four start at the top and go clockwise.
+fn quad<T: Copy>(parts: &[Option<T>]) -> Sides<Option<T>> {
+    let at = |index: usize| parts.get(index).copied().flatten();
+    match parts.len() {
+        1 => Sides {
+            top: at(0),
+            right: at(0),
+            bottom: at(0),
+            left: at(0),
+        },
+        2 => Sides {
+            top: at(0),
+            right: at(1),
+            bottom: at(0),
+            left: at(1),
+        },
+        3 => Sides {
+            top: at(0),
+            right: at(1),
+            bottom: at(2),
+            left: at(1),
+        },
+        4 => Sides {
+            top: at(0),
+            right: at(1),
+            bottom: at(2),
+            left: at(3),
+        },
+        _ => Sides::default(),
+    }
+}
+
+/// Whether a `border-style` keyword paints anything. Every style that does is
+/// painted solid: a dashed hairline and a solid one carry the same meaning at
+/// this size, and the reader cannot tell a groove from a ridge either.
+fn border_style(value: &str) -> Option<bool> {
+    match value {
+        "none" | "hidden" => Some(false),
+        "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+/// A `border-width`: a length, or one of the three keywords CSS gives instead.
+fn border_width(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
+    match value {
+        "thin" => Some(1),
+        "medium" => Some(MEDIUM_BORDER),
+        "thick" => Some(5),
+        _ => parse_length(value, root_px, em_px),
     }
 }
 
@@ -1323,5 +1507,86 @@ mod tests {
         let stack = vec![element("div", &[]), element("p", &[])];
         let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
         assert_eq!(inner.measure, Some(300));
+    }
+
+    #[test]
+    fn a_background_shorthand_keeps_its_colour() {
+        let sheet =
+            sheet("p { background: #112233 } div { background: url(x.png) no-repeat #fff }");
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None).background,
+            Some(0xff112233)
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("div", &[])], None).background,
+            Some(0xffffffff)
+        );
+    }
+
+    #[test]
+    fn a_background_does_not_inherit() {
+        let sheet = sheet("div { background: red }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(outer.background, Some(0xffff0000));
+        let stack = vec![element("div", &[]), element("p", &[])];
+        let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
+        assert_eq!(inner.background, None);
+    }
+
+    #[test]
+    fn a_border_shorthand_reads_in_any_order() {
+        let sheet = sheet("p { border-left: 4px solid #00ff00 } div { border: solid thin }");
+        let quote = cascade(&sheet, &[element("p", &[])], None);
+        assert_eq!(quote.borders.left.px(), 4);
+        assert_eq!(quote.borders.left.color, Some(0xff00ff00));
+        assert_eq!(quote.borders.top.px(), 0);
+
+        // No colour is `currentColor`, which only the painter can resolve.
+        let all = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(all.borders.bottom.px(), 1);
+        assert_eq!(all.borders.bottom.color, None);
+    }
+
+    #[test]
+    fn a_border_width_alone_paints_nothing() {
+        let sheet = sheet("p { border-width: 6px } div { border-width: 6px; border-style: solid }");
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None).borders.top.px(),
+            0
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("div", &[])], None)
+                .borders
+                .top
+                .px(),
+            6
+        );
+    }
+
+    #[test]
+    fn a_style_written_without_a_width_is_medium() {
+        let sheet = sheet("p { border: solid }");
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None)
+                .borders
+                .right
+                .px(),
+            MEDIUM_BORDER
+        );
+    }
+
+    #[test]
+    fn padding_follows_the_four_value_shorthand() {
+        let sheet = sheet("p { padding: 1px 2px 3px 4px } div { padding: 5px 10px }");
+        let p = cascade(&sheet, &[element("p", &[])], None).padding;
+        assert_eq!(
+            (p.top, p.right, p.bottom, p.left),
+            (Some(1), Some(2), Some(3), Some(4))
+        );
+        let d = cascade(&sheet, &[element("div", &[])], None).padding;
+        assert_eq!(
+            (d.top, d.right, d.bottom, d.left),
+            (Some(5), Some(10), Some(5), Some(10))
+        );
     }
 }
