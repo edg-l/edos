@@ -9,6 +9,7 @@
 use crate::{Error, Result, db, repo};
 use flate2::read::GzDecoder;
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
     io::{Read, Write},
     path::Path,
@@ -30,8 +31,19 @@ const ALLOWED_ROOTS: [&str; 4] = ["bin", "lib", "share", "opt"];
 /// path: owned by the package, replaced on upgrade, removed with it.
 pub const DEFAULTS: &str = "share/defaults/";
 
-/// Unpack `archive` and move it into place, returning every path installed.
-pub fn apply(name: &str, archive: &[u8]) -> Result<Vec<String>> {
+/// What an install put on the disk.
+pub struct Applied {
+    /// Every path installed, relative to `/`.
+    pub files: Vec<String>,
+    /// What each packaged default held before this install replaced it, keyed
+    /// by its path under `/etc`. Read as the archive is moved into place,
+    /// because the file it is read from is the one being overwritten; see
+    /// [`seed_etc`], which is the only thing that wants it.
+    pub superseded: BTreeMap<String, Vec<u8>>,
+}
+
+/// Unpack `archive` and move it into place.
+pub fn apply(name: &str, archive: &[u8]) -> Result<Applied> {
     let stage = format!("{}/stage/{}", repo::CACHE, name);
     // A staging directory left over from an interrupted run would otherwise
     // contribute its files to this install.
@@ -46,11 +58,20 @@ pub fn apply(name: &str, archive: &[u8]) -> Result<Vec<String>> {
     check_ownership(name, &staged)?;
 
     let mut installed = Vec::new();
+    let mut superseded = BTreeMap::new();
     for path in &staged {
         let destination = format!("/{}", path);
         if let Some(parent) = Path::new(&destination).parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| Error::Io(format!("{}: {}", parent.display(), e)))?;
+        }
+        // The default about to be overwritten, while it is still there. An
+        // upgrade needs it to tell a setting nobody has touched from one
+        // somebody edited.
+        if let Some(relative) = path.strip_prefix(DEFAULTS)
+            && let Ok(previous) = fs::read(&destination)
+        {
+            superseded.insert(relative.to_string(), previous);
         }
         let from = format!("{}/{}", stage, path);
         // Rename rather than copy: it is atomic, so a running program is never
@@ -62,7 +83,10 @@ pub fn apply(name: &str, archive: &[u8]) -> Result<Vec<String>> {
     }
 
     let _ = fs::remove_dir_all(&stage);
-    Ok(installed)
+    Ok(Applied {
+        files: installed,
+        superseded,
+    })
 }
 
 /// Walk the archive, writing each regular file under `stage`.
@@ -187,22 +211,49 @@ fn check_ownership(name: &str, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Copy each packaged default into `/etc`, skipping every destination that
-/// already holds something. Returns the paths it created.
+/// One `/etc` path an install wrote, and why it was allowed to.
+pub enum Seeded {
+    /// Nothing was there.
+    Created(String),
+    /// This install had put the previous default there and nobody had since
+    /// changed it.
+    Refreshed(String),
+}
+
+impl Seeded {
+    pub fn path(&self) -> &str {
+        match self {
+            Seeded::Created(path) | Seeded::Refreshed(path) => path,
+        }
+    }
+}
+
+/// Copy each packaged default into `/etc` where doing so overwrites nothing
+/// anyone decided. `ours` is the set of `/etc` paths earlier installs of this
+/// package created; see [`crate::Progress`] for how the result is reported.
 ///
-/// This is the whole of the machine-versus-package split. `/etc` stays the
-/// machine's: a file already there is a decision someone made, and an install
-/// never revisits it — which also means a corrected default never reaches a
-/// machine that has been seeded once, and the package's own copy under
-/// [`DEFAULTS`] is where to read what that default now says.
+/// This is the whole of the machine-versus-package split, and it writes in
+/// exactly two cases:
+///
+/// - **Nothing is there.** The default becomes the machine's starting point.
+/// - **This package put the previous default there and it is still byte for
+///   byte that default.** Nobody has expressed a preference, so carrying the
+///   corrected default forward loses nothing. Both halves are required: a file
+///   the package never created is not its to refresh even if the bytes happen
+///   to match, and one that differs is a decision someone made.
+///
+/// Anything else is left alone, which is what makes a setting stick. The cost
+/// is that a corrected default never reaches a machine whose copy was edited;
+/// the package's own copy under [`DEFAULTS`] is where to read what the default
+/// now says.
 ///
 /// The destination is the packaged path with [`DEFAULTS`] cut off, so it
 /// inherits the `..`, absolute-path and symlink refusals [`validate`] already
 /// applied to the archive.
-pub fn seed_etc(installed: &[String]) -> Result<Vec<String>> {
+pub fn seed_etc(applied: &Applied, ours: &[String]) -> Result<Vec<Seeded>> {
     let mut seeded = Vec::new();
 
-    for path in installed {
+    for path in &applied.files {
         let Some(relative) = path.strip_prefix(DEFAULTS) else {
             continue;
         };
@@ -211,9 +262,21 @@ pub fn seed_etc(installed: &[String]) -> Result<Vec<String>> {
         }
 
         let destination = format!("/etc/{}", relative);
-        if fs::exists(&destination).unwrap_or(false) {
-            continue;
-        }
+        let outcome = match fs::read(&destination) {
+            Err(_) => Seeded::Created(destination.clone()),
+            Ok(current) => {
+                let untouched = ours.iter().any(|p| *p == destination)
+                    && applied
+                        .superseded
+                        .get(relative)
+                        .is_some_and(|previous| *previous == current);
+                if !untouched {
+                    continue;
+                }
+                Seeded::Refreshed(destination.clone())
+            }
+        };
+
         if let Some(parent) = Path::new(&destination).parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| Error::Io(format!("{}: {}", parent.display(), e)))?;
@@ -221,7 +284,7 @@ pub fn seed_etc(installed: &[String]) -> Result<Vec<String>> {
 
         let from = format!("/{}", path);
         fs::copy(&from, &destination).map_err(|e| Error::Io(format!("{}: {}", destination, e)))?;
-        seeded.push(destination);
+        seeded.push(outcome);
     }
 
     Ok(seeded)

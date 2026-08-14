@@ -264,8 +264,8 @@ bit would mean `fs::set_permissions`, which reports Unsupported here.
 
 A package cannot write `/etc`, but it can say what it would like to find there.
 Files under `share/defaults/` mirror the `/etc` tree, and after an install moves
-everything into place `grab` copies each one to its `/etc` path **only where
-nothing is there already**:
+everything into place `grab` copies each one to its `/etc` path — but only where
+doing so overwrites nothing anyone decided:
 
 ```
 share/defaults/services/httpd.conf   ->   /etc/services/httpd.conf
@@ -281,17 +281,28 @@ could not create before. `enabled_by` still gates it, so a seeded service is
 known to init and not started until the file it names exists — which is why a
 package must ship the declaration and never the credential it points at.
 
-Three consequences, stated plainly because two of them are costs:
+An install writes in exactly two cases, and the second is what keeps a corrected
+default from being stranded:
 
-- **An existing file is never touched.** A setting already on the machine is a
-  decision someone made, and an install does not revisit it.
-- **Therefore a corrected default never reaches a machine that has been seeded
-  once.** The packaged copy under `share/defaults/` is upgraded like any other
-  file, so what the default now says is always readable there; what `/etc` says
-  is what the machine will use. This is the same trade dpkg makes with
-  conffiles, without the prompts.
-- **Every seed is announced** through `Progress`. An install that changes what
-  the machine runs at boot must not do it quietly.
+- **Nothing is there.** The default becomes the machine's starting point.
+- **This package put the previous default there and it is still byte for byte
+  that default.** Nobody has expressed a preference, so carrying the new default
+  forward loses nothing. Both halves are required: a file the package never
+  created is not its to refresh even where the bytes happen to match, and one
+  that differs from what was left there is a decision someone made.
+
+Anything else is left alone, which is what makes a setting stick. The residual
+cost is narrower than dpkg's conffile trade but the same shape: **a corrected
+default does not reach a machine whose copy was edited.** The packaged copy
+under `share/defaults/` is upgraded like any other file, so what the default now
+says is always readable there; what `/etc` says is what the machine uses. A
+three-way merge between the old default, the new one and the local edit would
+close that last gap and is the obvious next step, not something this design
+forecloses.
+
+**Every write is announced** through `Progress`, and the two cases read
+differently — `wrote ...` against `updated ...`. An install that changes what
+the machine runs at boot must not do it quietly.
 
 Removal is the mirror: `grab remove` deletes a seeded file only while it is
 still byte-identical to the default it came from, and keeps and reports one that
@@ -310,9 +321,10 @@ Installed state, all of it plain text:
 ```
 
 `files` is what makes removal exact: `grab remove` deletes what it recorded and
-nothing else. `seeded` is what lets it tell a setting the install created from
-one that was already there; an upgrade seeds nothing, since the destinations
-exist by then, so the list carries forward from the install that did.
+nothing else. `seeded` is what lets `grab` tell a setting it created from one
+that was already on the machine — which decides both whether an upgrade may
+refresh it and whether removal may take it away — and it carries forward across
+upgrades from the install that created each path.
 
 There is **no dependency resolution**, and this is not a simplification to
 revisit. EDOS has no dynamic linker — PT_INTERP is unimplemented — so every

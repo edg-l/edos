@@ -116,10 +116,10 @@ pub fn install_package(base: &str, package: &Package, progress: &mut dyn Progres
     let archive = repo::fetch_package(base, package, progress)?;
 
     progress.message(&format!("installing {}", package.name));
-    let installed = install::apply(&package.name, &archive)?;
-    let seeded = seed(&package.name, &installed, progress)?;
+    let applied = install::apply(&package.name, &archive)?;
+    let seeded = seed(&package.name, &applied, progress)?;
 
-    db::write(package, &installed, &seeded)?;
+    db::write(package, &applied.files, &seeded)?;
     progress.message(&format!("{} {} installed", package.name, package.version));
     Ok(())
 }
@@ -131,16 +131,27 @@ pub fn install_package(base: &str, package: &Package, progress: &mut dyn Progres
 /// daemon, so an install can change what the machine runs at boot and the
 /// person running it has to be able to see that.
 ///
-/// An upgrade seeds nothing, because the destinations exist by then, so the
-/// previous install's list carries forward — otherwise removal would forget the
-/// settings the first install created.
-fn seed(name: &str, installed: &[String], progress: &mut dyn Progress) -> Result<Vec<String>> {
+/// The list carries forward from the install that created each path, which is
+/// both what lets an upgrade tell an untouched setting from an edited one and
+/// what stops removal forgetting the settings an earlier install made.
+fn seed(
+    name: &str,
+    applied: &install::Applied,
+    progress: &mut dyn Progress,
+) -> Result<Vec<String>> {
     let mut seeded = db::read(name)?.map(|r| r.seeded).unwrap_or_default();
 
-    for path in install::seed_etc(installed)? {
-        progress.message(&format!("wrote {}, which had no setting before", path));
-        if !seeded.contains(&path) {
-            seeded.push(path);
+    for outcome in install::seed_etc(applied, &seeded)? {
+        progress.message(&match &outcome {
+            install::Seeded::Created(path) => {
+                format!("wrote {}, which had no setting before", path)
+            }
+            install::Seeded::Refreshed(path) => {
+                format!("updated {}, which still held the previous default", path)
+            }
+        });
+        if !seeded.iter().any(|p| p == outcome.path()) {
+            seeded.push(outcome.path().to_string());
         }
     }
 
@@ -169,8 +180,9 @@ pub fn install_local(path: &str, progress: &mut dyn Progress) -> Result<()> {
         name, version, path
     ));
 
-    let installed = install::apply(&name, &archive)?;
-    let seeded = seed(&name, &installed, progress)?;
+    let applied = install::apply(&name, &archive)?;
+    let seeded = seed(&name, &applied, progress)?;
+    let installed = applied.files.clone();
     let package = Package {
         name: name.clone(),
         version,
