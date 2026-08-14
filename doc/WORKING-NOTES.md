@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-14
+## Counts, remeasured 2026-08-15
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1582,11 +1582,11 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
-| userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| userspace programs | 118 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,960 code lines across 434 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 49,869 code lines | `tokei -t=Rust kernel/src` |
+| binaries in `filesystem/bin` | 118 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
+| Rust | 102,221 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 49,932 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,340 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -6262,3 +6262,60 @@ reach the guest, proven separately by `alt+f4` closing a window — so a
 non-reacting app is not a swallowed key. And a second `Refresh` sets the same
 status text as the first, so "the status did not change" only means something
 against a status that was going to change.
+
+## The initial process stack carries an auxiliary vector (2026-08-15)
+
+`setup_user_stack` (`kernel/src/thread/mod.rs`) now emits the full System V
+initial process stack: `argc` at `[rsp]`, `argv[]`, NULL, `envp[]`, NULL, then
+the auxiliary vector, then the string area holding the argument and environment
+bytes plus `AT_RANDOM`'s 16 bytes and `AT_EXECFN`'s path. This is step one of
+`doc/design/dynamic-linking-and-libc.md` stage 0; a libc's `crt1.o` and a
+dynamic linker both start by reading this and nothing else.
+
+Three things about it that are not obvious from the diff.
+
+**The stack has to be built after the image, not before.** `load_process_image`
+used to lay down the stack and then load the ELF. `AT_PHDR` and `AT_ENTRY` are
+not known until the ELF has been parsed, so the two swapped places. The Stack
+VMA is inserted before either, which is what lets `copy_to_user` demand-fault
+stack pages in the new address space, so the reorder is safe; the reloc table
+and `load_base` are still installed on the `MemoryManager` after the stack is
+written, so nothing in the fault path can see a half-built image.
+
+**`AT_PHDR` has two sources and both give the same answer here.** `PT_PHDR`
+names the table's address outright, and every binary this tree builds has one at
+`p_vaddr` 0x40. Without one, the fallback is the `PT_LOAD` whose file range
+covers `e_phoff` — and since that first `PT_LOAD` starts at file offset 0 with
+`p_vaddr` 0, it computes 0x400040 as well. Do not read a passing test as
+evidence that only one of the two paths works.
+
+**The entry alignment is deliberately still wrong, and must stay wrong for now.**
+The psABI wants `rsp % 16 == 0` at process entry; this kernel produces
+`rsp % 16 == 8`, the state a callee sees after `call` pushes a return address,
+because the fork's `_start` is an ordinary `extern "C" fn(argc, argv, envp)` and
+its prologue assumes it. glibc and musl both mask `%rsp` down first so they
+would tolerate either, but inverting the padding rule here without changing
+`_start` in the Rust fork GPFs on the first `movaps` spill. The same applies to
+`rdx`: the psABI reserves it for an `atexit`-registerable pointer, and glibc's
+`_start` moves it to `%r9` and calls it as `rtld_fini`, so a glibc binary
+entered with `envp` in `rdx` would call the environment array.
+
+### `programs/auxvtest`, and why it needs `#![no_main]`
+
+The vector's address is reachable only by walking `argv`: `argv[argc]` is NULL,
+`envp` begins one slot later, and the auxv begins one slot past `envp`'s NULL.
+Nothing in `std` hands out that pointer — `env::args()` yields strings, and the
+runtime's `_start` consumes `argv` without keeping it. `#![no_main]` plus a
+`#[unsafe(no_mangle)] extern "C" fn main(argc, argv)` takes over the C `main`
+symbol the PAL `_start` calls, which is the only way a program in this tree sees
+the real pointer. That is worth knowing for any future test of process entry.
+
+The suite checks 11 things, the strongest being that `AT_PHDR` minus `PT_PHDR`'s
+`p_vaddr` lands on this image's own `\x7fELF`, and that `AT_ENTRY` falls inside
+one of its `PT_LOAD`s. Watched go red: reversing the auxv push order so `AT_NULL`
+lands first turns the vector into a one-entry empty list and takes 7 of the 11
+checks with it. That red also found a weak assertion — a vector holding only
+`AT_NULL` satisfied "terminated" — which now requires more than one entry.
+
+`AT_RANDOM` differing across two boots (`99 37 f0 3f` then `38 06 a5 32`) is what
+distinguishes a live entropy source from a pointer into zeroed stack.

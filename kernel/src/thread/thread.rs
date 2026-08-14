@@ -47,9 +47,9 @@ use crate::{
         paging::allocate_process_pml4,
         runqueue::{DEFAULT_PRIORITY, PRIORITY_LEVELS},
         scheduler::switch_to_kernel_page,
-        setup_user_stack,
         signal::SignalState,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_free},
+        {ProcessAuxv, setup_user_stack},
     },
     timer::Instant,
     window,
@@ -374,11 +374,28 @@ pub(crate) fn load_process_image(
         .map_err(|_| ElfLoadError::MappingFailed)?;
     memory_manager.vmas = Some(vma_set.clone());
 
-    let (user_stack_pointer, argv_ptr, argc, envp_ptr) =
-        setup_user_stack(stack_top, argv, envp, &memory_manager)
-            .map_err(|_| ElfLoadError::MappingFailed)?;
-
     let mut load_info = load_elf(inode, path, &mut memory_manager)?;
+
+    // The stack is built after the image because the auxiliary vector describes
+    // where the image landed: AT_PHDR and AT_ENTRY are not known until the ELF
+    // has been parsed.
+    let aux = ProcessAuxv {
+        phdr: load_info.phdr_vaddr,
+        phentsize: load_info.phentsize,
+        phnum: load_info.phnum,
+        entry: load_info.entry_point.as_u64(),
+        base: 0,
+    };
+    let execfn = alloc::format!("{path}");
+    let (user_stack_pointer, argv_ptr, argc, envp_ptr) = setup_user_stack(
+        stack_top,
+        argv,
+        envp,
+        execfn.as_bytes(),
+        &aux,
+        &memory_manager,
+    )
+    .map_err(|_| ElfLoadError::MappingFailed)?;
 
     // Reloc table and VMA range live on the MemoryManager for lazy fault-time
     // application; load_base is what relocated values are computed against.

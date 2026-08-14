@@ -23,7 +23,7 @@
 | Images | `imgview` (BMP and SVG viewer) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest`, `auxvtest` |
 | Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`), `termbench` (the terminal widget with no window and no compositor) |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows), `edos_http` (HTTP/1.1 over TLS) |
 

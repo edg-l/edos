@@ -39,11 +39,17 @@ argument and environment strings go at the top of the stack, then, descending:
 the `envp` NULL, the `envp` pointers, the `argv` NULL, the `argv` pointers, and
 `argc` last, so `argc` sits at `[rsp]` (`mod.rs:207`) exactly as the psABI wants.
 
-Three things separate that from the SysV process entry ABI (psABI §3.4.1).
+The **auxiliary vector** follows the `envp` NULL, carrying `AT_PHDR`,
+`AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_ENTRY`, `AT_SECURE`,
+`AT_RANDOM`, `AT_EXECFN` and `AT_NULL`. `AT_PHDR` comes from `PT_PHDR` when the
+image has one and from the `PT_LOAD` covering `e_phoff` otherwise; `AT_BASE` is
+zero, which is what a static image reports and what it will keep reporting until
+something honours `PT_INTERP`. `programs/auxvtest` reads the vector back the way
+a `crt1.o` does and checks every entry, including that `AT_PHDR` lands on this
+image's own ELF magic.
 
-**There is no auxiliary vector.** The stack ends after the `envp` NULL: no
-`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_BASE`, `AT_PAGESZ`,
-`AT_RANDOM`, `AT_SECURE`, `AT_EXECFN`.
+Two things still separate the result from the SysV process entry ABI
+(psABI §3.4.1).
 
 **The registers are the live channel, not the stack.**
 `kernel/src/thread/thread.rs:999` sets `rdi = argc`, `rsi = argv`, `rdx = envp`,
@@ -61,10 +67,10 @@ with `argc` at `[rsp]`. Both glibc's and musl's `_start` begin by masking `%rsp`
 down, so in practice they tolerate it, but the padding rule has to invert to be
 conforming.
 
-The missing auxv is what blocks both questions. A dynamic linker learns where the
-main image's program headers are, and where it was itself loaded, from `AT_PHDR`
-and `AT_BASE`; there is no other channel. Every libc's `crt1.o`/`_start` reads
-`argc` off the stack, walks past the `envp` NULL, and hands the auxv to
+The auxv is what both questions rest on. A dynamic linker learns where the main
+image's program headers are, and where it was itself loaded, from `AT_PHDR` and
+`AT_BASE`; there is no other channel. Every libc's `crt1.o`/`_start` reads `argc`
+off the stack, walks past the `envp` NULL, and hands the auxv to
 `__libc_start_main`; musl additionally requires `AT_RANDOM` for its stack guard.
 
 ### 1.3 TLS is owned by the kernel
@@ -139,17 +145,13 @@ is no `struct termios` anywhere in the tree.
 
 ### 2.1 What has to change in the kernel
 
-1. **The initial process stack.** `setup_user_stack` already lays down
-   `argc`, `argv[]`, NULL, `envp[]`, NULL; what it does not lay down is the
-   auxiliary vector, so append one after the `envp` NULL carrying at minimum
-   `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_BASE`, `AT_PAGESZ`,
-   `AT_RANDOM`, `AT_SECURE`, `AT_EXECFN`, `AT_NULL`, and reserve room in the
-   string area for `AT_RANDOM`'s 16 bytes and `AT_EXECFN`'s path. This can be
-   **additive**: keep `rdi`/`rsi`/`rdx` set as they are, so every existing binary
-   and the `edos_rt` `_start` keep working unchanged, and let a new binary read
-   the stack instead. That matters because changing `_start` means changing the
-   Rust fork. The entry alignment (§1.2) is the part that cannot stay additive
-   forever — an interpreter's own `_start` is entitled to a 16-aligned `%rsp`.
+1. **The initial process stack.** Done. `setup_user_stack` lays down the full
+   SysV prefix and the auxiliary vector, and `rdi`/`rsi`/`rdx` are still set, so
+   every existing binary and the `edos_rt` `_start` kept working unchanged. What
+   is left of this item is the entry alignment (§1.2), which cannot stay
+   additive: an interpreter's own `_start` is entitled to a 16-aligned `%rsp`,
+   and inverting the padding rule means changing `_start` in the Rust fork in
+   the same step.
 2. **Two images in one address space.** Load the interpreter named by
    `PT_INTERP` as a second `ET_DYN` image at its own base, and enter *its*
    `e_entry` with the main image mapped but unrelocated. `LoadedInfo` grows from
@@ -270,10 +272,9 @@ scoped to 19 functions with a specification, and with a tested libc on top of it
 **Neither first.** Both questions are blocked behind the same three small ABI
 changes, and each of those three is worth doing on its own merits:
 
-1. **Finish the SysV initial process stack with a real auxv**, additively, keeping
-   the register convention. Nothing else in either project can start without it,
-   and it is the only item here that also has to be understood by the Rust fork
-   later.
+1. ~~**Finish the SysV initial process stack with a real auxv**, additively,
+   keeping the register convention.~~ Done; `programs/auxvtest` is the check.
+   The entry alignment is the remainder and is not additive (§2.1 item 1).
 2. **Return `-errno` from the syscall entry** and widen `Errno` to POSIX
    numbering. This removes a syscall from every failure path, removes a real
    (if rare) race against signal handlers, and is the difference between a libc
@@ -300,7 +301,8 @@ in order:
 
 Staged, with each stage independently landable:
 
-- **Stage 0** — the three ABI changes above.
+- **Stage 0** — the three ABI changes above. The auxv half of the first is
+  landed; negative-errno and `mprotect` are not.
 - **Stage 1** — `libs/libgloss-edos`, the 19-function newlib stub layer, plus a
   build recipe. Done when a C `hello world` compiles and runs in the guest.
 - **Stage 2** — termios and sockets in the port, and the first real third-party C

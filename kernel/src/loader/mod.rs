@@ -52,6 +52,13 @@ pub struct LoadedInfo {
     pub reloc_vma_range: Option<core::ops::Range<VirtAddr>>,
     /// ELF load base (0 for ET_EXEC, 0x400000 for ET_DYN static-PIE).
     pub load_base: u64,
+    /// User address of the program header table, for `AT_PHDR`. `None` when the
+    /// image maps no segment covering it, which leaves a dynamic linker unable
+    /// to find the main image's headers.
+    pub phdr_vaddr: Option<u64>,
+    /// `e_phentsize` and `e_phnum`, for `AT_PHENT` and `AT_PHNUM`.
+    pub phentsize: u16,
+    pub phnum: u16,
 }
 
 #[derive(Debug, Error)]
@@ -267,6 +274,7 @@ pub fn load_elf(
     const ET_EXEC: u16 = 2;
     const ET_DYN: u16 = 3;
     const PT_LOAD: u32 = 1;
+    const PT_PHDR: u32 = 6;
     const PT_TLS: u32 = 7;
     const PF_X: u32 = 1;
     const PF_W: u32 = 2;
@@ -339,6 +347,30 @@ pub fn load_elf(
     let phdr_bytes = read_file_range(path, e_phoff, phdr_bytes_len)?;
     if phdr_bytes.len() < phdr_bytes_len as usize {
         return Err(ElfLoadError::MissingSegments);
+    }
+
+    // AT_PHDR. The psABI leaves the program header table's user address to the
+    // kernel, and it is the only channel a dynamic linker has for finding the
+    // main image's headers. `PT_PHDR` names the address outright; without one
+    // the table is wherever the `PT_LOAD` covering `e_phoff` maps it.
+    let mut phdr_vaddr: Option<u64> = None;
+    for i in 0..e_phnum as usize {
+        let base = i * PHDR_SIZE;
+        let p_type = le_u32(&phdr_bytes, base).ok_or_else(short)?;
+        let p_offset = le_u64(&phdr_bytes, base + 8).ok_or_else(short)?;
+        let p_vaddr = le_u64(&phdr_bytes, base + 16).ok_or_else(short)?;
+        let p_filesz = le_u64(&phdr_bytes, base + 32).ok_or_else(short)?;
+
+        if p_type == PT_PHDR {
+            phdr_vaddr = Some(load_base.as_u64() + p_vaddr);
+            break;
+        }
+        if p_type == PT_LOAD
+            && e_phoff >= p_offset
+            && e_phoff + phdr_bytes_len <= p_offset + p_filesz
+        {
+            phdr_vaddr = Some(load_base.as_u64() + p_vaddr + (e_phoff - p_offset));
+        }
     }
 
     // Task 2.4: Build FileBacked + BSS VMAs for each PT_LOAD.
@@ -692,5 +724,8 @@ pub fn load_elf(
         reloc_table: built_reloc_table,
         reloc_vma_range,
         load_base: load_base.as_u64(),
+        phdr_vaddr,
+        phentsize: e_phentsize,
+        phnum: e_phnum,
     })
 }
