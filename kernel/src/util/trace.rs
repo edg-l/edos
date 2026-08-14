@@ -144,18 +144,18 @@ mod inner {
         TRACE_BUFFERS[idx].record(event);
     }
 
-    /// Dump all trace buffers via raw serial port (bypasses SERIAL_DBG lock).
-    /// Called from panic handler -- must not acquire any locks.
+    /// Dump all trace buffers through `emergency_println!`, which writes the
+    /// UART directly rather than through the `SERIAL_DBG` lock. Called from the
+    /// panic handler -- must not acquire any locks.
     pub fn dump_all_cpus() {
         static DUMPING: AtomicBool = AtomicBool::new(false);
         if DUMPING.swap(true, Ordering::Acquire) {
             return;
         }
 
-        let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
+        use crate::emergency_println;
 
-        use core::fmt::Write;
-        let _ = writeln!(port, "\n=== TRACE DUMP ===");
+        emergency_println!("\n=== TRACE DUMP ===");
 
         for cpu in 0..MAX_CPUS {
             let buf = &TRACE_BUFFERS[cpu];
@@ -171,14 +171,16 @@ mod inner {
                 0
             };
 
-            let _ = writeln!(port, "--- CPU {cpu} ({count} events, {total} total) ---");
+            emergency_println!("--- CPU {cpu} ({count} events, {total} total) ---");
             for i in 0..count {
                 let idx = (start + i) % RING_SIZE;
+                // SAFETY: `written` counts recorded events, so the first
+                // `count` slots reachable from `start` are initialised.
                 let event = unsafe { buf.slots[idx].assume_init_read() };
-                let _ = writeln!(port, "  [{i:>3}] {event}");
+                emergency_println!("  [{i:>3}] {event}");
             }
         }
-        let _ = writeln!(port, "=== END TRACE ===\n");
+        emergency_println!("=== END TRACE ===\n");
     }
 }
 

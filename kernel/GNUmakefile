@@ -36,8 +36,21 @@ all:
 
 
 .PHONY: check
-check:
+check: check-features
 	RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" cargo check --target $(RUST_TARGET)
+
+# Every optional feature, one at a time. Code behind a `cfg(feature)` the
+# default build never compiles rots silently: `util/trace.rs` kept calling a
+# `uart_16550` item that had been gone since the crate's 0.6 API change, and
+# nothing said so. The list is read out of Cargo.toml, so a new feature is
+# covered without touching this rule.
+.PHONY: check-features
+check-features:
+	@for f in $$(sed -n '/^\[features\]/,/^\[/p' Cargo.toml | sed -n 's/^\([a-z0-9-]*\) *=.*/\1/p' | grep -v '^default$$'); do \
+		echo "  check --features $$f"; \
+		RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" \
+			cargo check --quiet --target $(RUST_TARGET) --features "$$f" || exit 1; \
+	done
 
 # Remove object files and the final executable.
 .PHONY: clean

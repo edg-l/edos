@@ -2345,6 +2345,32 @@ with a reason: `FaultReject`'s payload fields are read only through the derived
 count, and `MAP_FIXED`/`MS_INVALIDATE` are unimplemented flags that still
 document the ABI's flag space.
 
+### The gate only ever built one of nine feature sets
+
+The same reasoning as above, one level up: `make check` builds the **default**
+features, so every one of the eight optional features was uncompiled by any gate.
+`trace` had been broken for as long as `serial.rs` has used uart_16550 0.6 —
+`util/trace.rs` still called `uart_16550::SerialPort::new`, which that release
+removed, so the feature CLAUDE.md documents as "per-CPU trace buffers dumped on
+panic" could not be turned on at all, and nothing said so.
+
+The fix is not the new API. `dump_all_cpus` was building its own UART only to
+avoid the `SERIAL_DBG` lock during a panic, and `serial::emergency_println!`
+already is that path — it polls LSR and writes 0x3F8 with no lock and no
+re-initialisation of a UART the panicking kernel is in the middle of using.
+The duplicate is gone.
+
+`make -C kernel check` now depends on `check-features`, which checks each
+feature on its own. It reads the names out of `Cargo.toml`'s `[features]`, so a
+feature added later is covered without touching the rule. About a second once
+cargo has each feature set cached, since they are separate build fingerprints.
+Watched go red against the pre-fix `trace.rs` and green after, rather than
+trusted on the strength of one green run.
+
+The two runtime-hostile features are still only compile-checked, which is all
+this gate claims: `lock-order-self-test-inversion` panics by design, and
+`sched-test` has `make test-headless` for the runtime half.
+
 ## Three defects the overnight run's own code review missed
 
 Found reviewing the 2026-08-11 run, all fixed in the same commit:
