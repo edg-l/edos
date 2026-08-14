@@ -1486,7 +1486,7 @@ does not have to invent them.
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
 | Rust | 101,609 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,026 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,318 | `git rev-list --count HEAD` |
+| commits | 1,320 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 154, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
