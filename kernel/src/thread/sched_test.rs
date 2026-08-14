@@ -9,7 +9,7 @@ use crate::{
     thread::{
         mutex::BlockingMutex,
         preempt::{PreemptSpinlock, preempt_disable, preempt_enabled},
-        runqueue::{BASE_SLICE, DEFAULT_PRIORITY},
+        runqueue::{BASE_SLICE, DEFAULT_PRIORITY, PRIORITY_LEVELS},
         rwlock::RwLock as BlockingRwLock,
         scheduler::{
             SCHEDULERS, WakePriority, current_thread, current_thread_id, sched, thread_exit,
@@ -123,9 +123,17 @@ struct TestHarness {
     burst_finished: AtomicU32,
     burst_steady: AtomicU64,
     burst_sleeper: AtomicU64,
+    // priority inversion: the lock the low thread holds and the high one wants,
+    // the handshakes that order the three threads, and what each one measured
+    pi_mutex: BlockingMutex<u64>,
+    pi_held: AtomicBool,
+    pi_released: AtomicBool,
+    pi_hold_cpu_ns: AtomicU64,
+    pi_hold_wall_ns: AtomicU64,
+    pi_wait_ns: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 55;
+const TOTAL_TESTS: u32 = 56;
 
 /// Registered lapic ids in ascending order, which is how the pinning cases
 /// below pick CPUs far enough apart not to measure each other.
@@ -210,6 +218,12 @@ pub fn run_sched_tests() {
         burst_finished: AtomicU32::new(0),
         burst_steady: AtomicU64::new(0),
         burst_sleeper: AtomicU64::new(0),
+        pi_mutex: BlockingMutex::new(0),
+        pi_held: AtomicBool::new(false),
+        pi_released: AtomicBool::new(false),
+        pi_hold_cpu_ns: AtomicU64::new(0),
+        pi_hold_wall_ns: AtomicU64::new(0),
+        pi_wait_ns: AtomicU64::new(0),
     });
 
     // --- Basic tests (8) ---
@@ -341,6 +355,18 @@ pub fn run_sched_tests() {
             test_burst_share as *const () as u64,
             boxed,
             burst_mask,
+        );
+    }
+
+    // Priority inversion: a low holder, a mid hog that preempts it, and a high
+    // waiter that measures what the section cost it (1)
+    for role in [PI_ROLE_LOW, PI_ROLE_MID, PI_ROLE_HIGH] {
+        let boxed = Box::into_raw(Box::new((harness.clone(), role))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-prio-inv",
+            test_priority_inversion as *const () as u64,
+            boxed,
+            contend_mask,
         );
     }
 
@@ -1707,5 +1733,131 @@ extern "C" fn test_burst_share(arg: *mut u8) -> ! {
         ratio_x100 % 100,
     );
     test_done(&h, "burst-share");
+    thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Priority inversion
+//
+// The Mars Pathfinder shape, on one CPU: a low-priority thread takes a
+// `BlockingMutex` and needs [`PI_HOLD`] of CPU inside the section, a
+// mid-priority thread spins for the whole window, and a high-priority thread
+// blocks on the same mutex. The high thread cannot run until the low one
+// releases, and the low one cannot run while the mid one is runnable, so the
+// mid thread — which wants neither the lock nor anything the high thread has —
+// sets how long the highest-priority thread on the machine waits.
+//
+// **The mid-priority hog is the whole test.** Without it the holder simply runs
+// to the end of its section and the waiter measures one hold, which is what a
+// correct mutex costs and says nothing about inheritance.
+//
+// This is an INSTRUMENT, not a gate on inheritance. The two assertions are
+// things the test itself controls: that the hog really did preempt the holder
+// (otherwise there was no inversion to measure and the number below is
+// meaningless), and that the waiter eventually got the lock. The inversion
+// factor is printed, and `doc/SCHED-ROADMAP.md` carries what it measured.
+// ---------------------------------------------------------------------------
+
+const PI_ROLE_LOW: u64 = 0;
+const PI_ROLE_MID: u64 = 1;
+const PI_ROLE_HIGH: u64 = 2;
+
+const PI_LOW_PRIORITY: u8 = DEFAULT_PRIORITY;
+/// Five levels over the holder, which is 1.25^5 = 3.05x of weight. Enough that
+/// the holder's section stretches several times its own length, without the
+/// starvation that would make the run time depend on the window rather than on
+/// the scheduler.
+const PI_MID_PRIORITY: u8 = DEFAULT_PRIORITY + 5;
+const PI_HIGH_PRIORITY: u8 = PRIORITY_LEVELS as u8 - 1;
+
+/// CPU time the holder needs inside the critical section. Charged as CPU rather
+/// than wall clock for the reason the burst case gives: the section is what the
+/// waiter is owed, and on a contended CPU a wall-clock spin is a fraction of it.
+const PI_HOLD: Duration = Duration::from_millis(10);
+
+/// How long the hog stays runnable after the holder takes the lock. It stops
+/// early once the waiter is through, so this is a cap that bounds the test
+/// rather than a window the measurement depends on.
+const PI_HOG_MS: u64 = 400;
+
+extern "C" fn test_priority_inversion(arg: *mut u8) -> ! {
+    let (h, role) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
+    let me = current_thread().unwrap();
+
+    match role {
+        PI_ROLE_LOW => {
+            me.set_priority(PI_LOW_PRIORITY);
+            let mut guard = h.pi_mutex.lock();
+            let cpu_start = cpu_time_now(&me);
+            let wall_start = Instant::now().as_nanos();
+            h.pi_held.store(true, Ordering::Release);
+            let cpu_end = cpu_start + PI_HOLD.as_nanos() as u64;
+            while cpu_time_now(&me) < cpu_end {
+                *guard += 1;
+                core::hint::spin_loop();
+            }
+            h.pi_hold_cpu_ns
+                .store(cpu_time_now(&me) - cpu_start, Ordering::Relaxed);
+            h.pi_hold_wall_ns.store(
+                Instant::now().as_nanos().saturating_sub(wall_start),
+                Ordering::Relaxed,
+            );
+            drop(guard);
+            h.pi_released.store(true, Ordering::Release);
+        }
+        PI_ROLE_MID => {
+            me.set_priority(PI_MID_PRIORITY);
+            while !h.pi_held.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            let deadline = Instant::now().as_nanos() + PI_HOG_MS * 1_000_000;
+            while Instant::now().as_nanos() < deadline && !h.pi_released.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+        _ => {
+            me.set_priority(PI_HIGH_PRIORITY);
+            while !h.pi_held.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            let start = Instant::now().as_nanos();
+            let guard = h.pi_mutex.lock();
+            let waited = Instant::now().as_nanos().saturating_sub(start);
+            drop(guard);
+            h.pi_wait_ns.store(waited, Ordering::Relaxed);
+
+            let hold_cpu = h.pi_hold_cpu_ns.load(Ordering::Relaxed).max(1);
+            let hold_wall = h.pi_hold_wall_ns.load(Ordering::Relaxed);
+            // The hog is the test: if the holder's section ran at close to its
+            // own CPU speed, nothing preempted it and the number below is not
+            // an inversion.
+            let stretch_x100 = hold_wall.saturating_mul(100) / hold_cpu;
+            assert!(
+                stretch_x100 > 150,
+                "[sched-test] prio-inversion: the holder's {} us section took {} us of wall clock \
+                 ({}.{:02}x); the {} levels of hog above it never preempted it, so there was no \
+                 inversion to measure",
+                hold_cpu / 1000,
+                hold_wall / 1000,
+                stretch_x100 / 100,
+                stretch_x100 % 100,
+                PI_MID_PRIORITY - PI_LOW_PRIORITY,
+            );
+
+            let inversion_x100 = waited.saturating_mul(100) / hold_cpu;
+            println!(
+                "[sched-test] prio-inversion: the top-priority waiter blocked {} us on a {} us \
+                 section ({}.{:02}x), holder stretched {}.{:02}x by a hog {} levels above it",
+                waited / 1000,
+                hold_cpu / 1000,
+                inversion_x100 / 100,
+                inversion_x100 % 100,
+                stretch_x100 / 100,
+                stretch_x100 % 100,
+                PI_MID_PRIORITY - PI_LOW_PRIORITY,
+            );
+            test_done(&h, "prio-inversion");
+        }
+    }
     thread_exit(0);
 }

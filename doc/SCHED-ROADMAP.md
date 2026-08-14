@@ -390,6 +390,44 @@ is re-armed rarely. TSC-deadline mode would remove the need for a floor at all
 reason to consider it; it is **not** a way to make arming cheaper, since it is
 still a trapping MSR write.
 
+## 6. Priority inversion is unbounded, and now measured: 18.17x
+
+`BlockingMutex` does not lend a waiter's weight to the holder, so a thread
+holding one is scheduled purely on its own priority no matter who is queued
+behind it. The Mars Pathfinder shape is the consequence, and `prio-inversion`
+in `thread/sched_test.rs` is the instrument: on one CPU, a holder at
+`DEFAULT_PRIORITY` needs 10 ms of CPU inside the section, a hog five levels
+above it stays runnable, and a waiter at priority 15 — the highest the machine
+has — blocks on the same mutex.
+
+Measured on a 4-CPU boot:
+
+```
+prio-inversion: the top-priority waiter blocked 181776 us on a 10000 us section
+(18.17x), holder stretched 18.37x by a hog 5 levels above it
+```
+
+The two numbers being nearly equal is the mechanism stated plainly: **the
+waiter's wait is the holder's stretch.** Every microsecond the hog takes from
+the holder is a microsecond added to the wait of a thread eight levels above
+the hog, and the only thing bounding it is how long the hog chooses to run. At
+1.25^5 = 3.05x of weight the hog is not even starving the holder, merely
+outweighing it; a hog at priority 15 against a holder at 0 would multiply this
+by far more.
+
+The test asserts only what it controls — that the hog really did preempt the
+holder (`stretch > 1.5x`, else there was no inversion to measure) and that the
+waiter eventually acquired. It is deliberately **not** a gate on inheritance,
+because a red gate would block every unrelated commit until the fix landed.
+
+**The fix** is weight lending in `thread/mutex.rs`: on blocking, raise the
+holder to the waiter's effective priority if that is higher; on release,
+restore what the holder had. The two things to get right are nesting (a holder
+that is itself blocked on another mutex must propagate, or the chain only moves
+one link) and restoring the *original* priority rather than the lent one when
+several waiters lend in turn. Re-run this test after: the inversion factor
+should fall to near 1x, and at that point the assertion can become the gate.
+
 ## What has been tried and did not work
 
 - **A deadline-aware wakeup check.** Built and reverted 2026-08-15; the numbers
