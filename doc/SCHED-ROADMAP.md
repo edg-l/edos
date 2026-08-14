@@ -390,17 +390,14 @@ is re-armed rarely. TSC-deadline mode would remove the need for a floor at all
 reason to consider it; it is **not** a way to make arming cheaper, since it is
 still a trapping MSR write.
 
-## 6. Priority inversion is unbounded, and now measured: 18.17x
+## 6. Priority inversion: 18.17x, halved to 7.67x by lending, still open
 
-`BlockingMutex` does not lend a waiter's weight to the holder, so a thread
-holding one is scheduled purely on its own priority no matter who is queued
-behind it. The Mars Pathfinder shape is the consequence, and `prio-inversion`
-in `thread/sched_test.rs` is the instrument: on one CPU, a holder at
-`DEFAULT_PRIORITY` needs 10 ms of CPU inside the section, a hog five levels
-above it stays runnable, and a waiter at priority 15 — the highest the machine
-has — blocks on the same mutex.
+The Mars Pathfinder shape, and `prio-inversion` in `thread/sched_test.rs` is
+the instrument: on one CPU, a holder at `DEFAULT_PRIORITY` needs 10 ms of CPU
+inside the section, a hog five levels above it stays runnable, and a waiter at
+priority 15 — the highest the machine has — blocks on the same mutex.
 
-Measured on a 4-CPU boot:
+Measured on a 4-CPU boot, before any lending:
 
 ```
 prio-inversion: the top-priority waiter blocked 181776 us on a 10000 us section
@@ -410,23 +407,48 @@ prio-inversion: the top-priority waiter blocked 181776 us on a 10000 us section
 The two numbers being nearly equal is the mechanism stated plainly: **the
 waiter's wait is the holder's stretch.** Every microsecond the hog takes from
 the holder is a microsecond added to the wait of a thread eight levels above
-the hog, and the only thing bounding it is how long the hog chooses to run. At
-1.25^5 = 3.05x of weight the hog is not even starving the holder, merely
-outweighing it; a hog at priority 15 against a holder at 0 would multiply this
-by far more.
+the hog, and the only thing bounding it is how long the hog chooses to run.
+
+`BlockingMutex` now lends: a waiter raises the holder to its own effective
+priority for the length of the section (`Thread::lent_priority`, and every
+`weight_of` site reads `effective_priority()`). Same instrument, same boot
+shape:
+
+```
+prio-inversion: the top-priority waiter blocked 76707 us on a 10000 us section
+(7.67x), holder stretched 7.23x by a hog 5 levels above it
+```
+
+**Why it is not near 1x, and what to look at next.** Lending buys the holder
+weight, not the CPU: boosted to 15 it has 6104 against the hog's 3125 at level
+12, which is 1.95x and so a 66% share — arithmetic that predicts a 1.5x stretch,
+not 7.23x. Both the before and after numbers are several times what pure share
+predicts, so the gap is not caused by lending and was there before it. Two
+candidates, in order:
+
+1. **The instrument is not alone on its CPU.** The threads are pinned to one
+   CPU, but the other 55 cases in the suite run concurrently on a 4-CPU boot
+   and are not pinned away from it. Settle this first by running the case on
+   `run-single` or by measuring the holder's share directly against
+   `/proc/sched`, before reading anything into the scheduler.
+2. **The loan does not re-place the holder.** It raises the weight, so
+   `charge_vruntime` slows the holder's virtual clock from the next charge on,
+   but the `vdeadline` it is holding was computed at the old weight and is only
+   recomputed once spent. Until then the boost has no effect on the pick.
+   Re-placing on the loan is the fix, and it needs the holder's runqueue lock
+   from the waiter's context.
+
+Known limits of what landed: the loan is a single priority per thread, not a
+stack, so a thread holding two of these forfeits an outer loan when it releases
+the inner lock — conservative, never a loan that outlives its section. And the
+donation reaches the holder alone; a chain of holders each blocked on the next
+carries it one link per acquisition rather than transitively in one step.
 
 The test asserts only what it controls — that the hog really did preempt the
 holder (`stretch > 1.5x`, else there was no inversion to measure) and that the
-waiter eventually acquired. It is deliberately **not** a gate on inheritance,
-because a red gate would block every unrelated commit until the fix landed.
-
-**The fix** is weight lending in `thread/mutex.rs`: on blocking, raise the
-holder to the waiter's effective priority if that is higher; on release,
-restore what the holder had. The two things to get right are nesting (a holder
-that is itself blocked on another mutex must propagate, or the chain only moves
-one link) and restoring the *original* priority rather than the lent one when
-several waiters lend in turn. Re-run this test after: the inversion factor
-should fall to near 1x, and at that point the assertion can become the gate.
+waiter eventually acquired. It is deliberately **not** a gate on inheritance;
+it becomes one when the factor is near 1x and the two candidates above are
+settled.
 
 ## What has been tried and did not work
 

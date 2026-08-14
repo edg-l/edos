@@ -7140,3 +7140,43 @@ The last 33 were hand-written, and only two of them were not mechanical:
 
 Both `cargo clippy --target x86_64-unknown-none` and the same with
 `--features sched-test` are clean, and the gate is worth keeping that way.
+
+## A waiter can lend its priority, and it only got half the inversion back (2026-08-15)
+
+`BlockingMutex` now does priority inheritance: a thread that blocks on one
+raises the holder to its own effective priority for the length of the section,
+and the holder drops every loan when it releases. `Thread::lent_priority` is
+where the loan lives, `Thread::effective_priority()` is `max(priority,
+lent_priority)`, and **every `weight_of` call site reads the effective one** --
+`clamp_lag`, `avg_vruntime` and `place` in `runqueue.rs`, and `charge_vruntime`
+in `thread.rs`. `Thread::priority()` still returns the static priority, which is
+what `/proc` and `sched_getattr` should report.
+
+Measured on the `prio-inversion` case: 18.17x before, 7.67x after, same 4-CPU
+boot and same 10 ms section.
+
+**Half a fix is the honest description, and the reason is in
+`doc/SCHED-ROADMAP.md` section 6.** Two things were ruled in as candidates and
+neither is the lending itself: the case is pinned to one CPU but the other 55
+tests in the suite are not pinned off it, and a loan raises the holder's weight
+without re-placing it, so the `vdeadline` it is already holding was computed at
+the old weight and stands until it is spent. Both before and after numbers are
+several times what the weight ratio alone predicts (1.95x of weight is a 66%
+share, so a 1.5x stretch), which is what says the gap predates the loan.
+
+Three things that are easy to get wrong here and are settled in the code:
+
+- **The uncontended path must not ask the scheduler anything.** `release()`
+  reads a plain `lent` flag on the mutex and only calls `current_thread()` when
+  a loan was actually made. `try_acquire` does pay one `current_thread_id()` to
+  publish the owner; that is the whole added cost of a free acquisition.
+- **Publish the owner after taking the lock and clear it before dropping it.**
+  A waiter that reads a holder therefore saw one that really held it. It can
+  still be one release stale, so after lending, the waiter re-reads the owner
+  and takes the loan back if it changed. Taking it back is conservative -- it
+  can cancel another waiter's live loan, which forfeits inheritance and never
+  grants it.
+- **The loan is a priority, not a stack.** A thread holding two of these gives
+  up an outer loan when it releases the inner lock. Paying for the exact case
+  costs the holder a list of what it holds, on the path where the uncontended
+  cost is the thing that matters.

@@ -145,7 +145,10 @@ pub fn virtual_delta(delta_ns: u64, weight: u64) -> u64 {
 /// waiting — one holder's slice — not by how much of that turn it would have
 /// used.
 fn clamp_lag(thread: &Thread, lag: i64) -> i64 {
-    let limit = virtual_delta(BASE_SLICE.as_nanos() as u64, weight_of(thread.priority())) as i64;
+    let limit = virtual_delta(
+        BASE_SLICE.as_nanos() as u64,
+        weight_of(thread.effective_priority()),
+    ) as i64;
     lag.clamp(-limit, limit)
 }
 
@@ -181,7 +184,7 @@ impl RunQueue {
         let mut total: u128 = 0;
         for ptr in self.queue.iter() {
             let thread = unsafe { &*ptr };
-            let weight = weight_of(thread.priority()) as u128;
+            let weight = weight_of(thread.effective_priority()) as u128;
             // Relative to the watermark so the products stay small; absolute
             // vruntimes are free to grow for as long as the machine is up.
             let relative = thread
@@ -238,7 +241,7 @@ impl RunQueue {
     pub(crate) fn place(&mut self, thread: &Thread, request_ns: u64) {
         let v = self.avg_vruntime();
         self.vtime = cmp::max(self.vtime, v);
-        let weight = weight_of(thread.priority());
+        let weight = weight_of(thread.effective_priority());
         let lag = clamp_lag(thread, thread.vlag.swap(0, Ordering::AcqRel));
         let vruntime = (v as i64).saturating_sub(lag).max(0) as u64;
         thread.vruntime.store(vruntime, Ordering::Release);

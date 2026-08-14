@@ -2927,6 +2927,9 @@ fn sys_clone(
         vlag: AtomicI64::new(0),
         slice_ns: AtomicU64::new(parent_thread.slice_ns.load(Ordering::Acquire)),
         priority: AtomicU8::new(parent_thread.priority()),
+        // A loan belongs to the lock the parent holds, not to the child,
+        // which starts holding nothing.
+        lent_priority: AtomicU8::new(0),
         parent: AtomicU64::new(parent_thread.id.0),
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
@@ -3193,6 +3196,9 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         vlag: AtomicI64::new(0),
         slice_ns: AtomicU64::new(parent_thread.slice_ns.load(Ordering::Acquire)),
         priority: AtomicU8::new(parent_thread.priority()),
+        // A loan belongs to the lock the parent holds, not to the child,
+        // which starts holding nothing.
+        lent_priority: AtomicU8::new(0),
         parent: AtomicU64::new(parent_thread.id.0),
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),

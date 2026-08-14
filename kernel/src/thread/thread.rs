@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    cmp,
     ops::Deref,
     sync::atomic::{
         AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -141,8 +142,11 @@ pub struct Thread {
     pub name: Arc<String>,
 
     // Scheduling-visible fields as atomics:
-    pub state: AtomicU8,         // State as u8
-    pub priority: AtomicU8,      // 0..16 small static priority, higher means more prio
+    pub state: AtomicU8,    // State as u8
+    pub priority: AtomicU8, // 0..16 small static priority, higher means more prio
+    /// Priority lent by a blocked waiter, 0 when none. See
+    /// [`Thread::lend_priority`].
+    pub lent_priority: AtomicU8,
     pub cpu_affinity: AtomicU32, // bitmask of allowed CPUs
     pub flags: AtomicU32,        // Flags
 
@@ -884,6 +888,34 @@ impl Thread {
         self.priority.load(Ordering::Acquire)
     }
 
+    /// The priority the scheduler serves this thread at: its own, or a higher
+    /// one lent to it while it holds a lock somebody more important wants.
+    pub fn effective_priority(&self) -> u8 {
+        cmp::max(
+            self.priority.load(Ordering::Acquire),
+            self.lent_priority.load(Ordering::Acquire),
+        )
+    }
+
+    /// Lend `prio` to this thread, raise-only.
+    ///
+    /// A loan never lowers anything, so two waiters on the same lock leave the
+    /// holder at the higher of the two and the order they arrive in does not
+    /// matter.
+    pub fn lend_priority(&self, prio: u8) {
+        let prio = prio.min((PRIORITY_LEVELS - 1) as u8);
+        if self.lent_priority.fetch_max(prio, Ordering::AcqRel) < prio {
+            self.mark_need_resched();
+        }
+    }
+
+    /// End every loan this thread is carrying.
+    pub fn drop_lent_priority(&self) {
+        if self.lent_priority.swap(0, Ordering::AcqRel) != 0 {
+            self.mark_need_resched();
+        }
+    }
+
     /// Restrict this thread to the CPUs named by `mask`; zero means anywhere.
     ///
     /// Affinity is enforced where a thread is *placed* — spawn, wake, and
@@ -953,7 +985,7 @@ impl Thread {
     /// preempted early keeps the deadline it had and finishes the turn it was
     /// promised, instead of being sent to the back for having been interrupted.
     fn charge_vruntime(&self, elapsed_ns: u64) {
-        let weight = weight_of(self.priority());
+        let weight = weight_of(self.effective_priority());
         let vruntime = self
             .vruntime
             .load(Ordering::Acquire)
@@ -1024,6 +1056,7 @@ impl Thread {
             vlag: AtomicI64::new(0),
             slice_ns: AtomicU64::new(BASE_SLICE.as_nanos() as u64),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
+            lent_priority: AtomicU8::new(0),
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             run_start_ns: AtomicU64::new(0),
@@ -1162,6 +1195,7 @@ impl Thread {
             vlag: AtomicI64::new(0),
             slice_ns: AtomicU64::new(BASE_SLICE.as_nanos() as u64),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
+            lent_priority: AtomicU8::new(0),
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             run_start_ns: AtomicU64::new(0),
