@@ -474,7 +474,14 @@ impl App {
                 // own, but it must still reach the container below: returning
                 // early here would leave it seeing every Ctrl release and
                 // never the matching press.
-                if !update_modifiers(&mut self.mods, event.code, true) {
+                //
+                // Alt marks a chord as the window manager's. The manager claims
+                // the ones it acts on and those never arrive here, but an
+                // unclaimed Alt chord still does, and it is not a binding this
+                // program made: Alt+PageDown is not a request to page the list.
+                // Only these shortcuts are skipped; the container below still
+                // sees the event.
+                if !update_modifiers(&mut self.mods, event.code, true) && !self.mods.alt {
                     let field_focused = self.widgets.focused() == Some(self.search);
                     match event.code {
                         keycode::F5 if !self.busy => self.start(Job::Refresh),
@@ -485,6 +492,12 @@ impl App {
                         _ => {}
                     }
                 }
+            }
+            // Without this the modifier set is a latch: anything ever pressed
+            // stays pressed, and the first Alt chord to arrive leaves every
+            // shortcut above dead for the rest of the session.
+            Some(WindowEventType::KeyRelease) => {
+                update_modifiers(&mut self.mods, event.code, false);
             }
             _ => {}
         }
