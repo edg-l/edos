@@ -7463,3 +7463,27 @@ it and every other caller passed 0.
 `assets/welcome.html` carries a `.card` paragraph (background, padding on all
 four edges, a 1px border) and a `blockquote` (a 4px left bar with
 `padding-left`), so a regression shows on the first screen.
+
+## `text-align` is a shift applied after the line is measured (2026-08-15)
+
+`css::Align` computes off `text-align` and inherits the way the property does,
+which costs nothing: `Computed::inherit` keeps every field it does not name, and
+alignment is one of the properties that should be kept. `view.rs` wraps a line
+flush left as it always did, then `push_aligned` moves every fragment on it by
+one offset — `align_offset(align, avail, used)`. Measuring first and shifting
+after is what keeps the hit test honest: `Layout::link_at` compares against the
+fragment rectangles, so a link inside a centred paragraph is clickable at the
+place it is drawn without alignment appearing anywhere in the hit test.
+
+`justify` is set flush left rather than dropped. Dropping it would leave an
+inherited `center` standing on a paragraph the page explicitly justified, which
+is worse than the ragged right edge.
+
+An image takes the alignment of the block it sits in, since `<p
+style="text-align:center"><img></p>` is how a page centres a figure far more
+often than margins are. That is the only place a `text-align` value moves
+something that is not text.
+
+**`hr` ignores it**, deliberately: a rule spans the box it was laid out in, and
+CSS aligns a rule with the `margin` pair, which this does not compute for a
+`<hr>`.

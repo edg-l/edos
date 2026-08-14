@@ -25,6 +25,10 @@
         border: 1px solid var(--accent);
       }
       blockquote { border-left: 4px solid #a3be8c; padding-left: 12px }
+      /* Alignment, including the figure below, which inherits it from the
+         paragraph the image sits in. */
+      h1, .centred { text-align: center }
+      .flush-right { text-align: right }
       @media (min-width: 100em) { p { display: none } }
       @media screen and (width >= 20em) { .wide { color: #a3be8c } }
       /* The pair a resize crosses: the window opens 760px wide, so widening it
@@ -75,7 +79,7 @@
       A vector image, drawn at the size the column gives it, clickable because
       it sits inside a link, and named by a path relative to this page:
     </p>
-    <p><a href="./welcome.html"><img src="../icons/edos.svg" alt="the EDOS mark"></a></p>
+    <p class="centred"><a href="./welcome.html"><img src="../icons/edos.svg" alt="the EDOS mark"></a></p>
     <p>A raster one, scaled down from a wallpaper:</p>
     <p><img src="/share/wallpapers/dusk.bmp" alt="the dusk wallpaper"></p>
     <p class="quiet">
@@ -93,6 +97,6 @@
       <li>Arrows, PageUp and PageDown scroll; q closes the window.</li>
     </ul>
     <hr>
-    <p class="mono">/share/web/welcome.html</p>
+    <p class="mono flush-right">/share/web/welcome.html</p>
   </body>
 </html>

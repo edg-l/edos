@@ -1,10 +1,10 @@
 //! A CSS subset: the cascade, and the declarations that change how text is set.
 //!
 //! Stage 2 of `doc/design/browser.md`. What is here is chosen by what the block
-//! list can already express -- colour, size, weight, face, decoration, the
-//! vertical margins between blocks, the measure a box asks for with `width` or
-//! `max-width`, and the box a block paints for itself with `background-color`,
-//! `padding` and `border` -- plus `display: none`, which is the one
+//! list can already express -- colour, size, weight, face, decoration,
+//! alignment, the vertical margins between blocks, the measure a box asks for
+//! with `width` or `max-width`, and the box a block paints for itself with
+//! `background-color`, `padding` and `border` -- plus `display: none`, the one
 //! declaration a document needs honoured before anything else, since a page
 //! that hides its skip-links and its mobile navigation with CSS renders them as
 //! stray text otherwise.
@@ -27,6 +27,15 @@ pub struct Sides<T> {
     pub right: T,
     pub bottom: T,
     pub left: T,
+}
+
+/// Where a line sits in the box it was laid out in.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
 }
 
 /// One edge's border. Nothing is painted without a style, whatever the width
@@ -77,6 +86,8 @@ pub struct Computed {
     /// A horizontal margin written `auto`, which centres the box in its column.
     /// Inherited for the same reason `measure` is.
     pub center: bool,
+    /// `text-align`, which inherits the way the property itself does.
+    pub align: Align,
     /// `background-color`, painted behind the block's own box.
     pub background: Option<u32>,
     pub padding: Sides<Option<u32>>,
@@ -138,6 +149,15 @@ impl Computed {
             "text-decoration" | "text-decoration-line" => {
                 self.underline = Some(value.contains("underline"));
             }
+            // `justify` is set flush left here: the last line of a justified
+            // paragraph is left aligned anyway, and stretching the others needs
+            // per-space positioning the blitter does not offer.
+            "text-align" => match value {
+                "left" | "start" | "justify" => self.align = Align::Left,
+                "center" => self.align = Align::Center,
+                "right" | "end" => self.align = Align::Right,
+                _ => {}
+            },
             "margin" => {
                 let written: Vec<&str> = value.split_whitespace().collect();
                 let sides = quad(&self.lengths(&written, root_px, parent_px));
@@ -1507,6 +1527,28 @@ mod tests {
         let stack = vec![element("div", &[]), element("p", &[])];
         let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
         assert_eq!(inner.measure, Some(300));
+    }
+
+    #[test]
+    fn text_align_is_read_and_inherited() {
+        let sheet =
+            sheet("div { text-align: center } p { text-align: right } li { text-align: justify }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(outer.align, Align::Center);
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None).align,
+            Align::Right
+        );
+        // Justification is not implemented, so it sets flush left rather than
+        // being dropped and leaving an inherited centre standing.
+        assert_eq!(
+            cascade(&sheet, &[element("li", &[])], None).align,
+            Align::Left
+        );
+
+        let stack = vec![element("div", &[]), element("span", &[])];
+        let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
+        assert_eq!(inner.align, Align::Center);
     }
 
     #[test]

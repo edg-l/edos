@@ -12,7 +12,7 @@ use edos_render::metrics::space;
 use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 
-use crate::css::{self, Sides};
+use crate::css::{self, Align, Sides};
 use crate::doc::{Block, BlockKind, Document, Marker, Picture, Run};
 
 /// Margin between the page and the window edge.
@@ -188,7 +188,7 @@ impl Layout {
 
                 let start = out.lines.len();
                 if plan.preformatted {
-                    out.preformatted(block, &plan, &mut y);
+                    out.preformatted(block, &plan, avail, &mut y);
                 } else {
                     let words = out.words(&block.runs, plan.style);
                     out.flow(words, &plan, avail, &mut y);
@@ -278,8 +278,11 @@ impl Layout {
             .first()
             .and_then(|run| run.link.clone())
             .map(|target| self.link_index(&target));
+        // An image is an inline box, so `text-align` places it the way it
+        // places a line of text: a centred figure is written that way far more
+        // often than with margins.
         let items = vec![Fragment {
-            x: (PAGE_PAD + plan.indent) as i32,
+            x: (PAGE_PAD + plan.indent + align_offset(plan.align, avail, width)) as i32,
             width,
             text: String::new(),
             style: plan.style,
@@ -360,7 +363,8 @@ impl Layout {
             // A word wider than the column gets its own line rather than being
             // cut: a URL broken across lines is worse than a ragged edge.
             if !items.is_empty() && pen + gap + width > avail {
-                self.push_line(std::mem::take(&mut items), line_height, y);
+                let line = std::mem::take(&mut items);
+                self.push_aligned(line, line_height, plan, avail, pen, y);
                 line_height = base_height;
                 pen = 0;
             } else {
@@ -378,29 +382,50 @@ impl Layout {
             pen += width;
         }
         if !items.is_empty() {
-            self.push_line(items, line_height, y);
+            self.push_aligned(items, line_height, plan, avail, pen, y);
         }
     }
 
     /// `pre`, whose newlines are the layout and whose overflow is clipped
     /// rather than wrapped, the way `white-space: pre` behaves.
-    fn preformatted(&mut self, block: &Block, plan: &Plan, y: &mut i32) {
+    fn preformatted(&mut self, block: &Block, plan: &Plan, avail: u32, y: &mut i32) {
         let line_height = text::line_height(plan.style);
         for line in block.text().lines() {
+            let mut used = 0;
             let items = if line.trim().is_empty() {
                 Vec::new()
             } else {
+                used = text::width(line, plan.style);
                 vec![Fragment {
                     x: (plan.indent + PAGE_PAD) as i32,
-                    width: text::width(line, plan.style),
+                    width: used,
                     text: line.to_string(),
                     style: plan.style,
                     link: None,
                     underline: false,
                 }]
             };
-            self.push_line(items, line_height, y);
+            self.push_aligned(items, line_height, plan, avail, used, y);
         }
+    }
+
+    /// Push a line with its fragments moved to where `text-align` puts them.
+    /// A line is measured left-aligned first, so the shift is one offset
+    /// applied to every fragment rather than a second pass over the words.
+    fn push_aligned(
+        &mut self,
+        mut items: Vec<Fragment>,
+        height: u32,
+        plan: &Plan,
+        avail: u32,
+        used: u32,
+        y: &mut i32,
+    ) {
+        let shift = align_offset(plan.align, avail, used) as i32;
+        for item in &mut items {
+            item.x += shift;
+        }
+        self.push_line(items, height, y);
     }
 
     fn push_line(&mut self, items: Vec<Fragment>, height: u32, y: &mut i32) {
@@ -426,9 +451,20 @@ struct Plan {
     /// by the cascade. `None` is the whole column.
     measure: Option<u32>,
     center: bool,
+    align: Align,
     background: Option<u32>,
     pad: Sides<u32>,
     border: Sides<Edge>,
+}
+
+/// How far into a box of `avail` pixels a line of `used` pixels starts.
+fn align_offset(align: Align, avail: u32, used: u32) -> u32 {
+    let slack = avail.saturating_sub(used);
+    match align {
+        Align::Left => 0,
+        Align::Center => slack / 2,
+        Align::Right => slack,
+    }
 }
 
 fn plan(block: &Block) -> Plan {
@@ -458,6 +494,7 @@ fn plan(block: &Block) -> Plan {
     plan.indent += css.margin_left.unwrap_or(0);
     plan.measure = css.measure;
     plan.center = css.center;
+    plan.align = css.align;
     plan.background = css.background;
     plan.pad = Sides {
         top: css.padding.top.unwrap_or(0),
@@ -491,6 +528,7 @@ fn default_plan(block: &Block) -> Plan {
         preformatted: false,
         measure: None,
         center: false,
+        align: Align::Left,
         background: None,
         pad: Sides::default(),
         border: Sides::default(),
