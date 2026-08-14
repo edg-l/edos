@@ -59,6 +59,41 @@ are separate boxes.
 Colours, font families and sizes, margins, padding, borders — the box model.
 Turns "readable" into "looks close to right".
 
+Where it stands: `css.rs` is the cascade. It reads every `<style>` element and
+every `style=` attribute, matches selectors that are comma-separated descendant
+chains of tag/`.class`/`#id` compounds, orders them by real specificity with
+the inline attribute winning, and computes `color`, `font-size` (px, pt, em,
+rem, `%` and the absolute keywords), `font-weight`, `font-style`,
+`font-family`'s monospace-or-not, `text-decoration`, the vertical and left
+margins, and `display: none`. `doc.rs` carries the computed style onto every
+`Run` and every `Block`, and `view.rs` lets it override the plan the tag alone
+implies — where it says nothing, the reader typography stands.
+
+Three deliberate limits:
+
+- **`@media` and `@supports` are skipped whole**, bodies included. Applying a
+  rule set that is conditional on a viewport this cannot answer for would let a
+  page's mobile rules beat its desktop ones.
+- **A selector using anything not implemented is dropped, not approximated.**
+  `a:hover`, `p[hidden]`, `>` and `*` all refuse to parse, because a selector
+  matched loosely applies far too widely; the failure mode of dropping one is a
+  style that does not appear, which is what an unimplemented property does
+  anyway.
+- **`<link rel=stylesheet>` is not fetched**, so a real site's styling is still
+  absent — `edos.edgl.dev` puts everything in two external files. The hook is
+  `doc::parse`, which would take a fetcher and resolve each `href` against the
+  document's base; `main::load` already does exactly that fetch. Doing it wants
+  `var()` and cascade layers first, since a modern stylesheet expresses most of
+  its colours through custom properties and would otherwise resolve to nothing.
+
+`css.rs` depends on nothing but `std`, so its unit tests run on the host even
+though the crate only links for `x86_64-unknown-edos`:
+`rustc +nightly --edition 2024 --test programs/edos-web/src/css.rs -o /tmp/t && /tmp/t`.
+
+`assets/welcome.html` is installed at `/share/web/welcome.html` and exercises
+exactly this subset, which makes it the page to open when a style stops being
+honoured.
+
 ### Stage 3 — real layout
 
 `taffy` is a pure-Rust flexbox and grid engine with no libc dependency, which is

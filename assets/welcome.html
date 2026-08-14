@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <title>EDOS</title>
+    <style>
+      /* Only what edos-web's CSS subset implements, so this page is also the
+         thing to open when a style stops being honoured. */
+      body { color: #d8dee9; margin-left: 4px }
+      h1 { color: #88c0d0; font-size: 2em }
+      h2 { color: #a3be8c; font-size: 1.25em; margin-top: 20px }
+      p { margin-bottom: 10px }
+      .note { color: #ebcb8b; font-style: italic }
+      .quiet { color: gray; font-size: smaller }
+      code, .mono { font-family: monospace; color: #b48ead }
+      .hidden { display: none }
+      nav a { text-decoration: none; font-weight: bold }
+      @media (min-width: 100em) { p { display: none } }
+    </style>
+  </head>
+  <body>
+    <h1>Welcome to EDOS</h1>
+    <nav><a href="/share/web/welcome.html">Reload</a></nav>
+
+    <p>
+      An x86_64 operating system written in Rust: an SMP preemptive kernel, its
+      own filesystem, a TCP/IP stack, and a userspace window manager.
+    </p>
+    <p class="note">This paragraph is styled by the page, not by the browser.</p>
+    <p class="hidden">If you can read this, display: none is not honoured.</p>
+
+    <h2>Trying things out</h2>
+    <p>
+      Open a page with <code>edos-web URL</code>, or read one from disk with a
+      path. <span class="quiet">Add -d to print it as text instead.</span>
+    </p>
+    <ul>
+      <li>Click a link to follow it; Backspace goes back.</li>
+      <li>Arrows, PageUp and PageDown scroll; q closes the window.</li>
+    </ul>
+    <hr>
+    <p class="mono">/share/web/welcome.html</p>
+  </body>
+</html>

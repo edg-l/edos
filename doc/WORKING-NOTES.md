@@ -7180,3 +7180,49 @@ Three things that are easy to get wrong here and are settled in the code:
   up an outer loan when it releases the inner lock. Paying for the exact case
   costs the holder a list of what it holds, on the path where the uncontended
   cost is the thing that matters.
+
+## `edos-web` has a cascade, and its unit tests run on the host (2026-08-15)
+
+Stage 2 of `doc/design/browser.md` is in `programs/edos-web/src/css.rs`: a
+stylesheet parser, a selector matcher, and a cascade that lands on every `Run`
+and every `Block` as a `Computed`. `view.rs` lets it override the plan a tag
+implies but only where the document said something, so a page with no CSS is
+set exactly as it was before.
+
+**The tests run on the host even though the crate cannot.** `cargo test -p
+edos-web` builds an `x86_64-unknown-edos` binary and then executes it, which
+SIGSEGVs on the host — the same trap any program in this workspace hits, and
+the reason `sshd`'s test modules are never run by a plain `cargo test`. But
+`css.rs` depends on nothing outside `std`, so it can be compiled as its own
+test crate:
+
+```
+rustc +nightly --edition 2024 --test programs/edos-web/src/css.rs -o ~/.cache/csstest && ~/.cache/csstest
+```
+
+That is worth reaching for on any userspace module that is pure logic. It needs
+no `+edos` toolchain and runs in under a second, which makes it a far tighter
+loop than a guest boot for anything decidable from the input alone.
+
+**Three decisions in the parser that look like gaps and are not.** `@media`
+and `@supports` bodies are skipped whole, because applying rules conditional on
+a viewport this cannot answer for lets a page's mobile rules beat its desktop
+ones. A selector containing `:`, `[`, `>`, `+`, `~` or `*` is dropped rather
+than matched loosely, since a `p[hidden]` matched as `p` restyles the whole
+document. And an unparseable value — `var()` above all — leaves the inherited
+one standing rather than falling back to a default the page never asked for.
+
+**What this does not do is fetch `<link rel=stylesheet>`**, which is why
+`edos.edgl.dev` still renders unstyled: Astro emits two external files and
+nothing inline. That is a deliberate stopping point rather than an oversight.
+A modern stylesheet expresses nearly all of its colour through custom
+properties, so fetching one without `var()` support would resolve most
+declarations to nothing while its `display` rules still applied — strictly
+worse than ignoring it. `var()` and cascade layers come first; the fetch hook
+is `doc::parse` taking a fetcher, and `main::load` already performs that fetch.
+
+`assets/welcome.html` is installed at `/share/web/welcome.html` by the
+`filesystem` target and uses only the implemented subset, so it is both the
+demo page and the regression fixture: open it with `edos-web
+/share/web/welcome.html` and every styled element in it should differ visibly
+from the reader defaults.

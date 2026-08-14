@@ -458,7 +458,7 @@ clean-sata:
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
 # silently creates a single directory with the braces in its name instead.
-FILESYSTEM_DIRS := bin boot dev etc home home/edos lib var mnt opt root sys tmp share share/fonts share/wallpapers share/icons share/sounds
+FILESYSTEM_DIRS := bin boot dev etc home home/edos lib var mnt opt root sys tmp share share/fonts share/wallpapers share/icons share/sounds share/web
 
 .PHONY: publish
 # Build the package archives, write the index and sign it. Needs the repository
@@ -501,6 +501,7 @@ $(SOUNDS): scripts/mksounds.py
 filesystem: $(WALLPAPERS) $(SOUNDS)
 	mkdir -p filesystem $(addprefix filesystem/,$(FILESYSTEM_DIRS))
 	cp -u assets/edos.svg filesystem/share/icons/edos.svg
+	cp -u assets/welcome.html filesystem/share/web/welcome.html
 	@for pair in $(FONT_COPIES); do \
 		src=$${pair%%:*}; dst=$${pair##*:}; \
 		if [ -f "$$src" ]; then \

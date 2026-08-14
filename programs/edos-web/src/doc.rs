@@ -10,6 +10,8 @@ use edos_http::url::Url;
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
+use crate::css::{Computed, Element, Stylesheet};
+
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockKind {
@@ -44,12 +46,19 @@ pub struct Run {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    /// What the document's own CSS asked for, which overrides all three flags
+    /// above wherever it says anything.
+    pub css: Computed,
 }
 
 #[derive(Clone, Debug)]
 pub struct Block {
     pub kind: BlockKind,
     pub runs: Vec<Run>,
+    /// The style of the element that opened the block, for the properties that
+    /// belong to a box rather than to a run: its margins, and the colour and
+    /// size its runs inherit.
+    pub css: Computed,
 }
 
 impl Block {
@@ -79,12 +88,21 @@ impl Document {
     }
 }
 
+/// The font size relative lengths and the absolute keywords resolve against.
+const ROOT_PX: u32 = edos_render::font::size::BODY;
+
 /// Parse `html` as a document fetched from `base`.
 pub fn parse(html: &[u8], base: Url) -> Document {
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
         .read_from(&mut &html[..])
         .expect("reading from a slice cannot fail");
+
+    // The sheet has to be whole before the first element is styled, and a
+    // `<style>` may sit anywhere in the document, so collecting it is its own
+    // pass rather than something the walk picks up as it goes.
+    let mut sheet = Stylesheet::default();
+    collect_styles(&dom.document, &mut sheet);
 
     let mut builder = Builder {
         base,
@@ -95,6 +113,10 @@ pub fn parse(html: &[u8], base: Url) -> Document {
         style: Style::default(),
         lists: Vec::new(),
         pre: false,
+        sheet,
+        stack: Vec::new(),
+        computed: Computed::default(),
+        block_css: Computed::default(),
     };
     builder.walk(&dom.document);
     builder.flush();
@@ -128,6 +150,14 @@ struct Builder {
     style: Style,
     lists: Vec<List>,
     pre: bool,
+    sheet: Stylesheet,
+    /// The open elements, innermost last, which is what a selector matches
+    /// against.
+    stack: Vec<Element>,
+    /// The style of the innermost open element.
+    computed: Computed,
+    /// The style of the element that opened the block being built.
+    block_css: Computed,
 }
 
 impl Builder {
@@ -156,13 +186,33 @@ impl Builder {
                     return;
                 }
 
+                self.stack.push(element_context(node, &tag));
+                let saved_computed = self.computed;
+                self.computed = self.sheet.cascade(
+                    &self.stack,
+                    attr(node, "style").as_deref(),
+                    &saved_computed,
+                    ROOT_PX,
+                );
+                // A hidden element contributes nothing, subtree included, and
+                // must not even open a block: `display: none` on a page's
+                // navigation is the difference between a document and a
+                // document with its menu spilled across the top of it.
+                if self.computed.hidden {
+                    self.stack.pop();
+                    self.computed = saved_computed;
+                    return;
+                }
+
                 let saved_style = self.style.clone();
                 let saved_pre = self.pre;
+                let saved_block_css = self.block_css;
                 let block = block_kind(&tag);
 
                 if let Some(kind) = block {
                     self.flush();
                     self.kind = kind;
+                    self.block_css = self.computed;
                 }
                 match tag {
                     local_name!("ul") => self.lists.push(List {
@@ -209,6 +259,9 @@ impl Builder {
                 }
                 self.style = saved_style;
                 self.pre = saved_pre;
+                self.block_css = saved_block_css;
+                self.computed = saved_computed;
+                self.stack.pop();
             }
             _ => {
                 for child in node.children.borrow().iter() {
@@ -276,12 +329,14 @@ impl Builder {
 
     fn append(&mut self, text: &str) {
         let style = self.style.clone();
+        let css = self.computed;
         match self.runs.last_mut() {
             Some(run)
                 if run.link == style.link
                     && run.bold == style.bold
                     && run.italic == style.italic
-                    && run.code == style.code =>
+                    && run.code == style.code
+                    && run.css == css =>
             {
                 run.text.push_str(text)
             }
@@ -291,6 +346,7 @@ impl Builder {
                 bold: style.bold,
                 italic: style.italic,
                 code: style.code,
+                css,
             }),
         }
     }
@@ -299,10 +355,12 @@ impl Builder {
     fn flush(&mut self) {
         let runs = std::mem::take(&mut self.runs);
         let kind = std::mem::replace(&mut self.kind, BlockKind::Paragraph);
+        let css = self.block_css;
         if kind == BlockKind::Rule {
             self.blocks.push(Block {
                 kind,
                 runs: Vec::new(),
+                css,
             });
             return;
         }
@@ -311,7 +369,7 @@ impl Builder {
             return;
         }
         runs.retain(|r| !r.text.is_empty());
-        self.blocks.push(Block { kind, runs });
+        self.blocks.push(Block { kind, runs, css });
     }
 }
 
@@ -373,6 +431,38 @@ fn block_kind(tag: &html5ever::LocalName) -> Option<BlockKind> {
         | local_name!("body") => BlockKind::Paragraph,
         _ => return None,
     })
+}
+
+/// What a selector can ask about an element: its tag, its id, its classes.
+fn element_context(node: &Handle, tag: &html5ever::LocalName) -> Element {
+    Element {
+        tag: tag.to_string(),
+        id: attr(node, "id").map(|id| id.trim().to_string()),
+        classes: attr(node, "class")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+/// Every `<style>` element's text, wherever in the document it sits.
+fn collect_styles(node: &Handle, sheet: &mut Stylesheet) {
+    if let NodeData::Element { name, .. } = &node.data
+        && name.local == local_name!("style")
+    {
+        let mut source = String::new();
+        for child in node.children.borrow().iter() {
+            if let NodeData::Text { contents } = &child.data {
+                source.push_str(&contents.borrow());
+            }
+        }
+        sheet.add(&source);
+        return;
+    }
+    for child in node.children.borrow().iter() {
+        collect_styles(child, sheet);
+    }
 }
 
 fn attr(node: &Handle, name: &str) -> Option<String> {

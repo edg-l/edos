@@ -29,8 +29,11 @@ pub struct Fragment {
     pub width: u32,
     pub text: String,
     pub style: Style,
-    /// Index into [`Layout::links`], for the colour and, later, the click.
+    /// Index into [`Layout::links`], for the colour and the click.
     pub link: Option<usize>,
+    /// Whether a rule is drawn under the text, which is a link's default and
+    /// what `text-decoration` overrides.
+    pub underline: bool,
 }
 
 /// One laid-out line: the fragments sharing a baseline, or a horizontal rule.
@@ -58,6 +61,7 @@ struct Word {
     text: String,
     style: Style,
     link: Option<usize>,
+    underline: bool,
     /// True when no space separates this word from the one before it, which is
     /// what `<b>bold</b>face` gives.
     glued: bool,
@@ -98,6 +102,7 @@ impl Layout {
                 text: text.clone(),
                 style: plan.style,
                 link: None,
+                underline: false,
             });
 
             let start = out.lines.len();
@@ -157,6 +162,9 @@ impl Layout {
                     }
                 }
             });
+            // A link is underlined unless the document says otherwise, so
+            // emphasis is not carried by colour alone.
+            let underline = run.css.underline.unwrap_or(link.is_some());
             let leading = run.text.starts_with(char::is_whitespace);
             let mut first = true;
             for word in run.text.split_whitespace() {
@@ -164,6 +172,7 @@ impl Layout {
                     text: word.to_string(),
                     style,
                     link,
+                    underline,
                     glued: first && !leading && !space_pending,
                 });
                 first = false;
@@ -178,9 +187,13 @@ impl Layout {
 
     /// Greedy wrap: place words until one does not fit, then start a line.
     fn flow(&mut self, words: Vec<Word>, plan: &Plan, avail: u32, y: &mut i32) {
-        let line_height = text::line_height(plan.style);
+        let base_height = text::line_height(plan.style);
         let mut items: Vec<Fragment> = Vec::new();
         let mut pen = 0u32;
+        // The tallest word on the line sets its height. CSS can put a size on
+        // a span, and a line measured from the block's own style alone would
+        // then overlap the one above it.
+        let mut line_height = base_height;
 
         for word in words {
             let width = text::width(&word.text, word.style);
@@ -193,16 +206,19 @@ impl Layout {
             // cut: a URL broken across lines is worse than a ragged edge.
             if !items.is_empty() && pen + gap + width > avail {
                 self.push_line(std::mem::take(&mut items), line_height, y);
+                line_height = base_height;
                 pen = 0;
             } else {
                 pen += gap;
             }
+            line_height = line_height.max(text::line_height(word.style));
             items.push(Fragment {
                 x: (plan.indent + PAGE_PAD + pen) as i32,
                 width,
                 text: word.text,
                 style: word.style,
                 link: word.link,
+                underline: word.underline,
             });
             pen += width;
         }
@@ -225,6 +241,7 @@ impl Layout {
                     text: line.to_string(),
                     style: plan.style,
                     link: None,
+                    underline: false,
                 }]
             };
             self.push_line(items, line_height, y);
@@ -253,6 +270,34 @@ struct Plan {
 }
 
 fn plan(block: &Block) -> Plan {
+    let mut plan = default_plan(block);
+    // The document's own CSS wins over the plan the tag alone implies, but
+    // only where it said something: a page that sets nothing keeps the reader
+    // typography, which is the whole reason the defaults exist.
+    let css = &block.css;
+    if let Some(color) = css.color {
+        plan.style.color = color;
+    }
+    if let Some(px) = css.font_px {
+        plan.style.px = px;
+    }
+    if css.bold == Some(true) {
+        plan.style.weight = Weight::Semibold;
+    }
+    if css.mono == Some(true) {
+        plan.style.family = Family::Mono;
+    }
+    if let Some(top) = css.margin_top {
+        plan.gap_before = top;
+    }
+    if let Some(bottom) = css.margin_bottom {
+        plan.gap_after = bottom;
+    }
+    plan.indent += css.margin_left.unwrap_or(0);
+    plan
+}
+
+fn default_plan(block: &Block) -> Plan {
     let text_color = Theme::DEFAULT.text_primary.raw();
     let base = Plan {
         style: Style::new(text_color),
@@ -312,6 +357,34 @@ fn heading_px(level: u8) -> u32 {
 }
 
 fn run_style(run: &Run, base: Style) -> Style {
+    let mut style = tag_style(run, base);
+    let css = &run.css;
+    if css.mono == Some(true) {
+        style.family = Family::Mono;
+    } else if css.mono == Some(false) {
+        style.family = Family::Sans;
+    }
+    match css.bold {
+        Some(true) => style.weight = Weight::Semibold,
+        Some(false) => style.weight = Weight::Regular,
+        None => {}
+    }
+    if let Some(px) = css.font_px {
+        style.px = px;
+    }
+    // The theme has no italic face, so CSS italic borrows the accent colour on
+    // the same terms `<em>` does, and only where the run is not already saying
+    // something with weight or with a colour of its own.
+    if css.italic == Some(true) && style.weight == Weight::Regular && css.color.is_none() {
+        style.color = Theme::DEFAULT.title_accent.raw();
+    }
+    if let Some(color) = css.color {
+        style.color = color;
+    }
+    style
+}
+
+fn tag_style(run: &Run, base: Style) -> Style {
     let mut style = base;
     if run.code {
         style.family = Family::Mono;
@@ -361,8 +434,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         }
         for item in &line.items {
             text::draw(&mut surface, item.x, y, &item.text, item.style);
-            if item.link.is_some() {
-                // Underlined, so a link is not carried by colour alone.
+            if item.underline {
                 let underline = y + line.height as i32 - 3;
                 fill(
                     surface.pixels,

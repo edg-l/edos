@@ -8,6 +8,7 @@ use std::{env, fs, io::Write as _, process};
 
 use edos_http::{Options, url::Url};
 
+mod css;
 mod doc;
 mod text;
 mod ui;
