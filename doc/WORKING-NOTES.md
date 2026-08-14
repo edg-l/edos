@@ -6542,3 +6542,42 @@ this, so the flag is not optional.
 and `strtod`. Everything goes through a C library function rather than a raw
 syscall, because the point is that newlib's own machinery works on top of the
 stubs.
+
+
+## Where EDOS could be novel (2026-08-15)
+
+`doc/design/kernel-architecture.md` answers the standing "are we building a
+worse Linux" question with evidence rather than taste. Three findings are worth
+repeating here because they change what work is worth doing.
+
+**EDOS is already spawn-first and `fork` is nearly vestigial.** 34 `spawn` call
+sites against 16 `fork`, and 13 of the 16 are tests and benchmarks. The only
+real users are `edos-sh` (background jobs, subshells) and `strace`. `edos-init`
+uses `spawn` exclusively, and `SYS_SPAWN2` has `posix_spawn`'s shape. Deleting
+`fork` would remove COW, the whole class the 2026-08-15 COW bug came from, and
+the open pgid-inheritance defect, in exchange for two shell features. Nobody had
+written down that this design position was already half taken.
+
+**Adopting Linux's ABI is not what makes a clone.** Asterinas is Rust, x86-64,
+over 100K lines — EDOS's scale — and is *fully* Linux ABI-compatible with 210+
+syscalls, while being nobody's idea of a copy, because its novelty is structural:
+a framekernel with an intra-kernel privilege boundary and a memory-safety TCB of
+14.0% of the codebase. Against EDOS's **824 `unsafe` occurrences in 50,016
+kernel lines**, that is also the sharpest available critique of this kernel.
+
+**The scheduler is the best novelty target, and the reason is one sentence:**
+everything worth conceding is ABI, and the scheduler is the largest thing in the
+kernel that is not. Errno numbers and struct layouts are compatibility surface;
+scheduling policy is invisible across the syscall boundary, so being different
+there costs no software. `doc/SCHED-ROADMAP.md` already names four measured
+defects and `switchbench` plus `/proc/sched_prof` already exist to judge a fix.
+sched_ext and ghOSt made pluggable scheduling mainstream, and both are
+constrained in ways EDOS is not — sched_ext by having to coexist with EEVDF and
+live inside the BPF verifier.
+
+One thing found while reading: **OSDI '25 and SOSP '25 are dominated by
+datacenter and LLM-serving work** — GPU sharing, inference scheduling, SmartNIC
+offload — almost none of which transfers to a workstation-shaped hobby OS. The
+structural work of 2019–2021 is still the live reading for this project. The
+newest directly relevant hardware lever is user-level interrupts (Intel UINTR),
+which this machine cannot test against.
