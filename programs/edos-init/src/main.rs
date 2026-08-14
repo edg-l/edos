@@ -39,6 +39,13 @@ const MAX_RAPID_FAILURES: u32 = 5;
 /// then picks up.
 const DEFAULT_TZ: &str = "+02:00";
 
+/// The session's home directory, and the user it belongs to. There is no user
+/// database yet, so this single account is the whole of it. Every service
+/// inherits both, and the working directory below, which is how a terminal
+/// opens somewhere other than `/`.
+const HOME: &str = "/home/edos";
+const USER: &str = "edos";
+
 /// How long to wait for a service's devices before giving up and spawning it
 /// anyway. Sized to clear the longest driver initialization on the boot path:
 /// the network driver waits up to 5 s for a DHCP lease, and an input driver
@@ -220,7 +227,18 @@ fn main() {
     // there is no zone database, so this fixed ISO 8601 offset is the whole of
     // the system's timezone support; it is inherited by every service and so by
     // the panel clock and anything the shell runs.
-    unsafe { std::env::set_var("TZ", DEFAULT_TZ) };
+    unsafe {
+        std::env::set_var("TZ", DEFAULT_TZ);
+        std::env::set_var("HOME", HOME);
+        std::env::set_var("USER", USER);
+    }
+
+    // The working directory is inherited across spawn, so setting it here is
+    // what puts the session's shell in the home directory. A root that has no
+    // `/home/edos` -- an older installed disk -- keeps the one it booted with.
+    if let Err(e) = std::env::set_current_dir(HOME) {
+        eprintln!("init: {}: {}, staying in /", HOME, e);
+    }
 
     let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
     let control = Control::new(&names);

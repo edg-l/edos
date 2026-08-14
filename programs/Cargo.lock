@@ -2178,6 +2178,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "which"
+version = "0.1.0"
+
+[[package]]
 name = "whoami"
 version = "0.1.0"
 dependencies = [

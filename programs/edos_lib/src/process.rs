@@ -433,20 +433,19 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    /// Spawn a shell connected via a PTY.
+    /// Spawn a program on the far end of a PTY.
     ///
     /// # Arguments
-    /// * `shell_path` - Path to the shell executable (e.g., "/bin/sh")
+    /// * `path` - Path to the executable (e.g., "/bin/sh")
+    /// * `args` - Arguments after argv[0]
     ///
     /// # Returns
     /// A ChildProcess on success, or None on error.
-    pub fn spawn_shell(shell_path: &str) -> Option<Self> {
+    pub fn spawn_shell(path: &str, args: &[&str]) -> Option<Self> {
         let (master_fd, slave_fd) = openpty()?;
 
         let pid = spawn_with_env(
-            shell_path,
-            &[],
-            slave_fd, // shell's stdin
+            path, args, slave_fd, // shell's stdin
             slave_fd, // shell's stdout
             slave_fd, // shell's stderr
         );

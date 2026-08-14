@@ -24,7 +24,7 @@ impl Default for Config {
         Self {
             port: 22,
             shell: "/bin/sh".to_string(),
-            home: "/".to_string(),
+            home: "/home/edos".to_string(),
             hostkey: "/var/sshd_host_ed25519".to_string(),
             users: Vec::new(),
             verbose: false,

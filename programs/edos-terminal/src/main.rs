@@ -10,7 +10,7 @@ use edos_render::window::{Window, WindowEvent, WindowEventType};
 const TERMINAL_WIDTH: u32 = 640;
 const TERMINAL_HEIGHT: u32 = 480;
 
-/// Shell path to spawn
+/// Shell path to spawn when no command is given on the command line.
 const SHELL_PATH: &str = "/bin/sh";
 
 /// How long a wait may last before the loop runs anyway.
@@ -22,6 +22,16 @@ const PTY_POLL_MS: u64 = 16;
 
 fn main() {
     eprintln!("[terminal] starting");
+
+    // `edos-terminal PROG [ARGS...]` runs that program in the window instead of
+    // a shell, which is how the applications menu reaches a program that draws
+    // with terminal escapes.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (command, command_args) = match argv.split_first() {
+        Some((program, rest)) => (program.as_str(), rest),
+        None => (SHELL_PATH, &[] as &[String]),
+    };
+
     // Create terminal window
     let mut window = match Window::new(100, 100, TERMINAL_WIDTH, TERMINAL_HEIGHT) {
         Ok(w) => w,
@@ -31,7 +41,11 @@ fn main() {
         }
     };
 
-    if let Err(e) = window.set_title("Terminal") {
+    let title = match argv.first() {
+        Some(program) => program.rsplit('/').next().unwrap_or(program),
+        None => "Terminal",
+    };
+    if let Err(e) = window.set_title(title) {
         eprintln!("Failed to set title: {:?}", e);
     }
 
@@ -55,9 +69,10 @@ fn main() {
     }
 
     // Try to spawn the shell
-    let child = match ChildProcess::spawn_shell(SHELL_PATH) {
+    let borrowed: Vec<&str> = command_args.iter().map(String::as_str).collect();
+    let child = match ChildProcess::spawn_shell(command, &borrowed) {
         Some(c) => {
-            println!("[Terminal] Spawned shell (PID: {})", c.pid);
+            println!("[Terminal] Spawned {} (PID: {})", command, c.pid);
             // Publish the grid before anything runs in it, so the first
             // full-screen program to start already knows the real size.
             let _ = edos_lib::io::set_winsize(
@@ -68,7 +83,7 @@ fn main() {
             Some(c)
         }
         None => {
-            eprintln!("[Terminal] Failed to spawn shell at {}", SHELL_PATH);
+            eprintln!("[Terminal] Failed to spawn {}", command);
             // Continue running even without a shell for testing
             terminal.write_str("EDOS Terminal\n");
             terminal.write_str("Shell not available. Type to echo.\n");

@@ -36,7 +36,10 @@ const RULE_GAP: i32 = 6;
 /// What a row does when it is chosen.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Item {
-    Launch(&'static str),
+    /// A program and the arguments it is launched with. The arguments are not
+    /// decoration: a viewer or a player with no file, and a terminal program
+    /// with no terminal, are menu entries that do nothing when chosen.
+    Launch(&'static str, &'static [&'static str]),
     PowerOff,
     Restart,
     Halt,
@@ -52,27 +55,48 @@ struct Row {
 /// actions belong where the hand does not land by accident.
 const ROWS: &[Row] = &[
     Row {
-        item: Item::Launch("/bin/edos-terminal"),
+        item: Item::Launch("/bin/edos-terminal", &[]),
         label: "Terminal",
         icon: &icons::TERMINAL,
     },
     Row {
-        item: Item::Launch("/bin/edos-files"),
+        item: Item::Launch("/bin/edos-files", &[]),
         label: "Files",
         icon: &icons::FOLDER,
     },
     Row {
-        item: Item::Launch("/bin/edos-edit"),
+        item: Item::Launch("/bin/edos-edit", &[]),
         label: "Editor",
         icon: &icons::DOCUMENT,
     },
     Row {
-        item: Item::Launch("/bin/edos-grab"),
+        item: Item::Launch("/bin/edos-web", &["https://edos.edgl.dev/"]),
+        label: "Web",
+        icon: &icons::LINK,
+    },
+    Row {
+        item: Item::Launch("/bin/imgview", &["/share/wallpapers/dusk.bmp"]),
+        label: "Images",
+        icon: &icons::FILE,
+    },
+    Row {
+        item: Item::Launch("/bin/play", &["/share/sounds/chime.wav"]),
+        label: "Play a sound",
+        icon: &icons::VOLUME,
+    },
+    Row {
+        // Snake draws with terminal escapes, so it is launched inside one.
+        item: Item::Launch("/bin/edos-terminal", &["/bin/snake"]),
+        label: "Snake",
+        icon: &icons::APPS,
+    },
+    Row {
+        item: Item::Launch("/bin/edos-grab", &[]),
         label: "Packages",
         icon: &icons::DISK,
     },
     Row {
-        item: Item::Launch("/bin/wintest"),
+        item: Item::Launch("/bin/wintest", &[]),
         label: "Widgets",
         icon: &icons::APPS,
     },
@@ -94,7 +118,7 @@ const ROWS: &[Row] = &[
 ];
 
 /// Index of the first power row, which is where the rule goes.
-const FIRST_POWER_ROW: usize = 5;
+const FIRST_POWER_ROW: usize = 9;
 
 /// Prefix on every line of a menu dump, so a host-side reader can pick the
 /// block out of an interleaved serial log.
@@ -304,8 +328,8 @@ impl Menu {
             // not leave a menu painted over the last frame.
             self.close();
             match item {
-                Item::Launch(path) => {
-                    let _ = spawn(path, &[], 0, 1, 2);
+                Item::Launch(path, args) => {
+                    let _ = spawn(path, args, 0, 1, 2);
                 }
                 Item::PowerOff => {
                     let _ = reboot(REBOOT_POWER_OFF);

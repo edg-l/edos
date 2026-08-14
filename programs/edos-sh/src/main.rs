@@ -928,7 +928,7 @@ fn main() {
             std::env::set_var("PATH", "/bin");
         }
         if std::env::var("HOME").is_err() {
-            std::env::set_var("HOME", "/");
+            std::env::set_var("HOME", "/home/edos");
         }
         if std::env::var("PWD").is_err() {
             if let Ok(cwd) = std::env::current_dir() {

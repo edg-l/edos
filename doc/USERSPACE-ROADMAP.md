@@ -15,10 +15,11 @@
 | Archives | `tar` (ustar create, list and extract), `gzip` and `gunzip` |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch`, `keymap` |
+| System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch`, `keymap`, `which` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format), `fsck` (in-guest EFS check of an unmounted device) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat`, `sshd` |
 | Packages | `grab` (the package manager, lib + CLI), `edos-grab` (its GUI) |
+| Web | `edos-web` (fetches a URL, parses the HTML, lays it out in a window, follows links) |
 | Audio | `play` |
 | Images | `imgview` (BMP and SVG viewer) |
 | Games | `snake` |
@@ -362,6 +363,13 @@ the face lacks draws nothing and the tree's chevrons are icons.
 
 Item 4 is closed. `edos-vi` stays: it is the only editor that works over ssh
 and on a serial console.
+
+The menu now also reaches `edos-web`, `imgview`, `play` and `snake`. Getting
+there needed two things beyond four more rows, both recorded in
+`doc/WORKING-NOTES.md`: launch arguments on a menu entry, because a viewer or a
+player with no file only prints its usage, and `edos-terminal PROG [ARGS...]`,
+because a program that draws with terminal escapes has no terminal when the
+panel spawns it.
 
 ### 5. A way to get software onto the machine
 
