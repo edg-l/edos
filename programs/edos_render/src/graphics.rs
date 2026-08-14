@@ -1487,6 +1487,35 @@ pub struct Screen {
     /// instead means VRAM is only ever written by the short copy in
     /// `publish`, immediately before the region is handed to the display.
     shadow: Vec<u32>,
+    /// What the page that is currently the back one has not been given yet,
+    /// beyond whatever the next partial flip publishes.
+    ///
+    /// A partial publish writes into whichever page is back at the time, so on
+    /// a flipping display each page only ever receives the rectangles sent
+    /// while it held that role: the page about to be shown is a frame behind,
+    /// missing what the previous frame published as well as what this one does.
+    /// Publishing the union brings it level. Without it a client that paints
+    /// once and never again lands on one page and not the other, and appears or
+    /// does not depending on which page the first flip happens to show. It
+    /// starts as the whole screen because a page nothing has been published to
+    /// is missing all of it.
+    pending_for_back_page: (u32, u32, u32, u32),
+}
+
+/// The smallest rectangle covering both, with an empty one contributing
+/// nothing rather than pulling the result to the origin.
+fn union_rect(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    if a.2 == 0 || a.3 == 0 {
+        return b;
+    }
+    if b.2 == 0 || b.3 == 0 {
+        return a;
+    }
+    let x = a.0.min(b.0);
+    let y = a.1.min(b.1);
+    let right = (a.0 + a.2).max(b.0 + b.2);
+    let bottom = (a.1 + a.3).max(b.1 + b.3);
+    (x, y, right - x, bottom - y)
 }
 
 impl Screen {
@@ -1506,6 +1535,7 @@ impl Screen {
             pitch_pixels,
             clip: None,
             shadow: vec![0; info.width * info.height],
+            pending_for_back_page: (0, 0, info.width as u32, info.height as u32),
         })
     }
 
@@ -1532,6 +1562,7 @@ impl Screen {
                     pitch_pixels,
                     clip: None,
                     shadow: Vec::new(),
+                    pending_for_back_page: (0, 0, info.width as u32, info.height as u32),
                 })
             }
         }
@@ -1805,7 +1836,11 @@ impl Screen {
 
     /// Flip the display (full screen transfer).
     pub fn flip(&mut self) {
-        self.publish(0, 0, self.info.width as u32, self.info.height as u32);
+        let (w, h) = (self.info.width as u32, self.info.height as u32);
+        self.publish(0, 0, w, h);
+        // The page this one replaces has everything except the frame just
+        // published, whatever it had before.
+        self.pending_for_back_page = (0, 0, w, h);
         let offset = self.framebuffer.flip();
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
@@ -1814,11 +1849,26 @@ impl Screen {
 
     /// Flip only a dirty rectangle (partial transfer).
     pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        self.publish(x, y, w, h);
-        let offset = self.framebuffer.flip_rect(x, y, w, h);
+        // On a flipping display the page being written is a frame behind; see
+        // `pending_for_back_page`. On a single-buffered one there is only ever
+        // the one buffer and the rectangle is exactly what changed.
+        let (px, py, pw, ph) = if self.double_buffered() {
+            union_rect(self.pending_for_back_page, (x, y, w, h))
+        } else {
+            (x, y, w, h)
+        };
+        self.publish(px, py, pw, ph);
+        self.pending_for_back_page = (x, y, w, h);
+        let offset = self.framebuffer.flip_rect(px, py, pw, ph);
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
         }
+    }
+
+    /// Whether the display alternates between two pages rather than scanning
+    /// out one buffer.
+    pub fn double_buffered(&self) -> bool {
+        self.vram.as_ref().is_some_and(|vram| vram.double_buffered)
     }
 
     /// Set hardware cursor image. Returns true if supported.
