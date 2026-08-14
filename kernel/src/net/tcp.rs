@@ -638,6 +638,21 @@ impl TcpConnection {
         Some(seg)
     }
 
+    /// Delete a connection nobody is waiting on any more.
+    ///
+    /// A close from a state with no FIN to send — a handshake still outstanding
+    /// is the reachable one — has no graceful shutdown available, and RFC 793
+    /// section 3.5 deletes the TCB. Leaving it alone instead means the stack
+    /// keeps retransmitting a SYN on behalf of a descriptor that is gone, and
+    /// the entry only disappears when that budget runs out.
+    pub fn abort(&mut self) {
+        if self.state != TcpState::Closed {
+            self.retransmit_queue.clear();
+            self.set_state(TcpState::Closed);
+            self.state_wq.wake_all();
+        }
+    }
+
     /// Build data segments for transmission. Respects MSS and send window.
     /// Returns (segments to send, bytes consumed from data).
     pub fn build_data_segments(&mut self, data: &[u8]) -> (Vec<Vec<u8>>, usize) {

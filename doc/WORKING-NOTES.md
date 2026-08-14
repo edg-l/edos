@@ -87,6 +87,27 @@ nothing.
 
 ---
 
+## A close with no FIN to send has to abort, or the stack talks to nobody
+
+`build_fin` returns `None` from every state that has no graceful shutdown
+available, and an outstanding handshake is the reachable one: a non-blocking
+`connect` that gets `EINPROGRESS` and is then closed. `sys_close` used to drop
+that on the floor, so the connection stayed `SYN_SENT` and the stack went on
+retransmitting a SYN for a descriptor that no longer existed. `netstat` showed
+the entry for as long as the retransmit budget lasted — five retries, about half
+a minute — because the cleanup sweep only reaps `Closed` and expired `TimeWait`.
+
+`TcpConnection::abort` is the RFC 793 §3.5 "delete the TCB" half: clear the
+retransmit queue, go to `Closed`, wake anything parked on the state. `sys_close`
+calls it exactly when `build_fin` declines, so the sweep collects the entry on
+its next pass instead of the timeout doing it.
+
+The measurement is `socktest` followed immediately by `netstat`: the suite
+deliberately connects to an address nothing answers, so a `SYN_SENT` row
+surviving that pair is the defect and an empty table is the fix.
+
+---
+
 ## TCP over loopback had never once worked, and non-blocking connect found it
 
 `sys_connect` honours `O_NONBLOCK` now: it returns `EINPROGRESS` as soon as the

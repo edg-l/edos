@@ -664,16 +664,25 @@ pub fn sys_close(fd: u64) -> i32 {
                 crate::net::socket::unbind_port(&sock, key);
             }
             notif.flush();
-            // For TCP sockets, send FIN to initiate graceful close
+            // For TCP sockets, send FIN to initiate graceful close. A state
+            // with no FIN to send — an outstanding handshake is the reachable
+            // one — is aborted instead, so the cleanup sweep collects it rather
+            // than the stack retransmitting for a descriptor that is gone.
             if let Some(conn) = tcp_conn {
                 let fin = conn.lock().build_fin();
-                if let Some(fin_seg) = fin {
-                    let remote_ip = conn.lock().remote_ip;
-                    if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
-                        let mut stack = stack_mutex.lock();
-                        let _ =
-                            stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
+                match fin {
+                    Some(fin_seg) => {
+                        let remote_ip = conn.lock().remote_ip;
+                        if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                            let mut stack = stack_mutex.lock();
+                            let _ = stack.send_ip(
+                                remote_ip,
+                                crate::net::ipv4::IpProtocol::Tcp,
+                                &fin_seg,
+                            );
+                        }
                     }
+                    None => conn.lock().abort(),
                 }
             }
             0
