@@ -342,8 +342,18 @@ instruction. The two paths stop sharing one representation, which is the part
 to design carefully — `Thread::ctx` is read by work-stealing and by
 `validate_ctx`, and both need to know which kind they are looking at.
 
-Worth: the 36 ns of `CpuContext` copies plus the `iretq` and the frame build,
-so a large fraction of the ~190 ns the switch costs.
+**Re-measured 2026-08-14, and this item is smaller than it reads.** The "36 ns
+of `CpuContext` copies" is two stages that price at 23.9 and 8.4 ns/call, of
+which ~8 is each stage's own probe — so the copies are ~16 ns, and the save side
+is free. The FPU pair in the same table is ~74. Skipping the reload when the
+registers already hold the incoming thread took `sched_yield` from 292 to 252 ns
+without touching any of this machinery; see the section on it below.
+
+What is left for this item is the `iretq`, the frame build and nine register
+saves nobody reads — real, unmeasured, and against the highest risk in the tree,
+since `Thread::ctx` is read by work-stealing and `validate_ctx`. Price the
+`iretq` on its own before starting: if a kernel-to-kernel `iretq` is ~30 ns
+here, the whole item is ~45, which does not obviously justify two saved forms.
 
 Reference: <https://kernel-internals.org/sched/context-switch/>
 
