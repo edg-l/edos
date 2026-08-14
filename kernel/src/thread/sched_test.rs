@@ -16,7 +16,7 @@ use crate::{
             thread_park, thread_park_while, thread_sleep, thread_yield,
         },
         thread::{ThreadId, get_thread_weak},
-        util::{queue_spawn_kthread_affine, queue_spawn_kthread_named_arg},
+        util::{pick_sched_filtered, queue_spawn_kthread_affine, queue_spawn_kthread_named_arg},
         waitqueue::WaitQueue,
     },
     timer::Instant,
@@ -96,9 +96,14 @@ struct TestHarness {
     // handshake cell the waker reads its tid from
     affinity_target_cpu: u32,
     affinity_tid: AtomicU64,
+    // load metric: how many pinned threads have reached their park, how many
+    // pinned spinners are running, and the release the spinners wait for
+    load_parkers_ready: AtomicU32,
+    load_spinners_ready: AtomicU32,
+    load_check_done: AtomicBool,
 }
 
-const TOTAL_TESTS: u32 = 51;
+const TOTAL_TESTS: u32 = 52;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -146,6 +151,9 @@ pub fn run_sched_tests() {
         // one whenever the machine has more than one.
         affinity_target_cpu: SCHEDULERS.read().keys().copied().max().unwrap_or(0),
         affinity_tid: AtomicU64::new(0),
+        load_parkers_ready: AtomicU32::new(0),
+        load_spinners_ready: AtomicU32::new(0),
+        load_check_done: AtomicBool::new(false),
     });
 
     // --- Basic tests (8) ---
@@ -231,6 +239,9 @@ pub fn run_sched_tests() {
             1u32 << harness.affinity_target_cpu,
         );
     }
+
+    // Load metric: threads parked on one CPU must not repel work from it (1)
+    spawn_test(&harness, "test-load-parked", test_load_parked);
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -1143,6 +1154,137 @@ extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
     );
 
     test_done(&h, "compute-across-yields");
+    thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Load: a parked thread is not load
+//
+// A CPU's load has to describe the work waiting on it, not the threads that
+// happen to call it home. `LOAD_PARKERS` threads pinned to one CPU and parked
+// there are runnable nowhere and cost that CPU nothing, so it is a *better*
+// place for new work than a CPU with a handful of threads actually running.
+//
+// The comparison is between two CPUs this test owns the contents of, which is
+// what makes it deterministic: asking instead whether the parked CPU wins
+// placements outright depends on what the rest of the suite is doing on every
+// other CPU at that moment, and it legitimately loses to an idle one.
+// ---------------------------------------------------------------------------
+
+/// Enough that a metric counting membership cannot mistake the parked CPU for
+/// the emptier of the two.
+const LOAD_PARKERS: u32 = 32;
+/// Real, runnable work on the CPU the parked one is compared against.
+const LOAD_SPINNERS: u32 = 6;
+/// Ceiling on how long a spinner holds its CPU if the checker never releases
+/// it, so a failure elsewhere cannot leave the suite burning a core.
+const LOAD_SPIN_LIMIT_MS: u64 = 5_000;
+
+extern "C" fn test_load_parked(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Two CPUs to compare. `parked_cpu` is the highest lapic id and `busy_cpu`
+    // the next one down; a single-CPU boot has no comparison to make and
+    // checks only the quantity.
+    let mut cpus: heapless::Vec<u32, 128> = SCHEDULERS.read().keys().copied().collect();
+    cpus.sort_unstable();
+    let parked_cpu = cpus.pop().expect("load: no schedulers registered");
+    let busy_cpu = cpus.pop();
+
+    for _ in 0..LOAD_PARKERS {
+        let boxed = Box::into_raw(Box::new(h.clone())) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-load-parker",
+            test_load_parker as *const () as u64,
+            boxed,
+            1u32 << parked_cpu,
+        );
+    }
+
+    while h.load_parkers_ready.load(Ordering::Acquire) < LOAD_PARKERS {
+        thread_yield();
+    }
+    // Readiness is published before the park, so give the last of them time to
+    // reach it. A parker still on its way is runnable and does weigh 1.
+    thread_sleep(Duration::from_millis(20));
+
+    // The quantity itself. The bound is the parker count rather than a small
+    // number because the suite's own threads land on that CPU too; what it must
+    // never report is load that scales with the threads parked on it.
+    let parked_load = cpu_load(parked_cpu);
+    assert!(
+        parked_load < LOAD_PARKERS as u64,
+        "[sched-test] load: cpu {parked_cpu} reports load {parked_load} with {LOAD_PARKERS} \
+         threads parked on it -- load is counting membership, not runnable work"
+    );
+
+    if let Some(busy_cpu) = busy_cpu {
+        for _ in 0..LOAD_SPINNERS {
+            let boxed = Box::into_raw(Box::new(h.clone())) as *mut u8;
+            queue_spawn_kthread_affine(
+                "test-load-spinner",
+                test_load_spinner as *const () as u64,
+                boxed,
+                1u32 << busy_cpu,
+            );
+        }
+        while h.load_spinners_ready.load(Ordering::Acquire) < LOAD_SPINNERS {
+            thread_yield();
+        }
+
+        let parked_load = cpu_load(parked_cpu);
+        let busy_load = cpu_load(busy_cpu);
+        assert!(
+            parked_load < busy_load,
+            "[sched-test] load: cpu {parked_cpu} with {LOAD_PARKERS} threads parked reports \
+             {parked_load}, cpu {busy_cpu} with {LOAD_SPINNERS} running reports {busy_load}"
+        );
+
+        // And the consumer: given only those two, placement must choose the one
+        // with nothing runnable on it.
+        let chosen = pick_sched_filtered(|cpu| cpu == parked_cpu || cpu == busy_cpu)
+            .expect("load: neither cpu is registered")
+            .cpu;
+        assert_eq!(
+            chosen, parked_cpu,
+            "[sched-test] load: placement chose cpu {chosen} over cpu {parked_cpu}, whose \
+             {LOAD_PARKERS} threads are all parked"
+        );
+
+        h.load_check_done.store(true, Ordering::Release);
+    }
+
+    test_done(&h, "load-parked-is-not-load");
+    thread_exit(0);
+}
+
+/// A CPU's runnable load, straight from its scheduler.
+fn cpu_load(cpu: u32) -> u64 {
+    SCHEDULERS
+        .read()
+        .get(&cpu)
+        .expect("load: no scheduler for cpu")
+        .load()
+}
+
+/// Pinned to one CPU and parked there for the rest of the run.
+extern "C" fn test_load_parker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    h.load_parkers_ready.fetch_add(1, Ordering::AcqRel);
+    loop {
+        thread_park_while(|| true);
+    }
+}
+
+/// Pinned to the CPU the parked one is compared against, and runnable for as
+/// long as the comparison takes.
+extern "C" fn test_load_spinner(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    h.load_spinners_ready.fetch_add(1, Ordering::AcqRel);
+    let deadline = Instant::now() + Duration::from_millis(LOAD_SPIN_LIMIT_MS);
+    while !h.load_check_done.load(Ordering::Acquire) && Instant::now() < deadline {
+        core::hint::spin_loop();
+    }
     thread_exit(0);
 }
 

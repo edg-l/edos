@@ -412,6 +412,34 @@ still a trapping MSR write.
   planning around it.** Marking kernel mappings `GLOBAL` took the part of the
   same win that is reachable without it.
 
+## Balance is measured on more than one CPU
+
+The single-CPU rule at the top of this file is about the switch and wake paths.
+It is exactly wrong for placement and rebalancing, where a second CPU is the
+thing under test, and `switchbench` is the wrong instrument for the same reason.
+Read `/proc/sched` (per-CPU `CURRENT QUEUED LOAD STEALS`) and `/proc/processes`
+on a `make run-big` boot instead.
+
+### Done: load is runnable work, not membership (2026-08-14)
+
+`thread_count` counted the threads that called a CPU home and was adjusted only
+on spawn, steal and exit — never on park, sleep or block — so a thread that
+would not run again weighed as much as one spinning flat out, and both
+`pick_sched` and `try_rebalance` balanced that. `Scheduler::load` is now the
+runqueue's length plus the thread running now, republished from the queue itself
+by the two helpers that own every access to it, so a parked thread is in no term
+of it. The steal paths kept no counts at all afterwards.
+
+Watched fail first: 32 threads pinned to one CPU and parked there took **0 of
+16** placements before the change. The gate is the `load-parked-is-not-load`
+sched-test case; `doc/WORKING-NOTES.md` has why its first form was flaky green
+and what replaced it.
+
+Still open in the same area, and now separate defects rather than one: parked
+threads never migrate, so a thread wakes back onto the CPU it parked on; and
+`REBALANCE_THRESHOLD = 2` and `REBALANCE_INTERVAL = 10` are picked numbers that
+nothing has measured against the new quantity.
+
 ## Recently closed
 
 The 2026-08-11 round, in `doc/WORKING-NOTES.md`: the APIC one-shot is re-armed

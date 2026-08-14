@@ -49,7 +49,7 @@ a failure too.
 
 **`make test` leaves a sched-test ISO behind, and it never reaches a desktop.**
 The target rebuilds `edos-x86_64.iso` with `CARGO_FLAGS="--features sched-test"`,
-and that kernel runs the suite and stops: the serial log ends at `ALL 51 TESTS
+and that kernel runs the suite and stops: the serial log ends at `ALL <N> TESTS
 PASSED` and the framebuffer stays black. A `make run-headless` or a
 `storage-check` right afterwards boots *that* ISO, since both take the file as
 already built, and the symptom is a guest that looks hung rather than one that

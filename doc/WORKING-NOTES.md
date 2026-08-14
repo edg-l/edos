@@ -1573,7 +1573,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-15 (negative errno)
+## Counts, remeasured 2026-08-14 (runnable load)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1585,12 +1585,12 @@ does not have to invent them.
 | userspace programs | 118 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 118 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 102,422 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,016 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,340 | `git rev-list --count HEAD` |
-| in-kernel test suite | 51 | `make test AUDIODEV=none` |
+| Rust | 102,533 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,123 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,347 | `git rev-list --count HEAD` |
+| in-kernel test suite | 52 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 152, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 155, of which 14 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
@@ -6581,3 +6581,70 @@ offload — almost none of which transfers to a workstation-shaped hobby OS. The
 structural work of 2019–2021 is still the live reading for this project. The
 newest directly relevant hardware lever is user-level interrupts (Intel UINTR),
 which this machine cannot test against.
+
+
+## A parked thread is not load (2026-08-14)
+
+`Scheduler::thread_count` counted the threads that called a CPU home: `+1` in
+`spawn_thread`, a matched pair across the two steal paths, `-1` on exit, and
+nothing anywhere else. A park, a sleep or a block never touched it, so a thread
+that would not run again for the rest of the boot weighed exactly as much as one
+spinning flat out. Both consumers balanced that: `pick_sched` placed every new
+thread away from a CPU whose threads were all parked, and `try_rebalance` only
+stole toward it once its membership was two below the busiest.
+
+**The measurement came first.** A sched-test case pins 32 threads to the top CPU
+and parks them there. Against the old metric that CPU took **0 of 16**
+placements, and it was watched fail before anything was fixed — the only reason
+the gate is worth having.
+
+That first form of the assertion was also **flaky in the green direction**, and
+the reason generalises. "Does the parked CPU win a placement outright" depends
+on every other CPU in the machine: the parked CPU also hosts the affinity test's
+thread, so it has a unit of real work, and it correctly loses every sample to a
+CPU that happens to be idle. Two runs in three failed that way *with the fix in*.
+What ships instead compares two CPUs the test owns the contents of — 32 parked
+on one against `LOAD_SPINNERS` running on the other — and asserts the parked one
+reports less load and wins a placement restricted to those two. **Write the
+assertion over state the test controls, not over the machine.**
+
+**The fix is a deletion.** `Scheduler::load` is the runqueue's own length plus
+the thread running now, and `queued` is republished from `rq.total_len()` by
+`with_rq` / `with_try_rq` — the two places anything may touch a runqueue. A
+parked or sleeping thread is in neither term because it is in no runqueue, so
+the metric is right by construction rather than by remembering to adjust a tally
+at each of ten state transitions, which is what a second maintained counter
+would have cost. The steal paths lost their bookkeeping entirely: the pop lowers
+the victim and the enqueue raises the thief, both through the same helper.
+`reap_and_schedule` lost its decrement for the same reason.
+
+This is the shape of `WaitQueue::waiters`: a count written under the lock that
+owns the collection and read with no lock at all. It needs none of that fence
+discipline, and the reason is worth stating rather than copying — a stale
+has-waiters read loses a wakeup, while a stale load read is a slightly worse
+placement. Balance decisions are allowed to be wrong; wakeups are not.
+
+`/proc/sched` reports `CURRENT QUEUED LOAD STEALS` per CPU, so the quantity is
+readable from the guest and not only from a test. What an idle desktop looks
+like there is the whole change in one screen — 29 live threads, and:
+
+```
+CPU  CURRENT  QUEUED  LOAD  STEALS
+1    0        0       0     1
+2    0        0       0     2
+3    0        0       0     1
+0    28       0       1     0
+```
+
+Every CPU reports 0 except the one running the `cat`. The old metric would have
+put roughly seven on each of them, which is the number that was deciding where
+new work went.
+
+**Measure balance on more than one CPU.** `doc/SCHED-ROADMAP.md`'s rule that
+every number wants a single-CPU boot is about the switch and wake paths; it is
+exactly wrong here, where a second CPU is the thing under test. `switchbench` is
+the wrong instrument for the same reason.
+
+What this does not fix: a parked thread still does not migrate, so it wakes back
+onto the CPU it parked on. That is now a separate defect about locality rather
+than the same one about placement.

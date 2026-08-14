@@ -336,10 +336,18 @@ change on this side alone.
 
 Beyond affinity (1.2), things that look like the next real improvements:
 
-- **Load is measured as `thread_count`.** A sleeping thread weighs the same as a
-  CPU-bound one, so `pick_sched` and `try_rebalance` balance thread counts
-  rather than load. A runnable-count or decayed-utilization metric would place
-  threads far better for the same complexity.
+- **Load was measured as `thread_count` — FIXED.** A sleeping thread weighed the
+  same as a CPU-bound one, so `pick_sched` and `try_rebalance` balanced
+  membership rather than load. `Scheduler::load` is now the runqueue's own
+  length plus the thread running, with the length republished from the queue by
+  `with_rq` / `with_try_rq` on every access, so a parked or sleeping thread is
+  in neither term. The steal paths lost their transfer bookkeeping with it: the
+  pop lowers the victim and the enqueue raises the thief. `/proc/sched` reports
+  the columns, and the sched-test case `load-parked-is-not-load` pins 32 threads
+  to one CPU and parks them, then asserts that CPU reports less load than one
+  running six threads and takes the placement between the two. A decayed
+  utilisation average is still the better metric and is now an improvement
+  rather than a correction.
 - **No priority inheritance.** The starvation fix bounds how long a low-priority
   lock holder can be passed over, but a high-priority waiter still waits behind
   it. This is the classic reason to add PI to the blocking primitives, and the

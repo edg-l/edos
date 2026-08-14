@@ -142,7 +142,9 @@ pub struct Scheduler {
     /// atomic is for the shared-reference API, not for sharing.
     armed_expiry: AtomicU64,
 
-    pub thread_count: AtomicU64,
+    /// How many threads this CPU's runqueue holds, republished from the queue
+    /// itself every time it is touched. See [`Scheduler::load`].
+    queued: AtomicU64,
 
     has_work: AtomicBool,
     steal_count: AtomicU64,
@@ -165,14 +167,14 @@ impl Scheduler {
                 thread.id.0,
                 state
             );
-            let mut rq = sc.rq.lock();
-            rq.enqueue(thread.clone(), thread.priority(), priority.is_boosted());
+            sc.with_rq(|rq| {
+                rq.enqueue(thread.clone(), thread.priority(), priority.is_boosted());
+            });
             sc.has_work.store(true, Ordering::Release);
             trace_event!(Enqueue {
                 cpu: sc.cpu,
                 tid: thread.id.0
             });
-            drop(rq);
             sc.mark_running_thread_need_resched();
         })
     }
@@ -209,7 +211,7 @@ impl Scheduler {
             current: AtomicU64::new(0),
             default_timeslice: Duration::from_millis(5),
             sleepers: Mutex::new(BinaryHeap::new()),
-            thread_count: AtomicU64::new(0),
+            queued: AtomicU64::new(0),
             earliest_deadline: AtomicU64::new(u64::MAX),
             armed_expiry: AtomicU64::new(0),
             has_work: AtomicBool::new(false),
@@ -217,6 +219,58 @@ impl Scheduler {
             steal_scan_start: AtomicU32::new(0),
             rebalance_tick: AtomicU32::new(0),
         }
+    }
+
+    /// Run `f` against this CPU's runqueue and republish `queued` from the
+    /// queue afterwards.
+    ///
+    /// Every access to `rq` goes through this or [`Scheduler::with_try_rq`],
+    /// which is what makes `queued` a fact about the queue rather than a tally
+    /// somebody has to remember to adjust. A steal needs no bookkeeping at all
+    /// under that rule: the pop lowers the victim and the enqueue raises the
+    /// thief, because both go through here.
+    fn with_rq<R>(&self, f: impl FnOnce(&mut RunQueue) -> R) -> R {
+        let mut rq = self.rq.lock();
+        let out = f(&mut rq);
+        self.queued.store(rq.total_len() as u64, Ordering::Release);
+        out
+    }
+
+    /// [`Scheduler::with_rq`] against a runqueue this CPU does not own, giving
+    /// up rather than waiting. `None` means the lock was held.
+    fn with_try_rq<R>(&self, f: impl FnOnce(&mut RunQueue) -> R) -> Option<R> {
+        let mut rq = self.rq.try_lock()?;
+        let out = f(&mut rq);
+        self.queued.store(rq.total_len() as u64, Ordering::Release);
+        Some(out)
+    }
+
+    /// Runnable work on this CPU: what is waiting in the runqueue, plus the
+    /// thread running now.
+    ///
+    /// This is what placement and rebalancing balance, and it deliberately
+    /// counts *runnable* threads rather than the threads that call this CPU
+    /// home. A parked or sleeping thread is in no runqueue and is not running,
+    /// so it weighs nothing — which is the point. Counting membership instead
+    /// lets a CPU whose threads are all parked look like the busiest one in the
+    /// machine and repel every new thread from it.
+    ///
+    /// Read without a lock and therefore already stale by the time it is used.
+    /// That is fine here in a way it is not for a wakeup: a balance decision
+    /// taken against a count one tick old is a slightly worse placement, not a
+    /// thread nobody runs.
+    pub fn load(&self) -> u64 {
+        self.queued.load(Ordering::Acquire) + (self.current.load(Ordering::Acquire) != 0) as u64
+    }
+
+    /// Threads waiting in this CPU's runqueue, without the one running.
+    pub fn queued(&self) -> u64 {
+        self.queued.load(Ordering::Acquire)
+    }
+
+    /// Threads this CPU has taken from another's runqueue.
+    pub fn steals(&self) -> u64 {
+        self.steal_count.load(Ordering::Relaxed)
     }
 
     /// The thread this CPU's scheduler last published as running, or `None`
@@ -311,9 +365,8 @@ impl Scheduler {
                         "tick_finish: thread {} already linked before re-enqueue",
                         cur.id.0
                     );
-                    let mut rq = self.rq.lock();
                     let priority = cur.priority();
-                    rq.enqueue(cur.clone(), priority, false);
+                    self.with_rq(|rq| rq.enqueue(cur.clone(), priority, false));
                     self.has_work.store(true, Ordering::Release);
                 }
                 self.pick_and_run(context);
@@ -381,11 +434,9 @@ impl Scheduler {
                     t.id.0
                 );
                 t.state.store(State::Ready as u8, Ordering::Release);
-                let mut rq = self.rq.lock();
                 let priority = t.priority();
-                rq.enqueue(t, priority, false);
+                self.with_rq(|rq| rq.enqueue(t, priority, false));
                 self.has_work.store(true, Ordering::Release);
-                drop(rq);
                 self.mark_running_thread_need_resched();
             }
         }
@@ -584,12 +635,11 @@ impl Scheduler {
         // interrupt frame, corrupting it.
         loop {
             let probe = sched_prof::now_ns();
-            let next = {
-                let mut rq = self.rq.lock();
+            let next = self.with_rq(|rq| {
                 let item = rq.pop_next();
                 self.has_work.store(!rq.is_empty(), Ordering::Release);
                 item
-            };
+            });
             sched_prof::record(Stage::Pick, probe);
 
             match next {
@@ -873,13 +923,10 @@ impl Scheduler {
                 thread.id.0,
                 cur_state
             );
-            self.thread_count.fetch_add(1, Ordering::AcqRel);
             thread.state.store(State::Ready as u8, Ordering::Release);
             thread.cpu.store(self.cpu, Ordering::Release);
-            let mut rq = self.rq.lock();
-            rq.enqueue(thread.clone(), thread.priority(), false);
+            self.with_rq(|rq| rq.enqueue(thread.clone(), thread.priority(), false));
             self.has_work.store(true, Ordering::Release);
-            drop(rq);
             self.mark_running_thread_need_resched();
 
             if self.cpu != get_percpu_data().lapic_id.get() {
@@ -917,18 +964,17 @@ impl Scheduler {
                 continue;
             }
 
-            // Try to lock victim's runqueue without blocking.
-            let Some(mut rq) = victim.rq.try_lock() else {
-                continue;
-            };
+            // Give up on a victim whose runqueue is busy rather than waiting
+            // for it; there are other CPUs to try.
+            let stolen = victim.with_try_rq(|rq| {
+                // Don't steal the victim's only thread.
+                if rq.total_len() < 2 {
+                    return None;
+                }
 
-            // Don't steal the victim's only thread.
-            if rq.total_len() < 2 {
-                continue;
-            }
+                // pop_back_any takes the lowest-priority tail thread.
+                let thread = rq.pop_back_any()?;
 
-            // pop_back_any takes the lowest-priority tail thread.
-            if let Some(thread) = rq.pop_back_any() {
                 // Skip threads whose context hasn't been saved yet.
                 // This happens when a thread is enqueued (e.g. yield,
                 // park abort) before context_switch saves its registers.
@@ -939,18 +985,21 @@ impl Scheduler {
                     });
                     let prio = thread.priority();
                     rq.enqueue(thread, prio, false);
-                    continue;
+                    return None;
                 }
                 if !self.thread_can_run_here(&thread) {
                     // Thread can't run on this CPU -- push it back.
                     let prio = thread.priority();
                     rq.enqueue(thread, prio, false);
-                    continue;
+                    return None;
                 }
-                // Don't touch victim.has_work or thread_count here --
-                // the victim updates has_work on its own next tick,
-                // and thread_count is adjusted by the caller after CAS.
-                drop(rq);
+                Some(thread)
+            });
+
+            // Don't touch victim.has_work here -- the victim updates it on its
+            // own next tick. The victim's load has already fallen by one: the
+            // pop went through `with_try_rq`.
+            if let Some(Some(thread)) = stolen {
                 return Some(thread);
             }
         }
@@ -958,32 +1007,33 @@ impl Scheduler {
         None
     }
 
-    /// Periodic rebalancing: if another CPU has significantly more threads
-    /// than us, steal one and enqueue it locally. Called from on_tick.
+    /// Periodic rebalancing: if another CPU carries significantly more runnable
+    /// work than us, steal one thread and enqueue it locally. Called from
+    /// on_tick.
     fn try_rebalance(&self) {
         let tick = self.rebalance_tick.fetch_add(1, Ordering::Relaxed);
         if tick % REBALANCE_INTERVAL != 0 {
             return;
         }
 
-        // Snapshot thread counts from all CPUs in one short locked pass.
-        let mut counts: heapless::Vec<(u32, u64), 128> = heapless::Vec::new();
+        // Snapshot every CPU's load in one short locked pass.
+        let mut loads: heapless::Vec<(u32, u64), 128> = heapless::Vec::new();
         {
             let schedulers = SCHEDULERS.read();
             for (&cpu_id, &sched) in schedulers.iter() {
-                let _ = counts.push((cpu_id, sched.thread_count.load(Ordering::Relaxed)));
+                let _ = loads.push((cpu_id, sched.load()));
             }
         }
         // Lock dropped.
 
-        let self_count = counts
+        let self_load = loads
             .iter()
             .find(|(c, _)| *c == self.cpu)
             .map(|(_, n)| *n)
             .unwrap_or(0);
-        let max_count = counts.iter().map(|(_, n)| *n).max().unwrap_or(0);
+        let max_load = loads.iter().map(|(_, n)| *n).max().unwrap_or(0);
 
-        if max_count.saturating_sub(self_count) < REBALANCE_THRESHOLD {
+        if max_load.saturating_sub(self_load) < REBALANCE_THRESHOLD {
             return;
         }
 
@@ -992,28 +1042,20 @@ impl Scheduler {
         };
 
         // Thread is in Ready state on the victim's runqueue.
-        // Migrate it to our runqueue without changing state.
-        let victim_cpu = thread.cpu.load(Ordering::Acquire);
+        // Migrate it to our runqueue without changing state. The victim is
+        // named before the move, since `thread.cpu` is about to become ours.
+        trace_event!(Rebalance {
+            thief_cpu: self.cpu,
+            victim_cpu: thread.cpu.load(Ordering::Acquire),
+            tid: thread.id.0,
+        });
         thread.cpu.store(self.cpu, Ordering::Release);
 
         let prio = thread.priority();
-        {
-            let mut rq = self.rq.lock();
-            rq.enqueue(thread.clone(), prio, false);
-        }
+        self.with_rq(|rq| rq.enqueue(thread.clone(), prio, false));
         self.has_work.store(true, Ordering::Release);
 
-        sched_for_cpu(victim_cpu)
-            .thread_count
-            .fetch_sub(1, Ordering::Relaxed);
-        self.thread_count.fetch_add(1, Ordering::Relaxed);
         self.steal_count.fetch_add(1, Ordering::Relaxed);
-
-        trace_event!(Rebalance {
-            thief_cpu: self.cpu,
-            victim_cpu: victim_cpu,
-            tid: thread.id.0,
-        });
 
         self.mark_running_thread_need_resched();
     }
@@ -1036,24 +1078,17 @@ impl Scheduler {
             let home_cpu = thread.cpu.load(Ordering::Acquire);
             let home = sched_for_cpu(home_cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            let mut rq = home.rq.lock();
             let prio = thread.priority();
-            rq.enqueue(thread, prio, false);
+            home.with_rq(|rq| rq.enqueue(thread, prio, false));
             home.has_work.store(true, Ordering::Release);
             return false;
         }
 
-        // Adjust thread_count now that the steal is committed.
-        let victim_cpu = thread.cpu.load(Ordering::Acquire);
         trace_event!(Steal {
             thief_cpu: self.cpu,
-            victim_cpu: victim_cpu,
+            victim_cpu: thread.cpu.load(Ordering::Acquire),
             tid: thread.id.0,
         });
-        sched_for_cpu(victim_cpu)
-            .thread_count
-            .fetch_sub(1, Ordering::Relaxed);
-        self.thread_count.fetch_add(1, Ordering::Relaxed);
         self.steal_count.fetch_add(1, Ordering::Relaxed);
 
         // context_switch_to overwrites the interrupt frame in-place.
@@ -1584,7 +1619,6 @@ extern "C" fn reap_and_schedule(context: *mut CpuContext) -> *mut CpuContext {
         if let Some(t) = current_thread() {
             sc.current.store(0, Ordering::Release);
             unsafe { get_percpu_data().set_current_thread(None) };
-            sc.thread_count.fetch_sub(1, Ordering::Relaxed);
             reaper_enqueue(t);
         }
         sc.wake_sleepers();
@@ -1604,8 +1638,8 @@ extern "C" fn transition_yield(_arg: *mut u8) -> bool {
         return true;
     };
     if cur.cas_state(State::Running, State::Ready) {
-        let mut rq = sched.rq.lock();
-        rq.enqueue(cur.clone(), cur.priority(), false);
+        let priority = cur.priority();
+        sched.with_rq(|rq| rq.enqueue(cur.clone(), priority, false));
         sched.has_work.store(true, Ordering::Release);
     }
     cur.flags

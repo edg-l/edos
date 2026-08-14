@@ -95,9 +95,9 @@ pub fn queue_spawn_kthread_affine(name: &str, entry: u64, arg: *mut u8, affinity
 }
 
 /// Rotating hint for `pick_sched` tie-breaking. Bumped every call to spread
-/// new-thread placement across CPUs with equal `thread_count`. Prevents the
-/// boot-time skew where sorted-lapic iteration + lowest-first tie-break packs
-/// most early kthreads onto a single CPU.
+/// new-thread placement across CPUs of equal load. Prevents the boot-time skew
+/// where sorted-lapic iteration + lowest-first tie-break packs most early
+/// kthreads onto a single CPU.
 static PICK_SCHED_ROTATION: AtomicU32 = AtomicU32::new(0);
 
 pub fn pick_sched() -> &'static Scheduler {
@@ -111,32 +111,32 @@ pub fn pick_sched_for(t: &Thread) -> Option<&'static Scheduler> {
     pick_sched_filtered(|cpu| t.allows_cpu(cpu))
 }
 
-fn pick_sched_filtered(allowed: impl Fn(u32) -> bool) -> Option<&'static Scheduler> {
+pub(crate) fn pick_sched_filtered(allowed: impl Fn(u32) -> bool) -> Option<&'static Scheduler> {
     // SCHEDULERS is keyed by lapic_id, which is NOT guaranteed to be
     // contiguous 0..num_cpus on real hardware. Iterate values directly.
     let schedulers = SCHEDULERS.read();
     let n = schedulers.len();
     assert!(n > 0, "pick_sched: no schedulers registered");
 
-    // Sample each scheduler once and keep the best sample. `thread_count` moves
-    // under us as other CPUs spawn and exit, so a pass that computes a minimum
+    // Sample each scheduler once and keep the best sample. Load moves under us
+    // as other CPUs enqueue and switch, so a pass that computes a minimum
     // followed by a pass that looks for it can match nothing at all: every
-    // count may have risen above the minimum in between.
+    // load may have risen above the minimum in between.
     //
     // Starting at the rotation offset keeps the round-robin tie-break. On a
-    // balanced system every scheduler has the same count, so the strict `<`
+    // balanced system every scheduler reports the same load, so the strict `<`
     // leaves the first one in rotation order winning, which spreads spawns
-    // evenly. A CPU with a genuinely lower count still wins outright.
+    // evenly. A CPU with genuinely less work still wins outright.
     let start = PICK_SCHED_ROTATION.fetch_add(1, Ordering::Relaxed) as usize % n;
     let mut best: Option<(&'static Scheduler, u64)> = None;
     for (_, sched) in schedulers.iter().cycle().skip(start).take(n) {
         if !allowed(sched.cpu) {
             continue;
         }
-        let count = sched.thread_count.load(Ordering::Acquire);
+        let load = sched.load();
         match best {
-            Some((_, best_count)) if best_count <= count => {}
-            _ => best = Some((*sched, count)),
+            Some((_, best_load)) if best_load <= load => {}
+            _ => best = Some((*sched, load)),
         }
     }
     best.map(|(sched, _)| sched)

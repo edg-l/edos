@@ -262,6 +262,30 @@ impl Procfs {
         out
     }
 
+    /// Per-CPU scheduler state.
+    ///
+    /// `queued` is what the runqueue holds and `load` adds the thread running
+    /// now. A parked or sleeping thread appears in neither, which is what makes
+    /// these a measure of runnable work rather than of how many threads call
+    /// the CPU home — and load is the quantity placement and rebalancing
+    /// balance, so a lopsided column here is a placement problem.
+    fn render_sched() -> String {
+        use crate::thread::scheduler::SCHEDULERS;
+        let mut out = String::from("CPU  CURRENT  QUEUED  LOAD  STEALS\n");
+        for (&cpu, &sched) in SCHEDULERS.read().iter() {
+            let _ = writeln!(
+                out,
+                "{:<4} {:<8} {:<7} {:<5} {}",
+                cpu,
+                sched.current.load(Ordering::Acquire),
+                sched.queued(),
+                sched.load(),
+                sched.steals(),
+            );
+        }
+        out
+    }
+
     fn render_evict_stats() -> String {
         use crate::fs::evict::{
             EVICT_DROPPED_COUNT, EVICT_SYNC_FALLBACK_COUNT, evict_kthread_drain_count,
@@ -1332,6 +1356,7 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
     ("cmdline", Procfs::render_cmdline),
     ("meminfo", Procfs::render_meminfo),
     ("cpuinfo", Procfs::render_cpuinfo),
+    ("sched", Procfs::render_sched),
     ("block_cache", Procfs::render_block_cache),
     ("evict_stats", Procfs::render_evict_stats),
     ("efs_stats", Procfs::render_efs_stats),
