@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use crate::drivers::dma::{DmaBuffer, dma};
 
 /// Transfer Request Block - the fundamental xHCI data structure (16 bytes).
@@ -18,15 +16,6 @@ impl Trb {
 
     pub fn cycle_bit(&self) -> bool {
         self.control & 1 != 0
-    }
-
-    /// No-Op Command (type 8) — used to test the command ring.
-    pub fn no_op_command() -> Self {
-        Self {
-            parameter: 0,
-            status: 0,
-            control: (TRB_TYPE_NO_OP as u32) << 10,
-        }
     }
 
     /// Enable Slot Command (type 9).
@@ -68,8 +57,9 @@ impl Trb {
     }
 }
 
-// TRB type constants
+// TRB type constants (xHCI 1.2 table 6-91)
 pub const TRB_TYPE_LINK: u8 = 6;
+#[expect(dead_code, reason = "TRB type table entry, transcribed whole")]
 pub const TRB_TYPE_NO_OP: u8 = 8;
 pub const TRB_TYPE_ENABLE_SLOT: u8 = 9;
 pub const TRB_TYPE_ADDRESS_DEVICE: u8 = 11;
@@ -81,6 +71,7 @@ pub const TRB_TYPE_PORT_STATUS_CHANGE: u8 = 34;
 // TRB control bit positions
 pub const TRB_CYCLE: u32 = 1 << 0;
 pub const TRB_TOGGLE_CYCLE: u32 = 1 << 1; // For Link TRBs
+#[expect(dead_code, reason = "TRB control bit, transcribed whole")]
 pub const TRB_CHAIN: u32 = 1 << 4;
 
 // Transfer-stage TRB types

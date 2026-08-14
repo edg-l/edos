@@ -1,4 +1,12 @@
-#![expect(unused)]
+//! AHCI Frame Information Structures and the ATA commands carried in them.
+//! Reference: AHCI 1.3.1 section 4.2.3 (FIS types) and ACS-4 (command codes).
+//!
+//! The FIS type, ATA command and SMART sub-command numbers are transcribed
+//! whole rather than trimmed to what the driver issues today. A partial table
+//! is worse than none: the next command someone needs gets re-derived from the
+//! specification instead of read from here, and a wrong opcode reaches the
+//! platter.
+#![expect(dead_code, reason = "complete transcription of the AHCI/ACS tables")]
 
 use bytemuck::{Pod, Zeroable};
 
@@ -135,59 +143,6 @@ impl FisRegH2D {
         fis.pmport = 1 << 7; // Command register
         fis.command = ATA_CMD_IDENTIFY;
         fis.device = 0; // Master device
-        fis
-    }
-
-    /// TRIM/DISCARD command for SSDs
-    pub fn new_trim() -> Self {
-        let mut fis = Self::zeroed();
-        fis.fis_type = FIS_TYPE_REG_H2D;
-        fis.pmport = 1 << 7;
-        fis.command = ATA_CMD_TRIM;
-        fis.device = 1 << 6;
-        fis.featurel = 0x01; // TRIM bit
-        fis
-    }
-
-    /// SMART commands for drive health monitoring
-    pub fn new_smart(subcommand: u8) -> Self {
-        let mut fis = Self::zeroed();
-        fis.fis_type = FIS_TYPE_REG_H2D;
-        fis.pmport = 1 << 7;
-        fis.command = ATA_CMD_SMART;
-        fis.featurel = subcommand;
-        fis.lba1 = 0x4F; // SMART signature
-        fis.lba2 = 0xC2; // SMART signature
-        fis
-    }
-
-    /// Verify sectors without reading data
-    pub fn new_verify(lba: u64, sectors: u16) -> Self {
-        let mut fis = Self::zeroed();
-        fis.fis_type = FIS_TYPE_REG_H2D;
-        fis.pmport = 1 << 7;
-        fis.command = ATA_CMD_VERIFY_SECTORS_EXT;
-        fis.device = 1 << 6; // LBA mode
-
-        // Set LBA
-        fis.lba0 = (lba & 0xFF) as u8;
-        fis.lba1 = ((lba >> 8) & 0xFF) as u8;
-        fis.lba2 = ((lba >> 16) & 0xFF) as u8;
-        fis.lba3 = ((lba >> 24) & 0xFF) as u8;
-        fis.lba4 = ((lba >> 32) & 0xFF) as u8;
-        fis.lba5 = ((lba >> 40) & 0xFF) as u8;
-
-        fis.countl = (sectors & 0xFF) as u8;
-        fis.counth = ((sectors >> 8) & 0xFF) as u8;
-        fis
-    }
-
-    /// Put drive in standby mode
-    pub fn new_standby() -> Self {
-        let mut fis = Self::zeroed();
-        fis.fis_type = FIS_TYPE_REG_H2D;
-        fis.pmport = 1 << 7;
-        fis.command = ATA_CMD_STANDBY_IMMEDIATE;
         fis
     }
 

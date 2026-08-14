@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use alloc::vec::Vec;
 
 use crate::{
@@ -30,14 +28,6 @@ impl PciManager {
         config::pci_read_u32(address, offset)
     }
 
-    fn read_config_u16(&mut self, address: PciAddress, offset: u8) -> u16 {
-        config::pci_read_u16(address, offset)
-    }
-
-    fn read_config_u8(&mut self, address: PciAddress, offset: u8) -> u8 {
-        config::pci_read_u8(address, offset)
-    }
-
     // Step 2: Check if device exists
     fn device_exists(&mut self, address: PciAddress) -> bool {
         let vendor_id = self.read_config_u32(address, 0) & 0xFFFF;
@@ -56,7 +46,7 @@ impl PciManager {
         for i in 0..16usize {
             let data = self.read_config_u32(address, (i * 4) as u8);
             let bytes = data.to_le_bytes();
-            header_bytes[(i * 4..(i + 1) * 4)].copy_from_slice(&bytes);
+            header_bytes[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
         }
 
         Some(*bytemuck::from_bytes(&header_bytes))
@@ -99,10 +89,6 @@ impl PciManager {
         &self.devices
     }
 
-    pub fn capabilities<'a>(&'a mut self, address: PciAddress) -> CapabilityIter<'a> {
-        CapabilityIter::new(self, address)
-    }
-
     // Helper to decode class information
     pub fn decode_class(class_code: u8, subclass: u8) -> (&'static str, &'static str) {
         match (class_code, subclass) {
@@ -118,59 +104,5 @@ impl PciManager {
             (0x0C, 0x03) => ("Serial Bus", "USB Controller"),
             _ => ("Unknown", "Unknown"),
         }
-    }
-}
-
-pub struct CapabilityIter<'a> {
-    manager: &'a mut PciManager,
-    address: PciAddress,
-    next: u8,
-    remaining: u8,
-}
-
-impl<'a> CapabilityIter<'a> {
-    const MAX_STEPS: u8 = 48;
-
-    fn new(manager: &'a mut PciManager, address: PciAddress) -> Self {
-        let status = manager.read_config_u16(address, 0x06);
-        let has_capabilities = (status & 0x10) != 0;
-        let next = if has_capabilities {
-            manager.read_config_u8(address, 0x34) & 0xFC
-        } else {
-            0
-        };
-
-        Self {
-            manager,
-            address,
-            next,
-            remaining: Self::MAX_STEPS,
-        }
-    }
-}
-
-impl Iterator for CapabilityIter<'_> {
-    type Item = (u8, u8);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next == 0 || self.remaining == 0 {
-            return None;
-        }
-
-        self.remaining -= 1;
-
-        let offset = self.next;
-        let id = self.manager.read_config_u8(self.address, offset);
-        let next_ptr = self.manager.read_config_u8(self.address, offset + 1) & 0xFC;
-
-        // Guard against self-referential loops by clearing next pointer when
-        // the link stops moving forward.
-        if next_ptr == offset {
-            self.next = 0;
-        } else {
-            self.next = next_ptr;
-        }
-
-        Some((id, offset))
     }
 }

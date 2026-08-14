@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use crate::{
     apic::get_lapic,
     drivers::pci::{
@@ -28,7 +26,6 @@ const CAP_ID_MSIX: u8 = 0x11;
 
 // MSI Control bits
 const MSI_ENABLE: u16 = 1 << 0;
-const MSI_MULTIPLE_MESSAGE_CAPABLE_SHIFT: u16 = 1; // 3 bits
 const MSI_MULTIPLE_MESSAGE_ENABLE_SHIFT: u16 = 4; // 3 bits
 const MSI_64BIT_CAPABLE: u16 = 1 << 7;
 

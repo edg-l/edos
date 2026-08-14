@@ -1,5 +1,11 @@
-// e1000e register offsets
-#![expect(dead_code)]
+//! e1000e register offsets and control bits.
+//! Reference: Intel 82574 GbE Controller datasheet, section 13.
+//!
+//! The register map is transcribed whole rather than trimmed to the offsets the
+//! driver touches today, so that reaching for one is a read rather than a
+//! re-derivation from the datasheet.
+#![expect(dead_code, reason = "complete transcription of the 82574 register map")]
+
 pub const CTRL: u32 = 0x0000;
 pub const STATUS: u32 = 0x0008;
 pub const EERD: u32 = 0x0014;

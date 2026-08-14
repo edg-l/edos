@@ -1,7 +1,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-pub mod colors;
 pub mod framebuffer;
 
 use spin::Once;
@@ -12,7 +11,7 @@ use x86_64::{PhysAddr, VirtAddr, structures::paging::PageTableFlags};
 
 use crate::{
     boot::boot_info,
-    drivers::vga::controller::{
+    drivers::vga::{
         DISPI_INDEX_VIDEO_MEMORY_64K, DISPI_INDEX_VIRT_HEIGHT, DISPI_INDEX_Y_OFFSET, dispi_read,
         dispi_write,
     },

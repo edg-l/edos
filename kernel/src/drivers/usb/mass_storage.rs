@@ -1,4 +1,3 @@
-#![expect(unused)]
 //! USB Mass Storage class driver - Bulk-Only Transport (BOT) with SCSI commands.
 //!
 //! Implements the USB Mass Storage Class specification using the Bulk-Only Transport
@@ -466,30 +465,15 @@ impl UsbMassStorage {
 /// rings owned by that thread. The node's presence at `/dev/usbN` confirms
 /// the device was detected and identified successfully.
 pub struct UsbStorageDevFsNode {
-    pub slot_id: u8,
     pub block_size: u32,
     pub block_count: u64,
-    pub vendor: [u8; 8],
-    pub product: [u8; 16],
 }
 
 impl UsbStorageDevFsNode {
-    pub fn new(slot_id: u8, block_size: u32, block_count: u64, inquiry_data: &[u8; 36]) -> Self {
-        let mut vendor = [0u8; 8];
-        let mut product = [0u8; 16];
-        // INQUIRY response: bytes 8-15 = vendor, bytes 16-31 = product
-        if inquiry_data.len() >= 16 {
-            vendor.copy_from_slice(&inquiry_data[8..16]);
-        }
-        if inquiry_data.len() >= 32 {
-            product.copy_from_slice(&inquiry_data[16..32]);
-        }
+    pub fn new(block_size: u32, block_count: u64) -> Self {
         Self {
-            slot_id,
             block_size,
             block_count,
-            vendor,
-            product,
         }
     }
 }
@@ -522,16 +506,23 @@ pub fn register_usb_storage(
     block_count: u64,
     inquiry_data: &[u8; 36],
 ) {
-    let node = Arc::new(UsbStorageDevFsNode::new(
-        slot_id,
-        block_size,
-        block_count,
-        inquiry_data,
-    ));
+    let node = Arc::new(UsbStorageDevFsNode::new(block_size, block_count));
+
+    // INQUIRY response (SPC-4 section 6.4.2): bytes 8-15 are the vendor
+    // identification and bytes 16-31 the product identification, both padded
+    // with spaces rather than terminated.
+    let vendor = core::str::from_utf8(&inquiry_data[8..16]).unwrap_or("?");
+    let product = core::str::from_utf8(&inquiry_data[16..32]).unwrap_or("?");
 
     let path = alloc::format!("/usb{}", index);
     match devfs::register_device_str(&path, node) {
-        Ok(()) => println!("usb-msc: registered /dev{}", path),
+        Ok(()) => println!(
+            "usb-msc: registered /dev{} (slot {}, {} {})",
+            path,
+            slot_id,
+            vendor.trim_end(),
+            product.trim_end()
+        ),
         Err(e) => println!("usb-msc: failed to register /dev{}: {:?}", path, e),
     }
 }

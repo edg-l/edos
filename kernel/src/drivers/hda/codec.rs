@@ -1,4 +1,3 @@
-#![expect(unused)]
 //! HDA codec discovery and configuration.
 
 use super::HdaController;
@@ -32,7 +31,6 @@ const PIN_OUT_EN: u8 = 0x40;
 /// Information about the discovered codec topology needed for playback.
 pub struct CodecInfo {
     pub cad: u8,     // Codec address (usually 0)
-    pub afg_nid: u8, // Audio Function Group node ID
     pub dac_nid: u8, // DAC (Audio Output) node ID
     pub pin_nid: u8, // Output pin node ID
     /// Loudest gain the DAC's output amp accepts, from its amp capabilities.
@@ -168,7 +166,6 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
 
     Ok(CodecInfo {
         cad,
-        afg_nid,
         dac_nid,
         pin_nid,
         out_amp_max_gain,

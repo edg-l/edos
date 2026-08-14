@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use alloc::vec::Vec;
 
 use crate::drivers::dma::DmaBuffer;
@@ -161,11 +159,12 @@ impl UsbSpeed {
 /// An enumerated USB device with its associated xHCI resources.
 pub struct UsbDevice {
     pub slot_id: u8,
-    pub speed: UsbSpeed,
-    pub port_id: u8,
     pub ep0_ring: TransferRing,
     pub input_ctx: DmaBuffer,
-    /// Output Device Context buffer registered in the DCBAA. Must live as long as the device.
+    /// Output Device Context buffer whose physical address is registered in the
+    /// DCBAA. Nothing reads it back; holding it is what keeps the controller's
+    /// entry pointing at live memory for as long as the device exists.
+    #[allow(dead_code)]
     pub output_ctx: DmaBuffer,
     pub device_descriptor: Option<DeviceDescriptor>,
     /// Raw configuration descriptor blob (Configuration + Interface + Endpoint descriptors).

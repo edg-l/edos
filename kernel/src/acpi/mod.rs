@@ -1,22 +1,18 @@
-#![expect(unused)]
-
 use acpi::{
     AcpiTables, PhysicalMapping,
-    platform::{InterruptModel, ProcessorInfo, interrupt::Apic},
+    platform::{InterruptModel, interrupt::Apic},
     sdt::madt::Madt,
 };
 use spin::Once;
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{acpi::handler::AcpiHandler, boot::boot_info, println};
-use alloc::{collections::BTreeMap, vec::Vec};
 use raw_cpuid::CpuId;
 
 pub mod handler;
 
 static ACPI_TABLES: Once<AcpiTables<AcpiHandler>> = Once::new();
 
-static PROCESSOR_INFO: Once<ProcessorInfo> = Once::new();
 static APIC_INFO: Once<Apic> = Once::new();
 
 pub fn init_acpi() {
@@ -28,18 +24,15 @@ pub fn init_acpi() {
 
     println!("Acpi tables initialized");
 
-    let (interrupt_model, processor_info) =
-        InterruptModel::new(acpi_tables()).expect("interrupt model");
+    // The processor info alongside the model describes the MADT's view of the
+    // APs; the ones this kernel starts come from Limine's MP response instead.
+    let (interrupt_model, _) = InterruptModel::new(acpi_tables()).expect("interrupt model");
 
     APIC_INFO.call_once(|| match interrupt_model {
         InterruptModel::Unknown => unimplemented!(),
         InterruptModel::Apic(apic) => apic,
         _ => unimplemented!(),
     });
-
-    let processor_info = processor_info.unwrap();
-
-    PROCESSOR_INFO.call_once(|| processor_info);
 }
 
 pub fn acpi_tables() -> &'static AcpiTables<AcpiHandler> {
@@ -52,18 +45,8 @@ pub fn acpi_madt() -> PhysicalMapping<AcpiHandler, Madt> {
     tables.find_table::<Madt>().expect("edos needs a MADT")
 }
 
-pub fn processor_info() -> &'static ProcessorInfo {
-    PROCESSOR_INFO.get().unwrap()
-}
-
 pub fn apic_info() -> &'static Apic {
     APIC_INFO.get().unwrap()
-}
-
-static NUMBER_OF_CORES: Once<usize> = Once::new();
-
-pub fn number_of_cores() -> usize {
-    *NUMBER_OF_CORES.call_once(|| 1 + processor_info().application_processors.len())
 }
 
 /// Returns the raw current APIC ID via CPUID topology.

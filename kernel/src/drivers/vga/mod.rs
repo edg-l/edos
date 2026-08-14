@@ -1,49 +1,25 @@
-#![expect(unused)]
+//! Bochs/QEMU VBE extensions (the DISPI interface), used by the framebuffer to
+//! size video memory and to page-flip by moving the visible Y offset.
 
-use alloc::{boxed::Box, vec::Vec};
+use x86_64::instructions::port::Port;
 
-use crate::thread::scheduler::thread_park;
-use crate::{
-    drivers::{
-        pci::{pci_manager, structures::PciDevice},
-        vga::controller::VgaController,
-    },
-    log,
-    thread::{scheduler::sched, util::queue_spawn_kthread_named_arg},
-};
+const DISPI_INDEX_PORT: u16 = 0x01CE;
+const DISPI_DATA_PORT: u16 = 0x01CF;
 
-pub mod controller;
-pub mod error;
-pub mod structures;
+pub const DISPI_INDEX_VIRT_HEIGHT: u16 = 0x07;
+pub const DISPI_INDEX_Y_OFFSET: u16 = 0x09;
+pub const DISPI_INDEX_VIDEO_MEMORY_64K: u16 = 0x0A;
 
-pub fn init() {
-    let manager = pci_manager().read();
-
-    for device in manager.get_devices() {
-        if device.header.class_code == 0x03 && device.header.subclass == 0x0 {
-            queue_spawn_kthread_named_arg(
-                "vga",
-                vga_thread as *const () as u64,
-                Box::into_raw(Box::new(*device)).cast(),
-            );
-            break;
-        }
+pub fn dispi_write(index: u16, value: u16) {
+    unsafe {
+        Port::new(DISPI_INDEX_PORT).write(index);
+        Port::new(DISPI_DATA_PORT).write(value);
     }
 }
 
-extern "C" fn vga_thread(device: *mut PciDevice) {
-    let device = unsafe { Box::from_raw(device) };
-    let _capabilities: Vec<_> = pci_manager().write().capabilities(device.address).collect();
-    log!(
-        "vga: starting (PCI {:02x}:{:02x}.{})",
-        device.address.bus,
-        device.address.device,
-        device.address.function
-    );
-
-    let controller = VgaController::new(*device).unwrap();
-
-    loop {
-        thread_park();
+pub fn dispi_read(index: u16) -> u16 {
+    unsafe {
+        Port::new(DISPI_INDEX_PORT).write(index);
+        Port::new(DISPI_DATA_PORT).read()
     }
 }

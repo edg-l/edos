@@ -1,5 +1,4 @@
 // Atomics are accessed from both debug and release builds (always-exported).
-#![allow(dead_code)]
 
 /// Lock-order rank constants and per-thread enforcement infrastructure.
 ///

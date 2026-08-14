@@ -1,6 +1,3 @@
-#![expect(unused)]
-
-use bytemuck::{Pod, Zeroable};
 use x86_64::{
     PrivilegeLevel, VirtAddr, registers::rflags::RFlags, structures::idt::InterruptStackFrameValue,
 };
@@ -57,16 +54,6 @@ impl CpuContext {
     pub fn is_from_userspace(&self) -> bool {
         // Check if CS register has RPL (Ring Privilege Level) of 3
         self.interrupt_stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
-    }
-
-    #[inline]
-    pub fn is_from_kernel(&self) -> bool {
-        self.interrupt_stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0
-    }
-
-    #[inline]
-    pub fn rip(&self) -> u64 {
-        self.interrupt_stack_frame.instruction_pointer.as_u64()
     }
 }
 

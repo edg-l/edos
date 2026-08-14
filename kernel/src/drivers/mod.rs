@@ -96,7 +96,6 @@ pub fn init_drivers() {
     usb::init(); // must be after pci
     e1000e::init(); // must be after pci
     hda::init(); // must be after pci
-    vga::init();
     graphics::init();
     tty::init();
     random::init();

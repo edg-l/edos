@@ -1,6 +1,13 @@
 //! Intel High Definition Audio controller register definitions.
 //! Reference: Intel HD Audio Specification Rev 1.0a
-#![expect(unused)]
+//!
+//! The register map is transcribed whole rather than trimmed to the offsets the
+//! driver touches today, so that reaching for one is a read rather than a
+//! re-derivation from the specification.
+#![expect(
+    dead_code,
+    reason = "complete transcription of the HD Audio register map"
+)]
 
 // === Global Registers ===
 pub const GCAP: u32 = 0x00; // Global Capabilities (16-bit)

@@ -1385,10 +1385,10 @@ says it ran. Grep the saved log for the thing that proves the work happened
 (`Checking edos-kernel`, `ALL 51 TESTS PASSED`) rather than reading the exit
 status of the chain.
 
-## "Warning-free" does not cover fifteen files
+## "Warning-free" does not cover three files
 
-`make check` being warning-free is the tree's standing claim, and fifteen files
-under `kernel/src` opt themselves out of it with a blanket inner attribute:
+`make check` being warning-free is the tree's standing claim, and three files
+under `kernel/src` still opt themselves out of it with a blanket inner attribute:
 
 ```bash
 for f in $(grep -rl '^#!\[expect\|^#!\[allow' kernel/src); do
@@ -1411,17 +1411,49 @@ function in the file being changed and check that the build names it. If it does
 not, look for an inner attribute at the top of that file before looking anywhere
 else.
 
-Still carrying the blanket attribute, in rough order of how much driver logic
-sits behind it: `drivers/usb/mass_storage.rs`, `drivers/usb/xhci/device.rs`,
-`drivers/usb/xhci/rings.rs`, `drivers/hda/codec.rs`, `drivers/pci/manager.rs`,
-`acpi/mod.rs`, `drivers/msi/mod.rs`, `drivers/ahci/fis.rs`, `thread/util.rs`,
-`thread/context.rs`, `graphics/colors.rs`, `drivers/vga/mod.rs`,
-`drivers/hda/regs.rs`, `drivers/e1000e/regs.rs`. The register-definition files
-(`hda/regs.rs`, `e1000e/regs.rs`, `ahci/fis.rs`) have a real reason — a hardware
-register block is written out whole and most of it is unused by design — and want
-a narrower `#![expect(dead_code)]` with that sentence rather than the `unused`
-group. The rest want the attribute deleted and the fallout decided one item at a
-time.
+Fourteen of them lost the attribute in one sweep, which exposed 100 warnings.
+What that bought, beyond the imports and the `let mut` that make up the bulk:
+
+- **A whole dead driver.** `drivers/vga/` spawned a kthread on every boot that
+  logged the display's PCI BARs, built a `VgaController` holding nothing but the
+  `PciDevice` it was handed, and parked forever. The live half was three port
+  helpers — `dispi_read`/`dispi_write` and the DISPI index constants, which
+  `graphics/mod.rs` uses to size video memory and to page-flip. `vga/mod.rs` is
+  now just those, and `controller.rs`, `error.rs` and an empty `structures.rs`
+  are gone along with `vga::init()`.
+- **A duplicate PCI capability walk.** `PciManager::capabilities` and
+  `CapabilityIter` re-implemented what `pci::find_capability` does for MSI and
+  MSI-X; the dead VGA kthread was its only caller, so it fell out with it. One
+  capability walker, not two.
+- **A superseded thread teardown.** `scheduler::exit_thread(tid)` did the
+  reaper's job — `THREADS.remove`, `record_thread_exit`, `adopt_orphans_of` — but
+  removed the thread from the registry *before* `t.free()`, where the reaper
+  frees first. Nothing called it.
+- **`acpi::processor_info`, `number_of_cores` and the `PROCESSOR_INFO` static.**
+  The MADT's view of the APs, parsed and stored at boot and never read: the
+  processors this kernel starts come from Limine's MP response
+  (`smp.rs`, `MP_REQUEST`). Discarding it also removed an `unwrap`.
+- **`UsbDevice::output_ctx` is not dead**, it is a DMA ownership anchor — its
+  physical address is written into the DCBAA and nothing reads the field back.
+  It keeps an `#[allow(dead_code)]` saying so. The mass-storage node's `vendor`
+  and `product` were the opposite case: parsed out of the INQUIRY response and
+  stored for nobody, so they became the registration log line instead.
+
+The register-definition files (`hda/regs.rs`, `e1000e/regs.rs`, `ahci/fis.rs`)
+have a real reason — a hardware register block is transcribed whole and most of
+it is unused by design — so each carries a narrow `#![expect(dead_code)]` with a
+`reason` naming the spec, not the `unused` group. `expect` rather than `allow`
+so it warns if the file ever stops needing it. Two spec-table entries in
+`xhci/rings.rs` carry the same thing per item.
+
+Still carrying a blanket attribute, and each is a separate job: 38 warnings sit
+behind `drivers/ahci/structures.rs` (`#![allow(dead_code)]`, mostly AHCI status
+bit constants plus several `print_*` debug helpers), `util/uaccess.rs`
+(`#![allow(unused)]`, and an entire never-constructed `UAccessGuard`), and
+`fs/block_page_cache.rs` (`#![allow(dead_code)]`, one unused
+`journal_for_device`). `debug/lock_order.rs` needed none at all — removing its
+`#![allow(dead_code)]` produced nothing under the default build, `sched-test` or
+`lock-order-self-test`.
 
 ## An xHCI controller is built once, not probed then initialised
 
@@ -1452,12 +1484,12 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,930 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,347 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,317 | `git rev-list --count HEAD` |
+| Rust | 101,609 code lines across 433 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,026 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,318 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 157, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 154, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,

@@ -1349,23 +1349,6 @@ pub fn thread_exit(code: i32) -> ! {
     }
 }
 
-pub fn exit_thread(tid: ThreadId) {
-    if let Some(t) = THREADS.remove(tid) {
-        debug_assert!(
-            !t.rq_link.is_linked(),
-            "exit_thread: thread {} still linked on runqueue",
-            tid.0
-        );
-        t.state.store(State::Dying as u8, Ordering::Release);
-        t.free();
-        let code = t.exit_code.load(Ordering::Acquire);
-        let parent = t.parent.load(Ordering::Acquire);
-        record_thread_exit(tid, code, parent);
-        let _ = THREADS.remove_info(tid);
-        crate::thread::thread::adopt_orphans_of(tid);
-    }
-}
-
 /// Validate the frame pointer the interrupt trampoline handed us.
 fn check_context(context: *mut CpuContext, who: &str) {
     if context.is_null() {

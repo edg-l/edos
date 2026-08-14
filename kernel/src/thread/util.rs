@@ -1,23 +1,20 @@
-#![expect(unused)]
-
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::{string::ToString, sync::Arc};
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
-use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
+use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 
 use crate::thread::scheduler::thread_exit;
 use crate::{
     memory::{
-        KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
+        KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, USER_STACK_SIZE,
         mapper::{MemoryManager, memory_mapper},
         valloc::vmalloc,
     },
-    print, println,
+    println,
     thread::{
-        UserThreadInfo,
-        scheduler::{SCHEDULERS, Scheduler, exit_thread, sched},
+        scheduler::{SCHEDULERS, Scheduler},
         thread::{Thread, ThreadId},
     },
 };
@@ -65,14 +62,6 @@ pub fn kthread_stack_free(stack_top: u64) {
     }
 }
 
-pub fn queue_spawn_kthread(entry: u64) -> ThreadId {
-    let thread = Thread::new_kernel(None, entry, 0);
-    let id = thread.id;
-    let sched = pick_sched();
-    sched.spawn_thread(thread);
-    id
-}
-
 pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> ThreadId {
     let thread = Thread::new_kernel(Some(name.to_string()), entry, 0);
 
@@ -83,7 +72,7 @@ pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> ThreadId {
 }
 
 pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> ThreadId {
-    let mut thread = Thread::new_kernel(Some(name.to_string()), entry, arg as u64);
+    let thread = Thread::new_kernel(Some(name.to_string()), entry, arg as u64);
 
     let id = thread.id;
     let sched = pick_sched();
@@ -158,14 +147,10 @@ pub fn kthread_exit(code: i32) -> ! {
     thread_exit(code)
 }
 
-pub fn thread_stack_alloc(_manager: &mut MemoryManager) -> u64 {
-    USER_STACK_TOP.as_u64()
-}
-
 /// Free a lazily-allocated user stack. Only unmaps pages that were actually
 /// faulted in (present in the page table).
 pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
-    use x86_64::structures::paging::{Mapper, Page, Size4KiB, Translate};
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB};
 
     let stack_bottom = stack_top - USER_STACK_SIZE;
     let page_count = USER_STACK_SIZE / 4096;

@@ -1,11 +1,7 @@
 use core::ptr::NonNull;
 
 use acpi::{Handle, Handler, PhysicalMapping};
-use alloc::sync::Arc;
-use spin::mutex::Mutex;
-use x86_64::{
-    PhysAddr, VirtAddr, align_up, instructions::port::Port, structures::paging::PageTableFlags,
-};
+use x86_64::{PhysAddr, VirtAddr, instructions::port::Port, structures::paging::PageTableFlags};
 
 use crate::{
     memory::{

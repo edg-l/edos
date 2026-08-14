@@ -229,10 +229,20 @@ Audited, with what each one turned out to be:
   compiles cleanly and makes the compositor read garbage.
 - **The framebuffer here is single-buffered.** `flip()` returns a new back-page
   offset only on the Bochs VBE path; virtio-gpu, which every `run` target uses,
-  has one buffer. Partial rect transfers are therefore safe. If a double
-  buffered path is ever the default, partial transfers must accumulate damage
-  across two frames or each buffer will only receive the rects sent while it
-  was the back one.
+  has one buffer. Partial rect transfers are therefore safe. On a double
+  buffered path, partial transfers must accumulate damage across two frames or
+  each buffer will only receive the rects sent while it was the back one.
+
+  **That is not hypothetical: the VBE path has it now, observed 2026-08-14.**
+  Booting `scripts/edos-vm start --vga std` and sampling the taskbar row
+  (`h-20`) shows it painted on some boots and solid black on others — two of
+  four runs on an unmodified tree. The panel draws itself once at startup and
+  never again until something damages it, so that single paint lands in
+  whichever page was the back one and the first flip replaces it with the page
+  that never received it. The clock survives because it repaints every minute
+  and so reaches both. Sampling a row of pixels is the way to see this; a
+  screenshot read by eye invites blaming whatever changed most recently, which
+  is how it nearly got attributed to an unrelated driver cleanup.
 - **Damage is not the only reason to repaint.** Focus changes repaint the title
   bar accent, and a window that moves exposes background where it was and has
   to be drawn where it now is; all of these are tracked by the compositor from

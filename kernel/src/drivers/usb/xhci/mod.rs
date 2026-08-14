@@ -682,8 +682,6 @@ impl XhciController {
 
         Ok(UsbDevice {
             slot_id,
-            speed,
-            port_id,
             ep0_ring,
             input_ctx,
             output_ctx,
