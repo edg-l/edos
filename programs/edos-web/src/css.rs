@@ -272,8 +272,8 @@ fn parse_list_style(value: &str) -> Option<ListStyle> {
 }
 
 /// The box `display` asks for, reduced to what a block-and-inline model can
-/// answer. `display: none` is not here: it is `Computed::hidden`, since
-/// `visibility: hidden` reaches the same outcome by another property.
+/// answer. `display: none` is not here: it is `Computed::hidden`, which drops
+/// the box rather than naming one.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Display {
     /// An inline-level box, which stays in the line its parent block is
@@ -436,10 +436,15 @@ pub struct Computed {
     pub background: Option<u32>,
     pub padding: Sides<Option<u32>>,
     pub borders: Sides<Border>,
-    /// `display: none`, and `visibility: hidden` with it. Not inherited: a
-    /// hidden element hides its subtree by not being walked at all, which is
-    /// not the same thing as its children inheriting a value.
+    /// `display: none`. Not inherited: a hidden element hides its subtree by
+    /// not being walked at all, which is not the same thing as its children
+    /// inheriting a value.
     pub hidden: bool,
+    /// `visibility: hidden`, which keeps the box in flow and only stops it
+    /// being painted, per css-display-3 §3. It inherits, and a child setting
+    /// `visible` comes back: that is the one way a subtree can be partly
+    /// hidden, and it is why this cannot be answered as `display: none`.
+    pub invisible: bool,
     /// `display`, when the page named a box other than the element's own.
     /// Not inherited. `None` is "the page said nothing", which leaves the box
     /// to the element: a `<div>` blocks, a `<span>` does not.
@@ -495,11 +500,13 @@ impl Computed {
                     self.display = display;
                 }
             }
-            "visibility" => {
-                if value.eq_ignore_ascii_case("hidden") {
-                    self.hidden = true;
-                }
-            }
+            // `collapse` is `hidden` everywhere outside a table, and there are
+            // no tables here.
+            "visibility" => match value.to_ascii_lowercase().as_str() {
+                "hidden" | "collapse" => self.invisible = true,
+                "visible" => self.invisible = false,
+                _ => {}
+            },
             "font-size" => {
                 if let Some(px) = parse_font_size(value, root_px, parent_px) {
                     self.font_px = Some(px);
@@ -2474,6 +2481,60 @@ mod tests {
         let computed = cascade(&sheet, &[element("p", &[])], None);
         assert!(computed.hidden);
         assert_eq!(computed.display, None);
+    }
+
+    #[test]
+    fn visibility_hides_without_dropping_the_box() {
+        let computed = cascade(
+            &sheet("p { visibility: hidden }"),
+            &[element("p", &[])],
+            None,
+        );
+        assert!(computed.invisible);
+        assert!(!computed.hidden);
+        assert!(
+            cascade(
+                &sheet("p { visibility: collapse }"),
+                &[element("p", &[])],
+                None
+            )
+            .invisible
+        );
+    }
+
+    #[test]
+    fn visibility_inherits_and_a_child_can_come_back() {
+        let sheet = sheet("div { visibility: hidden } span { visibility: visible }");
+        let parent = sheet
+            .cascade(
+                &[element("div", &[])],
+                None,
+                &Computed::default(),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert!(parent.invisible);
+        let hidden_child = sheet
+            .cascade(
+                &[element("div", &[]), element("em", &[])],
+                None,
+                &parent,
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert!(hidden_child.invisible);
+        let visible_child = sheet
+            .cascade(
+                &[element("div", &[]), element("span", &[])],
+                None,
+                &parent,
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert!(!visible_child.invisible);
     }
 
     #[test]

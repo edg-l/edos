@@ -110,6 +110,11 @@
          and nothing of the leading around the line. */
       .hilite .tinted { background: #4c566a }
       .hilite mark.own { background: #a3be8c; color: #2e3440 }
+      /* `visibility` keeps the box and its space, and inherits, so a child
+         setting `visible` paints inside a hidden parent. */
+      .unseen { visibility: hidden; background: #bf616a; border: 1px solid #eceff4 }
+      .unseen .back { visibility: visible; color: #a3be8c }
+      .hilite .gone { visibility: hidden }
     </style>
   </head>
   <body>
@@ -302,6 +307,18 @@ while the newline above them is kept.</p>
         browser gives it</mark>, <mark class="own">one styled by the page
         keeps its own pair</mark>, and <span class="tinted">a plain span
         carries whatever background it asks for</span>.</p>
+    </div>
+
+    <h2>What a hidden box still occupies</h2>
+    <div class="hilite">
+      <p>A paragraph with <span class="gone">a hidden run in the middle of
+        it</span> holding the space its words were laid out in.</p>
+      <p class="unseen">A hidden paragraph, painting neither its own red
+        background nor its border, and reserving every line it would have
+        set. <span class="back">This span asks to be visible again, so it is
+        the only thing this paragraph draws.</span></p>
+      <p>The paragraph after it, which starts below the gap the hidden one
+        holds.</p>
     </div>
 
     <h2>What a list may be numbered in</h2>

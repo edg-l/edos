@@ -55,6 +55,10 @@ pub struct Fragment {
     /// alone. A block's background is a [`Decor`] spanning all its lines; an
     /// inline one covers the text and nothing else, so it lives here.
     pub background: Option<u32>,
+    /// `visibility: hidden` on the run this came from: the fragment keeps the
+    /// space it was laid out in and paints nothing, and the hit test steps over
+    /// it, since a hidden link is not a link the reader can reach.
+    pub hidden: bool,
 }
 
 /// What a line draws.
@@ -92,6 +96,10 @@ pub struct Line {
     pub natural: u32,
     pub items: Vec<Fragment>,
     pub kind: LineKind,
+    /// `visibility: hidden` on the block: the line holds its place and draws
+    /// nothing. Text lines carry the flag on their fragments instead, since a
+    /// `visible` child inside a hidden block still paints its own words.
+    pub hidden: bool,
 }
 
 /// One edge of a box as it is painted: its thickness and its resolved colour.
@@ -156,6 +164,9 @@ struct Word {
     /// `background-color` the run set on itself, or the highlight a `<mark>`
     /// wears.
     background: Option<u32>,
+    /// `visibility: hidden` on the run, which lays the word out and paints
+    /// nothing where it stands.
+    hidden: bool,
 }
 
 impl Layout {
@@ -223,6 +234,7 @@ impl Layout {
                         x: box_x + left as i32,
                         width: avail,
                     },
+                    hidden: plan.invisible,
                 });
                 y += height as i32;
             } else if !picture_drawn {
@@ -236,6 +248,7 @@ impl Layout {
                     letter: plan.letter,
                     shift: 0,
                     background: None,
+                    hidden: plan.invisible,
                 });
 
                 let start = out.lines.len();
@@ -258,7 +271,9 @@ impl Layout {
                 plan.border.bottom,
                 plan.border.left,
             ];
-            if plan.background.is_some() || edges.iter().any(|edge| edge.px > 0) {
+            if !plan.invisible
+                && (plan.background.is_some() || edges.iter().any(|edge| edge.px > 0))
+            {
                 out.decor.push(Decor {
                     x: box_x,
                     y: box_top,
@@ -288,7 +303,7 @@ impl Layout {
         let item = line
             .items
             .iter()
-            .find(|item| x >= item.x && x < item.x + item.width as i32)?;
+            .find(|item| !item.hidden && x >= item.x && x < item.x + item.width as i32)?;
         self.links.get(item.link?).map(String::as_str)
     }
 
@@ -339,6 +354,7 @@ impl Layout {
             letter: 0,
             shift: 0,
             background: None,
+            hidden: plan.invisible,
         }];
         self.lines.push(Line {
             y: *y,
@@ -347,6 +363,7 @@ impl Layout {
             natural: height,
             items,
             kind: LineKind::Image { pixels, width },
+            hidden: plan.invisible,
         });
         *y += height as i32;
         true
@@ -423,6 +440,7 @@ impl Layout {
                     word_gap,
                     shift,
                     background,
+                    hidden: run.css.invisible,
                 });
                 word.clear();
                 *spaces = 0;
@@ -523,6 +541,7 @@ impl Layout {
                             letter: word.letter,
                             shift: word.shift,
                             background: word.background,
+                            hidden: word.hidden,
                         });
                         pen += head_width;
                         let line = std::mem::take(&mut items);
@@ -556,6 +575,7 @@ impl Layout {
                     letter: word.letter,
                     shift: word.shift,
                     background: word.background,
+                    hidden: word.hidden,
                 });
                 pen += width;
                 break;
@@ -608,6 +628,7 @@ impl Layout {
             natural,
             items,
             kind: LineKind::Text,
+            hidden: false,
         });
         *y += height as i32;
     }
@@ -645,6 +666,9 @@ struct Plan {
     background: Option<u32>,
     pad: Sides<u32>,
     border: Sides<Edge>,
+    /// `visibility: hidden` on the element that opened the block: it is laid
+    /// out and measured as it would have been, and nothing it owns is painted.
+    invisible: bool,
 }
 
 /// The height a line of `style` occupies: what the page asked for with
@@ -717,6 +741,7 @@ fn plan(block: &Block) -> Plan {
     plan.ws = css.white_space.unwrap_or_default();
     plan.wrap = css.wrap();
     plan.background = css.background;
+    plan.invisible = css.invisible;
     plan.pad = Sides {
         top: css.padding.top.unwrap_or(0),
         right: css.padding.right.unwrap_or(0),
@@ -758,6 +783,7 @@ fn default_plan(block: &Block) -> Plan {
         background: None,
         pad: Sides::default(),
         border: Sides::default(),
+        invisible: false,
     };
     match block.kind {
         BlockKind::Heading(level) => Plan {
@@ -910,7 +936,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             continue;
         }
         match &line.kind {
-            LineKind::Rule { x, width: rule_w } => {
+            LineKind::Rule { x, width: rule_w } if !line.hidden => {
                 fill(
                     surface.pixels,
                     width,
@@ -927,7 +953,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             LineKind::Image {
                 pixels,
                 width: image_w,
-            } => {
+            } if !line.hidden => {
                 let x = line.items.first().map_or(PAGE_PAD as i32, |item| item.x);
                 blit(
                     surface.pixels,
@@ -942,9 +968,15 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                 );
                 continue;
             }
+            // A hidden rule or picture holds its place and draws nothing; the
+            // line has no text to fall through to either way.
+            LineKind::Rule { .. } | LineKind::Image { .. } => continue,
             LineKind::Text => {}
         }
         for (index, item) in line.items.iter().enumerate() {
+            if item.hidden {
+                continue;
+            }
             // Fragments share a baseline rather than a top edge: a smaller face
             // is dropped to the tallest one's feet, and `vertical-align` then
             // moves it off that baseline.
@@ -955,7 +987,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             // the words they cover, reaching the next fragment when that one is
             // set the same way. Drawn per word either would come out dashed,
             // since a word is a fragment of its own.
-            let next = line.items.get(index + 1);
+            let next = line.items.get(index + 1).filter(|next| !next.hidden);
             let joined = |same: bool| match next {
                 Some(next) if same && next.x >= item.x + item.width as i32 => {
                     (next.x - item.x) as u32

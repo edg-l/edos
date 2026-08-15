@@ -141,14 +141,17 @@ without them, and each is small:
   invalid so the element keeps its own box. The marker follows `list-item`
   rather than the `<li>` tag, so `li { display: block }` loses its bullet the
   way a browser does, and a `<span>` may gain one.
-- **`visibility: hidden` is answered as `display: none`, which is wrong and is
-  the next thing to fix in the cascade.** Both set `Computed::hidden` and the
-  element is then not walked at all, where css-display-3 §3 keeps a hidden box
-  in flow and only stops it being painted; a page reserving space with it gets a
-  collapsed layout here. The fix is a second flag beside `hidden` that `view.rs`
-  reads when it emits fragments and decor rather than when it walks the tree,
-  and it inherits where `hidden` does not, since `visibility: visible` on a
-  child of a hidden element brings that child back.
+- **`visibility` is not `display`.** `display: none` is `Computed::hidden` and
+  drops the element and its subtree in `doc.rs` before a block opens;
+  `visibility: hidden` is `Computed::invisible`, which lays the box out exactly
+  as it would have been and paints none of it, per css-display-3 §3. It is read
+  where `view.rs` emits rather than where it walks: a `Fragment` and a `Line`
+  each carry `hidden`, the draw pass steps over them, `link_at` steps over a
+  hidden fragment so a hidden link cannot be clicked, and a block whose plan is
+  invisible pushes no `Decor`. Unlike `hidden` it inherits, so a child setting
+  `visibility: visible` inside a hidden parent is painted and is the only thing
+  that parent draws. `collapse` is answered as `hidden`, which is what it means
+  outside a table.
 - **A background belongs to a run as well as to a block.** A block's
   `background-color` is one `view::Decor` spanning every line it produced; a
   colour a `<span>` or a `<mark>` sets is painted per fragment instead, over
