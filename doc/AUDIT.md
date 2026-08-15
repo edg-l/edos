@@ -352,11 +352,15 @@ Beyond affinity (1.2), things that look like the next real improvements:
   the busy side has to be unambiguous against that. A decayed utilisation
   average is still the better metric and is now an improvement rather than a
   correction.
-- **No priority inheritance.** EEVDF bounds how long a low-priority lock holder
-  can be passed over — it falls behind `V` and its deadline expires — but a
-  high-priority waiter still waits behind it. This is the classic reason to add
-  PI to the blocking primitives, and the rank table already gives a place to
-  hang it. It is now the only item left in this section.
+- **No priority inheritance — FIXED for `BlockingMutex`, and the residual is
+  measured rather than assumed.** EEVDF bounds how long a low-priority lock
+  holder can be passed over — it falls behind `V` and its deadline expires — but
+  a high-priority waiter still waited behind it. A waiter now lends the holder
+  its effective priority for the duration and the lend is undone on release.
+  The `prio-inversion` case in `thread/sched_test.rs` measures the Mars
+  Pathfinder shape and fell from 18.17x to 7.67x; `doc/SCHED-ROADMAP.md` §6
+  carries the two candidates for the gap that is left. `BlockingRwLock` and the
+  futex path have no lending at all, which is what remains open here.
 - **The timeslice was a flat 5 ms — FIXED, and the entry understated it.**
   Priority did not merely fail to affect share of CPU; the strict-priority
   buckets that carried it could withhold the CPU entirely. Their anti-starvation

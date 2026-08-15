@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-117 programs and 3 libraries, all in the `programs/` cargo workspace.
+123 programs and 3 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
