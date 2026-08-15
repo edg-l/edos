@@ -154,6 +154,122 @@ impl Wrap {
     }
 }
 
+/// `list-style-type`, the marker a list item wears.
+///
+/// The counting styles are kept apart from the bullets because only they read
+/// the item's position: a `ul` given `lower-roman` numbers its items, and an
+/// `ol` given `square` does not, whatever the element says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListStyle {
+    None,
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    DecimalLeadingZero,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    UpperRoman,
+}
+
+impl ListStyle {
+    /// The marker for the `n`th item of a list, without its trailing space.
+    /// Empty for `none`, which is what a page hiding its navigation bullets
+    /// asks for.
+    pub fn marker(self, n: usize) -> String {
+        match self {
+            ListStyle::None => String::new(),
+            ListStyle::Disc => "\u{2022}".to_string(),
+            ListStyle::Circle => "\u{25e6}".to_string(),
+            ListStyle::Square => "\u{25aa}".to_string(),
+            ListStyle::Decimal => format!("{n}."),
+            ListStyle::DecimalLeadingZero => format!("{n:02}."),
+            ListStyle::LowerAlpha => format!("{}.", alphabetic(n, 'a')),
+            ListStyle::UpperAlpha => format!("{}.", alphabetic(n, 'A')),
+            ListStyle::LowerRoman => format!("{}.", roman(n).to_lowercase()),
+            ListStyle::UpperRoman => format!("{}.", roman(n)),
+        }
+    }
+
+    /// The same marker for a plain-text rendering, where the bullet glyphs are
+    /// spelled with the characters a terminal is certain to have.
+    pub fn ascii_marker(self, n: usize) -> String {
+        match self {
+            ListStyle::Disc => "*".to_string(),
+            ListStyle::Circle => "o".to_string(),
+            ListStyle::Square => "-".to_string(),
+            _ => self.marker(n),
+        }
+    }
+}
+
+/// `n` in the bijective base-26 CSS calls `lower-alpha`: a, b, ... z, aa, ab.
+/// Zero has no representation, so it falls back to the decimal CSS Counter
+/// Styles §5 asks for when a counter is outside its style's range.
+fn alphabetic(n: usize, first: char) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut n = n;
+    let mut out = Vec::new();
+    while n > 0 {
+        let digit = (n - 1) % 26;
+        out.push((first as u8 + digit as u8) as char);
+        n = (n - 1) / 26;
+    }
+    out.iter().rev().collect()
+}
+
+/// `n` in upper-case Roman numerals. The style's range is 1 to 3999, and a
+/// counter outside it is written in decimal instead, per CSS Counter Styles §5.
+fn roman(n: usize) -> String {
+    const DIGITS: [(usize, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    if !(1..=3999).contains(&n) {
+        return n.to_string();
+    }
+    let mut n = n;
+    let mut out = String::new();
+    for (value, glyph) in DIGITS {
+        while n >= value {
+            out.push_str(glyph);
+            n -= value;
+        }
+    }
+    out
+}
+
+/// A `list-style-type` keyword, or `None` for one this cannot draw.
+fn parse_list_style(value: &str) -> Option<ListStyle> {
+    Some(match value {
+        "none" => ListStyle::None,
+        "disc" => ListStyle::Disc,
+        "circle" => ListStyle::Circle,
+        "square" => ListStyle::Square,
+        "decimal" => ListStyle::Decimal,
+        "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
+        "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
+        "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
+        "lower-roman" => ListStyle::LowerRoman,
+        "upper-roman" => ListStyle::UpperRoman,
+        _ => return None,
+    })
+}
+
 /// `text-transform`, the case a box sets for the text inside it.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Transform {
@@ -224,6 +340,10 @@ pub struct Computed {
     pub align: Align,
     /// `text-transform`, likewise inherited.
     pub transform: Transform,
+    /// `list-style-type`, inherited so a rule on the list reaches its items.
+    /// `None` is "the page said nothing", which leaves the marker to the kind
+    /// of list the element opened and how deeply it is nested.
+    pub list_style: Option<ListStyle>,
     /// `white-space`, inherited. `None` is "the page said nothing", which is
     /// what lets `<pre>` carry the UA default without the cascade knowing about
     /// element names: an author rule anywhere on the box overrides it.
@@ -348,6 +468,24 @@ impl Computed {
                 "normal" => self.break_word = false,
                 _ => {}
             },
+            "list-style-type" => {
+                if let Some(style) = parse_list_style(value) {
+                    self.list_style = Some(style);
+                }
+            }
+            // The shorthand resets every component it leaves out, so one
+            // written with only a position or an image still puts the type
+            // back to `disc`.
+            "list-style" => {
+                let words: Vec<&str> = value.split_whitespace().collect();
+                let named = words.iter().find_map(|word| parse_list_style(word));
+                let other = words
+                    .iter()
+                    .any(|word| matches!(*word, "inside" | "outside") || word.starts_with("url("));
+                if let Some(style) = named.or(other.then_some(ListStyle::Disc)) {
+                    self.list_style = Some(style);
+                }
+            }
             "text-transform" => match value {
                 "none" => self.transform = Transform::None,
                 "uppercase" => self.transform = Transform::Upper,
@@ -2074,5 +2212,56 @@ mod tests {
             )
             .0;
         assert_eq!(inner.indent, 28);
+    }
+
+    #[test]
+    fn list_style_type_parses_and_inherits() {
+        let sheet = sheet(
+            "ul { list-style-type: square } ol { list-style: lower-roman }              nav { list-style: none } menu { list-style: inside }              dir { list-style-type: cjk-earthly-branch }",
+        );
+        let style = |tag| cascade(&sheet, &[element(tag, &[])], None).list_style;
+        assert_eq!(style("ul"), Some(ListStyle::Square));
+        assert_eq!(style("ol"), Some(ListStyle::LowerRoman));
+        assert_eq!(style("nav"), Some(ListStyle::None));
+        // A shorthand carrying only a position still resets the type, and a
+        // counter style this cannot draw leaves the property alone.
+        assert_eq!(style("menu"), Some(ListStyle::Disc));
+        assert_eq!(style("dir"), None);
+
+        // The property inherits, which is what carries a rule on the list down
+        // to the items that wear the marker.
+        let stack = vec![element("ul", &[]), element("li", &[])];
+        let inner = sheet
+            .cascade(
+                &stack,
+                None,
+                &cascade(&sheet, &stack[..1], None),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(inner.list_style, Some(ListStyle::Square));
+    }
+
+    #[test]
+    fn list_markers_count_in_their_own_style() {
+        assert_eq!(ListStyle::Disc.marker(3), "\u{2022}");
+        assert_eq!(ListStyle::None.marker(3), "");
+        assert_eq!(ListStyle::Decimal.marker(12), "12.");
+        assert_eq!(ListStyle::DecimalLeadingZero.marker(3), "03.");
+        assert_eq!(ListStyle::DecimalLeadingZero.marker(12), "12.");
+        assert_eq!(ListStyle::LowerAlpha.marker(1), "a.");
+        assert_eq!(ListStyle::LowerAlpha.marker(26), "z.");
+        assert_eq!(ListStyle::LowerAlpha.marker(27), "aa.");
+        assert_eq!(ListStyle::UpperAlpha.marker(28), "AB.");
+        assert_eq!(ListStyle::LowerRoman.marker(4), "iv.");
+        assert_eq!(ListStyle::UpperRoman.marker(1994), "MCMXCIV.");
+        // Outside the style's range a counter is written in decimal.
+        assert_eq!(ListStyle::UpperRoman.marker(4000), "4000.");
+        assert_eq!(ListStyle::LowerAlpha.marker(0), "0.");
+        // The plain-text rendering spells the bullets in ASCII and leaves the
+        // counting styles as they are.
+        assert_eq!(ListStyle::Circle.ascii_marker(1), "o");
+        assert_eq!(ListStyle::LowerRoman.ascii_marker(9), "ix.");
     }
 }

@@ -38,6 +38,10 @@
         border: 1px solid var(--accent);
       }
       blockquote { border-left: 4px solid #a3be8c; padding-left: 12px }
+      /* The marker a list item wears, which the element alone does not decide:
+         a ul counts when it is asked to, and an ol wears a bullet. */
+      .roman { list-style-type: lower-roman }
+      .plain { list-style: none }
       /* Alignment, including the figure below, which inherits it from the
          paragraph the image sits in. */
       h1, .centred { text-align: center }
@@ -139,7 +143,25 @@ while the newline above them is kept.</p>
     </p>
     <ul>
       <li>Click a link to follow it; Backspace goes back.</li>
-      <li>Arrows, PageUp and PageDown scroll; q closes the window.</li>
+      <li>
+        Arrows, PageUp and PageDown scroll; q closes the window.
+        <ul>
+          <li>
+            A nested list wears a hollow bullet, and one nested inside that a
+            square.
+            <ul><li>Like this one.</li></ul>
+          </li>
+        </ul>
+      </li>
+    </ul>
+
+    <h2>What a list may be numbered in</h2>
+    <ol class="roman" start="3">
+      <li>A list numbered in lower-case Roman, counting from three.</li>
+      <li>Its second item.</li>
+    </ol>
+    <ul class="plain">
+      <li>A list with no marker at all, kept at its indent.</li>
     </ul>
     <hr>
     <p class="mono flush-right">/share/web/welcome.html</p>

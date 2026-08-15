@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::doc::{Block, BlockKind, Document, Marker};
+use crate::doc::{Block, BlockKind, Document};
 
 /// Render `document` wrapped to `width` columns.
 ///
@@ -67,13 +67,7 @@ pub fn render(document: &Document, width: usize, links: bool) -> String {
 fn lead(block: &Block) -> (String, String) {
     match block.kind {
         BlockKind::Heading(level) => (format!("{} ", "#".repeat(level as usize)), String::new()),
-        BlockKind::ListItem { depth, marker } => {
-            let prefix = match marker {
-                Marker::Bullet => "* ".to_string(),
-                Marker::Number(n) => format!("{}. ", n),
-            };
-            (prefix, "  ".repeat(depth + 1))
-        }
+        BlockKind::ListItem { depth, marker } => (marker.ascii(), "  ".repeat(depth + 1)),
         BlockKind::Quote => ("> ".to_string(), String::new()),
         _ => (String::new(), String::new()),
     }

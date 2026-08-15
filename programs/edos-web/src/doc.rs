@@ -17,7 +17,9 @@ use edos_render::image::{Image, Svg, decode_bmp, looks_like_svg};
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::css::{self, Computed, Element, MediaQueries, Stylesheet, Vars, Viewport, WhiteSpace};
+use crate::css::{
+    self, Computed, Element, ListStyle, MediaQueries, Stylesheet, Vars, Viewport, WhiteSpace,
+};
 
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,10 +43,33 @@ pub enum BlockKind {
     Image,
 }
 
+/// The marker one `li` wears: the `list-style-type` the cascade left on it, and
+/// its position in its list, which only a counting style reads.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Marker {
-    Bullet,
-    Number(usize),
+pub struct Marker {
+    pub style: ListStyle,
+    pub n: usize,
+}
+
+impl Marker {
+    /// The marker text, with the space that separates it from the item.
+    pub fn text(&self) -> String {
+        self.with(ListStyle::marker)
+    }
+
+    /// The same for a plain-text rendering.
+    pub fn ascii(&self) -> String {
+        self.with(ListStyle::ascii_marker)
+    }
+
+    fn with(&self, render: fn(ListStyle, usize) -> String) -> String {
+        let marker = render(self.style, self.n);
+        if marker.is_empty() {
+            marker
+        } else {
+            marker + " "
+        }
+    }
 }
 
 /// A stretch of text sharing one appearance and one link target.
@@ -514,17 +539,34 @@ impl Builder<'_> {
         decode(&(self.fetch)(&url)?)
     }
 
-    /// The depth and marker for an `li`, consuming an ordered list's counter.
+    /// The depth and marker for an `li`, consuming its list's counter.
+    ///
+    /// Every list counts, ordered or not, since the counter is the item's
+    /// position and a `ul` the page asked to number reads it too.
     fn marker(&mut self) -> (usize, Marker) {
         let depth = self.lists.len().saturating_sub(1);
-        match self.lists.last_mut() {
-            Some(list) if list.ordered => {
+        let ordered = self.lists.last().is_some_and(|list| list.ordered);
+        let n = match self.lists.last_mut() {
+            Some(list) => {
                 let n = list.next;
                 list.next += 1;
-                (depth, Marker::Number(n))
+                n
             }
-            _ => (depth, Marker::Bullet),
-        }
+            None => 1,
+        };
+        let style = self.computed.list_style.unwrap_or(if ordered {
+            ListStyle::Decimal
+        } else {
+            // The UA stylesheet's nesting rule: a list inside a list wears a
+            // hollow bullet, and one inside that a square. HTML Standard
+            // §15.3.10 "Lists".
+            match depth % 3 {
+                0 => ListStyle::Disc,
+                1 => ListStyle::Circle,
+                _ => ListStyle::Square,
+            }
+        });
+        (depth, Marker { style, n })
     }
 
     fn resolve(&self, href: &str) -> Option<String> {

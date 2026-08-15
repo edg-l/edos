@@ -67,7 +67,8 @@ the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
 left, since the blitter cannot stretch a line), `line-height` (a factor, a
 length or `normal`), `text-transform`, `text-indent`, `white-space`,
-`word-break`/`overflow-wrap`, the vertical and left margins,
+`word-break`/`overflow-wrap`, `list-style-type` (and the type keyword in the
+`list-style` shorthand), the vertical and left margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
@@ -152,6 +153,17 @@ properties change that and `css::Wrap` is the pair resolved into the one answer
 an empty line would not hold the word, and `word-break: break-all` fills the
 line to the column edge and cuts wherever that falls. `word-break` wins where a
 page sets both, since it asks for the cut in strictly more cases.
+
+**The element does not decide a list's marker.** `list-style-type` does, and
+`ul` and `ol` only supply the value the UA stylesheet would: `decimal` for an
+ordered list, and a bullet that varies with nesting depth for an unordered one —
+disc, then circle, then square, per the HTML Standard's rendering rules. So
+every list counts its items, ordered or not, because a `ul` given
+`list-style-type: lower-roman` needs the position too. `css::ListStyle::marker`
+writes the counter in the style's own alphabet, falling back to decimal outside
+the style's range the way CSS Counter Styles §5 asks — which is what a Roman
+numeral past 3999 gets. `none` keeps the item's indent and drops the marker,
+which is what a page styling a navigation list means by it.
 
 **A page's own measure is honoured.** `width` and `max-width` resolve to
 `Computed::measure`, and `margin: 0 auto` sets `Computed::center`, which

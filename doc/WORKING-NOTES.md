@@ -7609,3 +7609,33 @@ verified at all. The first attempt used a 79-character URL, which measures about
 526px against the fixture's 38em (~608px) column, so the `break-word` paragraph
 rendered identically to the default one and looked like a bug in the cut. Check
 the measure before reading anything into a fixture that does not break.
+
+## `list-style-type`: the marker is a property, not an element (2026-08-15)
+
+`<ul>` and `<ol>` do not decide what an item wears; they only supply the value
+the UA stylesheet would, and `list-style-type` overrides it. So `doc::Marker`
+stopped being `Bullet | Number(n)` — a shape in which a `ul` could never be
+numbered — and became the resolved `css::ListStyle` plus the item's position.
+
+Two consequences fall out of that and both are load-bearing:
+
+- **Every list counts, ordered or not.** The counter used to advance only inside
+  an `<ol>`, so `ul { list-style-type: lower-roman }` would have numbered every
+  item `i.`. The position is a property of the item, not of the element that
+  opened the list.
+- **The nesting bullet is a UA rule, not a renderer default.** An unordered list
+  with nothing said about it wears disc, then circle, then square by depth (HTML
+  Standard §15.3.10). That is `depth % 3` in `doc.rs::marker`, and it is only
+  reached when the cascade left `list_style` at `None`.
+
+`ListStyle::marker` writes the counter in the style's alphabet: bijective
+base-26 for `lower-alpha` (a…z, aa), Roman for `lower-roman`. A counter outside
+a style's range is written in decimal instead, which is what CSS Counter
+Styles §5 asks for and what a Roman numeral past 3999 gets. `ascii_marker` is
+the same thing for the `-d` text dump, where the bullets are spelled `*`, `o`
+and `-` so the output stays ASCII.
+
+`list-style: none` keeps the item at its indent and drops the marker, rather
+than dropping the indent too — that is what a page styling a navigation list
+means by it, and `view.rs` gets there by turning the empty marker string into
+no marker fragment at all.

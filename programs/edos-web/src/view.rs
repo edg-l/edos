@@ -13,7 +13,7 @@ use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 
 use crate::css::{self, Align, Sides};
-use crate::doc::{Block, BlockKind, Document, Marker, Picture, Run};
+use crate::doc::{Block, BlockKind, Document, Picture, Run};
 
 /// Margin between the page and the window edge.
 pub const PAGE_PAD: u32 = space(4);
@@ -687,10 +687,9 @@ fn default_plan(block: &Block) -> Plan {
         BlockKind::ListItem { depth, marker } => Plan {
             indent: LIST_INDENT * (depth as u32 + 1),
             gap_after: space(1),
-            marker: Some(match marker {
-                Marker::Bullet => "\u{2022} ".to_string(),
-                Marker::Number(n) => format!("{n}. "),
-            }),
+            // `list-style-type: none` leaves the indent and drops the marker,
+            // which is what a page styling a navigation list expects.
+            marker: Some(marker.text()).filter(|text| !text.is_empty()),
             ..base
         },
         BlockKind::Pre => Plan {
