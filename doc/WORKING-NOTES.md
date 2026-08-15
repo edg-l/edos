@@ -77,15 +77,27 @@ The `edos_rt` half is written and committed there (`closing a descriptor is the
 drop`) and **is not published**, so nothing in this repo has changed: programs
 build against the installed toolchain, which still pins 0.0.50.
 
-**What stops it going further is that the fork cannot currently be checked.**
-`./x check library/std --target x86_64-unknown-edos` fails on a *pristine*
-`~/dev/rust` with 266 errors, every one `E0514: found crate core compiled by an
-incompatible version of rustc` — the `stage1-std` artifacts were built by
-`6e2a77099` and the compiler is `bba29813d`. A `[patch.crates-io]` path
-override onto the local crate hits the same wall. So the cheap check CLAUDE.md
-advertises is unavailable until that build tree is cleaned, and publishing
-before it works would mean publishing something never compiled. A crates.io
-version cannot be withdrawn.
+**The fork could not be checked at all, and now can.** `./x check library/std
+--target x86_64-unknown-edos` failed on a *pristine* `~/dev/rust` with 266
+errors, every one `E0514: found crate core compiled by an incompatible version
+of rustc`: the `core`, `alloc` and `libc` rmeta under
+`build/x86_64-unknown-linux-gnu/stage1-std/x86_64-unknown-edos/dist/` were
+built by `6e2a77099` and the stage1 compiler had moved to `bba29813d`. Nothing
+invalidated them, so every later check read them and refused.
+
+The cure is to remove that one target directory, `stage1-std/x86_64-unknown-edos`,
+which is 205 MB and rebuilds itself. **Not `./x clean`**, which would also throw
+away the 29 GB tree including the downloaded CI LLVM. The first check afterwards
+takes 30 seconds because it rebuilds `core`, `alloc`, `libc` and the rest of the
+edos std; every one after that is 2 seconds, which is the cheap check CLAUDE.md
+advertises.
+
+Two things confirmed while fixing it, both of which the fd-leak work needs. A
+`[patch.crates-io]` path override onto `~/dev/edos_rt` now resolves and compiles,
+so the change can be tested before anything is published; a crates.io version
+cannot be withdrawn, so that order is not optional. And the installed toolchain
+is untouched by the deletion: it lives under the `install.prefix` in
+`bootstrap.toml`, not in `build/`, so `cargo +edos build` keeps working across it.
 
 ---
 
