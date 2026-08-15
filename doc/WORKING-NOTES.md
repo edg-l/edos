@@ -6,6 +6,45 @@ session.
 
 ---
 
+## The cursor resource was recreated on every shape change, and leaked its buffer
+
+Reported from a Windows guest: `RESOURCE_CREATE_2D resource 100 failed: 0x0`,
+twice, mid-session. Two separate bugs, and the reported code belongs to the
+newer one.
+
+**`0x0` is not a virtio-gpu response code.** Every real answer is `0x11xx` or
+`0x12xx`, so a zero means the response area was read before the device wrote
+it. With the flip pipelined, the control ring can hold completions that belong
+to a *frame*; `execute_scratch` took the first completion it saw, and if that
+was the frame's it reclaimed it and then read its own response area, still
+zeroed. `push` returns the descriptor head it used, so the command waits for
+**its own** head now and reclaims anything else on the frame's behalf. That is
+immune to whatever else is in flight, which a `pending` counter is not.
+
+**Underneath it, a real error the zero was hiding.** The same run on the v0.5.0
+ISO reports `0x1203` -- `ERR_INVALID_RESOURCE_ID` -- because `setup_cursor`
+creates resource 100 every time it is called and the resource already exists.
+It is called on every *shape* change, which is every hover over a window's
+resize edge, and each call also allocated a fresh 16 KiB DMA buffer and
+`core::mem::forget`-ed it. That worked exactly once; every later change leaked.
+
+A shape change is a new picture in the same box. The buffer lives on the driver
+now and the resource is created on the first upload only, so later calls re-fill
+the pixels and re-issue `UPDATE_CURSOR`. Zero failures across five shape changes
+where there were six before, and one `hardware cursor set up` line rather than
+one per hover.
+
+**What this says about `blob=off` on a real host.** The reporter's `wmfps` line
+after the asynchronous flip landed reads `flip_p50=0` with `flip_p95` between 27
+and 278 us, against `int_p50=13041` -- a 13 ms frame. The flip is no longer
+where a frame's time goes. What is left is `moves`: 29 or so out of ~76 frames
+per second, meaning the pointer position changes on well under half of them. A
+window can only advance as often as the guest is told the pointer moved, so that
+number is now the ceiling on how smooth a drag can look, and it is the thing to
+chase next. It is USB HID through xHCI, so the endpoint's interval and the
+driver's re-arm are where to look; nothing measured yet.
+
+
 ## The flip parks instead of spinning, and sends the regions rather than their box
 
 Two follow-ons to the asynchronous flip, and the first one corrects a claim made

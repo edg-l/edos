@@ -212,6 +212,13 @@ pub struct VirtioGpu {
     /// are announced. False means the device never interrupts and the only way
     /// to learn a command finished is to look.
     irq: bool,
+    /// The cursor's pixel buffer, allocated on the first upload and reused.
+    ///
+    /// A shape change is a new image in the same resource, not a new resource.
+    /// Creating resource 100 again is refused with `ERR_INVALID_RESOURCE_ID`
+    /// because it already exists, and the old buffer would leak on every
+    /// change -- once per hover over a window's resize edge.
+    cursor_buf: Option<DmaBuffer>,
     /// Descriptor chains submitted for the previous frame and not yet
     /// reclaimed. The scratch buffer holds their commands, so it may not be
     /// rewritten until they are.
@@ -300,6 +307,7 @@ impl VirtioGpu {
             scratch,
             cursor_scratch,
             use_blob,
+            cursor_buf: None,
             irq: irq_ok,
             pending: 0,
         })
@@ -333,16 +341,29 @@ impl VirtioGpu {
             ),
         ];
 
-        self.control_queue
+        let mine = self
+            .control_queue
             .push(&bufs)
             .expect("virtio-gpu: control queue full");
 
         let notify_off = self.control_queue.notify_off;
         self.transport.notify_queue(0, notify_off);
 
+        // **Wait for this command's own completion, not for the first one to
+        // arrive.** The flip is asynchronous, so the ring can hold completions
+        // that belong to a frame rather than to this command; taking one of
+        // those and then reading the response area finds it still zeroed, and a
+        // response type of zero is a code no device returns. Matching on the
+        // descriptor head this push was given makes that impossible to get
+        // wrong, whatever else is in flight.
         for _ in 0..10_000_000u32 {
             if let Some((head, _len)) = self.control_queue.poll_used() {
                 self.control_queue.reclaim(head);
+                if head != mine {
+                    // A frame's completion, reclaimed on its behalf.
+                    self.pending = self.pending.saturating_sub(1);
+                    continue;
+                }
                 let resp = unsafe {
                     core::ptr::read_volatile(
                         self.scratch.as_ptr().add(resp_offset) as *const VirtioGpuCtrlHdr
@@ -357,7 +378,26 @@ impl VirtioGpu {
     }
 
     /// Copy `cmd` into the scratch buffer and execute, returning the response header.
+    /// Make the scratch buffer and the control ring safe for a synchronous
+    /// command.
+    ///
+    /// **A pipelined flip leaves its commands in the scratch buffer and its
+    /// completions in the ring.** A synchronous command issued while that is
+    /// outstanding would write over commands the host is still reading, and
+    /// then reclaim the flip's completion and read its own response area before
+    /// the device had written it -- which reads back as a response type of
+    /// zero, a code no virtio-gpu device ever returns. `RESOURCE_CREATE_2D
+    /// resource 100 failed: 0x0` when the cursor image is set is exactly that.
+    ///
+    /// Every path that writes the scratch buffer calls this first. It is not
+    /// enough to drain inside `execute_scratch`, because callers write their
+    /// command into the buffer before reaching it.
+    fn begin_command(&mut self) {
+        self.reclaim_pending();
+    }
+
     fn send_command<Cmd: Sized>(&mut self, cmd: &Cmd, resp_size: usize) -> VirtioGpuCtrlHdr {
+        self.begin_command();
         let cmd_size = core::mem::size_of::<Cmd>();
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -379,6 +419,7 @@ impl VirtioGpu {
     /// fallback if none is reported.
     #[expect(unused)]
     pub fn get_display_info(&mut self) -> (u32, u32) {
+        self.begin_command();
         let mut hdr: VirtioGpuCtrlHdr = unsafe { core::mem::zeroed() };
         hdr.type_ = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
 
@@ -425,6 +466,7 @@ impl VirtioGpu {
     /// Query the EDID data and extract the display refresh rate in Hz.
     /// Returns None if EDID is not supported or the data can't be parsed.
     pub fn get_refresh_rate(&mut self) -> Option<u32> {
+        self.begin_command();
         let mut cmd: VirtioGpuCmdGetEdid = unsafe { core::mem::zeroed() };
         cmd.hdr.type_ = VIRTIO_GPU_CMD_GET_EDID;
         cmd.scanout = 0;
@@ -534,6 +576,7 @@ impl VirtioGpu {
         }
 
         // RESOURCE_ATTACH_BACKING: command header + mem entry packed together.
+        self.begin_command();
         let attach_size = core::mem::size_of::<VirtioGpuResourceAttachBacking>();
         let entry_size = core::mem::size_of::<VirtioGpuMemEntry>();
 
@@ -1019,16 +1062,26 @@ impl VirtioGpu {
         let cursor_hw_size = 64u32;
         let byte_len = (cursor_hw_size * cursor_hw_size * 4) as usize;
 
-        // Allocate DMA buffer for cursor pixel data
-        let cursor_buf = dma()
-            .allocate_sized(byte_len)
-            .expect("virtio-gpu: failed to allocate cursor buffer");
+        // The resource is created once and then re-filled. A later call is a
+        // different picture in the same box.
+        let first = self.cursor_buf.is_none();
+        if first {
+            self.cursor_buf = Some(
+                dma()
+                    .allocate_sized(byte_len)
+                    .expect("virtio-gpu: failed to allocate cursor buffer"),
+            );
+        }
+        let (cursor_ptr, cursor_phys) = {
+            let buf = self.cursor_buf.as_ref().expect("just allocated");
+            (buf.as_ptr(), buf.phys_addr().as_u64())
+        };
 
         // Copy pixel data into 64x64 buffer, adding alpha.
         // Source pixels: 0x00000000 = transparent, 0x00RRGGBB = opaque.
         unsafe {
-            core::ptr::write_bytes(cursor_buf.as_ptr(), 0, byte_len);
-            let dst = cursor_buf.as_ptr() as *mut u32;
+            core::ptr::write_bytes(cursor_ptr, 0, byte_len);
+            let dst = cursor_ptr as *mut u32;
             let src_w = if pixels.len() == 256 { 16 } else { 64 };
             let src_h = pixels.len() / src_w.max(1);
             for y in 0..src_h.min(64) {
@@ -1045,14 +1098,16 @@ impl VirtioGpu {
         }
 
         // Use B8G8R8A8 format (1) for cursor to support alpha transparency.
-        self.create_resource_with_format(
-            cursor_res_id,
-            VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
-            cursor_hw_size,
-            cursor_hw_size,
-            cursor_buf.phys_addr().as_u64(),
-            byte_len as u32,
-        );
+        if first {
+            self.create_resource_with_format(
+                cursor_res_id,
+                VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                cursor_hw_size,
+                cursor_hw_size,
+                cursor_phys,
+                byte_len as u32,
+            );
+        }
 
         // Transfer cursor to host (must use control queue with FENCE for cursor)
         let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
@@ -1082,10 +1137,13 @@ impl VirtioGpu {
         cmd.hot_y = hot_y;
         self.send_cursor_command(&cmd);
 
-        // Keep the DMA buffer alive (cursor lives forever)
-        core::mem::forget(cursor_buf);
-
-        println!("virtio-gpu: hardware cursor set up");
+        // The buffer is owned by `self.cursor_buf` and stays mapped for as long
+        // as the resource refers to it. It used to be leaked with `forget` to
+        // keep it alive, which worked exactly once: every later shape change
+        // allocated another and leaked that too.
+        if first {
+            println!("virtio-gpu: hardware cursor set up");
+        }
     }
 
     /// Move the hardware cursor to (x, y). Fire-and-forget on the cursor queue.
