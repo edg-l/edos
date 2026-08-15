@@ -68,8 +68,24 @@ Four things it has to get right:
   program.
 
 Verify with the same instrument that found it: `strace -e openat,close` over
-`wc`, then `make guest-check`, then a desktop session left running while
-`lsof -p <taskbar>` is sampled twice.
+`wc`, then `make guest-check` — `stdtest` is the only program in the tree that
+uses `std::process::Command`, and its `Command::new("/bin/echo").output()` is
+exactly the pipe-EOF path this can break — then `ssh-check` and
+`storage-check`.
+
+The `edos_rt` half is written and committed there (`closing a descriptor is the
+drop`) and **is not published**, so nothing in this repo has changed: programs
+build against the installed toolchain, which still pins 0.0.50.
+
+**What stops it going further is that the fork cannot currently be checked.**
+`./x check library/std --target x86_64-unknown-edos` fails on a *pristine*
+`~/dev/rust` with 266 errors, every one `E0514: found crate core compiled by an
+incompatible version of rustc` — the `stage1-std` artifacts were built by
+`6e2a77099` and the compiler is `bba29813d`. A `[patch.crates-io]` path
+override onto the local crate hits the same wall. So the cheap check CLAUDE.md
+advertises is unavailable until that build tree is cleaned, and publishing
+before it works would mean publishing something never compiled. A crates.io
+version cannot be withdrawn.
 
 ---
 
