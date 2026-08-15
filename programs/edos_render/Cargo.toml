@@ -11,6 +11,7 @@ default = []
 svg = ["dep:resvg"]
 
 [dependencies]
+window-abi = { path = "../../libs/window-abi" }
 edos_lib = { path = "../edos_lib" }
 # default-features = false drops usvg's `text` feature, which pulls fontdb and
 # memmap2 and wants a libc this target has not got.

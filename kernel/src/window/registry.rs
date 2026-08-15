@@ -207,50 +207,9 @@ impl WindowInfo {
     }
 }
 
-/// Window property constants for sys_window_set/get.
-pub mod property {
-    pub const VISIBLE: u64 = 1;
-    pub const X: u64 = 2;
-    pub const Y: u64 = 3;
-    pub const WIDTH: u64 = 4;
-    pub const HEIGHT: u64 = 5;
-    pub const TITLE_PTR: u64 = 6;
-    pub const BUFFER_SHM: u64 = 7;
-    pub const FLAGS: u64 = 8;
-    /// Put the window away, or bring it back. Non-zero minimizes.
-    pub const MINIMIZED: u64 = 9;
-    /// Thickness of the window manager's frame around this window, packed as
-    /// four u16 edges: left, top, right, bottom, low bits first. Set by
-    /// whoever decorates the window, so pointer routing follows the frame that
-    /// is actually drawn.
-    pub const FRAME: u64 = 10;
-    /// Pixel dimensions of the buffer named by [`BUFFER_SHM`], packed as two
-    /// u32s: width in the high half, height in the low.
-    ///
-    /// The buffer's stride is the client's, not the window manager's. A resize
-    /// changes [`WIDTH`] the moment the manager decides it, while the client
-    /// allocates its new buffer some frames later, so a compositor that reads
-    /// the buffer at the window's current width reads it at a stride it was
-    /// never written with and draws a sheared picture.
-    pub const BUFFER_SIZE: u64 = 11;
-}
-
-/// Window flags.
-pub mod flags {
-    /// No title bar or border: the window owns every pixel it was given, and
-    /// the compositor neither decorates it nor lets the pointer drag it.
-    pub const FLAG_UNDECORATED: u64 = 1;
-    /// Never holds keyboard focus. Chrome that paints no focus state, such as
-    /// the panel, since input landing there is invisible to the user.
-    pub const FLAG_NO_FOCUS: u64 = 2;
-
-    /// A panel: undecorated and never focusable. The kernel never tests this
-    /// combined value, it tests the two bits separately, which is the whole
-    /// point -- a menu is undecorated but must take focus, or it cannot be
-    /// dismissed by focus loss. Kept as the name userspace sets.
-    #[allow(dead_code)]
-    pub const FLAG_DOCK: u64 = FLAG_UNDECORATED | FLAG_NO_FOCUS;
-}
+// Shared with every client through `window-abi`: a number that means one thing
+// here and another there sets the wrong field, and nothing says so.
+pub use window_abi::{flags, property};
 
 /// Global window registry.
 pub struct WindowRegistry {

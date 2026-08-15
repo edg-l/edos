@@ -486,50 +486,10 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
 /// a repaint the compositor had not seen yet.
 pub const WINDOW_LIST_CONSUME_DAMAGE: u64 = 1;
 
-/// Maximum title length in WindowListEntry (including null terminator).
-pub const TITLE_MAX: usize = 64;
-
-/// Entry in the window list returned by sys_window_list.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct WindowListEntry {
-    pub id: u64,
-    pub pid: u64,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub z_order: u32,
-    pub visible: u32,
-    pub buffer_shm_id: u64,
-    /// Pixel dimensions the client wrote `buffer_shm_id` at, or zero when it
-    /// has not said. Read the buffer at these rather than at `width` and
-    /// `height`: those are the manager's and change before the client has
-    /// allocated to match, so reading at them shears the picture.
-    pub buffer_width: u32,
-    pub buffer_height: u32,
-    pub flags: u64,
-    /// The frame the window's manager last reported, packed as four u16 edges.
-    /// Reported back so a manager can skip rewriting a frame it already set.
-    pub frame: u64,
-    /// The client's repaint count. A reader keeps the value it last acted on
-    /// and redraws when it differs; the kernel never resets it.
-    pub damage_seq: u32,
-    /// The region the client reported repainting, in window-local pixels, or
-    /// all zeroes when it reported none. Only meaningful to a caller that
-    /// consumes damage; see `WINDOW_LIST_CONSUME_DAMAGE`.
-    pub damage_x: u32,
-    pub damage_y: u32,
-    pub damage_w: u32,
-    pub damage_h: u32,
-    /// Set for the window that currently holds input focus. The registry is the
-    /// single source of truth: clients must not re-derive focus from `z_order`.
-    pub focused: u32,
-    /// Set while the window is put away. It stays in this list so the panel can
-    /// offer a way back; the compositor skips it.
-    pub minimized: u32,
-    pub title: [u8; TITLE_MAX],
-}
+// The shape the client reads back, so neither side owns it: a field added here
+// alone is read at the wrong offset there, with nothing to say so at compile
+// time. It lives in `window-abi`.
+pub use window_abi::{TITLE_MAX, WindowListEntry};
 
 /// Send an event to a window.
 ///

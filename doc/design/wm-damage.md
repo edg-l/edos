@@ -224,9 +224,11 @@ Audited, with what each one turned out to be:
 
 ## Traps
 
-- **`WindowListEntry` is mirrored field for field** in `kernel/src/syscalls/window.rs`
-  and `programs/edos_render/src/window.rs`. Changing one without the other
-  compiles cleanly and makes the compositor read garbage.
+- **`WindowListEntry` is `libs/window-abi`**, which the kernel and
+  `edos_render` both depend on. It used to be written out in both, where
+  changing one alone compiled cleanly and made the compositor read garbage; the
+  same went for the property numbers, the flags and `WindowEvent`. Anything new
+  that crosses that boundary belongs in that crate for the same reason.
 - **Two pages mean a partial transfer reaches one of them.** `flip()` returns a
   new back-page offset only on the Bochs VBE path; virtio-gpu, which every `run`
   target uses, has one buffer, so a partial rect transfer there is simply the

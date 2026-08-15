@@ -429,14 +429,11 @@ panel, the terminal and every widget at once. What lives in it:
 | `metrics` | One spacing scale derived from a single unit, and the shared control height. |
 | `theme` | Every colour in the shell. |
 | `widgets` | Controls, layout, and the terminal grid. |
-| `window` | Window syscalls, and the `WindowListEntry` ABI. |
+| `window` | Window syscall wrappers. The shapes they exchange are `libs/window-abi`, re-exported here. |
 | `graphics` | Framebuffer, textures, `Screen`. |
 
-Two things that break silently rather than loudly:
+One thing that breaks silently rather than loudly:
 
-- **`WindowListEntry` mirrors the kernel's struct** in `kernel/src/syscalls/window.rs`
-  field for field. Change one without the other and the compositor reads garbage;
-  nothing catches it at compile time.
 - **Text is measured, not counted.** The chrome face is proportional, so
   `chars().count() * char_width()` is wrong everywhere except a mono grid. Use
   `widgets::text_width`.

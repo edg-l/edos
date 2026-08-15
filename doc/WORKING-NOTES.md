@@ -4620,7 +4620,7 @@ worse than one that admits it.
 
 - `/proc/syscalls` publishes the kernel's own syscall table (number, name,
   argument kinds) and its errno names, so `strace` holds no duplicate that could
-  drift the way `WindowListEntry` can. **Adding a syscall now means adding a row
+  drift the way `WindowListEntry` could before it moved to `libs/window-abi`. **Adding a syscall now means adding a row
   to `kernel/src/syscalls/table.rs`** or `strace` will print it as
   `syscall_NNN(0x…, 0x…)`.
 - Buffer contents are captured on both sides: an input buffer on entry, an

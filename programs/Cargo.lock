@@ -552,6 +552,7 @@ dependencies = [
  "fontdue",
  "noto-sans-mono-bitmap",
  "resvg",
+ "window-abi",
 ]
 
 [[package]]
@@ -2413,6 +2414,10 @@ version = "0.1.0"
 dependencies = [
  "edos_lib",
 ]
+
+[[package]]
+name = "window-abi"
+version = "0.1.0"
 
 [[package]]
 name = "windows-link"
