@@ -1,10 +1,76 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-12
+# Working notes, sessions of 2026-08-08 to 2026-08-15
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
 session.
 
 ---
+
+## The browser became one, and what the site was actually missing
+
+`edos-web` could fetch and render a page and nothing else: no way to type an
+address, no forward, no reload, a fragment link that refetched the page and
+landed at its top, and a window that went dead for the length of a load. The
+site it exists to read came out wrong in ways that were worth measuring rather
+than guessing at, so the counts below are occurrences in the CSS the guest
+actually downloads (`/usr/src/edos-web/dist/_astro/*.css`).
+
+**What was wrong, in the order it mattered:**
+
+1. **Every picture was missing.** All 17 images on the site are WebP and the
+   decoder read BMP and SVG, so each one fell back to its alt text. `png`,
+   `image-webp` and `zune-jpeg` are pure Rust and build for
+   `x86_64-unknown-edos` unpatched; they sit behind `edos_render`'s `raster`
+   feature, and `imgview` and the file manager's thumbnails take the same path.
+2. **`calc()` was refused: 141 lengths**, over `font-size` (13), `margin-top`
+   (12), `height` (11), `width` (8), `padding` (7) and `gap` (5). Every one of
+   them left the property at whatever was inherited.
+3. **`hsl()` was refused: 45 colours**, which is the whole aside and badge
+   palette, because a generated sheet declares one hue as a custom property and
+   writes each shade as `hsl(var(--hue) 60% 40%)`. `color-mix()` was six more.
+4. **`position` is unimplemented (59 declarations)**, so Starlight's sidebar
+   landed in the flow and a documentation page opened on a screen and a half of
+   navigation links. Measured: `edos.edgl.dev/introduction/` is 72 blocks whole
+   and 42 from its `<main>`.
+5. **Tables ran together.** `<tr>` opened a block and `<td>` opened nothing, so
+   a row rendered as its cells' text on one line.
+6. **Rounded corners: 66 radii**, none of them drawn.
+
+**The two traps in it, both worth keeping:**
+
+- **A page's `sr-only` text was being rendered at full size.** The
+  visually-hidden idiom is a box sized 1x1 with `overflow: hidden`, and nothing
+  here clips, so every heading on the site read "What runs today" followed by
+  "Section titled What runs today". The answer is in the cascade rather than in
+  layout: a box that small can show nothing whatever its overflow says. The
+  test that keeps it honest also asserts the opposite — a *child* of a 1px-wide
+  box is not hidden, because `measure` inherits and reading it as "this element
+  asked for 1px" would drop the page.
+- **`resolve()` dropped every `href` starting with `#`.** That was right when a
+  fragment did nothing and wrong the moment one scrolled, and the symptom was a
+  table of contents whose links were not links. Found by dumping the page with
+  `-d -l`, which lists every link target: the fragment ones were simply absent.
+
+**Loading is a thread now.** `net.rs` runs the whole load -- fetch, parse,
+style -- on a thread and posts progress back, which is what the `Arc`s in
+`doc.rs` and the `Mutex` around its subresource cache are for: a whole
+`Document` crosses the channel. One load at a time, and a second abandons the
+first by ticket rather than by stopping the thread, because a thread inside a
+TLS handshake cannot be interrupted. **The page gives way to the loading view
+the moment the load starts** -- Edgar's call, and the right one: the old page
+left up through a slow fetch reads as a click that was ignored.
+
+**Two measurements worth keeping.** The site sends about 100 KB of CSS per page
+and this machine's TLS is software, so `Accept-Encoding: gzip` is worth more
+than the inflate costs; and the subresource cache now belongs to the window
+rather than to the document, because every page of a site links the same
+sheets and following a link fetched all of them again over a handshake each.
+
+**Driving this in the guest**: `edos-web URL > /dev/klog 2>&1` is what makes a
+headless run readable -- the window's stdout is otherwise in the terminal it
+was launched from, where a screenshot is the only way to read it. And
+`scripts/edos-vm focus <title>` rather than clicking a taskbar button, which
+minimises the window and leaves every keystroke on the wallpaper.
 
 ## Every `File` leaks its descriptor, and `strace` says so in one line
 
@@ -2073,11 +2139,11 @@ does not have to invent them.
 | userspace programs | 125 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 126 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 110,910 code lines across 450 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 112,298 code lines across 451 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,827 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,446 | `git rev-list --count HEAD` |
+| commits | 1,456 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
-| host unit tests | 130 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
+| host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 160, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
