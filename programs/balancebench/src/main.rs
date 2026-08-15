@@ -38,18 +38,9 @@ use std::time::{Duration, Instant};
 
 use edos_lib::io::Tee;
 use edos_lib::process::{close, pipe, read, write};
+use edos_lib::procinfo::cpus_online;
 
 /// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
-fn cpus_online() -> u64 {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("cpus online:"))
-                .and_then(|value| value.trim().parse::<u64>().ok())
-        })
-        .unwrap_or(0)
-}
 
 /// Blocked threads created per CPU before the workers run.
 const BLOCKED_PER_CPU: u64 = 8;

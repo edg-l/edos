@@ -192,3 +192,21 @@ fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 fn first_word_number(value: &str) -> Option<u64> {
     value.split_ascii_whitespace().next()?.parse().ok()
 }
+
+/// CPUs the scheduler has online, from `/proc/cpuinfo`, or 0 when it cannot be
+/// read.
+///
+/// Every scheduler benchmark opens by checking this: a single-CPU boot is what
+/// makes switch latency measurable, and a multi-CPU one is what makes placement
+/// measurable, so each of them reports loudly when it was started on the wrong
+/// machine. See `doc/SCHED-ROADMAP.md`.
+pub fn cpus_online() -> u64 {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("cpus online:"))
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0)
+}

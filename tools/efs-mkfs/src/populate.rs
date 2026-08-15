@@ -166,26 +166,8 @@ fn create_file_inode(
         .alloc_inode(preferred_group)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "filesystem full: no inodes"))?;
 
-    let mut inode = EfsInode {
-        mode: S_IFREG | 0o644,
-        uid: 0,
-        gid: 0,
-        link_count: 1,
-        size: content.len() as u64,
-        blocks: 0,
-        flags: 0,
-        orphan_next: 0,
-        ctime_sec: ts.0,
-        ctime_nsec: ts.1,
-        reserved2: 0,
-        mtime_sec: ts.0,
-        mtime_nsec: ts.1,
-        reserved3: 0,
-        atime_sec: ts.0,
-        atime_nsec: ts.1,
-        checksum: 0,
-        data_area: [0u8; INODE_DATA_AREA_SIZE],
-    };
+    let mut inode = EfsInode::new(S_IFREG | 0o644, ts);
+    inode.size = content.len() as u64;
 
     if content.len() <= INODE_DATA_AREA_SIZE {
         // Inline data.
@@ -251,26 +233,8 @@ fn create_symlink_inode(
         .alloc_inode(preferred_group)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "filesystem full: no inodes"))?;
 
-    let mut inode = EfsInode {
-        mode: S_IFLNK | 0o777,
-        uid: 0,
-        gid: 0,
-        link_count: 1,
-        size: target.len() as u64,
-        blocks: 0,
-        flags: 0,
-        orphan_next: 0,
-        ctime_sec: ts.0,
-        ctime_nsec: ts.1,
-        reserved2: 0,
-        mtime_sec: ts.0,
-        mtime_nsec: ts.1,
-        reserved3: 0,
-        atime_sec: ts.0,
-        atime_nsec: ts.1,
-        checksum: 0,
-        data_area: [0u8; INODE_DATA_AREA_SIZE],
-    };
+    let mut inode = EfsInode::new(S_IFLNK | 0o777, ts);
+    inode.size = target.len() as u64;
 
     if target.len() <= INODE_DATA_AREA_SIZE {
         inode.flags = INODE_FLAG_INLINE_DATA;
@@ -398,26 +362,10 @@ fn populate_dir(
             let dotdot_min_usize = efs_common::dir_entry_min_size(2) as usize;
             let initial_cursor_child = dot_min_usize + dotdot_min_usize;
             let child_inode_initial = {
-                let mut ino = EfsInode {
-                    mode: S_IFDIR | 0o755,
-                    uid: 0,
-                    gid: 0,
-                    link_count: 2, // "." + parent entry
-                    size: block_size as u64,
-                    blocks: 1,
-                    flags: 0,
-                    orphan_next: 0,
-                    ctime_sec: ts.0,
-                    ctime_nsec: ts.1,
-                    reserved2: 0,
-                    mtime_sec: ts.0,
-                    mtime_nsec: ts.1,
-                    reserved3: 0,
-                    atime_sec: ts.0,
-                    atime_nsec: ts.1,
-                    checksum: 0,
-                    data_area: [0u8; INODE_DATA_AREA_SIZE],
-                };
+                let mut ino = EfsInode::new(S_IFDIR | 0o755, ts);
+                ino.link_count = 2; // "." + parent entry
+                ino.size = block_size as u64;
+                ino.blocks = 1;
                 set_inode_extent(&mut ino, 0, child_data_block, 1);
                 ino.checksum = checksum_inode(&ino);
                 ino

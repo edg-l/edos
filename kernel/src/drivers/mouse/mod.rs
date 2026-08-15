@@ -1,6 +1,5 @@
 //! PS/2 mouse driver with event broadcasting and DevFS interface.
 
-use crate::thread::preempt::PreemptSpinlock;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
 use alloc::{
@@ -16,13 +15,12 @@ use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
     debug::lock_order::RANK_DEVICE_POLLERS,
     fs::{
-        DevFsDevice, DevFsError, MmapRegion, PollState,
+        DevFsDevice, DevFsError, PollState,
         handle::{PollKey, PollRef, PollRegistration, Pollable},
         register_device_str,
     },
     graphics::DISPLAY,
     log,
-    memory::mapper::MemoryManager,
     thread::{
         broadcast::{Broadcaster, Subscriber},
         mutex::BlockingMutex,
@@ -420,25 +418,8 @@ impl DevFsDevice for MouseDevice {
         Ok(bytes[..count.min(bytes.len())].to_vec())
     }
 
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-
-    fn ioctl(&self, _request: u64, _arg: u64) -> Result<u64, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-
     fn poll(&self) -> Result<Box<dyn Pollable>, DevFsError> {
         Ok(Box::new(MousePoll))
-    }
-
-    fn mmap(
-        &self,
-        _offset: usize,
-        _length: usize,
-        _memory: Arc<PreemptSpinlock<MemoryManager>>,
-    ) -> Result<MmapRegion, DevFsError> {
-        Err(DevFsError::Unsupported)
     }
 
     fn size(&self) -> u64 {

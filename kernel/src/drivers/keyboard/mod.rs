@@ -1,4 +1,3 @@
-use crate::thread::preempt::PreemptSpinlock;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::{
@@ -17,11 +16,10 @@ use crate::{
     apic::get_lapic,
     debug::lock_order::RANK_DEVICE_POLLERS,
     fs::{
-        DevFsDevice, DevFsError, MmapRegion, PollState,
+        DevFsDevice, DevFsError, PollState,
         handle::{PollKey, PollRef, PollRegistration, Pollable},
         register_device_str,
     },
-    memory::mapper::MemoryManager,
     thread::{
         broadcast::{Broadcaster, Subscriber},
         mutex::BlockingMutex,
@@ -196,29 +194,8 @@ impl DevFsDevice for KeyboardDevice {
         Ok(buffer)
     }
 
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-
-    fn ioctl(&self, _request: u64, _arg: u64) -> Result<u64, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-
     fn poll(&self) -> Result<Box<dyn Pollable>, DevFsError> {
         Ok(Box::new(KeyboardPoll))
-    }
-
-    fn mmap(
-        &self,
-        _offset: usize,
-        _length: usize,
-        _memory: Arc<PreemptSpinlock<MemoryManager>>,
-    ) -> Result<MmapRegion, DevFsError> {
-        Err(DevFsError::Unsupported)
-    }
-
-    fn size(&self) -> u64 {
-        0
     }
 }
 

@@ -58,6 +58,38 @@ pub struct EfsInode {
 const _: () = assert!(core::mem::size_of::<EfsInode>() == 256);
 
 impl EfsInode {
+    /// A fresh inode of `mode`, timestamped `(secs, nanos)` on all three
+    /// stamps, owned by root, with one link, no size and no blocks.
+    ///
+    /// The caller sets whatever it differs in and stamps the checksum last —
+    /// `checksum_inode` covers every other field, so computing it here would
+    /// only be right for an inode nobody touched afterwards. This exists
+    /// because the same twenty-field literal was written out in the kernel and
+    /// four times in `efs-mkfs`: a field added to the struct has to reach every
+    /// one of them, and the compiler only says so for the ones it can see.
+    pub fn new(mode: u16, ts: (u64, u32)) -> Self {
+        EfsInode {
+            mode,
+            uid: 0,
+            gid: 0,
+            link_count: 1,
+            size: 0,
+            blocks: 0,
+            flags: 0,
+            orphan_next: 0,
+            ctime_sec: ts.0,
+            ctime_nsec: ts.1,
+            reserved2: 0,
+            mtime_sec: ts.0,
+            mtime_nsec: ts.1,
+            reserved3: 0,
+            atime_sec: ts.0,
+            atime_nsec: ts.1,
+            checksum: 0,
+            data_area: [0u8; INODE_DATA_AREA_SIZE],
+        }
+    }
+
     /// Returns `true` if this inode represents a directory.
     pub fn is_dir(&self) -> bool {
         self.mode & S_IFMT == S_IFDIR

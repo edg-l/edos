@@ -1975,27 +1975,8 @@ fn inode_to_file(name: String, inode: &EfsInode) -> File {
 }
 
 fn new_inode(mode: u16, flags: u32) -> EfsInode {
-    let now = current_unix_time();
-    let mut inode = EfsInode {
-        mode,
-        uid: 0,
-        gid: 0,
-        link_count: 1,
-        size: 0,
-        blocks: 0,
-        flags,
-        orphan_next: 0,
-        ctime_sec: now,
-        ctime_nsec: 0,
-        reserved2: 0,
-        mtime_sec: now,
-        mtime_nsec: 0,
-        reserved3: 0,
-        atime_sec: now,
-        atime_nsec: 0,
-        checksum: 0,
-        data_area: [0u8; INODE_DATA_AREA_SIZE],
-    };
+    let mut inode = EfsInode::new(mode, (current_unix_time(), 0));
+    inode.flags = flags;
     inode.checksum = checksum_inode(&inode);
     inode
 }

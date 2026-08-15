@@ -82,26 +82,10 @@ pub fn make_dir_inode(
     blocks: u64,
     ts: (u64, u32),
 ) -> EfsInode {
-    let mut inode = EfsInode {
-        mode: S_IFDIR | mode_perm,
-        uid: 0,
-        gid: 0,
-        link_count,
-        size,
-        blocks,
-        flags: 0,
-        orphan_next: 0,
-        ctime_sec: ts.0,
-        ctime_nsec: ts.1,
-        reserved2: 0,
-        mtime_sec: ts.0,
-        mtime_nsec: ts.1,
-        reserved3: 0,
-        atime_sec: ts.0,
-        atime_nsec: ts.1,
-        checksum: 0,
-        data_area: [0u8; 176],
-    };
+    let mut inode = EfsInode::new(S_IFDIR | mode_perm, ts);
+    inode.link_count = link_count;
+    inode.size = size;
+    inode.blocks = blocks;
     inode.checksum = checksum_inode(&inode);
     inode
 }

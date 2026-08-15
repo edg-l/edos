@@ -54,6 +54,11 @@ impl From<DevFsError> for fs::Error {
 }
 
 /// Trait implemented by kernel devices exposed through devfs.
+///
+/// Every method defaults to the refusal, so a device implements the operations
+/// it has and says nothing about the rest. An override that returns
+/// `Unsupported` is the default written out again and only hides which
+/// operations the device really answers.
 pub trait DevFsDevice: Send + Sync {
     fn read(&self, _offset: usize, _count: usize) -> Result<Vec<u8>, DevFsError> {
         Err(DevFsError::Unsupported)
