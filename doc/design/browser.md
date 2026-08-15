@@ -72,13 +72,15 @@ length or `normal`), `text-transform`, `text-indent`, `white-space`,
 `word-break`/`overflow-wrap`, `letter-spacing`/`word-spacing`,
 `list-style-type` (and the type keyword in the
 `list-style` shorthand), all four margins,
-the measure a box asks for with `width`/`max-width`, the box it paints for
+the measure a box asks for with `width`/`max-width`, the height it asks for
+with `height`/`min-height`/`max-height`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
-per-edge longhands, on a block or on a run), and `display`. `doc.rs` carries the computed style onto every `Run` and every
+per-edge longhands, on a block or on a run), `display` and `visibility`.
+`doc.rs` carries the computed style onto every `Run` and every
 `Block`, and `view.rs` lets it override the plan the tag alone implies — where
 it says nothing, the reader typography stands.
 
-Four pieces exist because a stylesheet written this decade is unreadable
+The pieces below exist because a stylesheet written this decade is unreadable
 without them, and each is small:
 
 - **Custom properties and `var()`.** `Vars` is the scope, an `Rc<BTreeMap>`
