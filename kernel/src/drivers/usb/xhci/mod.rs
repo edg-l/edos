@@ -1542,30 +1542,53 @@ pub extern "C" fn xhci_driver_main() -> ! {
     const REPEAT_DELAY_US: u64 = 500_000; // 500ms initial delay
     const REPEAT_INTERVAL_US: u64 = 33_333; // ~30 Hz repeat rate
 
+    // How many reports an interrupt endpoint may have in flight.
+    //
+    // **One is not enough, and a relative mouse is what shows it.** With a
+    // single TRB queued the controller has nowhere to put a report until the
+    // driver has been woken, has read the last one and has re-armed; anything
+    // the device produces in that window waits for the next service interval.
+    // A relative device sends a report per delta and QEMU emits hundreds of
+    // them to walk a pointer across the screen, so the guest falls behind a
+    // queue it drains one interval at a time and the pointer arrives late and
+    // in bursts. With a ring of buffers the controller can deliver back to back
+    // and the driver drains whatever accumulated in one wake.
+    //
+    // A physical mouse is a relative device too; `usb-tablet` is a convenience
+    // that only exists in a VM. This is the path real hardware takes.
+    const HID_QUEUE_DEPTH: usize = 8;
+
     let mouse_report_buf = dma()
-        .allocate_sized(mouse_report_len)
+        .allocate_sized(mouse_report_len * HID_QUEUE_DEPTH)
         .expect("xhci: failed to allocate mouse HID report buf");
     let mouse_report_phys = mouse_report_buf.phys_addr().as_u64();
+    // Which slot the next completion refers to. An interrupt endpoint has one
+    // ring and completes in the order it was filled, so a rotating index is
+    // enough to say which buffer the report landed in.
+    let mut mouse_slot: usize = 0;
+    let mut kbd_slot: usize = 0;
 
     if let Some((ref mut dev, ref mut ring, ep_dci)) = keyboard_device {
-        let trb = Trb {
-            parameter: kbd_report_phys,
-            status: 8,
-            control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
-        };
-        ring.push(trb);
+        for i in 0..HID_QUEUE_DEPTH {
+            ring.push(Trb {
+                parameter: kbd_report_phys + (i * 8) as u64,
+                status: 8,
+                control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+            });
+        }
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         crate::drivers::keyboard::USB_KEYBOARD_ACTIVE
             .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
     if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
-        let trb = Trb {
-            parameter: mouse_report_phys,
-            status: mouse_report_len as u32,
-            control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
-        };
-        ring.push(trb);
+        for i in 0..HID_QUEUE_DEPTH {
+            ring.push(Trb {
+                parameter: mouse_report_phys + (i * mouse_report_len) as u64,
+                status: mouse_report_len as u32,
+                control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+            });
+        }
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         crate::drivers::mouse::USB_MOUSE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -1625,11 +1648,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             .is_some_and(|(dev, _, _)| dev.slot_id == event_slot_id);
 
                         if is_keyboard {
-                            // Read the 8-byte keyboard report from the DMA buffer
+                            // Read the 8-byte keyboard report out of the slot
+                            // this completion refers to.
                             let mut report = [0u8; 8];
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
-                                    kbd_report_buf.as_ptr(),
+                                    kbd_report_buf.as_ptr().add(kbd_slot * 8),
                                     report.as_mut_ptr(),
                                     8,
                                 );
@@ -1663,16 +1687,18 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 }
                             }
 
-                            // Resubmit the TRB to receive the next keyboard report
+                            // Hand the slot back and take the next one. The ring
+                            // stays full, so the controller never has to wait
+                            // for this thread between reports.
                             if let Some((ref mut dev, ref mut ring, ep_dci)) = keyboard_device {
-                                let trb = Trb {
-                                    parameter: kbd_report_phys,
+                                ring.push(Trb {
+                                    parameter: kbd_report_phys + (kbd_slot * 8) as u64,
                                     status: 8,
                                     control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
-                                };
-                                ring.push(trb);
+                                });
                                 unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
                             }
+                            kbd_slot = (kbd_slot + 1) % HID_QUEUE_DEPTH;
                         } else if is_mouse {
                             // Read the report from the DMA buffer. Its length is
                             // the endpoint's, not the boot layout's: an absolute
@@ -1681,7 +1707,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             let len = mouse_report_len.min(report.len());
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
-                                    mouse_report_buf.as_ptr(),
+                                    mouse_report_buf.as_ptr().add(mouse_slot * mouse_report_len),
                                     report.as_mut_ptr(),
                                     len,
                                 );
@@ -1696,16 +1722,17 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 }
                             }
 
-                            // Resubmit the TRB to receive the next mouse report
+                            // Hand the slot back and take the next one.
                             if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
-                                let trb = Trb {
-                                    parameter: mouse_report_phys,
+                                ring.push(Trb {
+                                    parameter: mouse_report_phys
+                                        + (mouse_slot * mouse_report_len) as u64,
                                     status: mouse_report_len as u32,
                                     control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
-                                };
-                                ring.push(trb);
+                                });
                                 unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
                             }
+                            mouse_slot = (mouse_slot + 1) % HID_QUEUE_DEPTH;
                         } else {
                             println!("xhci: transfer event from unknown slot {}", event_slot_id);
                         }

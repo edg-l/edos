@@ -422,7 +422,24 @@ wobble.
 parser landed; `make run` did not, and an invocation copied out of the
 GNUmakefile inherited the slow path. Both use it now.
 
-If a relative device is ever needed again (it is still `--pointer mouse`, for
-testing that path), the guest-side fix is to keep several TRBs queued on the
-interrupt endpoint instead of re-arming one at a time, so the controller never
-has to wait for the driver between reports.
+**The guest-side half is fixed too**: an interrupt endpoint now keeps eight
+report buffers queued rather than re-arming one at a time. With a single TRB the
+controller has nowhere to put a report until the driver has been woken, has read
+the last one and has re-armed, so anything the device produces in that window
+waits for the next service interval. That is a missed interval per wake, and it
+halves an endpoint's usable rate. A physical mouse is a relative device, so this
+is the path real hardware takes.
+
+**What that does not fix, and why `usb-tablet` is the right configuration
+rather than a workaround.** An interrupt endpoint carries one packet per service
+interval, so `usb-mouse`'s 8 ms `bInterval` is a hard ceiling of 125 reports per
+second however many buffers are queued. QEMU emits 325 deltas to walk a pointer
+across the screen, so that is ~2.6 s of backlog, measured at ~2 s here. The
+guest cannot poll its way out of it.
+
+A real mouse does not behave this way. It produces reports at its own rate and
+its `bInterval` is chosen to match, so supply and drain are balanced and no
+backlog forms. The hundreds-of-deltas burst is an artefact of emulating a
+relative pointer whose position has to be walked to wherever the host's already
+is. That is why absolute is correct for a VM and why the queue depth is the
+right fix for hardware.
