@@ -16,6 +16,10 @@
       .quiet { color: gray; font-size: smaller }
       /* Leading of the page's own choosing, as a factor of the font size. */
       .airy { line-height: 2 }
+      /* The case a page sets, and the indent it opens a paragraph with. */
+      .shout { text-transform: uppercase }
+      .titled { text-transform: capitalize }
+      .indented { text-indent: 3em }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
@@ -66,6 +70,14 @@
       This paragraph sets its own leading at twice its font size, so its lines
       sit further apart than the ones above it and its text stays centred in
       the space each line was given.
+    </p>
+
+    <p class="shout">This line is set in capitals by the page, not by its own text.</p>
+    <p class="titled">a line the page asks to be set in title case, it's cl<code>aimed</code>.</p>
+    <p class="indented">
+      This paragraph opens with an indent of three ems, and the lines that
+      follow the first one are flush with the left edge of the column the way
+      a printed page sets a paragraph.
     </p>
 
     <p class="quiet">

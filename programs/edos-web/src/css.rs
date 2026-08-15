@@ -2,7 +2,8 @@
 //!
 //! Stage 2 of `doc/design/browser.md`. What is here is chosen by what the block
 //! list can already express -- colour, size, weight, face, decoration,
-//! alignment, the vertical margins between blocks, the measure a box asks for
+//! alignment, case, the first-line indent, the leading,
+//! the vertical margins between blocks, the measure a box asks for
 //! with `width` or `max-width`, and the box a block paints for itself with
 //! `background-color`, `padding` and `border` -- plus `display: none`, the one
 //! declaration a document needs honoured before anything else, since a page
@@ -87,6 +88,45 @@ impl LineHeight {
     }
 }
 
+/// `text-transform`, the case a box sets for the text inside it.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Transform {
+    #[default]
+    None,
+    Upper,
+    Lower,
+    /// The first letter after every word boundary. A run glued mid-word to the
+    /// one before it is left alone by whoever sets the text, since the letter
+    /// this would raise is in the middle of the word the reader sees.
+    Capitalize,
+}
+
+impl Transform {
+    /// `word` recased, borrowed unchanged when nothing is to be done.
+    pub fn apply(self, word: &str) -> Cow<'_, str> {
+        match self {
+            Transform::None => Cow::Borrowed(word),
+            Transform::Upper => Cow::Owned(word.to_uppercase()),
+            Transform::Lower => Cow::Owned(word.to_lowercase()),
+            Transform::Capitalize => {
+                let mut out = String::with_capacity(word.len());
+                let mut boundary = true;
+                for ch in word.chars() {
+                    if boundary && ch.is_alphanumeric() {
+                        out.extend(ch.to_uppercase());
+                    } else {
+                        out.push(ch);
+                    }
+                    // An apostrophe is inside a word, not between two: without
+                    // this `it's` is set `It'S`.
+                    boundary = !(ch.is_alphanumeric() || ch == '\'' || ch == '\u{2019}');
+                }
+                Cow::Owned(out)
+            }
+        }
+    }
+}
+
 /// A property value that a `Computed` carries after the cascade.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Computed {
@@ -116,6 +156,11 @@ pub struct Computed {
     pub center: bool,
     /// `text-align`, which inherits the way the property itself does.
     pub align: Align,
+    /// `text-transform`, likewise inherited.
+    pub transform: Transform,
+    /// `text-indent`: how far into the box the block's first line starts. It
+    /// inherits, so a wrapper that sets it indents the paragraphs inside it.
+    pub indent: u32,
     /// `background-color`, painted behind the block's own box.
     pub background: Option<u32>,
     pub padding: Sides<Option<u32>>,
@@ -194,6 +239,22 @@ impl Computed {
                 "right" | "end" => self.align = Align::Right,
                 _ => {}
             },
+            "text-transform" => match value {
+                "none" => self.transform = Transform::None,
+                "uppercase" => self.transform = Transform::Upper,
+                "lowercase" => self.transform = Transform::Lower,
+                "capitalize" => self.transform = Transform::Capitalize,
+                _ => {}
+            },
+            // A percentage is of the containing block, and a negative value --
+            // a hanging indent -- resolves to zero rather than drawing into the
+            // page margin, which is the one place the box has nothing to hang
+            // over.
+            "text-indent" => {
+                if let Some(px) = parse_measure(value, root_px, self.em(parent_px), basis) {
+                    self.indent = px;
+                }
+            }
             "margin" => {
                 let written: Vec<&str> = value.split_whitespace().collect();
                 let sides = quad(&self.lengths(&written, root_px, parent_px));
@@ -1756,5 +1817,69 @@ mod tests {
         assert_eq!(line("p").px(16), Some(1));
         assert_eq!(line("div"), LineHeight::Normal);
         assert_eq!(line("pre"), LineHeight::Normal);
+    }
+
+    #[test]
+    fn text_transform_is_read_and_inherited() {
+        let sheet = sheet(
+            "div { text-transform: uppercase } p { text-transform: capitalize } \
+             li { text-transform: lowercase } pre { text-transform: full-width }",
+        );
+        let transform = |tag| cascade(&sheet, &[element(tag, &[])], None).transform;
+        assert_eq!(transform("div"), Transform::Upper);
+        assert_eq!(transform("p"), Transform::Capitalize);
+        assert_eq!(transform("li"), Transform::Lower);
+        // A keyword this cannot set is dropped, leaving what was inherited.
+        assert_eq!(transform("pre"), Transform::None);
+
+        let stack = vec![element("div", &[]), element("span", &[])];
+        let inner = sheet
+            .cascade(
+                &stack,
+                None,
+                &cascade(&sheet, &stack[..1], None),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(inner.transform, Transform::Upper);
+    }
+
+    #[test]
+    fn transform_recases_at_word_boundaries() {
+        assert_eq!(Transform::Upper.apply("edos v2"), "EDOS V2");
+        assert_eq!(Transform::Lower.apply("EDOS v2"), "edos v2");
+        assert_eq!(Transform::Capitalize.apply("edos"), "Edos");
+        // A hyphen starts a word and an apostrophe does not.
+        assert_eq!(Transform::Capitalize.apply("read-only"), "Read-Only");
+        assert_eq!(Transform::Capitalize.apply("it's"), "It's");
+        assert_eq!(Transform::None.apply("EdOS"), "EdOS");
+    }
+
+    #[test]
+    fn text_indent_resolves_and_inherits() {
+        let sheet = sheet(
+            "div { text-indent: 2em } p { text-indent: 10% } \
+             li { text-indent: -2em } pre { text-indent: 1em hanging }",
+        );
+        let indent = |tag| cascade(&sheet, &[element(tag, &[])], None).indent;
+        assert_eq!(indent("div"), 28);
+        assert_eq!(indent("p"), Viewport::default().width_px / 10);
+        // A hanging indent has nothing to hang over at the page edge, and a
+        // keyword this cannot honour leaves the property alone.
+        assert_eq!(indent("li"), 0);
+        assert_eq!(indent("pre"), 0);
+
+        let stack = vec![element("div", &[]), element("p2", &[])];
+        let inner = sheet
+            .cascade(
+                &stack,
+                None,
+                &cascade(&sheet, &stack[..1], None),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(inner.indent, 28);
     }
 }

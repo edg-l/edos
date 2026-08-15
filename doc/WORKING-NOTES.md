@@ -7517,3 +7517,30 @@ than like text stuck to the top of an over-tall box.
 `line-height: 0` is refused as a factor (it would stack every line on the one
 above) while `0px` clamps to a pixel, and anything with a `calc()` is refused
 like every other value this subset cannot compute.
+
+## `text-transform` recases at word boundaries, and `capitalize` has to know which words are real (2026-08-15)
+
+`css::Transform` is `None`/`Upper`/`Lower`/`Capitalize`, inherited like the
+property, and `Transform::apply` does the recasing so `view.rs` and any later
+caller share one definition. Two details are not the obvious implementation:
+
+- **A boundary is any non-alphanumeric except an apostrophe.** Uppercasing only
+  the first character gives `read-only`, where a browser gives `Read-Only`;
+  treating the apostrophe as a boundary gives `It'S`. Both are visible on the
+  first screen of the fixture, which is why they are worth the four lines.
+- **`capitalize` must skip a run glued *mid-word* to the one before it, and
+  only that.** `view::words` splits runs into words and marks the first word of
+  a run `glued` when no whitespace separates it from the previous run — but that
+  flag is also true for the first word of the whole block, where there is
+  nothing to be glued to. Gating on `glued` alone leaves a paragraph's opening
+  word lowercase; the gate is `glued && !words.is_empty()`. The fixture's
+  `it's cl<code>aimed</code>` is the case that distinguishes them.
+
+`text-indent` moves the first line only: `Plan::first_indent` seeds `flow`'s pen,
+and the wrap resets it to zero for every line after, so nothing else in the
+greedy wrapper changes. It is included in the `used` width a line is aligned
+with, which is what keeps a centred or right-flush indented line inside its box.
+A negative indent resolves to zero — `parse_length` already clamps — because at
+the page edge there is no margin for a hanging line to hang over, and an indent
+wider than the column stops a pixel short of it so a line always has somewhere
+to start.

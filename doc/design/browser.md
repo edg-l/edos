@@ -66,7 +66,7 @@ attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
 left, since the blitter cannot stretch a line), `line-height` (a factor, a
-length or `normal`), the vertical and left margins,
+length or `normal`), `text-transform`, `text-indent`, the vertical and left margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
@@ -114,6 +114,15 @@ without them, and each is small:
   and only reflows its lines. `programs/edos-web/src/ui.rs` says `edos-web: ~
   WxH - N blocks` on stdout when a rebuild happens, which is how a headless run
   tells a re-cascade from a line-break reflow.
+
+**How the text is set follows two more properties.** `text-transform` recases at
+word boundaries rather than at the first character of a run, so `read-only` is
+set `Read-Only` and `it's` is set `It's`; a run glued mid-word to the one before
+it is left alone, since the letter `capitalize` would raise there is inside the
+word the reader sees. `text-indent` moves only the first line of a block, and a
+negative one — a hanging indent — resolves to zero, because at the page edge
+there is no margin for the line to hang over. Both inherit, which is what carries
+them from the wrapper that declares them to the paragraphs inside it.
 
 **A page's own measure is honoured.** `width` and `max-width` resolve to
 `Computed::measure`, and `margin: 0 auto` sets `Computed::center`, which

@@ -337,13 +337,23 @@ impl Layout {
             let space_before = run.text.starts_with(char::is_whitespace);
             let mut first = true;
             for word in run.text.split_whitespace() {
+                let glued = first && !space_before && !space_pending;
+                // A run glued to a word already on the block continues it
+                // rather than starting one, so `capitalize` leaves it alone:
+                // the letter it would raise is in the middle of the word the
+                // reader sees. The block's own first word is glued to nothing.
+                let continues = glued && !words.is_empty();
+                let text = match run.css.transform {
+                    css::Transform::Capitalize if continues => word.to_string(),
+                    transform => transform.apply(word).into_owned(),
+                };
                 words.push(Word {
-                    text: word.to_string(),
+                    text,
                     style,
                     link,
                     underline,
                     height,
-                    glued: first && !space_before && !space_pending,
+                    glued,
                 });
                 first = false;
             }
@@ -359,7 +369,11 @@ impl Layout {
     fn flow(&mut self, words: Vec<Word>, plan: &Plan, avail: u32, y: &mut i32) {
         let base_height = leading(plan.line, plan.style);
         let mut items: Vec<Fragment> = Vec::new();
-        let mut pen = 0u32;
+        // The first line starts at the indent the page asked for, and the wrap
+        // below resets the pen to zero for every line after it. An indent wider
+        // than the column would leave nothing to set the line in, so it stops a
+        // pixel short of one.
+        let mut pen = plan.first_indent.min(avail.saturating_sub(1));
         // The tallest word on the line sets its height. CSS can put a size on
         // a span, and a line measured from the block's own style alone would
         // then overlap the one above it.
@@ -407,11 +421,12 @@ impl Layout {
             let items = if line.trim().is_empty() {
                 Vec::new()
             } else {
-                used = text::width(line, plan.style);
+                let text = block.css.transform.apply(line);
+                used = text::width(&text, plan.style);
                 vec![Fragment {
                     x: (plan.indent + PAGE_PAD) as i32,
                     width: used,
-                    text: line.to_string(),
+                    text: text.into_owned(),
                     style: plan.style,
                     link: None,
                     underline: false,
@@ -466,6 +481,9 @@ struct Plan {
     /// The block's `line-height`, which its words inherit unless they set one.
     line: css::LineHeight,
     indent: u32,
+    /// `text-indent`: how far into the box the first line starts, the rest of
+    /// them being flush with its left edge.
+    first_indent: u32,
     gap_before: u32,
     gap_after: u32,
     marker: Option<String>,
@@ -523,6 +541,7 @@ fn plan(block: &Block) -> Plan {
         plan.gap_after = bottom;
     }
     plan.indent += css.margin_left.unwrap_or(0);
+    plan.first_indent = css.indent;
     plan.measure = css.measure;
     plan.center = css.center;
     plan.align = css.align;
@@ -554,6 +573,7 @@ fn default_plan(block: &Block) -> Plan {
         style: Style::new(text_color),
         line: css::LineHeight::Normal,
         indent: 0,
+        first_indent: 0,
         gap_before: 0,
         gap_after: space(2),
         marker: None,
