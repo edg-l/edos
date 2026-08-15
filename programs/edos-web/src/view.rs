@@ -40,9 +40,9 @@ pub struct Fragment {
     pub style: Style,
     /// Index into [`Layout::links`], for the colour and the click.
     pub link: Option<usize>,
-    /// Whether a rule is drawn under the text, which is a link's default and
-    /// what `text-decoration` overrides.
-    pub underline: bool,
+    /// The lines drawn across the text: a link's underline by default, and
+    /// whatever `text-decoration` asks for where the page says.
+    pub decoration: css::Decorations,
     /// `letter-spacing`, in pixels, added to every character's advance. It is
     /// on the fragment rather than on the style because a `Style` is the face
     /// the whole shell shares, and tracking is a property of this page's run.
@@ -122,7 +122,7 @@ struct Word {
     text: String,
     style: Style,
     link: Option<usize>,
-    underline: bool,
+    decoration: css::Decorations,
     /// The leading this word asks for: the page's `line-height` where it set
     /// one, the face's own height otherwise.
     height: u32,
@@ -214,7 +214,7 @@ impl Layout {
                     text: text.clone(),
                     style: plan.style,
                     link: None,
-                    underline: false,
+                    decoration: css::Decorations::default(),
                     letter: plan.letter,
                 });
 
@@ -315,7 +315,7 @@ impl Layout {
             text: String::new(),
             style: plan.style,
             link,
-            underline: false,
+            decoration: css::Decorations::default(),
             letter: 0,
         }];
         self.lines.push(Line {
@@ -355,7 +355,10 @@ impl Layout {
             let link = run.link.as_ref().map(|target| self.link_index(target));
             // A link is underlined unless the document says otherwise, so
             // emphasis is not carried by colour alone.
-            let underline = run.css.underline.unwrap_or(link.is_some());
+            let decoration = run.css.decoration.unwrap_or(css::Decorations {
+                underline: link.is_some(),
+                ..css::Decorations::default()
+            });
             let height = leading(run.css.line, style);
             let letter = run.css.letter_spacing;
             let word_gap = run.css.word_spacing;
@@ -378,7 +381,7 @@ impl Layout {
                     text,
                     style,
                     link,
-                    underline,
+                    decoration,
                     height,
                     glued,
                     spaces: *spaces,
@@ -481,7 +484,7 @@ impl Layout {
                             text: head,
                             style: word.style,
                             link: word.link,
-                            underline: word.underline,
+                            decoration: word.decoration,
                             letter: word.letter,
                         });
                         pen += head_width;
@@ -512,7 +515,7 @@ impl Layout {
                     text,
                     style: word.style,
                     link: word.link,
-                    underline: word.underline,
+                    decoration: word.decoration,
                     letter: word.letter,
                 });
                 pen += width;
@@ -890,7 +893,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             }
             LineKind::Text => {}
         }
-        for item in &line.items {
+        for (index, item) in line.items.iter().enumerate() {
             text::draw_tracked(
                 &mut surface,
                 item.x,
@@ -899,21 +902,48 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                 item.style,
                 item.letter,
             );
-            if item.underline {
-                // Under the text, not under the line: open leading would
-                // otherwise leave the rule floating below the words it marks.
-                let underline = y + (line.height - line.lead) as i32 - 3;
-                fill(
-                    surface.pixels,
-                    width,
-                    height,
-                    top,
-                    item.x,
-                    underline,
-                    item.width,
-                    1,
-                    item.style.color,
-                );
+            // A decoration runs through the spaces between the words it marks,
+            // so a rule reaches the next fragment when that one is set the same
+            // way. Drawn per word it would come out dashed, since a word is a
+            // fragment of its own.
+            let span = match line.items.get(index + 1) {
+                Some(next)
+                    if next.decoration == item.decoration
+                        && next.style.px == item.style.px
+                        && next.style.color == item.style.color
+                        && next.x >= item.x + item.width as i32 =>
+                {
+                    (next.x - item.x) as u32
+                }
+                _ => item.width,
+            };
+            // Against the text, not against the line: open leading would
+            // otherwise leave the rules floating away from the words they mark.
+            let underline = y + (line.height - line.lead) as i32 - 3;
+            let rules = [
+                (item.decoration.underline, underline),
+                // A strike sits through the lowercase, which is about a third
+                // of the font size above where the underline sits.
+                (
+                    item.decoration.line_through,
+                    underline - (item.style.px as i32) * 3 / 10,
+                ),
+                (item.decoration.overline, y + line.lead as i32),
+            ];
+            for (drawn, rule_y) in rules {
+                if drawn {
+                    fill(
+                        surface.pixels,
+                        width,
+                        height,
+                        top,
+                        item.x,
+                        rule_y,
+                        span,
+                        1,
+                        item.style.color,
+                    );
+                }
             }
         }
     }

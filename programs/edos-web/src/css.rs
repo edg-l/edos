@@ -310,6 +310,26 @@ impl Transform {
     }
 }
 
+/// The lines `text-decoration` draws across a run (css-text-decor-3 §2.1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Decorations {
+    pub underline: bool,
+    pub line_through: bool,
+    pub overline: bool,
+}
+
+impl Decorations {
+    /// Both sets of lines at once, which is how a decoration an element wears
+    /// by being a `<del>` joins one it inherited.
+    pub fn merged(self, other: Decorations) -> Decorations {
+        Decorations {
+            underline: self.underline || other.underline,
+            line_through: self.line_through || other.line_through,
+            overline: self.overline || other.overline,
+        }
+    }
+}
+
 /// A property value that a `Computed` carries after the cascade.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Computed {
@@ -320,7 +340,9 @@ pub struct Computed {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub mono: Option<bool>,
-    pub underline: Option<bool>,
+    /// `text-decoration`. `None` is "the page said nothing", which leaves the
+    /// lines to the element: a link is underlined, a `<del>` struck through.
+    pub decoration: Option<Decorations>,
     /// `line-height`, which inherits the way the property itself does.
     pub line: LineHeight,
     pub margin_top: Option<u32>,
@@ -442,8 +464,20 @@ impl Computed {
                     self.line = line;
                 }
             }
+            // The shorthand also carries a colour, a style and a thickness
+            // (css-text-decor-3 §2.5); only the line keywords are read, and
+            // every line the value names is drawn.
             "text-decoration" | "text-decoration-line" => {
-                self.underline = Some(value.contains("underline"));
+                let mut lines = Decorations::default();
+                for word in value.split_whitespace() {
+                    match word {
+                        "underline" => lines.underline = true,
+                        "line-through" => lines.line_through = true,
+                        "overline" => lines.overline = true,
+                        _ => {}
+                    }
+                }
+                self.decoration = Some(lines);
             }
             // `justify` is set flush left here: the last line of a justified
             // paragraph is left aligned anyway, and stretching the others needs
@@ -1970,6 +2004,53 @@ mod tests {
         let stack = vec![element("div", &[]), element("span", &[])];
         let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
         assert_eq!(inner.align, Align::Center);
+    }
+
+    #[test]
+    fn text_decoration_reads_every_line_it_names() {
+        let sheet = sheet(
+            "p { text-decoration: underline } \
+             del { text-decoration: line-through overline } \
+             a { text-decoration: none } \
+             h1 { text-decoration: underline wavy #f00 2px }",
+        );
+        let underlined = Decorations {
+            underline: true,
+            ..Decorations::default()
+        };
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None).decoration,
+            Some(underlined)
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("del", &[])], None).decoration,
+            Some(Decorations {
+                line_through: true,
+                overline: true,
+                ..Decorations::default()
+            })
+        );
+        // `none` is an answer, not a silence: it has to reach the renderer so a
+        // link's default underline is suppressed.
+        assert_eq!(
+            cascade(&sheet, &[element("a", &[])], None).decoration,
+            Some(Decorations::default())
+        );
+        // A colour, a style and a thickness in the shorthand are ignored
+        // without taking the line with them.
+        assert_eq!(
+            cascade(&sheet, &[element("h1", &[])], None).decoration,
+            Some(underlined)
+        );
+    }
+
+    #[test]
+    fn text_decoration_inherits() {
+        let sheet = sheet("div { text-decoration: line-through }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        let stack = vec![element("div", &[]), element("span", &[])];
+        let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
+        assert_eq!(inner.decoration, outer.decoration);
     }
 
     #[test]

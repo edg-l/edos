@@ -18,7 +18,8 @@ use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::css::{
-    self, Computed, Element, ListStyle, MediaQueries, Stylesheet, Vars, Viewport, WhiteSpace,
+    self, Computed, Decorations, Element, ListStyle, MediaQueries, Stylesheet, Vars, Viewport,
+    WhiteSpace,
 };
 
 /// What a block is, which decides its font size and its leading marker.
@@ -452,6 +453,21 @@ impl Builder<'_> {
                     }
                     local_name!("b") | local_name!("strong") => self.style.bold = true,
                     local_name!("i") | local_name!("em") => self.style.italic = true,
+                    local_name!("s") | local_name!("del") | local_name!("strike") => self
+                        .ua_decoration(
+                            saved_computed.decoration,
+                            Decorations {
+                                line_through: true,
+                                ..Decorations::default()
+                            },
+                        ),
+                    local_name!("u") | local_name!("ins") => self.ua_decoration(
+                        saved_computed.decoration,
+                        Decorations {
+                            underline: true,
+                            ..Decorations::default()
+                        },
+                    ),
                     local_name!("code") | local_name!("kbd") | local_name!("samp") => {
                         self.style.code = true
                     }
@@ -486,6 +502,18 @@ impl Builder<'_> {
                 }
             }
         }
+    }
+
+    /// The lines an element wears by being the element it is: `<del>` struck
+    /// through, `<u>` underlined. They join whatever the element inherited,
+    /// since a decoration propagates to a subtree, and they apply only where
+    /// the cascade said nothing about this element, so `del { text-decoration:
+    /// none }` still wins.
+    fn ua_decoration(&mut self, inherited: Option<Decorations>, add: Decorations) {
+        if self.computed.decoration != inherited {
+            return;
+        }
+        self.computed.decoration = Some(inherited.unwrap_or_default().merged(add));
     }
 
     /// An `img`: fetch and decode it, or leave behind what a reader with

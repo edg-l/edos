@@ -64,8 +64,9 @@ attribute; matches selectors that are comma-separated descendant chains of
 tag/`.class`/`#id` compounds; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
-monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
-left, since the blitter cannot stretch a line), `line-height` (a factor, a
+monospace-or-not, `text-decoration` (`underline`, `line-through`, `overline`
+and `none`, in the shorthand or in `text-decoration-line`), `text-align` (with
+`justify` set flush left, since the blitter cannot stretch a line), `line-height` (a factor, a
 length or `normal`), `text-transform`, `text-indent`, `white-space`,
 `word-break`/`overflow-wrap`, `letter-spacing`/`word-spacing`,
 `list-style-type` (and the type keyword in the

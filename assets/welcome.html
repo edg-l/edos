@@ -31,6 +31,9 @@
          way it can be written: opened up, and pulled back in. */
       .tracked { letter-spacing: 3px; word-spacing: 12px }
       .tight { letter-spacing: -1px }
+      /* The rules a page draws across its text, and the one it takes away. */
+      .ruled { text-decoration: underline overline }
+      .plain { text-decoration: none }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
@@ -117,6 +120,9 @@ while the newline above them is kept.</p>
     <p class="breaks-all">And a paragraph broken wherever the line ends, so every line but the last reaches the same right edge.</p>
     <p class="tracked">Letters set three pixels apart, words twelve.</p>
     <p class="tight">And the same line pulled a pixel tighter than the face sets it.</p>
+    <p>A <del>price the page struck out</del> beside <ins>the one that replaced it</ins>,
+      and <a class="plain" href="./welcome.html">a link the page asked to leave unruled</a>.</p>
+    <p class="ruled">A line with a rule above it and a rule below it.</p>
 
     <p class="quiet">
       This column is 38em wide and centred in the window rather than filling

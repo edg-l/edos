@@ -7697,3 +7697,42 @@ Two smaller things worth knowing:
 The fixture's `.tracked` and `.tight` paragraphs show both directions, and the
 tight one is the reason to keep it: a page pulling its type in a pixel is
 invisible in a unit test and obvious beside its neighbours in a screenshot.
+
+## `text-decoration`: a UA line has to be told apart from an inherited one (2026-08-15)
+
+The property became a `Decorations` set — `underline`, `line_through`,
+`overline` — rather than the single bool it was, because `text-decoration:
+line-through overline` names two lines in one declaration and the shorthand also
+carries a colour, a style and a thickness that are ignored without taking the
+line with them.
+
+The part that is not obvious is where `<del>`, `<s>`, `<u>` and `<ins>` get
+their line from. `Computed.decoration` inherits, so by the time `doc.rs` reaches
+a `<del>` the field already holds whatever an ancestor set, and there is no
+field saying who set it. `del { text-decoration: none }` therefore cannot be
+honoured by looking at the value alone. `ua_decoration` compares the cascaded
+value against the parent's: unchanged means the cascade said nothing about this
+element, which is the only case where the UA line is added, and it is *merged*
+into the inherited set rather than replacing it, since a decoration propagates
+to a subtree.
+
+Author rules still replace rather than merge. Real CSS propagation cannot be
+cancelled by a descendant — `text-decoration: none` inside an underlined block
+leaves the underline standing — but a reader that honours that has no way to
+suppress the default underline on a link inside a decorated ancestor, and
+suppressing it is the case pages actually write.
+
+A word is a `Fragment` of its own, so a rule drawn per fragment comes out
+dashed. The draw loop extends each rule to the next fragment's `x` when that
+fragment is decorated the same way, in the same colour and at the same size,
+which is what puts the line through the spaces as well. The underline on a
+multi-word link was dashed the same way before this and is now continuous too.
+
+The three rules are positioned off the same anchor the underline always used,
+three pixels above the text box's bottom edge: the strike sits `0.3em` above
+that, which lands through the lowercase, and the overline at the top of the box.
+Scaling the strike with `style.px` rather than with the line box matters because
+`line-height` moves the box and not the letters.
+
+The fixture's `.ruled` paragraph and the `<del>`/`<ins>`/`.plain` line show all
+four outcomes, including the link the page asked to leave unruled.
