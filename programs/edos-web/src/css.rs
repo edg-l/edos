@@ -2498,6 +2498,13 @@ fn parse_measure(value: &str, root_px: u32, em_px: u32, basis: u32) -> Option<u3
         let percent: f32 = number.trim().parse().ok()?;
         return Some((basis as f32 * percent.max(0.0) / 100.0).round() as u32);
     }
+    // Answered here rather than in `parse_length`, because a percentage inside
+    // a width is of the containing block: `calc(100% - 2rem)` is the width of
+    // the column less two ems, and reading that `100%` as the font size would
+    // make it a rounding error instead.
+    if let Some(px) = math(value, root_px, em_px, basis as f32 / 100.0) {
+        return Some(px.max(0.0).round() as u32);
+    }
     parse_length(value, root_px, em_px)
 }
 
@@ -2509,18 +2516,213 @@ fn parse_signed_length(value: &str, root_px: u32, em_px: u32) -> Option<i32> {
     if value == "0" || value == "auto" || value == "inherit" {
         return (value == "0").then_some(0);
     }
+    // A percentage in one of these resolves against the font size, which is
+    // what `parse_length` means by `%` everywhere except a measure --
+    // `parse_measure` answers the calc itself, against the containing block.
+    if let Some(px) = math(value, root_px, em_px, em_px as f32 / 100.0) {
+        return Some(px.round() as i32);
+    }
+    let (number, unit) = number_and_unit(value)?;
+    Some(unit_px(number, unit, root_px, em_px, em_px as f32 / 100.0)?.round() as i32)
+}
+
+/// A written length split into its number and its unit, or `None` when the
+/// value does not begin with a number at all.
+fn number_and_unit(value: &str) -> Option<(f32, &str)> {
     let split = value.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+')?;
     let (number, unit) = value.split_at(split);
-    let number: f32 = number.parse().ok()?;
-    let px = match unit {
+    Some((number.parse().ok()?, unit.trim()))
+}
+
+/// One length in pixels. `percent_px` is what one percent is worth, which
+/// differs by property: a percentage width is of the containing block, and a
+/// percentage anywhere else here is of the font size.
+fn unit_px(number: f32, unit: &str, root_px: u32, em_px: u32, percent_px: f32) -> Option<f32> {
+    Some(match unit {
         "px" => number,
         "pt" => number * 4.0 / 3.0,
         "em" => number * em_px as f32,
         "rem" => number * root_px as f32,
-        "%" => number * em_px as f32 / 100.0,
+        "%" => number * percent_px,
         _ => return None,
+    })
+}
+
+/// `calc()`, `min()`, `max()` and `clamp()`, resolved to pixels, or `None` for
+/// a value that is not one of them.
+///
+/// A stylesheet written this decade reaches for these the way an older one
+/// reached for a number: 141 lengths on `edos.edgl.dev` are a `calc()`, over
+/// font sizes, margins, heights, widths, padding and gaps, and refusing them
+/// left every one of those properties at whatever the element inherited.
+///
+/// Dimensional analysis is not performed. Every term becomes pixels as it is
+/// read, so `calc(2px * 3px)` is 6px rather than the invalid value CSS says it
+/// is; a sheet writing that is broken in a real browser too, and checking it
+/// would want a type system this does not otherwise need.
+fn math(value: &str, root_px: u32, em_px: u32, percent_px: f32) -> Option<f32> {
+    let (name, args) = function(value)?;
+    let one = |arg: &str| {
+        Math {
+            src: arg,
+            at: 0,
+            root_px,
+            em_px,
+            percent_px,
+        }
+        .whole()
     };
-    Some(px.round() as i32)
+    match name {
+        "calc" => one(args),
+        "min" | "max" | "clamp" => {
+            let parts: Vec<f32> = split_top_level(args, ',')
+                .iter()
+                .map(|arg| one(arg.trim()))
+                .collect::<Option<_>>()?;
+            match (name, parts.as_slice()) {
+                ("min", [first, rest @ ..]) => Some(rest.iter().fold(*first, |a, b| a.min(*b))),
+                ("max", [first, rest @ ..]) => Some(rest.iter().fold(*first, |a, b| a.max(*b))),
+                // css-values-4 §10.3: the floor wins over the ceiling, which is
+                // the same order `min-width` is applied in.
+                ("clamp", [low, mid, high]) => Some(mid.min(*high).max(*low)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `name(args)` split into its two halves, for a value that is one whole
+/// function call and nothing else.
+fn function(value: &str) -> Option<(&str, &str)> {
+    let value = value.trim();
+    let open = value.find('(')?;
+    let args = value.strip_suffix(')')?.get(open + 1..)?;
+    let name = value[..open].trim();
+    // The parenthesis has to close at the very end, or this is two values
+    // rather than one call: `min(1px, 2px) 3px` is not a length.
+    (close_paren(value, open + 1)? == value.len() - 1).then_some((name, args))
+}
+
+/// A `calc()` body, read left to right.
+struct Math<'a> {
+    src: &'a str,
+    at: usize,
+    root_px: u32,
+    em_px: u32,
+    percent_px: f32,
+}
+
+impl Math<'_> {
+    /// The whole expression, which must use up the body: a trailing token is a
+    /// sheet this does not understand rather than something to ignore.
+    fn whole(&mut self) -> Option<f32> {
+        let value = self.expr()?;
+        self.space();
+        (self.at == self.src.len()).then_some(value)
+    }
+
+    fn expr(&mut self) -> Option<f32> {
+        let mut left = self.term()?;
+        loop {
+            self.space();
+            let op = match self.peek() {
+                Some(op @ ('+' | '-')) => op,
+                _ => return Some(left),
+            };
+            self.at += 1;
+            let right = self.term()?;
+            left = if op == '+' {
+                left + right
+            } else {
+                left - right
+            };
+        }
+    }
+
+    fn term(&mut self) -> Option<f32> {
+        let mut left = self.factor()?;
+        loop {
+            self.space();
+            let op = match self.peek() {
+                Some(op @ ('*' | '/')) => op,
+                _ => return Some(left),
+            };
+            self.at += 1;
+            let right = self.factor()?;
+            if op == '/' && right == 0.0 {
+                return None;
+            }
+            left = if op == '*' {
+                left * right
+            } else {
+                left / right
+            };
+        }
+    }
+
+    fn factor(&mut self) -> Option<f32> {
+        self.space();
+        match self.peek()? {
+            '(' => {
+                self.at += 1;
+                let value = self.expr()?;
+                self.space();
+                (self.peek()? == ')').then(|| self.at += 1)?;
+                Some(value)
+            }
+            '-' => {
+                self.at += 1;
+                Some(-self.factor()?)
+            }
+            '+' => {
+                self.at += 1;
+                self.factor()
+            }
+            ch if ch.is_ascii_alphabetic() => {
+                // A nested `calc()`, `min()`, `max()` or `clamp()`.
+                let open = self.src[self.at..].find('(')? + self.at;
+                let close = close_paren(self.src, open + 1)?;
+                let nested = &self.src[self.at..=close];
+                self.at = close + 1;
+                math(nested, self.root_px, self.em_px, self.percent_px)
+            }
+            _ => {
+                let rest = &self.src[self.at..];
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '%')
+                    .unwrap_or(rest.len());
+                // A unit is letters, and only the ones a length is written in.
+                let unit_end = rest[end..]
+                    .find(|c: char| !c.is_ascii_alphabetic())
+                    .map_or(rest.len(), |stop| end + stop);
+                let (number, unit) = (&rest[..end], &rest[end..unit_end]);
+                let (number, unit) = if number.ends_with('%') {
+                    (&number[..number.len() - 1], "%")
+                } else {
+                    (number, unit)
+                };
+                self.at += unit_end;
+                let number: f32 = number.parse().ok()?;
+                // A bare number is a multiplier, which is the only place CSS
+                // allows one inside a calculation.
+                if unit.is_empty() {
+                    return Some(number);
+                }
+                unit_px(number, unit, self.root_px, self.em_px, self.percent_px)
+            }
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.src[self.at..].chars().next()
+    }
+
+    fn space(&mut self) {
+        while self.peek().is_some_and(|c| c.is_whitespace()) {
+            self.at += 1;
+        }
+    }
 }
 
 /// `grid-template-columns`, as the track list the box engine takes.
@@ -2578,11 +2780,20 @@ fn parse_spacing(value: &str, root_px: u32, em_px: u32) -> Option<i32> {
     parse_signed_length(value, root_px, em_px)
 }
 
-/// `#rgb`, `#rrggbb`, `rgb()`/`rgba()` and the handful of named colours a
-/// hand-written page actually uses. Everything else -- `hsl()`, `oklch()`, a
-/// colour named outside this list -- is refused so the inherited colour stands.
-/// A `var()` never reaches here: it is substituted before the declaration is
-/// applied.
+/// `#rgb`, `#rrggbb`, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `color-mix()` in
+/// sRGB, and the handful of named colours a hand-written page actually uses.
+/// Everything else -- `oklch()`, `lab()`, a colour named outside this list --
+/// is refused so the inherited colour stands. A `var()` never reaches here: it
+/// is substituted before the declaration is applied.
+///
+/// `hsl()` earns its place from a generated stylesheet rather than a
+/// hand-written one: a theme declares a hue as a custom property and writes
+/// every shade as `hsl(var(--hue) 60% 40%)`, so refusing the function drops a
+/// whole palette rather than one colour.
+///
+/// Alpha is read and discarded, here as everywhere: a surface is one opaque
+/// word per pixel, so a colour that asks to be blended is drawn at full
+/// strength rather than not at all.
 fn parse_color(value: &str) -> Option<u32> {
     let value = value.trim();
     if let Some(hex) = value.strip_prefix('#') {
@@ -2617,6 +2828,13 @@ fn parse_color(value: &str) -> Option<u32> {
         }
         return None;
     }
+    if let Some((name, args)) = function(value) {
+        match name {
+            "hsl" | "hsla" => return parse_hsl(args),
+            "color-mix" => return parse_color_mix(args),
+            _ => return None,
+        }
+    }
     let named: (u8, u8, u8) = match value {
         "black" => (0, 0, 0),
         "white" => (255, 255, 255),
@@ -2636,6 +2854,121 @@ fn parse_color(value: &str) -> Option<u32> {
         _ => return None,
     };
     Some(rgb(named.0, named.1, named.2))
+}
+
+/// The body of an `hsl()`: a hue angle, a saturation and a lightness, in
+/// either the comma or the space syntax, with an optional alpha this ignores.
+fn parse_hsl(args: &str) -> Option<u32> {
+    let args = args.replace(',', " ");
+    let parts: Vec<&str> = args.split('/').next()?.split_whitespace().collect();
+    let [hue, saturation, lightness] = parts.as_slice() else {
+        return None;
+    };
+    let hue = parse_angle(hue)?;
+    let saturation = parse_ratio(saturation)?;
+    let lightness = parse_ratio(lightness)?;
+    // css-color-4 §7.1, the reference conversion.
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue / 60.0;
+    let second = chroma * (1.0 - (sector % 2.0 - 1.0).abs());
+    let (r, g, b) = match sector as u32 {
+        0 => (chroma, second, 0.0),
+        1 => (second, chroma, 0.0),
+        2 => (0.0, chroma, second),
+        3 => (0.0, second, chroma),
+        4 => (second, 0.0, chroma),
+        _ => (chroma, 0.0, second),
+    };
+    let base = lightness - chroma / 2.0;
+    let channel = |v: f32| ((v + base) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Some(rgb(channel(r), channel(g), channel(b)))
+}
+
+/// A hue, in whichever of the four angle units css-values-4 §8.1 allows. A
+/// bare number is degrees, which is what `hsl()` is nearly always written in.
+fn parse_angle(value: &str) -> Option<f32> {
+    // `unwrap_or` would evaluate the bare-number branch even when the split
+    // succeeded, and `240deg` does not parse as a number.
+    let (number, unit) = match number_and_unit(value) {
+        Some(split) => split,
+        None => (value.trim().parse().ok()?, ""),
+    };
+    let degrees = match unit {
+        "" | "deg" => number,
+        "grad" => number * 0.9,
+        "rad" => number.to_degrees(),
+        "turn" => number * 360.0,
+        _ => return None,
+    };
+    Some(degrees.rem_euclid(360.0))
+}
+
+/// A percentage or a plain fraction, clamped to 0..=1.
+fn parse_ratio(value: &str) -> Option<f32> {
+    let ratio = match value.strip_suffix('%') {
+        Some(number) => number.trim().parse::<f32>().ok()? / 100.0,
+        None => value.trim().parse::<f32>().ok()?,
+    };
+    Some(ratio.clamp(0.0, 1.0))
+}
+
+/// `color-mix(in srgb, <color> [<percent>], <color> [<percent>])`.
+///
+/// Only sRGB is answered. The others -- `oklab`, `oklch`, `hsl` as an
+/// interpolation space -- mix along a different curve, and a mix computed in
+/// the wrong space is a colour the page did not ask for, where refusing it
+/// leaves the inherited one.
+///
+/// `transparent` is answered as "the other colour", since nothing here has an
+/// alpha channel: the pages that write it are asking for a surface that lets
+/// most of what is behind it through, and this renderer's answer to that is
+/// the surface itself.
+fn parse_color_mix(args: &str) -> Option<u32> {
+    let parts = split_top_level(args, ',');
+    let [space, first, second] = parts.as_slice() else {
+        return None;
+    };
+    if space.trim() != "in srgb" {
+        return None;
+    }
+    let (first, first_weight) = mix_operand(first)?;
+    let (second, second_weight) = mix_operand(second)?;
+    let weight = match (first_weight, second_weight) {
+        (Some(w), _) => w,
+        (None, Some(w)) => 1.0 - w,
+        (None, None) => 0.5,
+    };
+    match (first, second) {
+        (Some(first), Some(second)) => Some(blend(first, second, weight)),
+        // One side transparent: the other stands, whatever the weights said.
+        (Some(colour), None) | (None, Some(colour)) => Some(colour),
+        (None, None) => None,
+    }
+}
+
+/// One side of a `color-mix()`: a colour, or `None` for `transparent`, and the
+/// percentage written after it if there was one.
+fn mix_operand(operand: &str) -> Option<(Option<u32>, Option<f32>)> {
+    let operand = operand.trim();
+    let (colour, weight) = match operand.rsplit_once(' ') {
+        Some((colour, last)) if last.ends_with('%') => (colour.trim(), parse_ratio(last)),
+        _ => (operand, None),
+    };
+    if colour == "transparent" {
+        return Some((None, weight));
+    }
+    Some((Some(parse_color(colour)?), weight))
+}
+
+/// `first` mixed with `second`, `weight` being how much of the first survives.
+fn blend(first: u32, second: u32, weight: f32) -> u32 {
+    let channel = |shift: u32| {
+        let (a, b) = ((first >> shift) & 0xFF, (second >> shift) & 0xFF);
+        (a as f32 * weight + b as f32 * (1.0 - weight))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    rgb(channel(16), channel(8), channel(0))
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -2681,6 +3014,135 @@ mod tests {
         sheet
             .cascade(stack, inline, &Computed::default(), &Vars::root(), 14)
             .0
+    }
+
+    #[test]
+    fn a_calculation_is_a_length() {
+        let sheet = sheet(
+            "p { font-size: calc(1rem + 2px) } \
+             div { margin-top: calc(2 * 8px) } \
+             h1 { font-size: clamp(10px, 2px + 4px, 40px) } \
+             h2 { font-size: min(30px, 2rem, 18px) } \
+             h3 { font-size: max(10px, 1rem) } \
+             pre { margin-top: calc(100% - 2px) }",
+        );
+        // `root_px` is 14 in these tests, and `em` resolves against the
+        // parent's font size, which is the same here.
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None).font_px,
+            Some(16)
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("div", &[])], None).margin_top,
+            Some(16)
+        );
+        // The floor wins over the ceiling and over the value, css-values-4
+        // §10.3, so a value under the floor comes back as the floor.
+        assert_eq!(
+            cascade(&sheet, &[element("h1", &[])], None).font_px,
+            Some(10)
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("h2", &[])], None).font_px,
+            Some(18)
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("h3", &[])], None).font_px,
+            Some(14)
+        );
+        // A percentage outside a measure is of the font size, 14 here.
+        assert_eq!(
+            cascade(&sheet, &[element("pre", &[])], None).margin_top,
+            Some(12)
+        );
+    }
+
+    /// A percentage inside a width is of the containing block, not of the font
+    /// size, so the two funnels answer the same `calc()` differently on
+    /// purpose.
+    #[test]
+    fn a_calculated_width_is_of_the_containing_block() {
+        let sheet = sheet_in(
+            "div { width: calc(100% - 60px) }",
+            Viewport::new(800, 600, 16),
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("div", &[])], None).measure,
+            Some(740)
+        );
+    }
+
+    /// A calculation this cannot read leaves the declaration invalid, which
+    /// keeps the inherited value rather than guessing a number.
+    #[test]
+    fn an_unreadable_calculation_is_refused() {
+        let sheet = sheet(
+            "p { margin-top: calc(1px + ) } \
+             div { margin-top: calc(10vh) } \
+             h1 { margin-top: min(1px, 2px) 3px }",
+        );
+        assert_eq!(cascade(&sheet, &[element("p", &[])], None).margin_top, None);
+        assert_eq!(
+            cascade(&sheet, &[element("div", &[])], None).margin_top,
+            None
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("h1", &[])], None).margin_top,
+            None
+        );
+    }
+
+    #[test]
+    fn a_colour_may_be_written_in_hsl() {
+        assert_eq!(parse_color("hsl(0 100% 50%)"), Some(0xffff_0000));
+        assert_eq!(parse_color("hsl(120, 100%, 50%)"), Some(0xff00_ff00));
+        assert_eq!(parse_color("hsl(240deg 100% 50% / 0.5)"), Some(0xff00_00ff));
+        assert_eq!(parse_color("hsl(0.5turn 100% 50%)"), Some(0xff00_ffff));
+        assert_eq!(parse_color("hsl(0 0% 100%)"), Some(0xffff_ffff));
+    }
+
+    /// The palette a generated sheet builds out of one custom property, which
+    /// is where `hsl()` actually comes from.
+    #[test]
+    fn a_hue_may_arrive_through_a_custom_property() {
+        let sheet = sheet(":root { --hue: 120 } p { color: hsl(var(--hue) 100% 50%) }");
+        let root = sheet.cascade(
+            &[element("html", &[])],
+            None,
+            &Computed::default(),
+            &Vars::root(),
+            14,
+        );
+        let (computed, _) = sheet.cascade(
+            &[element("html", &[]), element("p", &[])],
+            None,
+            &root.0,
+            &root.1,
+            14,
+        );
+        assert_eq!(computed.color, Some(0xff00_ff00));
+    }
+
+    #[test]
+    fn colours_mix_in_srgb() {
+        assert_eq!(
+            parse_color("color-mix(in srgb, #000000 50%, #ffffff)"),
+            Some(0xff80_8080)
+        );
+        // A weight written on the second colour is how much of *it* survives.
+        assert_eq!(
+            parse_color("color-mix(in srgb, #000000, #ffffff 25%)"),
+            Some(0xff40_4040)
+        );
+        // Nothing here has an alpha channel, so a mix towards transparent is
+        // the colour itself.
+        assert_eq!(
+            parse_color("color-mix(in srgb, #123456 90%, transparent)"),
+            Some(0xff12_3456)
+        );
+        // Any other interpolation space mixes along a different curve, so it
+        // is refused rather than answered wrongly.
+        assert_eq!(parse_color("color-mix(in oklab, #000 50%, #fff)"), None);
     }
 
     /// The visually-hidden idiom, which every accessible site uses to carry
@@ -3585,11 +4047,11 @@ mod tests {
              pre { line-height: -1 }",
         );
         // A zero length stacks every line on the one above it, so it is
-        // clamped to a pixel; a negative factor and a `calc()` are refused
-        // outright, leaving the inherited value standing.
+        // clamped to a pixel; a negative factor is refused outright, leaving
+        // the inherited value standing. A `calc()` is a length like any other.
         let line = |tag| cascade(&sheet, &[element(tag, &[])], None).line;
         assert_eq!(line("p").px(16), Some(1));
-        assert_eq!(line("div"), LineHeight::Normal);
+        assert_eq!(line("div").px(16), Some(16));
         assert_eq!(line("pre"), LineHeight::Normal);
     }
 
