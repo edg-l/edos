@@ -23,17 +23,22 @@
 # and README quote it. Nothing else hardcodes it, so the bump here is the whole
 # bump.
 #
-# THE HOUSE STYLE, from v0.2.0 through v0.4.0, so the next one matches:
-#   * Title is `EDOS vX.Y.Z: <what a user can now do>`, in plain words -- "a
-#     system you can log in to", "one bootable file". Not a feature list.
-#   * Open with two or three sentences saying what changed since the last one,
-#     then the commit count.
-#   * A `## Fix this first` section AT THE TOP if the previous release has a
-#     defect that loses data or otherwise bites whoever is running it. It comes
-#     before the new features, however good they are.
-#   * Sections per theme, `##`, ordered by what a reader cares about.
-#   * Say what does NOT work and what is off by default. v0.4.0 said sshd ships
-#     disabled and why; that is the tone.
+# THE CHANGELOG STYLE is conventional-commits shaped: grouped by kind, not by
+# subsystem, and NOT wrapped to 80 columns -- GitHub renders it as prose in a
+# wide column and hard wrapping only makes it ragged. Write long lines and let
+# the browser wrap them. See HOW-TO-RELEASE.md for the full template.
+#
+#   * Title is `EDOS vX.Y.Z: <what a user can now do>`, in plain words.
+#   * A short lead paragraph, then the commit count.
+#   * `## Breaking changes` FIRST if anything needs action from whoever is
+#     running the previous release -- data loss, a format change, a flag that
+#     moved. Before the features, however good they are.
+#   * Then `## Features`, `## Bug fixes`, `## Performance`, `## Internal`, in
+#     that order. Omit any section that has nothing in it.
+#   * Each entry is a bullet leading with a bolded summary, then the mechanism
+#     in a sentence or two. Say what changed and why it mattered, not which
+#     commit did it.
+#   * Say what does NOT work and what is off by default.
 #   * Close with the counts: programs, lines of Rust, syscalls.
 #
 # THE GATES RUN BEFORE THE ISO IS BUILT, and a red one stops the release. This
