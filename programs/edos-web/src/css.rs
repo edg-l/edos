@@ -356,6 +356,13 @@ impl Tracks {
     pub fn as_slice(&self) -> &[Track] {
         &self.items[..self.len as usize]
     }
+
+    /// `count` content-sized columns, which is what a table's columns are: the
+    /// page writes no template for them, and the widths come from what is in
+    /// them.
+    pub fn auto(count: usize) -> Option<Tracks> {
+        Tracks::from_slice(&vec![Track::Auto; count])
+    }
 }
 
 /// One column track of `grid-template-columns`.

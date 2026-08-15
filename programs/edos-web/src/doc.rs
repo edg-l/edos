@@ -19,7 +19,7 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::css::{
     self, Computed, Decorations, Display, Element, ListStyle, MediaQueries, Siblings, Stylesheet,
-    Vars, Viewport, WhiteSpace,
+    Tracks, Vars, Viewport, WhiteSpace,
 };
 
 /// The highlight `<mark>` is set in, as every UA sets it: yellow behind black.
@@ -801,6 +801,20 @@ impl Builder<'_> {
                     self.computed.white_space = Some(WhiteSpace::Pre);
                 }
 
+                // A table is laid out as a grid of one column per cell in its
+                // widest row. There is no table layout algorithm here and no
+                // `display: table` to reach for, and the alternative is what
+                // this did before: `<tr>` opened a block and its cells were
+                // inline inside it, so a row came out as its cells' text run
+                // together on one line. `colspan` and `rowspan` are not
+                // honoured, so a table using them misaligns from that row on.
+                if tag == local_name!("table") && self.computed.display.is_none() {
+                    if let Some(columns) = table_columns(node) {
+                        self.computed.display = Some(Display::Grid);
+                        self.computed.grid_columns = Some(columns);
+                    }
+                }
+
                 let entered_main = !self.in_main && self.is_main(node);
                 if entered_main {
                     self.in_main = true;
@@ -1364,7 +1378,8 @@ fn block_kind(tag: &html5ever::LocalName) -> Option<BlockKind> {
         | local_name!("ol")
         | local_name!("li")
         | local_name!("table")
-        | local_name!("tr")
+        | local_name!("td")
+        | local_name!("th")
         | local_name!("dl")
         | local_name!("dt")
         | local_name!("dd")
@@ -1374,6 +1389,43 @@ fn block_kind(tag: &html5ever::LocalName) -> Option<BlockKind> {
         | local_name!("body") => BlockKind::Paragraph,
         _ => return None,
     })
+}
+
+/// The column tracks a table needs: one per cell in its widest row, or `None`
+/// for a table with no cells or with more columns than [`Tracks`] holds.
+///
+/// `<tr>`, `<thead>` and the rest open no box of their own -- they are not in
+/// `block_kind` -- so the cells land in the table's own container and become
+/// its grid items.
+fn table_columns(node: &Handle) -> Option<Tracks> {
+    let mut widest = 0;
+    widest_row(node, &mut widest);
+    Tracks::auto(widest)
+}
+
+fn widest_row(node: &Handle, widest: &mut usize) {
+    for child in node.children.borrow().iter() {
+        let NodeData::Element { name, .. } = &child.data else {
+            continue;
+        };
+        match name.local {
+            // A nested table counts its own columns, not this one's.
+            local_name!("table") => continue,
+            local_name!("tr") => {
+                let cells = child
+                    .children
+                    .borrow()
+                    .iter()
+                    .filter(|cell| {
+                        matches!(&cell.data, NodeData::Element { name, .. }
+                            if name.local == local_name!("td") || name.local == local_name!("th"))
+                    })
+                    .count();
+                *widest = (*widest).max(cells);
+            }
+            _ => widest_row(child, widest),
+        }
+    }
 }
 
 /// Whether `node` is the `<head>`, which reader mode walks whatever else it

@@ -129,6 +129,8 @@
       .cell.b { background-color: #2f855a; }
       .cell.c { background-color: #975a16; }
       .badge { display: inline-block; background-color: #5e81ac; color: #fff; padding: 4px 8px; }
+      th, td { padding: 4px 10px; border: 1px solid #4c566a; }
+      th { font-weight: bold; }
     </style>
   </head>
   <body>
@@ -375,6 +377,14 @@ while the newline above them is kept.</p>
       <p class="cell b">to the</p>
       <p class="cell c">next row</p>
     </div>
+    <hr>
+    <h2>What a table arranges</h2>
+    <table>
+      <tr><th>Column</th><th>What it holds</th><th>Width</th></tr>
+      <tr><td>one</td><td>a cell of its own</td><td>content</td></tr>
+      <tr><td>two</td><td>a longer cell, which widens its column</td><td>content</td></tr>
+    </table>
+
     <hr>
     <h2 id="the-end">What a fragment reaches</h2>
     <p>The link at the top of this page points at this heading's
