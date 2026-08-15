@@ -43,7 +43,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-REPO_ROOT=$(pwd)
 ISO=edos-x86_64.iso
 
 die() { echo "release: $*" >&2; exit 1; }
@@ -126,6 +125,17 @@ prepare() {
 	EOF
 }
 
+# Programs in the workspace: every member that carries a binary. `edos_lib`,
+# `edos_render` and `edos_http` are libraries and are not counted.
+members() {
+	python3 -c "
+import tomllib
+m = tomllib.load(open('programs/Cargo.toml','rb'))['workspace']['members']
+libs = {'edos_lib', 'edos_render', 'edos_http'}
+print(len([x for x in m if x not in libs]))
+"
+}
+
 # The facts a release note is written from, so they are never re-derived by
 # hand. Everything here is measured now, not quoted from a doc.
 material() {
@@ -140,10 +150,10 @@ material() {
 	echo '| | value |'
 	echo '|---|---|'
 	echo "| syscalls | $(grep -c 'const SYS_' kernel/src/syscalls/mod.rs) |"
-	echo "| userspace programs | $(($(grep -cE '^\s+"' programs/Cargo.toml) - 3)) |"
+	echo "| userspace programs | $(members) |"
 	echo "| binaries in filesystem/bin | $(ls filesystem/bin | wc -l) |"
-	echo "| Rust | $(tokei -t=Rust --output json 2>/dev/null | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -1) code lines |"
-	echo "| kernel Rust | $(tokei -t=Rust kernel/src 2>/dev/null | awk '/^ Rust/{print $4}') code lines |"
+	echo "| Rust | $(tokei -t=Rust 2>/dev/null | awk '/^ Rust/{print $4; exit}') code lines across $(tokei -t=Rust 2>/dev/null | awk '/^ Rust/{print $2; exit}') files |"
+	echo "| kernel Rust | $(tokei -t=Rust kernel/src 2>/dev/null | awk '/^ Rust/{print $4; exit}') code lines |"
 	echo "| commits, all time | $(git rev-list --count HEAD) |"
 	echo "| in-kernel suite | $(grep -aoE 'ALL [0-9]+ TESTS PASSED' run_log.txt 2>/dev/null | tail -1) |"
 	echo "| host unit tests | $(./scripts/host-tests 2>/dev/null | grep -oE 'ok\. [0-9]+ passed' | awk '{s+=$2} END {print s}') |"
