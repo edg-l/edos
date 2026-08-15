@@ -7761,7 +7761,7 @@ baseline is better than putting it somewhere arbitrary.
 ## `make host-tests` is the userspace suite (2026-08-15)
 
 `make test` boots a guest and runs the in-kernel suite; nothing ran the unit
-tests in `programs/` at all. There are 98 of them across four crates — URL
+tests in `programs/` at all. There are 101 of them across four crates — URL
 resolution (`edos_http/src/url.rs`), the CSS cascade
 (`edos-web/src/css.rs`), the SSH wire format, key exchange and auth
 (`sshd/src/*.rs`), and `grab`'s merge — and every one is decidable without a
