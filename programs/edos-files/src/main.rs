@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use edos_lib::keymap::{Modifiers, keycode, update_modifiers};
 use edos_lib::mounts::Mount;
 use edos_lib::process::spawn;
-use edos_render::image::{Image, decode_bmp};
+use edos_render::image::{Image, decode_raster};
 use edos_render::metrics::space;
 use edos_render::widgets::{Rect, TextInput, WidgetContainer, WidgetEvent, WidgetId};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
@@ -309,7 +309,7 @@ impl App {
 
         self.preview = fs::read(&path)
             .ok()
-            .and_then(|bytes| decode_bmp(&bytes).ok())
+            .and_then(|bytes| decode_raster(&bytes).ok())
             .map(|image| scale_preview(&image, path));
     }
 

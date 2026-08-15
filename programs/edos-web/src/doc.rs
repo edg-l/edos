@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use edos_http::url::Url;
 use edos_render::graphics::Color;
-use edos_render::image::{Image, Svg, decode_bmp, looks_like_svg};
+use edos_render::image::{Image, Svg, decode_raster, looks_like_svg};
 use html5ever::{LocalName, local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
@@ -247,7 +247,7 @@ fn decode(bytes: &[u8]) -> Option<Picture> {
     if looks_like_svg(bytes) {
         Svg::parse(bytes).ok().map(Picture::Vector)
     } else {
-        decode_bmp(bytes).ok().map(Picture::Raster)
+        decode_raster(bytes).ok().map(Picture::Raster)
     }
 }
 

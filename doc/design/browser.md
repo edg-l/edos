@@ -22,7 +22,7 @@ None of this needs building:
 | HTTPS fetch | `programs/edos_http` — HTTP/1.1 over `rustls`, verified against a real site from inside the guest |
 | 2D rasteriser | `tiny-skia`, already vendored via `resvg`: paths, fills, strokes, gradients, blending |
 | Glyphs | `fontdue` + `ttf-parser` in `edos_render::font`, proportional faces at arbitrary sizes, one text blitter |
-| Images | `resvg`/`usvg` for SVG and BMP decode, both already wired into `imgview` |
+| Images | `resvg`/`usvg` for SVG, `png`/`image-webp`/`zune-jpeg` for raster, all wired into `imgview` and the file manager's thumbnails too |
 | Window, input, scrolling | `edos_render`'s widgets and `window.rs` |
 
 Missing: **an HTML parser, a CSS subset, and layout.** That is the whole list.
@@ -395,10 +395,15 @@ raster or a still-parsed SVG tree; `view.rs` rasterises it at layout time, so a
 vector picture is re-rendered when the column changes rather than magnified.
 Four rules:
 
-- **BMP and SVG are what decodes**, sniffed from the bytes rather than taken
-  from the URL. A PNG or a JPEG is not an error — the block falls back to the
-  `[alt]` text it carries, which is also what a failed fetch gives, so the page
-  reads the same either way.
+- **PNG, WebP, JPEG, BMP and SVG decode**, sniffed from the bytes rather than
+  taken from the URL, since a server that names a WebP `.png` is a server. The
+  three that are not ours are crates -- `png`, `image-webp`, `zune-jpeg` --
+  behind `edos_render`'s `raster` feature, all pure Rust and all building for
+  this target unpatched. They are not optional in practice: every one of the 17
+  pictures on `edos.edgl.dev` is a WebP, so a browser without them shows a
+  page of alt text where the screenshots are. Anything that still fails to
+  decode falls back to the `[alt]` text, which is also what a failed fetch
+  gives, so the page reads the same either way.
 - **A picture is a block**, since the block list has no inline box. An image
   mid-sentence breaks the sentence in two and the text after it resumes in the
   block it interrupted.

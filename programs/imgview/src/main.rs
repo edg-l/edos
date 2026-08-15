@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use edos_lib::keymap::{Modifiers, map_keycode, update_modifiers};
-use edos_render::image::{Image, ImageError, Svg, decode_bmp, looks_like_svg};
+use edos_render::image::{Image, ImageError, Svg, decode_raster, looks_like_svg};
 use edos_render::metrics::{TEXT_CELL_HEIGHT, space};
 use edos_render::theme::Theme;
 use edos_render::widgets::{Label, Widget, colors};
@@ -170,13 +170,16 @@ fn open(path: &str) -> Result<Source, String> {
                 other => format!("{path}: {other:?}"),
             });
     }
-    decode_bmp(&bytes)
+    decode_raster(&bytes)
         .map(Source::Raster)
         .map_err(|err| match err {
-            ImageError::Malformed => format!("{path}: not a BMP or an SVG, or truncated"),
+            ImageError::Malformed => {
+                format!("{path}: not a picture this can read, or truncated")
+            }
             ImageError::Unsupported => {
                 format!("{path}: compressed or paletted BMPs are not supported")
             }
+            ImageError::Raster(message) => format!("{path}: {message}"),
             other => format!("{path}: {other:?}"),
         })
 }

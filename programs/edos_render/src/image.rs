@@ -1,9 +1,14 @@
 //! Reading an image off disk and fitting it to a rectangle.
 //!
-//! BMP because it is the one raster format a machine can produce without a
-//! library and this OS can decode without one: no compression to implement, no
-//! entropy coder, no colour management. Anything richer belongs behind a real
-//! decoder crate, and none of them build against this std yet.
+//! BMP is decoded here because it is the one raster format a machine can
+//! produce without a library: no compression to implement, no entropy coder,
+//! no colour management.
+//!
+//! PNG, WebP and JPEG come from crates, behind the `raster` feature, because
+//! the web is not made of BMPs -- every screenshot on `edos.edgl.dev` is a
+//! WebP, and a browser that decodes none of them shows a page of alt text.
+//! All three are pure Rust and build for this target unpatched: `png`,
+//! `image-webp` and `zune-jpeg`.
 
 use crate::graphics::Color;
 
@@ -25,6 +30,129 @@ pub enum ImageError {
     /// position -- so the message is worth more than the fact of failure.
     #[cfg(feature = "svg")]
     Svg(String),
+    /// A raster decoder rejected the file, carrying what it said.
+    #[cfg(feature = "raster")]
+    Raster(String),
+}
+
+/// Decode whatever raster format the bytes turn out to be.
+///
+/// Sniffed from the bytes rather than taken from the URL or the extension: a
+/// server that names a picture `.png` and sends a WebP is a server, and the
+/// magic numbers are unambiguous.
+pub fn decode_raster(bytes: &[u8]) -> Result<Image, ImageError> {
+    match kind(bytes) {
+        Some(Raster::Bmp) => decode_bmp(bytes),
+        #[cfg(feature = "raster")]
+        Some(Raster::Png) => decode_png(bytes),
+        #[cfg(feature = "raster")]
+        Some(Raster::Webp) => decode_webp(bytes),
+        #[cfg(feature = "raster")]
+        Some(Raster::Jpeg) => decode_jpeg(bytes),
+        #[cfg(not(feature = "raster"))]
+        Some(_) => Err(ImageError::Unsupported),
+        None => Err(ImageError::Malformed),
+    }
+}
+
+/// A raster format this build may be able to read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Raster {
+    Bmp,
+    Png,
+    Webp,
+    Jpeg,
+}
+
+/// What the first bytes say the file is.
+pub fn kind(bytes: &[u8]) -> Option<Raster> {
+    if bytes.starts_with(b"BM") {
+        return Some(Raster::Bmp);
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(Raster::Png);
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some(Raster::Jpeg);
+    }
+    // RIFF....WEBP, the container rather than the codec: lossy, lossless and
+    // animated all wear it, and the decoder is what decides which it can read.
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(Raster::Webp);
+    }
+    None
+}
+
+/// One pixel per word, from a decoder that hands back separate channels.
+#[cfg(feature = "raster")]
+fn pack(width: u32, height: u32, channels: usize, data: &[u8]) -> Result<Image, ImageError> {
+    let count = width as usize * height as usize;
+    if data.len() < count * channels {
+        return Err(ImageError::Malformed);
+    }
+    let pixels = data
+        .chunks_exact(channels)
+        .take(count)
+        .map(|px| match channels {
+            // Greyscale, with and without an alpha this ignores.
+            1 | 2 => Color::from_rgb(px[0], px[0], px[0]).raw(),
+            _ => Color::from_rgb(px[0], px[1], px[2]).raw(),
+        })
+        .collect();
+    Ok(Image {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Decode a PNG, of any bit depth and colour type: the crate expands whatever
+/// it reads to 8-bit RGB or RGBA first.
+#[cfg(feature = "raster")]
+pub fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
+    let mut decoder = png::Decoder::new(bytes);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|err| ImageError::Raster(err.to_string()))?;
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|err| ImageError::Raster(err.to_string()))?;
+    let channels = info.color_type.samples();
+    pack(
+        info.width,
+        info.height,
+        channels,
+        &buffer[..info.buffer_size()],
+    )
+}
+
+/// Decode a WebP, lossy or lossless. An animation is decoded as its first
+/// frame, which is what a still picture of it is.
+#[cfg(feature = "raster")]
+pub fn decode_webp(bytes: &[u8]) -> Result<Image, ImageError> {
+    let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))
+        .map_err(|err| ImageError::Raster(err.to_string()))?;
+    let (width, height) = decoder.dimensions();
+    let channels = if decoder.has_alpha() { 4 } else { 3 };
+    let mut buffer = vec![0; width as usize * height as usize * channels];
+    decoder
+        .read_image(&mut buffer)
+        .map_err(|err| ImageError::Raster(err.to_string()))?;
+    pack(width, height, channels, &buffer)
+}
+
+/// Decode a baseline or progressive JPEG.
+#[cfg(feature = "raster")]
+pub fn decode_jpeg(bytes: &[u8]) -> Result<Image, ImageError> {
+    let mut decoder = zune_jpeg::JpegDecoder::new(bytes);
+    let data = decoder
+        .decode()
+        .map_err(|err| ImageError::Raster(err.to_string()))?;
+    let (width, height) = decoder.dimensions().ok_or(ImageError::Malformed)?;
+    let channels = data.len() / (width as usize * height as usize).max(1);
+    pack(width as u32, height as u32, channels.max(1), &data)
 }
 
 /// Offset of the pixel-data pointer in `BITMAPFILEHEADER`.

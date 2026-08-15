@@ -9,6 +9,9 @@ default = []
 # code that only a program showing an SVG has any use for, and every graphical
 # program in the tree links this crate.
 svg = ["dep:resvg"]
+# Raster formats beyond BMP. Behind a feature for the same reason as `svg`:
+# only a program that shows pictures from the web needs them.
+raster = ["dep:png", "dep:image-webp", "dep:zune-jpeg"]
 
 [dependencies]
 window-abi = { path = "../../libs/window-abi" }
@@ -16,6 +19,9 @@ edos_lib = { path = "../edos_lib" }
 # default-features = false drops usvg's `text` feature, which pulls fontdb and
 # memmap2 and wants a libc this target has not got.
 resvg = { version = "0.45", default-features = false, optional = true }
+png = { version = "0.17", optional = true }
+image-webp = { version = "0.2", optional = true }
+zune-jpeg = { version = "0.4", optional = true }
 fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
 # The default unicode range is Basic Latin alone, so every accented character
 # rasterizes to nothing and reads on screen as a space. A Spanish ISO keyboard

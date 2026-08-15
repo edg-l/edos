@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-edos_render = { path = "../edos_render" }
+# `raster` so a thumbnail is not BMP-only: a picture on this machine is as
+# likely to be a PNG as anything else.
+edos_render = { path = "../edos_render", features = ["raster"] }
 edos_lib = { path = "../edos_lib" }

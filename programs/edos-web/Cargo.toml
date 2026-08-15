@@ -6,9 +6,9 @@ edition = "2024"
 [dependencies]
 edos_http = { path = "../edos_http" }
 edos_lib = { path = "../edos_lib" }
-# `svg` because a page's pictures are as often vector as raster, and the
-# decoder is already in the tree.
-edos_render = { path = "../edos_render", features = ["svg"] }
+# `svg` because a page's pictures are as often vector as raster, and `raster`
+# because everything else on the web is a PNG, a WebP or a JPEG.
+edos_render = { path = "../edos_render", features = ["svg", "raster"] }
 # The box engine. It arranges boxes and asks a measure function how big a leaf
 # is; it does not break lines, so `view.rs`'s inline engine is what answers it.
 taffy = { version = "0.9", default-features = false, features = ["std", "taffy_tree", "block_layout", "flexbox", "grid"] }
