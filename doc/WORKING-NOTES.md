@@ -60,11 +60,27 @@ TLS handshake cannot be interrupted. **The page gives way to the loading view
 the moment the load starts** -- Edgar's call, and the right one: the old page
 left up through a slow fetch reads as a click that was ignored.
 
-**Two measurements worth keeping.** The site sends about 100 KB of CSS per page
-and this machine's TLS is software, so `Accept-Encoding: gzip` is worth more
-than the inflate costs; and the subresource cache now belongs to the window
+**Three measurements worth keeping.** The site sends about 100 KB of CSS per
+page and this machine's TLS is software, so `Accept-Encoding: gzip` is worth
+more than the inflate costs; the subresource cache now belongs to the window
 rather than to the document, because every page of a site links the same
-sheets and following a link fetched all of them again over a handshake each.
+sheets; and connections are pooled, which took the homepage from seven TCP and
+TLS handshakes to one.
+
+**The pool has to be per process, not per thread**, and that is the one thing
+about it that is not obvious. `edos-web` loads each page on a thread of its
+own, so a thread-local pool is empty on every navigation and holds a connection
+only for the subresources of the page that opened it. Two navigations opened
+two connections thread-local and one shared.
+
+**Testing the stale case needs a server that closes on demand.** A pooled
+connection the far end has closed cannot be told from a live one -- the write
+succeeds and the failure arrives on the way back -- so the client retries once
+when, and only when, the request went out on a reused connection. Cloudflare
+holds a connection far too long to wait for in a test; a 40-line Python server
+that keeps a connection for N seconds and then drops it makes the case happen
+on command, and the guest log tells the whole story either way: watch for
+`Established -> CloseWait` between the two requests in `run_log.txt`.
 
 **Driving this in the guest**: `edos-web URL > /dev/klog 2>&1` is what makes a
 headless run readable -- the window's stdout is otherwise in the terminal it

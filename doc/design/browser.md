@@ -393,6 +393,16 @@ Three deliberate limits:
   same `max_body` the wire is, because a few kilobytes of gzip expand to as
   much as the sender likes. `grab` turns it off for a package, which is already
   compressed.
+- **The connection is kept and reused.** The whole homepage -- the document,
+  two stylesheets and four images -- is one TCP connection and one TLS
+  handshake now, measured in the guest against seven before. The pool is in
+  `edos_http` and is one per process rather than per thread, since a page is
+  loaded on a thread of its own and a thread-local pool would be empty on every
+  navigation. A pooled connection the far end has closed cannot be told from a
+  live one, so a request that went out on a reused connection is retried once
+  on a fresh one; that path is the one worth testing deliberately, and
+  `scripts/` has no server that closes on demand -- the one used here was a
+  throwaway.
 - **At most `doc::MAX_SHEETS` external sheets are fetched, and each one
   serially**, on the thread that is about to lay the page out. A page linking
   more than six is linking print and font sheets; a browser that fetched all of
