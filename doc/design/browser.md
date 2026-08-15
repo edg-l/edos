@@ -67,7 +67,8 @@ the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
 left, since the blitter cannot stretch a line), `line-height` (a factor, a
 length or `normal`), `text-transform`, `text-indent`, `white-space`,
-`word-break`/`overflow-wrap`, `list-style-type` (and the type keyword in the
+`word-break`/`overflow-wrap`, `letter-spacing`/`word-spacing`,
+`list-style-type` (and the type keyword in the
 `list-style` shorthand), all four margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
@@ -125,6 +126,19 @@ word the reader sees. `text-indent` moves only the first line of a block, and a
 negative one — a hanging indent — resolves to zero, because at the page edge
 there is no margin for the line to hang over. Both inherit, which is what carries
 them from the wrapper that declares them to the paragraphs inside it.
+
+**`letter-spacing` and `word-spacing` are the one pair of lengths that keep a
+negative sign.** A negative margin or padding has nowhere to go in a flat block
+list, so `parse_length` floors those at zero; a page tightening a display
+heading by `-0.02em` means exactly what it wrote, so the spacing properties go
+through `parse_signed_length` instead and carry an `i32`. The tracking is added
+to every character's advance, the last one included, and it reaches the space
+between two words as well — a space is a character — where `word-spacing` is
+added on top of it. It is applied inside `edos_render`'s blitter
+(`text::draw_tracked`, `text::width_tracked`) rather than by drawing each
+character at a position of its own, so the sub-pixel advances accumulate the
+way an untracked run's do and the measured width stays the width drawn: an
+underline or a link hit-test would otherwise drift a pixel per character.
 
 **`white-space` decides two independent things**, and the layout is written
 around that split rather than around the `<pre>` element: whether the source's

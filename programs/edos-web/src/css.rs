@@ -2,7 +2,8 @@
 //!
 //! Stage 2 of `doc/design/browser.md`. What is here is chosen by what the block
 //! list can already express -- colour, size, weight, face, decoration,
-//! alignment, case, the first-line indent, the leading,
+//! alignment, case, the first-line indent, the leading, the tracking a page
+//! puts between letters and words,
 //! the vertical margins between blocks, the measure a box asks for
 //! with `width` or `max-width`, and the box a block paints for itself with
 //! `background-color`, `padding` and `border` -- plus `display: none`, the one
@@ -358,6 +359,11 @@ pub struct Computed {
     /// `text-indent`: how far into the box the block's first line starts. It
     /// inherits, so a wrapper that sets it indents the paragraphs inside it.
     pub indent: u32,
+    /// `letter-spacing`, inherited, and signed: a page tightening a display
+    /// heading writes a negative value and means it.
+    pub letter_spacing: i32,
+    /// `word-spacing`, inherited, added to every space between two words.
+    pub word_spacing: i32,
     /// `background-color`, painted behind the block's own box.
     pub background: Option<u32>,
     pub padding: Sides<Option<u32>>,
@@ -502,6 +508,19 @@ impl Computed {
             "text-indent" => {
                 if let Some(px) = parse_measure(value, root_px, self.em(parent_px), basis) {
                     self.indent = px;
+                }
+            }
+            // Both take a signed length, and both are relative to the element's
+            // own font size, so a heading that tightens by `-0.02em` tightens by
+            // its own em rather than the parent's.
+            "letter-spacing" => {
+                if let Some(px) = parse_spacing(value, root_px, self.em(parent_px)) {
+                    self.letter_spacing = px;
+                }
+            }
+            "word-spacing" => {
+                if let Some(px) = parse_spacing(value, root_px, self.em(parent_px)) {
+                    self.word_spacing = px;
                 }
             }
             "margin" => {
@@ -1546,7 +1565,10 @@ fn parse_measure(value: &str, root_px: u32, em_px: u32, basis: u32) -> Option<u3
     parse_length(value, root_px, em_px)
 }
 
-fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
+/// A length that keeps its sign, which only the spacing properties want: a
+/// negative margin or padding has nowhere to go in a flat block list, so
+/// [`parse_length`] floors those at zero instead.
+fn parse_signed_length(value: &str, root_px: u32, em_px: u32) -> Option<i32> {
     let value = value.trim();
     if value == "0" || value == "auto" || value == "inherit" {
         return (value == "0").then_some(0);
@@ -1554,9 +1576,6 @@ fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
     let split = value.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+')?;
     let (number, unit) = value.split_at(split);
     let number: f32 = number.parse().ok()?;
-    if number < 0.0 {
-        return Some(0);
-    }
     let px = match unit {
         "px" => number,
         "pt" => number * 4.0 / 3.0,
@@ -1565,7 +1584,20 @@ fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
         "%" => number * em_px as f32 / 100.0,
         _ => return None,
     };
-    Some(px.round().max(0.0) as u32)
+    Some(px.round() as i32)
+}
+
+fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
+    Some(parse_signed_length(value, root_px, em_px)?.max(0) as u32)
+}
+
+/// `letter-spacing`/`word-spacing`: a signed length, or `normal`, which is the
+/// face's own advances and so no adjustment at all.
+fn parse_spacing(value: &str, root_px: u32, em_px: u32) -> Option<i32> {
+    if value.trim().eq_ignore_ascii_case("normal") {
+        return Some(0);
+    }
+    parse_signed_length(value, root_px, em_px)
 }
 
 /// `#rgb`, `#rrggbb`, `rgb()`/`rgba()` and the handful of named colours a
@@ -2243,6 +2275,39 @@ mod tests {
             )
             .0;
         assert_eq!(inner.indent, 28);
+    }
+
+    #[test]
+    fn spacing_takes_a_sign_and_inherits() {
+        let sheet = sheet(
+            "div { letter-spacing: 2px; word-spacing: 0.5em } \
+             p { letter-spacing: -1px } h1 { letter-spacing: normal } \
+             pre { letter-spacing: 3 } code { word-spacing: -0.25em }",
+        );
+        let computed = |tag| cascade(&sheet, &[element(tag, &[])], None);
+        assert_eq!(computed("div").letter_spacing, 2);
+        assert_eq!(computed("div").word_spacing, 7);
+        // A page tightening its display type writes a negative value and means
+        // it, unlike a negative margin, which has nowhere to go.
+        assert_eq!(computed("p").letter_spacing, -1);
+        assert_eq!(computed("h1").letter_spacing, 0);
+        // A bare number is not a length, so the declaration is dropped.
+        assert_eq!(computed("pre").letter_spacing, 0);
+        assert_eq!(computed("code").word_spacing, -4);
+
+        // Both inherit, so a rule on a wrapper reaches the text inside it.
+        let stack = vec![element("div", &[]), element("span", &[])];
+        let inner = sheet
+            .cascade(
+                &stack,
+                None,
+                &cascade(&sheet, &stack[..1], None),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(inner.letter_spacing, 2);
+        assert_eq!(inner.word_spacing, 7);
     }
 
     #[test]

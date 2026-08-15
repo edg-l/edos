@@ -27,6 +27,10 @@
          a last-resort cut, or a cut wherever the line happens to end. */
       .breaks-word { overflow-wrap: break-word }
       .breaks-all { word-break: break-all }
+      /* The tracking a page puts between letters and between words, either
+         way it can be written: opened up, and pulled back in. */
+      .tracked { letter-spacing: 3px; word-spacing: 12px }
+      .tight { letter-spacing: -1px }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
@@ -111,6 +115,8 @@ while the newline above them is kept.</p>
     <p>A word wider than the column runs past it: https://edos.edgl.dev/introduction/an-unreasonably-long-path-that-no-column-anywhere-in-this-window-could-ever-hope-to-hold-in-one-piece</p>
     <p class="breaks-word">The same word cut only because nothing else would hold it: https://edos.edgl.dev/introduction/an-unreasonably-long-path-that-no-column-anywhere-in-this-window-could-ever-hope-to-hold-in-one-piece</p>
     <p class="breaks-all">And a paragraph broken wherever the line ends, so every line but the last reaches the same right edge.</p>
+    <p class="tracked">Letters set three pixels apart, words twelve.</p>
+    <p class="tight">And the same line pulled a pixel tighter than the face sets it.</p>
 
     <p class="quiet">
       This column is 38em wide and centred in the window rather than filling

@@ -111,7 +111,14 @@ mod bitmap {
         get_raster_width(FontWeight::Regular, HEIGHT) as u32
     }
 
-    pub fn draw(surface: &mut super::Surface<'_>, x: i32, y: i32, text: &str, color: u32) {
+    pub fn draw(
+        surface: &mut super::Surface<'_>,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: u32,
+        letter: i32,
+    ) {
         let advance = advance() as i32;
         let mut pen = x;
         for ch in text.chars() {
@@ -122,7 +129,7 @@ mod bitmap {
                     }
                 }
             }
-            pen += advance;
+            pen += advance + letter;
         }
     }
 }
@@ -133,8 +140,25 @@ mod bitmap {
 /// every caller already had: a widget knows the box it is filling, not the
 /// typographic grid.
 pub fn draw(surface: &mut Surface<'_>, x: i32, y: i32, text: &str, style: Style) {
+    draw_tracked(surface, x, y, text, style, 0);
+}
+
+/// Draw `text` with `letter` pixels added to every character's advance, which
+/// is what CSS `letter-spacing` asks for.
+///
+/// The tracking is part of the pen rather than applied by drawing each
+/// character separately, so the sub-pixel advances still accumulate the way an
+/// untracked run's do and [`width_tracked`] stays the width that gets drawn.
+pub fn draw_tracked(
+    surface: &mut Surface<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    style: Style,
+    letter: i32,
+) {
     if !font::available() {
-        bitmap::draw(surface, x, y, text, style.color);
+        bitmap::draw(surface, x, y, text, style.color, letter);
         return;
     }
 
@@ -154,7 +178,7 @@ pub fn draw(surface: &mut Surface<'_>, x: i32, y: i32, text: &str, style: Style)
                 surface.blend(gx + col as i32, gy + row as i32, style.color, coverage);
             }
         }
-        pen += glyph.advance;
+        pen += glyph.advance + letter as f32;
     }
 }
 
@@ -164,6 +188,14 @@ pub fn width(text: &str, style: Style) -> u32 {
         return text.chars().count() as u32 * bitmap::advance();
     }
     font::measure(style.family, style.weight, style.px, text)
+}
+
+/// Width of `text` set in `style` with `letter` pixels of tracking, which the
+/// last character carries too: the advance is the character's, not the gap to
+/// the next one.
+pub fn width_tracked(text: &str, style: Style, letter: i32) -> u32 {
+    let count = text.chars().count() as i32;
+    (width(text, style) as i32 + letter * count).max(0) as u32
 }
 
 /// Height of one line set in `style`, in pixels.

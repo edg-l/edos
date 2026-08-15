@@ -7665,3 +7665,35 @@ computes `container` first, centres with it, and takes `plan.trail` off it last.
 Every case with no right margin is arithmetically unchanged, which is why the
 existing tests could not have caught the first version — the fixture and a
 screenshot could, and did.
+
+## `letter-spacing`/`word-spacing`: the tracking belongs in the blitter (2026-08-15)
+
+The obvious implementation — draw each character at a position of its own,
+advancing by the character's width plus the tracking — is wrong for a
+proportional face. `edos_render`'s blitter carries an `f32` pen and adds each
+glyph's fractional advance to it; drawing character by character rounds the pen
+to an integer at every step, so a run drifts from `font::measure`'s width by up
+to a pixel per character. That width is what positions an underline and what
+`Layout::link_at` hit-tests, so a tracked link would have been underlined short
+and clickable in the wrong place. `text::draw_tracked` adds the tracking to the
+same `f32` pen instead, and `text::width_tracked` is `width + letter * chars`,
+which is exactly what that pen ends at.
+
+Two smaller things worth knowing:
+
+- **These are the only lengths in `css.rs` that keep a negative sign.**
+  `parse_length` floors negatives at zero, which is right for a margin or a
+  padding in a flat block list that has nowhere to put them, and wrong for a
+  page tightening a display heading by `-0.02em`. `parse_signed_length` is the
+  shared core; `parse_length` clamps its result, and `parse_spacing` also maps
+  `normal` to zero. A side effect of the refactor: a negative length with an
+  unrecognised unit is now refused rather than resolving to zero.
+- **The tracking reaches the space between two words, not just the letters
+  inside them.** A space is a character, so a tracked line opens up between its
+  words as well; `word-spacing` is added on top of that. Both ride on `Word`
+  rather than on `Style`, because `Style` is the face the whole shell shares and
+  a `<span>` can change either partway through a line.
+
+The fixture's `.tracked` and `.tight` paragraphs show both directions, and the
+tight one is the reason to keep it: a page pulling its type in a pixel is
+invisible in a unit test and obvious beside its neighbours in a screenshot.

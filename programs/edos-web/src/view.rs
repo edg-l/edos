@@ -43,6 +43,10 @@ pub struct Fragment {
     /// Whether a rule is drawn under the text, which is a link's default and
     /// what `text-decoration` overrides.
     pub underline: bool,
+    /// `letter-spacing`, in pixels, added to every character's advance. It is
+    /// on the fragment rather than on the style because a `Style` is the face
+    /// the whole shell shares, and tracking is a property of this page's run.
+    pub letter: i32,
 }
 
 /// What a line draws.
@@ -131,6 +135,10 @@ struct Word {
     /// How many line breaks stand before this word: `<br>`, or a newline in a
     /// box whose `white-space` keeps them.
     breaks: u32,
+    /// `letter-spacing` and `word-spacing` as the run wrote them. Both ride on
+    /// the word because a `<span>` can set either partway through a line.
+    letter: i32,
+    word_gap: i32,
 }
 
 impl Layout {
@@ -202,11 +210,12 @@ impl Layout {
             } else if !picture_drawn {
                 let marker = plan.marker.as_ref().map(|text| Fragment {
                     x: 0,
-                    width: text::width(text, plan.style),
+                    width: text::width_tracked(text, plan.style, plan.letter),
                     text: text.clone(),
                     style: plan.style,
                     link: None,
                     underline: false,
+                    letter: plan.letter,
                 });
 
                 let start = out.lines.len();
@@ -307,6 +316,7 @@ impl Layout {
             style: plan.style,
             link,
             underline: false,
+            letter: 0,
         }];
         self.lines.push(Line {
             y: *y,
@@ -347,6 +357,8 @@ impl Layout {
             // emphasis is not carried by colour alone.
             let underline = run.css.underline.unwrap_or(link.is_some());
             let height = leading(run.css.line, style);
+            let letter = run.css.letter_spacing;
+            let word_gap = run.css.word_spacing;
             let mut word = String::new();
             let mut flush = |word: &mut String, spaces: &mut u32, breaks: &mut u32| {
                 if word.is_empty() {
@@ -371,6 +383,8 @@ impl Layout {
                     glued,
                     spaces: *spaces,
                     breaks: *breaks,
+                    letter,
+                    word_gap,
                 });
                 word.clear();
                 *spaces = 0;
@@ -430,10 +444,14 @@ impl Layout {
             // A space at the head of a line is dropped where spaces collapse
             // and kept where they do not, since an indented `pre` line is
             // nothing but its leading spaces.
+            // `word-spacing` widens the space itself, and `letter-spacing`
+            // reaches it too: a space is a character, so a tracked line opens
+            // between its words as well as inside them.
             let mut gap = if word.glued || (items.is_empty() && !plan.ws.keeps_spaces()) {
                 0
             } else {
-                word.spaces * text::width(" ", word.style)
+                let advance = text::width(" ", word.style) as i32 + word.letter + word.word_gap;
+                word.spaces * advance.max(0) as u32
             };
             // The word is placed whole unless it does not fit, and what happens
             // then is either a cut inside it or a fresh line to try again on.
@@ -441,7 +459,7 @@ impl Layout {
             // loop cannot run twice without making progress.
             let mut text = word.text;
             loop {
-                let width = text::width(&text, word.style);
+                let width = text::width_tracked(&text, word.style, word.letter);
                 if plan.ws.wraps() && pen + gap + width > avail {
                     let room = avail.saturating_sub(pen + gap);
                     // Without a break property a word wider than the column
@@ -450,12 +468,12 @@ impl Layout {
                     let cut = plan
                         .wrap
                         .breaks(width > avail)
-                        .then(|| fit_prefix(&text, word.style, room))
+                        .then(|| fit_prefix(&text, word.style, room, word.letter))
                         .flatten();
                     if let Some(cut) = cut {
                         pen += gap;
                         let head = text[..cut].to_string();
-                        let head_width = text::width(&head, word.style);
+                        let head_width = text::width_tracked(&head, word.style, word.letter);
                         line_height = line_height.max(word.height);
                         items.push(Fragment {
                             x: (plan.indent + PAGE_PAD + pen) as i32,
@@ -464,6 +482,7 @@ impl Layout {
                             style: word.style,
                             link: word.link,
                             underline: word.underline,
+                            letter: word.letter,
                         });
                         pen += head_width;
                         let line = std::mem::take(&mut items);
@@ -494,6 +513,7 @@ impl Layout {
                     style: word.style,
                     link: word.link,
                     underline: word.underline,
+                    letter: word.letter,
                 });
                 pen += width;
                 break;
@@ -552,6 +572,9 @@ struct Plan {
     /// `text-indent`: how far into the box the first line starts, the rest of
     /// them being flush with its left edge.
     first_indent: u32,
+    /// `letter-spacing` for the block's own text, which is also what its list
+    /// marker is set with.
+    letter: i32,
     gap_before: u32,
     gap_after: u32,
     marker: Option<String>,
@@ -586,10 +609,10 @@ fn leading(line: css::LineHeight, style: Style) -> u32 {
 ///
 /// The scan stops at the first overflow rather than measuring every prefix: a
 /// longer prefix of the same string is never narrower, whatever the face.
-fn fit_prefix(text: &str, style: Style, room: u32) -> Option<usize> {
+fn fit_prefix(text: &str, style: Style, room: u32, letter: i32) -> Option<usize> {
     let mut fits = None;
     for (index, _) in text.char_indices().skip(1) {
-        if text::width(&text[..index], style) > room {
+        if text::width_tracked(&text[..index], style, letter) > room {
             break;
         }
         fits = Some(index);
@@ -635,6 +658,7 @@ fn plan(block: &Block) -> Plan {
     plan.indent += css.margin_left.unwrap_or(0);
     plan.trail = css.margin_right.unwrap_or(0);
     plan.first_indent = css.indent;
+    plan.letter = css.letter_spacing;
     plan.measure = css.measure;
     plan.center = css.center;
     plan.align = css.align;
@@ -671,6 +695,7 @@ fn default_plan(block: &Block) -> Plan {
         line: css::LineHeight::Normal,
         indent: 0,
         first_indent: 0,
+        letter: 0,
         gap_before: 0,
         gap_after: space(2),
         marker: None,
@@ -866,12 +891,13 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             LineKind::Text => {}
         }
         for item in &line.items {
-            text::draw(
+            text::draw_tracked(
                 &mut surface,
                 item.x,
                 y + line.lead as i32,
                 &item.text,
                 item.style,
+                item.letter,
             );
             if item.underline {
                 // Under the text, not under the line: open leading would
