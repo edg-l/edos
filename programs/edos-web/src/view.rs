@@ -153,14 +153,18 @@ impl Layout {
             // The measure the page asked for, never wider than the column it
             // sits in: there is no horizontal scroll, so the window is the
             // outer bound whatever the document says.
-            let mut box_w = column.saturating_sub(plan.indent).max(1);
+            // The measure and `margin: 0 auto` settle the container this block
+            // sits in; `margin-right` then takes from the right of it, which is
+            // what keeps a block with one from moving off the left edge its
+            // centred neighbours share.
+            let mut container = column.saturating_sub(plan.indent).max(1);
             if let Some(measure) = plan.measure {
-                box_w = box_w.min(measure).max(1);
+                container = container.min(measure).max(1);
             }
-            // `margin: 0 auto` centres the box in what is left of the column.
             if plan.center {
-                plan.indent += column.saturating_sub(plan.indent + box_w) / 2;
+                plan.indent += column.saturating_sub(plan.indent + container) / 2;
             }
+            let box_w = container.saturating_sub(plan.trail).max(1);
 
             // The measure bounds the border box, the way `box-sizing:
             // border-box` behaves: a padded box sized to the column would
@@ -560,6 +564,9 @@ struct Plan {
     /// The measure `width`/`max-width` asked for, already resolved to pixels
     /// by the cascade. `None` is the whole column.
     measure: Option<u32>,
+    /// `margin-right`: how much of the column the box gives back on its right,
+    /// which narrows it without moving where it starts.
+    trail: u32,
     center: bool,
     align: Align,
     background: Option<u32>,
@@ -626,6 +633,7 @@ fn plan(block: &Block) -> Plan {
         plan.gap_after = bottom;
     }
     plan.indent += css.margin_left.unwrap_or(0);
+    plan.trail = css.margin_right.unwrap_or(0);
     plan.first_indent = css.indent;
     plan.measure = css.measure;
     plan.center = css.center;
@@ -669,6 +677,7 @@ fn default_plan(block: &Block) -> Plan {
         ws: css::WhiteSpace::Normal,
         wrap: css::Wrap::Word,
         measure: None,
+        trail: 0,
         center: false,
         align: Align::Left,
         background: None,

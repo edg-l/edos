@@ -68,7 +68,7 @@ monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
 left, since the blitter cannot stretch a line), `line-height` (a factor, a
 length or `normal`), `text-transform`, `text-indent`, `white-space`,
 `word-break`/`overflow-wrap`, `list-style-type` (and the type keyword in the
-`list-style` shorthand), the vertical and left margins,
+`list-style` shorthand), all four margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
@@ -187,6 +187,16 @@ wrapper reaches the paragraphs inside it. Three consequences follow:
 - **`auto` on either horizontal margin centres**, rather than only the pair
   doing so. A page that writes one means the pair; a box pushed to one side by
   a single `auto` is not a layout anything here can express anyway.
+
+A margin-right *length* is a different thing from `auto` and is kept as one, in
+`Computed::margin_right`. **The order it is applied in is the whole of it.** The
+measure and the inherited `center` settle the container the block sits in
+first; only then does the right margin come off that container's right edge.
+Taking it out of the column before centring instead reads as a narrower box to
+centre, which slides a block with a right margin *left* of the very neighbours
+it shares a column with — the opposite of what the property asks for. Unlike
+`measure`, both horizontal margins reset on `inherit()`: a box's own margin is
+not its children's.
 
 Three deliberate limits:
 

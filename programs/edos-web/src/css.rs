@@ -325,6 +325,7 @@ pub struct Computed {
     pub margin_top: Option<u32>,
     pub margin_bottom: Option<u32>,
     pub margin_left: Option<u32>,
+    pub margin_right: Option<u32>,
     /// The measure `width` and `max-width` put on this box, in pixels, already
     /// narrowed by every ancestor's.
     ///
@@ -376,6 +377,7 @@ impl Computed {
             margin_top: None,
             margin_bottom: None,
             margin_left: None,
+            margin_right: None,
             background: None,
             padding: Sides::default(),
             borders: Sides::default(),
@@ -517,6 +519,7 @@ impl Computed {
                 self.margin_top = sides.top.or(self.margin_top);
                 self.margin_bottom = sides.bottom.or(self.margin_bottom);
                 self.margin_left = sides.left.or(self.margin_left);
+                self.margin_right = sides.right.or(self.margin_right);
             }
             "margin-top" => self.margin_top = self.length(value, root_px, parent_px),
             "margin-bottom" => self.margin_bottom = self.length(value, root_px, parent_px),
@@ -524,7 +527,13 @@ impl Computed {
             // side rather than centred, but a page that writes one means the
             // pair: the other half is in the shorthand or in a rule this cannot
             // see, and a centred box is what it was after either way.
-            "margin-right" if is_auto(value) => self.center = true,
+            "margin-right" => {
+                if is_auto(value) {
+                    self.center = true;
+                } else {
+                    self.margin_right = self.length(value, root_px, parent_px);
+                }
+            }
             "margin-left" => {
                 if is_auto(value) {
                     self.center = true;
@@ -1837,6 +1846,28 @@ mod tests {
         assert_eq!(computed.margin_top, Some(1));
         assert_eq!(computed.margin_bottom, Some(3));
         assert_eq!(computed.margin_left, Some(4));
+        assert_eq!(computed.margin_right, Some(2));
+    }
+
+    #[test]
+    fn a_margin_right_length_is_kept_and_auto_still_centres() {
+        let sheet = sheet("p { margin-right: 3em } div { margin-right: auto }");
+        let computed = cascade(&sheet, &[element("p", &[])], None);
+        assert_eq!(computed.margin_right, Some(3 * 14));
+        assert!(!computed.center);
+
+        let centred = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(centred.margin_right, None);
+        assert!(centred.center);
+    }
+
+    #[test]
+    fn a_horizontal_margin_does_not_inherit() {
+        let sheet = sheet("div { margin: 0 5px }");
+        let outer = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(outer.margin_right, Some(5));
+        assert_eq!(outer.inherit().margin_right, None);
+        assert_eq!(outer.inherit().margin_left, None);
     }
 
     #[test]

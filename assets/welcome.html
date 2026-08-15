@@ -38,6 +38,9 @@
         border: 1px solid var(--accent);
       }
       blockquote { border-left: 4px solid #a3be8c; padding-left: 12px }
+      /* A right margin narrows the box without moving where it starts, so this
+         one's background stops well short of the column its neighbours reach. */
+      .inset-right { background: #3b4252; margin-right: 14em }
       /* The marker a list item wears, which the element alone does not decide:
          a ul counts when it is asked to, and an ol wears a bullet. */
       .roman { list-style-type: lower-roman }
@@ -114,6 +117,11 @@ while the newline above them is kept.</p>
       it, and the rule at the foot of the page stops where the column does.
     </p>
 
+    <p class="inset-right">
+      A right margin the page asked for: this box gives back fourteen ems on its
+      right, so its background stops short of where the paragraphs around it end
+      while its first character stays on the same left edge as theirs.
+    </p>
     <p class="card">
       This paragraph paints its own box: a background behind it, twelve pixels
       of padding around it, and a hairline border on every edge.

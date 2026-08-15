@@ -7639,3 +7639,29 @@ and `-` so the output stays ASCII.
 than dropping the indent too — that is what a page styling a navigation list
 means by it, and `view.rs` gets there by turning the empty marker string into
 no marker fragment at all.
+
+## `margin-right` was silently dropped, and the order it is applied in is the bug behind the bug (2026-08-15)
+
+`css.rs` matched `"margin-right"` only when the value was `auto`, and the
+`margin` shorthand read three of its four sides. A page writing
+`margin-right: 4em`, or `margin: 0 2em`, got a box that ran to the full column
+on its right with nothing to say it had been ignored — the failure is invisible
+because a block filling its column is also what a block with no margin looks
+like. `Computed::margin_right` now holds the length, and both horizontal
+margins reset on `inherit()`.
+
+The layout half took two tries and the first one *looked* right in the
+unit tests. Subtracting the right margin from the column before the measure and
+the centring is wrong: `center` inherits here (the block list is flat, so a
+centred wrapper is not a box any later stage sees), and centring a box that has
+already given its margin back slides it **left** of the very neighbours it
+shares a column with. Measured on the fixture: the box's left edge landed 98 px
+left of every paragraph around it, which is the opposite of what the property
+asks for.
+
+The order that is right: the measure and `center` settle the container, and
+only then does `margin-right` come off that container's right edge. `view.rs`
+computes `container` first, centres with it, and takes `plan.trail` off it last.
+Every case with no right margin is arithmetically unchanged, which is why the
+existing tests could not have caught the first version — the fixture and a
+screenshot could, and did.
