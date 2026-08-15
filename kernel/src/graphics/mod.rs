@@ -68,6 +68,27 @@ fn try_init_virtio_gpu() -> Option<Display> {
     let transport = VirtioTransport::new(&gpu_dev)?;
     transport.init_device();
 
+    // Give the device an interrupt before its queues are configured: the queue
+    // binds to an MSI-X table entry, and there is no entry to bind to until
+    // MSI-X is enabled. Without this the control queue never signals and every
+    // flip has to discover its own completions by looking.
+    if let Err(e) = crate::drivers::msi::enable_msix_for_device(
+        &gpu_dev,
+        crate::interrupts::InterruptIndex::VirtioGpu.as_u8(),
+        0,
+    ) {
+        println!("virtio-gpu: MSI-X setup failed: {:?}, trying MSI", e);
+        if let Err(e2) = crate::drivers::msi::enable_msi_for_device(
+            &gpu_dev,
+            crate::interrupts::InterruptIndex::VirtioGpu.as_u8(),
+        ) {
+            println!(
+                "virtio-gpu: MSI setup also failed: {:?}, polling completions",
+                e2
+            );
+        }
+    }
+
     let mut gpu = match VirtioGpu::new(transport) {
         Ok(g) => g,
         Err(e) => {
@@ -148,6 +169,22 @@ impl Display {
         match self {
             Display::Vbe(fb) => fb.flip(), // VBE always flips full screen
             Display::VirtioGpu(vg) => vg.flip_rect(x, y, w, h),
+        }
+    }
+
+    /// Wait until the previous frame's pixels have been read.
+    ///
+    /// **Called before the compositor writes the framebuffer, not after.** The
+    /// flip itself is asynchronous, so the host may still be copying the last
+    /// frame out of the very buffer the next one is about to be drawn into;
+    /// waiting afterwards would be waiting in the wrong place and the overlap
+    /// would tear. Waiting here costs nothing in the ordinary case, because a
+    /// whole compositing pass has happened since the flip was submitted.
+    pub fn flip_wait(&mut self) {
+        match self {
+            // Nothing asynchronous to wait for: a VBE flip is a register write.
+            Display::Vbe(_) => {}
+            Display::VirtioGpu(vg) => vg.flip_wait(),
         }
     }
 
@@ -326,6 +363,12 @@ impl VirtioGpuDisplay {
     }
 
     /// Transfer only a dirty rect to the host and flush.
+    /// Wait for the previous frame's transfer to be read out. See
+    /// [`Display::flip_wait`].
+    pub fn flip_wait(&mut self) {
+        self.gpu.flip_wait();
+    }
+
     pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) -> u64 {
         use crate::drivers::virtio::gpu::VirtioGpuRect;
         self.gpu.transfer_and_flush(

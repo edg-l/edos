@@ -458,6 +458,19 @@ impl Procfs {
         )
     }
 
+    /// Whether the display's completions are announced or discovered.
+    ///
+    /// `irqs` staying at zero while frames are being drawn means the vector was
+    /// accepted but nothing is delivering it, and every flip is finding its own
+    /// completions by looking.
+    fn render_gpu_stats() -> String {
+        use crate::interrupts::io::VIRTIO_GPU_IRQS_FIRED;
+        alloc::format!(
+            "virtio_gpu_irqs {}\n",
+            VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed)
+        )
+    }
+
     fn render_ahci_stats() -> String {
         use crate::drivers::ahci::watchdog::{
             NCQ_INFLIGHT, NCQ_MAX_INFLIGHT, NCQ_STRANDED, NCQ_TIMEOUT_MS, WATCHDOG_FIRINGS,
@@ -1375,6 +1388,7 @@ const GLOBAL_FILES: &[GlobalFile] = &[
     ("lock_order_stats", Procfs::render_lock_order_stats),
     ("inflight_stats", Procfs::render_inflight_stats),
     ("ahci_stats", Procfs::render_ahci_stats),
+    ("gpu_stats", Procfs::render_gpu_stats),
     ("windows", Procfs::render_windows),
     ("net", Procfs::render_net),
     ("sockets", Procfs::render_sockets),

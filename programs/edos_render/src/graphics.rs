@@ -47,6 +47,7 @@ const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
 const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
 const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
+const FB_IOCTL_FLIP_WAIT: u64 = 0x4642_000A;
 const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 
@@ -153,6 +154,17 @@ impl Framebuffer {
     }
 
     /// Flip only a dirty rectangle (partial transfer).
+    /// Wait for the previous flip's pixels to be read out of the framebuffer.
+    ///
+    /// The flip is asynchronous, so the display may still be copying the last
+    /// frame out of the buffer the next one is about to be written into. This
+    /// is called immediately before that write, which is the only place it is
+    /// any use: a whole compositing pass has happened since the flip was
+    /// submitted, so in the ordinary case there is nothing left to wait for.
+    pub fn flip_wait(&self) {
+        let _ = self.fd.ioctl(FB_IOCTL_FLIP_WAIT, 0, 0, IOCTL_ARG_IN);
+    }
+
     pub fn flip_rect(&self, x: u32, y: u32, w: u32, h: u32) -> u64 {
         #[repr(C)]
         struct FlipRect {
@@ -1647,6 +1659,12 @@ impl Screen {
         if self.vram.is_none() {
             return;
         }
+        // The display reads this buffer asynchronously, so the previous frame
+        // may still be on its way out of it. This is the only place VRAM is
+        // written, which makes it the one place the wait has to be: waiting
+        // after the flip instead would let a compositing pass overwrite pixels
+        // the host had not finished reading, and the overlap would tear.
+        self.framebuffer.flip_wait();
         let (screen_w, screen_h) = (self.info.width, self.info.height);
         let x0 = (x as usize).min(screen_w);
         let y0 = (y as usize).min(screen_h);

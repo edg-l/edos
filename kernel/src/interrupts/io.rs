@@ -23,8 +23,25 @@ pub static HDA_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
 /// path is fine and the drive genuinely stalled.
 pub static AHCI_IRQS_FIRED: AtomicU64 = AtomicU64::new(0);
 
+/// Completions the virtio-gpu control queue has signalled.
+///
+/// The handler cannot drain the ring itself: the queue lives behind the
+/// `DISPLAY` lock, which a flip holds with preemption disabled, so an interrupt
+/// arriving on that CPU would deadlock against it. It publishes a count
+/// instead, and the flip path reads it to know a poll is worth making. Counting
+/// rather than flagging means a completion that lands between two flips is not
+/// lost.
+pub static VIRTIO_GPU_IRQS_FIRED: AtomicU64 = AtomicU64::new(0);
+
 pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::ps2_drain_buffer();
+    unsafe { get_lapic().end_of_interrupt() };
+}
+
+pub(super) extern "x86-interrupt" fn virtio_gpu_interrupt_handler(
+    _stack_frame: InterruptStackFrame,
+) {
+    VIRTIO_GPU_IRQS_FIRED.fetch_add(1, Ordering::Relaxed);
     unsafe { get_lapic().end_of_interrupt() };
 }
 

@@ -20,6 +20,7 @@ pub enum InterruptIndex {
     E1000e = APIC_OFFSET + 9,
     Hda = APIC_OFFSET + 10,
     TlbShootdown = APIC_OFFSET + 11,
+    VirtioGpu = APIC_OFFSET + 12,
     Spurious = 0xFF,
 }
 

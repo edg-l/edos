@@ -6,6 +6,55 @@ session.
 
 ---
 
+## The display flip waited on the host, and the wait was in the wrong place
+
+`transfer_and_flush` submitted its commands and then **spun until the host had
+finished them**, holding the `DISPLAY` lock throughout. The cursor does not: it
+goes out on the cursor queue fire-and-forget. That asymmetry is the drag
+symptom -- the pointer is drawn by the host at the host's rate while the window
+waits for a round trip, so the window trails the hand.
+
+`blob=off` makes the round trip much more expensive, and it is not a choice:
+the zero-copy path needs host `CONFIG_UDMABUF` plus a memfd backend, which is
+Linux-only, so a Windows or macOS host runs `TRANSFER_TO_HOST_2D` -- a real copy
+of the damaged rectangle, per frame -- before the flush. The guest detects the
+failure and sets `use_blob = false` itself, so nothing announces that the
+expensive path is the one in use.
+
+**Two changes, and the second one is where the mistake was.**
+
+The flip is asynchronous now: it pushes its descriptors, notifies, and returns,
+recording what is outstanding. The obvious place to reclaim those descriptors is
+at the start of the next flip -- and that is wrong, and would have shipped a
+tear. `Screen::publish` copies the new frame from the shadow into the very
+buffer the host is still reading, and it runs *before* the next flip ioctl. So
+the wait has to be in `publish`, not in the flip: `FB_IOCTL_FLIP_WAIT` is its
+own call for exactly that reason. By then a whole compositing pass has happened,
+so in the ordinary case there is nothing left to wait for.
+
+**virtio-gpu had no interrupt at all.** Not for want of the primitives:
+`BlockingMutex` landed 2025-09-27 and the driver 2026-04-08, six months later.
+`InterruptIndex` simply had no virtio entry, and nothing in `drivers/virtio/`
+mentioned MSI. The two offsets it needs (`COMMON_MSIX_CONFIG`,
+`COMMON_QUEUE_MSIX`) were already defined and carried `#[expect(unused)]`.
+
+The part that is easy to miss: **binding the queue is a second step.** Enabling
+MSI-X on the PCI device is not enough -- virtio starts every queue at
+`VIRTIO_MSI_NO_VECTOR` and stays silent until the vector is written into the
+queue's own config, which reads exactly like a device that cannot interrupt.
+`set_queue_msix_vector` reads the value back, because a device out of vectors
+answers `NO_VECTOR` rather than failing the write. `/proc/gpu_stats` carries the
+count: it moved 58 to 156 across one window drag, so the vector is live.
+
+The handler cannot drain the ring itself. The queue is behind `DISPLAY`, a
+preempt-disabling spinlock a flip holds, so an interrupt on that CPU would
+deadlock against it. It publishes a count and the flip path does the draining --
+which is also why the drain is still a bounded spin rather than a park: parking
+under a preempt spinlock is forbidden. The bound is shorter when the queue is
+bound to a vector, because a completion that has not arrived by then is a host
+still working rather than one that never said.
+
+
 ## A deep page crashed `edos-web`, and the walk bound was only half of it — FIXED
 
 `doc.rs::walk` recursed once per element with no bound, over a tree built from

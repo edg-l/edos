@@ -5,6 +5,10 @@ use crate::{log, println};
 
 // -------- Virtio GPU command types --------
 
+/// The MSI-X table entry the control queue's completions are delivered on.
+/// Entry 0, matching the vector `graphics::init` programs for this device.
+const VIRTIO_GPU_MSIX_VECTOR: u16 = 0;
+
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
 const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
@@ -201,6 +205,14 @@ pub struct VirtioGpu {
     cursor_scratch: DmaBuffer,
     /// True if RESOURCE_BLOB is available (zero-copy display path).
     use_blob: bool,
+    /// True if the control queue is bound to an MSI-X vector, so completions
+    /// are announced. False means the device never interrupts and the only way
+    /// to learn a command finished is to look.
+    irq: bool,
+    /// Descriptor chains submitted for the previous frame and not yet
+    /// reclaimed. The scratch buffer holds their commands, so it may not be
+    /// rewritten until they are.
+    pending: u32,
 }
 
 impl VirtioGpu {
@@ -239,6 +251,12 @@ impl VirtioGpu {
         transport.set_queue_used(control_queue.used_phys_addr());
 
         control_queue.notify_off = transport.queue_notify_off();
+        // Bind the control queue to the MSI-X vector the caller enabled. A
+        // device with no vector left answers with `NO_VECTOR` rather than
+        // failing the write, and then never interrupts, so the flip path is
+        // told to keep polling instead of trusting a completion signal it will
+        // not get.
+        let irq_ok = transport.set_queue_msix_vector(VIRTIO_GPU_MSIX_VECTOR);
         transport.enable_queue();
 
         // Set up cursor queue (index 1).
@@ -268,8 +286,8 @@ impl VirtioGpu {
             .map_err(|_| "virtio-gpu: failed to allocate cursor scratch buffer")?;
 
         println!(
-            "virtio-gpu: initialised, control={}, cursor={}, blob={}",
-            size, cursor_size, use_blob
+            "virtio-gpu: initialised, control={}, cursor={}, blob={}, irq={}",
+            size, cursor_size, use_blob, irq_ok
         );
 
         Ok(Self {
@@ -279,6 +297,8 @@ impl VirtioGpu {
             scratch,
             cursor_scratch,
             use_blob,
+            irq: irq_ok,
+            pending: 0,
         })
     }
 
@@ -595,26 +615,98 @@ impl VirtioGpu {
 
         dma_buf
     }
+    /// Reclaim the descriptor chains submitted for the previous frame.
+    ///
+    /// **This is what the frame before paid for, and it is why the flip no
+    /// longer blocks.** The commands live in the scratch buffer, so it cannot
+    /// be rewritten until the host is finished reading them -- but there is no
+    /// reason to wait for that at submission. Waiting at the *start* of the
+    /// next frame instead overlaps the host's work with everything the
+    /// compositor does in between, which at 60 Hz is the whole frame.
+    ///
+    /// The completions are almost always already there by then. When they are
+    /// not, the wait has to be a spin: `DISPLAY` is a preempt-disabling
+    /// spinlock and parking under one is forbidden, so the bound is short and
+    /// the frame is dropped rather than held. A dropped frame is one the
+    /// compositor draws again a moment later; a held one stalls every window.
+    pub fn flip_wait(&mut self) {
+        self.reclaim_pending();
+    }
+
+    fn reclaim_pending(&mut self) -> bool {
+        if self.pending == 0 {
+            return true;
+        }
+        // Sized to cover a host that is merely busy, not one that has stopped.
+        // A queue bound to an MSI-X vector needs far less of it: the device
+        // announces the completion, so one that has not arrived by now is a
+        // host still working rather than one that forgot to tell us. Without a
+        // vector the only evidence is the ring itself, so look for longer.
+        let spins: u32 = if self.irq { 20_000 } else { 200_000 };
+        for _ in 0..spins {
+            while let Some((head, _)) = self.control_queue.poll_used() {
+                self.control_queue.reclaim(head);
+                self.pending -= 1;
+                if self.pending == 0 {
+                    return true;
+                }
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
 
     /// Transfer pixel data from the backing buffer to the host and flush it to
     /// the physical display.
     ///
     /// With blob resources: only RESOURCE_FLUSH (QEMU reads DMA directly).
-    /// Without blob: batched TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
+    /// Without blob: TRANSFER_TO_HOST_2D + RESOURCE_FLUSH, which is a real copy
+    /// of the rectangle on the host side and so the expensive one. `blob=on`
+    /// needs host udmabuf support, so anything but Linux runs the copy.
+    ///
+    /// Submits and returns. Nothing here reads the responses -- the guest wants
+    /// the pixels on screen, not a receipt -- so the only thing the completions
+    /// are needed for is knowing when the scratch buffer is free again, and
+    /// that is asked at the start of the next frame.
     pub fn transfer_and_flush(&mut self, resource_id: u32, rect: VirtioGpuRect, stride: u32) {
-        if self.use_blob {
-            // Zero-copy path: just flush, QEMU reads directly from guest memory.
-            let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
-            flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
-            flush.rect = rect;
-            flush.resource_id = resource_id;
-            self.send_command(&flush, core::mem::size_of::<VirtioGpuCtrlHdr>());
+        // The previous frame's commands are still in the scratch buffer if this
+        // fails, so writing this frame's over them would hand the host a
+        // half-overwritten command. Dropping the frame is the safe answer.
+        if !self.reclaim_pending() {
             return;
         }
 
         let hdr_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
         let xfer_size = core::mem::size_of::<VirtioGpuTransferToHost2d>();
         let flush_size = core::mem::size_of::<VirtioGpuResourceFlush>();
+
+        if self.use_blob {
+            // Zero-copy path: just flush, QEMU reads directly from guest memory.
+            let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
+            flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+            flush.rect = rect;
+            flush.resource_id = resource_id;
+            let resp_off = (flush_size + 7) & !7;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &flush as *const _ as *const u8,
+                    self.scratch.as_ptr(),
+                    flush_size,
+                );
+                core::ptr::write_bytes(self.scratch.as_ptr().add(resp_off), 0, hdr_size);
+            }
+            let phys = self.scratch.phys_addr().as_u64();
+            let bufs = [
+                (phys, flush_size as u32, 0u16),
+                (phys + resp_off as u64, hdr_size as u32, VIRTQ_DESC_F_WRITE),
+            ];
+            if self.control_queue.push(&bufs).is_some() {
+                self.pending += 1;
+                let notify_off = self.control_queue.notify_off;
+                self.transport.notify_queue(0, notify_off);
+            }
+            return;
+        }
 
         // Layout in scratch buffer:
         //   [xfer cmd | xfer resp | flush cmd | flush resp]
@@ -636,7 +728,6 @@ impl VirtioGpu {
                 self.scratch.as_ptr(),
                 xfer_size,
             );
-            // Zero response area
             core::ptr::write_bytes(self.scratch.as_ptr().add(xfer_resp_off), 0, hdr_size);
         }
 
@@ -674,30 +765,20 @@ impl VirtioGpu {
             ),
         ];
 
-        self.control_queue
-            .push(&xfer_bufs)
-            .expect("virtio-gpu: queue full");
-        self.control_queue
-            .push(&flush_bufs)
-            .expect("virtio-gpu: queue full");
+        // The transfer must be seen before the flush that publishes it, which
+        // the queue's own ordering gives: both chains are made available before
+        // the single notify below.
+        if self.control_queue.push(&xfer_bufs).is_none() {
+            return;
+        }
+        self.pending += 1;
+        if self.control_queue.push(&flush_bufs).is_some() {
+            self.pending += 1;
+        }
 
         // Single notify for both commands
         let notify_off = self.control_queue.notify_off;
         self.transport.notify_queue(0, notify_off);
-
-        // Poll for both completions
-        let mut completed = 0u32;
-        for _ in 0..10_000_000u32 {
-            if let Some((head, _)) = self.control_queue.poll_used() {
-                self.control_queue.reclaim(head);
-                completed += 1;
-                if completed == 2 {
-                    return;
-                }
-            }
-            core::hint::spin_loop();
-        }
-        panic!("virtio-gpu: batched command timeout");
     }
 
     /// Switch scanout to a different resource.

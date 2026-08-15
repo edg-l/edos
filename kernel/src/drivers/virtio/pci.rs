@@ -32,13 +32,11 @@ const COMMON_DFSELECT: usize = 0x00; // u32 - device feature select
 const COMMON_DF: usize = 0x04; // u32 - device feature bits
 const COMMON_GFSELECT: usize = 0x08; // u32 - guest (driver) feature select
 const COMMON_GF: usize = 0x0C; // u32 - guest feature bits
-#[expect(unused)]
 const COMMON_MSIX_CONFIG: usize = 0x10; // u16
 const COMMON_NUM_QUEUES: usize = 0x12; // u16
 const COMMON_STATUS: usize = 0x14; // u8
 const COMMON_QUEUE_SELECT: usize = 0x16; // u16
 const COMMON_QUEUE_SIZE: usize = 0x18; // u16
-#[expect(unused)]
 const COMMON_QUEUE_MSIX: usize = 0x1A; // u16
 const COMMON_QUEUE_ENABLE: usize = 0x1C; // u16
 const COMMON_QUEUE_NOTIFY_OFF: usize = 0x1E; // u16
@@ -322,6 +320,29 @@ impl VirtioTransport {
 
     pub fn enable_queue(&self) {
         self.cfg_write_u16(COMMON_QUEUE_ENABLE, 1);
+    }
+
+    /// Bind the selected queue to an MSI-X vector.
+    ///
+    /// virtio-pci raises no interrupt for a queue until this is written: the
+    /// device starts every queue at `VIRTIO_MSI_NO_VECTOR` and stays silent,
+    /// which reads exactly like a device that does not support interrupts at
+    /// all. Select the queue first (`select_queue`), the way every other queue
+    /// field here works. virtio 1.2 §4.1.4.3.
+    ///
+    /// Reads back what the device took: a device that has run out of vectors
+    /// answers `VIRTIO_MSI_NO_VECTOR` rather than failing the write, so the
+    /// only way to know it was accepted is to look.
+    pub fn set_queue_msix_vector(&self, vector: u16) -> bool {
+        self.cfg_write_u16(COMMON_QUEUE_MSIX, vector);
+        self.cfg_read_u16(COMMON_QUEUE_MSIX) == vector
+    }
+
+    /// Bind device configuration-change notifications to an MSI-X vector.
+    #[expect(unused)]
+    pub fn set_config_msix_vector(&self, vector: u16) -> bool {
+        self.cfg_write_u16(COMMON_MSIX_CONFIG, vector);
+        self.cfg_read_u16(COMMON_MSIX_CONFIG) == vector
     }
 
     pub fn queue_notify_off(&self) -> u16 {

@@ -14,6 +14,14 @@ pub const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
 pub const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 pub const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 pub const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
+/// Wait until the previous flip's pixels have been read out of the framebuffer.
+///
+/// Its own call rather than part of the flip, because the two happen at
+/// opposite ends of a frame: the flip submits, and the wait belongs immediately
+/// before the compositor writes the buffer again. See [`Display::flip_wait`].
+///
+/// [`Display::flip_wait`]: crate::graphics::Display::flip_wait
+pub const FB_IOCTL_FLIP_WAIT: u64 = 0x4642_000A;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -183,6 +191,11 @@ impl DevFsDevice for FramebufferDevice {
                 unsafe {
                     *info_ptr = info;
                 }
+                Ok(0)
+            }
+            FB_IOCTL_FLIP_WAIT => {
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                display.lock().flip_wait();
                 Ok(0)
             }
             FB_IOCTL_FLIP_RECT => {
