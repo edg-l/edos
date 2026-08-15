@@ -66,7 +66,7 @@ attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
 left, since the blitter cannot stretch a line), `line-height` (a factor, a
-length or `normal`), `text-transform`, `text-indent`, the vertical and left margins,
+length or `normal`), `text-transform`, `text-indent`, `white-space`, the vertical and left margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
@@ -123,6 +123,25 @@ word the reader sees. `text-indent` moves only the first line of a block, and a
 negative one — a hanging indent — resolves to zero, because at the page edge
 there is no margin for the line to hang over. Both inherit, which is what carries
 them from the wrapper that declares them to the paragraphs inside it.
+
+**`white-space` decides two independent things**, and the layout is written
+around that split rather than around the `<pre>` element: whether the source's
+spaces and newlines survive (`keeps_spaces`, `keeps_newlines`) and whether a
+line may be broken to fit the column (`wraps`). `<pre>` is nothing but the UA
+default `white-space: pre` applied in `doc.rs` after the cascade, so an author
+rule on the same box overrides it and `pre-wrap`, `pre-line` and `nowrap` reach
+any element at all. There is one line breaker: `view.rs::words` counts the
+separators instead of discarding them, carrying on each word how many spaces
+and how many breaks stand before it, and `flow` turns a break into a line
+wherever it stands and a kept run of spaces into that many space widths. A tab
+is a fixed four spaces, since a real tab stop is measured from the start of the
+line and a word carrying its own leading gap cannot see one.
+
+That is also what makes `<br>` a break rather than a space. A collapsing box
+turns its own newlines into spaces while parsing, so any newline still standing
+when the breaker runs came either from `<br>` or from a box that keeps them —
+and a block whose whitespace is kept is trimmed only where HTML itself ignores
+it, the newline after the start tag and the closing tag's own indentation.
 
 **A page's own measure is honoured.** `width` and `max-width` resolve to
 `Computed::measure`, and `margin: 0 auto` sets `Computed::center`, which

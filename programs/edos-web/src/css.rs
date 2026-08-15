@@ -88,6 +88,43 @@ impl LineHeight {
     }
 }
 
+/// `white-space`, which decides two independent things: whether the source's
+/// spaces and newlines survive into the rendering, and whether a line may be
+/// broken to fit the column.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum WhiteSpace {
+    #[default]
+    Normal,
+    /// Collapsed like `normal`, but set on one line however wide it gets.
+    NoWrap,
+    /// Every space and newline kept, and no wrapping: the source is the layout.
+    Pre,
+    /// Spaces and newlines kept, and long lines still wrapped to the column.
+    PreWrap,
+    /// Newlines kept, runs of spaces collapsed.
+    PreLine,
+}
+
+impl WhiteSpace {
+    /// Whether a newline in the source starts a line in the rendering.
+    pub fn keeps_newlines(self) -> bool {
+        matches!(
+            self,
+            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
+        )
+    }
+
+    /// Whether a run of spaces is set at its own width rather than as one.
+    pub fn keeps_spaces(self) -> bool {
+        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap)
+    }
+
+    /// Whether a line too wide for the column is broken.
+    pub fn wraps(self) -> bool {
+        !matches!(self, WhiteSpace::Pre | WhiteSpace::NoWrap)
+    }
+}
+
 /// `text-transform`, the case a box sets for the text inside it.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Transform {
@@ -158,6 +195,10 @@ pub struct Computed {
     pub align: Align,
     /// `text-transform`, likewise inherited.
     pub transform: Transform,
+    /// `white-space`, inherited. `None` is "the page said nothing", which is
+    /// what lets `<pre>` carry the UA default without the cascade knowing about
+    /// element names: an author rule anywhere on the box overrides it.
+    pub white_space: Option<WhiteSpace>,
     /// `text-indent`: how far into the box the block's first line starts. It
     /// inherits, so a wrapper that sets it indents the paragraphs inside it.
     pub indent: u32,
@@ -237,6 +278,14 @@ impl Computed {
                 "left" | "start" | "justify" => self.align = Align::Left,
                 "center" => self.align = Align::Center,
                 "right" | "end" => self.align = Align::Right,
+                _ => {}
+            },
+            "white-space" => match value {
+                "normal" => self.white_space = Some(WhiteSpace::Normal),
+                "nowrap" => self.white_space = Some(WhiteSpace::NoWrap),
+                "pre" => self.white_space = Some(WhiteSpace::Pre),
+                "pre-wrap" | "break-spaces" => self.white_space = Some(WhiteSpace::PreWrap),
+                "pre-line" => self.white_space = Some(WhiteSpace::PreLine),
                 _ => {}
             },
             "text-transform" => match value {
@@ -1817,6 +1866,45 @@ mod tests {
         assert_eq!(line("p").px(16), Some(1));
         assert_eq!(line("div"), LineHeight::Normal);
         assert_eq!(line("pre"), LineHeight::Normal);
+    }
+
+    #[test]
+    fn white_space_is_read_and_inherited() {
+        let sheet = sheet(
+            "div { white-space: pre-wrap } p { white-space: nowrap } \
+             li { white-space: pre-line } pre { white-space: balance }",
+        );
+        let ws = |tag| cascade(&sheet, &[element(tag, &[])], None).white_space;
+        assert_eq!(ws("div"), Some(WhiteSpace::PreWrap));
+        assert_eq!(ws("p"), Some(WhiteSpace::NoWrap));
+        assert_eq!(ws("li"), Some(WhiteSpace::PreLine));
+        // A keyword this cannot set leaves the property unset, which is what
+        // lets `<pre>` keep the UA default.
+        assert_eq!(ws("pre"), None);
+
+        let stack = vec![element("div", &[]), element("span", &[])];
+        let inner = sheet
+            .cascade(
+                &stack,
+                None,
+                &cascade(&sheet, &stack[..1], None),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(inner.white_space, Some(WhiteSpace::PreWrap));
+    }
+
+    #[test]
+    fn white_space_separates_keeping_from_wrapping() {
+        // The two questions are independent, which is the whole point of the
+        // property: `pre-wrap` keeps the source's spacing and still wraps,
+        // `nowrap` collapses it and does not.
+        assert!(WhiteSpace::PreWrap.keeps_spaces() && WhiteSpace::PreWrap.wraps());
+        assert!(WhiteSpace::PreLine.keeps_newlines() && !WhiteSpace::PreLine.keeps_spaces());
+        assert!(!WhiteSpace::NoWrap.keeps_newlines() && !WhiteSpace::NoWrap.wraps());
+        assert!(WhiteSpace::Pre.keeps_spaces() && !WhiteSpace::Pre.wraps());
+        assert!(WhiteSpace::Normal.wraps() && !WhiteSpace::Normal.keeps_newlines());
     }
 
     #[test]

@@ -20,6 +20,9 @@
       .shout { text-transform: uppercase }
       .titled { text-transform: capitalize }
       .indented { text-indent: 3em }
+      /* What the source's own spaces and newlines mean. */
+      .as-written { white-space: pre-wrap; font-family: monospace }
+      .lines-kept { white-space: pre-line }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
@@ -79,6 +82,20 @@
       follow the first one are flush with the left edge of the column the way
       a printed page sets a paragraph.
     </p>
+
+    <p class="as-written">    four spaces open this line and survive,
+the newline above is the source's own,
+and this line is long enough that it still wraps to the column, since pre-wrap keeps the spacing without giving up the column.</p>
+    <p class="lines-kept">These     runs    of   spaces  collapse to one,
+while the newline above them is kept.</p>
+    <p>A break ends this line,<br>and this one starts after it.</p>
+<pre>
+    fn main() {
+        println!("a pre block keeps its indentation");
+    }
+
+    and a line this long is set past the edge of the column rather than wrapped
+</pre>
 
     <p class="quiet">
       This column is 38em wide and centred in the window rather than filling

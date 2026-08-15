@@ -17,7 +17,7 @@ use edos_render::image::{Image, Svg, decode_bmp, looks_like_svg};
 use html5ever::{local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::css::{self, Computed, Element, MediaQueries, Stylesheet, Vars, Viewport};
+use crate::css::{self, Computed, Element, MediaQueries, Stylesheet, Vars, Viewport, WhiteSpace};
 
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -293,7 +293,6 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         kind: BlockKind::Paragraph,
         style: Style::default(),
         lists: Vec::new(),
-        pre: false,
         sheet,
         stack: Vec::new(),
         computed: Computed::default(),
@@ -335,7 +334,6 @@ struct Builder<'a> {
     kind: BlockKind,
     style: Style,
     lists: Vec<List>,
-    pre: bool,
     sheet: Stylesheet,
     /// The open elements, innermost last, which is what a selector matches
     /// against.
@@ -395,8 +393,14 @@ impl Builder<'_> {
                     return;
                 }
 
+                // The UA stylesheet's one whitespace rule, applied after the
+                // cascade so an author rule on the same box still wins, and
+                // before the block opens so the block carries it.
+                if tag == local_name!("pre") && self.computed.white_space.is_none() {
+                    self.computed.white_space = Some(WhiteSpace::Pre);
+                }
+
                 let saved_style = self.style.clone();
-                let saved_pre = self.pre;
                 let saved_block_css = self.block_css;
                 let block = block_kind(&tag);
 
@@ -418,7 +422,6 @@ impl Builder<'_> {
                         let (depth, marker) = self.marker();
                         self.kind = BlockKind::ListItem { depth, marker };
                     }
-                    local_name!("pre") => self.pre = true,
                     local_name!("a") => {
                         self.style.link = attr(node, "href").and_then(|h| self.resolve(&h))
                     }
@@ -427,7 +430,11 @@ impl Builder<'_> {
                     local_name!("code") | local_name!("kbd") | local_name!("samp") => {
                         self.style.code = true
                     }
-                    local_name!("br") => self.push_text("\n"),
+                    // A break is a newline no collapsing may swallow, so it is
+                    // appended rather than pushed as text: every other newline
+                    // in a collapsing box has become a space by then, which is
+                    // what lets the line breaker treat one as a break.
+                    local_name!("br") => self.append("\n"),
                     local_name!("img") => self.image(node),
                     _ => {}
                 }
@@ -443,7 +450,6 @@ impl Builder<'_> {
                     self.flush();
                 }
                 self.style = saved_style;
-                self.pre = saved_pre;
                 self.block_css = saved_block_css;
                 self.computed = saved_computed;
                 self.vars = saved_vars;
@@ -529,17 +535,29 @@ impl Builder<'_> {
         self.base.join(href).ok().map(|u| u.to_string())
     }
 
-    /// Append text to the open block, collapsing whitespace the way
-    /// `white-space: normal` does outside `pre`.
+    /// Append text to the open block, collapsing whitespace as the box's
+    /// `white-space` asks.
+    ///
+    /// A newline that survives here is a line break for every later stage, so a
+    /// collapsing box must not leave one: `pre-line` keeps them and drops the
+    /// spaces on either side, and `normal` turns them into spaces like any
+    /// other whitespace.
     fn push_text(&mut self, text: &str) {
-        if self.pre {
+        let ws = self.white_space();
+        if ws.keeps_spaces() {
             self.append(text);
             return;
         }
         let mut out = String::with_capacity(text.len());
         let mut space = self.ends_with_space();
         for ch in text.chars() {
-            if ch.is_whitespace() {
+            if ch == '\n' && ws.keeps_newlines() {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push('\n');
+                space = true;
+            } else if ch.is_whitespace() {
                 if !space {
                     out.push(' ');
                     space = true;
@@ -553,6 +571,11 @@ impl Builder<'_> {
             return;
         }
         self.append(&out);
+    }
+
+    /// The `white-space` in force on the innermost open element.
+    fn white_space(&self) -> WhiteSpace {
+        self.computed.white_space.unwrap_or_default()
     }
 
     /// True when the open block would swallow a following space, which is also
@@ -602,7 +625,11 @@ impl Builder<'_> {
             });
             return;
         }
-        let mut runs = trim_edges(runs);
+        let mut runs = if css.white_space.unwrap_or_default().keeps_spaces() {
+            trim_preserved(runs)
+        } else {
+            trim_edges(runs)
+        };
         if runs.is_empty() {
             return;
         }
@@ -627,6 +654,29 @@ fn trim_edges(mut runs: Vec<Run>) -> Vec<Run> {
             first.text = trimmed;
             break;
         }
+    }
+    while let Some(last) = runs.last_mut() {
+        let trimmed = last.text.trim_end().to_string();
+        if trimmed.is_empty() {
+            runs.pop();
+        } else {
+            last.text = trimmed;
+            break;
+        }
+    }
+    runs
+}
+
+/// A block whose `white-space` keeps its spacing is trimmed only where HTML
+/// itself ignores whitespace: the newline that follows the start tag, and the
+/// trailing whitespace that is the closing tag's own indentation. Trimming its
+/// leading spaces the way a collapsing block is trimmed would throw away the
+/// indentation that is the whole point of the source's own layout.
+fn trim_preserved(mut runs: Vec<Run>) -> Vec<Run> {
+    if let Some(first) = runs.first_mut()
+        && let Some(rest) = first.text.strip_prefix('\n')
+    {
+        first.text = rest.to_string();
     }
     while let Some(last) = runs.last_mut() {
         let trimmed = last.text.trim_end().to_string();

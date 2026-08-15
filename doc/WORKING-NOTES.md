@@ -7544,3 +7544,37 @@ A negative indent resolves to zero — `parse_length` already clamps — because
 the page edge there is no margin for a hanging line to hang over, and an indent
 wider than the column stops a pixel short of it so a line always has somewhere
 to start.
+
+## `white-space`: one line breaker, and what `<pre>` actually is
+
+`white-space` answers two separate questions -- does the source's spacing
+survive, and may a line be broken -- so `css::WhiteSpace` exposes them as
+`keeps_spaces`, `keeps_newlines` and `wraps` rather than as a mode the layout
+switches on. `<pre>` is not a layout path: it is the UA default
+`white-space: pre`, applied in `doc.rs` after the cascade, so an author rule on
+the same element still wins and `pre-wrap`/`pre-line`/`nowrap` work on any
+element.
+
+`view.rs` had a second layout path for `pre` that set each source line as one
+fragment. It is gone, and with it the reason a link or a `<span>` inside a
+`<pre>` lost its styling: there was nowhere for a run to be seen. `words` now
+counts separators instead of discarding them -- each word carries how many
+spaces and how many breaks stand before it -- and `flow` is the only breaker.
+
+Two things fall out of that and are worth knowing before touching it:
+
+- **A surviving newline is a break, everywhere.** A collapsing box turns its
+  own newlines into spaces during parsing, so any newline still present when
+  the breaker runs came from `<br>` or from a box that keeps them. That is what
+  finally made `<br>` a line break; it had been collapsed to a space since the
+  program was written, because it was pushed through the same text path as
+  document text.
+- **A preserved block cannot be edge-trimmed like a collapsing one.** The first
+  attempt reused `trim_edges` and the leading indentation of every `pre` line
+  vanished -- the block's first run starts with exactly the spaces that are the
+  point. `trim_preserved` drops only what HTML itself ignores: the newline
+  after the start tag, and the trailing whitespace that is the closing tag's
+  indentation.
+
+A tab is set as a fixed four spaces. A real tab stop is measured from the start
+of the line, and a word that carries its own leading gap has no way to see one.

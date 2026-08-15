@@ -21,6 +21,10 @@ pub const PAGE_PAD: u32 = space(4);
 const LIST_INDENT: u32 = space(6);
 /// Indent a blockquote sits at.
 const QUOTE_INDENT: u32 = space(4);
+/// Spaces a tab is set as where `white-space` keeps it. A real tab stop is
+/// measured from the start of the line, which a word carrying its own leading
+/// gap cannot see, so the width is fixed instead.
+const TAB_SPACES: u32 = 4;
 /// Width of the scrollbar drawn when the page is taller than the viewport.
 pub const SCROLLBAR_W: u32 = space(2);
 /// Tallest an image is drawn. A page's hero picture is often taller than the
@@ -121,6 +125,12 @@ struct Word {
     /// True when no space separates this word from the one before it, which is
     /// what `<b>bold</b>face` gives.
     glued: bool,
+    /// How many spaces stand before this word. One in a collapsing box, however
+    /// many the source wrote where `white-space` keeps them.
+    spaces: u32,
+    /// How many line breaks stand before this word: `<br>`, or a newline in a
+    /// box whose `white-space` keeps them.
+    breaks: u32,
 }
 
 impl Layout {
@@ -196,12 +206,8 @@ impl Layout {
                 });
 
                 let start = out.lines.len();
-                if plan.preformatted {
-                    out.preformatted(block, &plan, avail, &mut y);
-                } else {
-                    let words = out.words(&block.runs, plan.style);
-                    out.flow(words, &plan, avail, &mut y);
-                }
+                let words = out.words(&block.runs, plan.style, plan.ws);
+                out.flow(words, &plan, avail, &mut y);
 
                 // The marker hangs in the left margin of the first line, which
                 // is what makes a wrapped list item's continuation align under
@@ -321,12 +327,15 @@ impl Layout {
     }
 
     /// Split the runs into words, recording each link target once.
-    fn words(&mut self, runs: &[Run], base: Style) -> Vec<Word> {
+    ///
+    /// The separators are counted rather than thrown away, since a box whose
+    /// `white-space` keeps them needs the source's own spacing back: the gap
+    /// before a word and the breaks before it are carried on the word itself,
+    /// which is also how a separator that falls on a run boundary survives.
+    fn words(&mut self, runs: &[Run], base: Style, ws: css::WhiteSpace) -> Vec<Word> {
         let mut words = Vec::new();
-        // The space between two links is its own run, carrying neither link, so
-        // whether a word is glued to the one before it cannot be read off the
-        // run it belongs to alone.
-        let mut space_pending = false;
+        let mut spaces = 0;
+        let mut breaks = 0;
         for run in runs {
             let style = run_style(run, base);
             let link = run.link.as_ref().map(|target| self.link_index(target));
@@ -334,17 +343,19 @@ impl Layout {
             // emphasis is not carried by colour alone.
             let underline = run.css.underline.unwrap_or(link.is_some());
             let height = leading(run.css.line, style);
-            let space_before = run.text.starts_with(char::is_whitespace);
-            let mut first = true;
-            for word in run.text.split_whitespace() {
-                let glued = first && !space_before && !space_pending;
+            let mut word = String::new();
+            let mut flush = |word: &mut String, spaces: &mut u32, breaks: &mut u32| {
+                if word.is_empty() {
+                    return;
+                }
+                let glued = *spaces == 0 && *breaks == 0;
                 // A run glued to a word already on the block continues it
                 // rather than starting one, so `capitalize` leaves it alone:
                 // the letter it would raise is in the middle of the word the
                 // reader sees. The block's own first word is glued to nothing.
                 let continues = glued && !words.is_empty();
                 let text = match run.css.transform {
-                    css::Transform::Capitalize if continues => word.to_string(),
+                    css::Transform::Capitalize if continues => std::mem::take(word),
                     transform => transform.apply(word).into_owned(),
                 };
                 words.push(Word {
@@ -354,13 +365,36 @@ impl Layout {
                     underline,
                     height,
                     glued,
+                    spaces: *spaces,
+                    breaks: *breaks,
                 });
-                first = false;
+                word.clear();
+                *spaces = 0;
+                *breaks = 0;
+            };
+            for ch in run.text.chars() {
+                match ch {
+                    // Every newline that reaches here is a break: a collapsing
+                    // box turned its own into spaces while parsing, so the ones
+                    // left came from `<br>` or from a box that keeps them.
+                    '\n' => {
+                        flush(&mut word, &mut spaces, &mut breaks);
+                        breaks += 1;
+                        spaces = 0;
+                    }
+                    // A tab is set as a fixed run of spaces rather than to a
+                    // tab stop: the stops would have to be measured from the
+                    // start of the line, which a word carrying its own gap
+                    // cannot see.
+                    _ if ch.is_whitespace() => {
+                        flush(&mut word, &mut spaces, &mut breaks);
+                        let width = if ch == '\t' { TAB_SPACES } else { 1 };
+                        spaces = if ws.keeps_spaces() { spaces + width } else { 1 };
+                    }
+                    _ => word.push(ch),
+                }
             }
-            // `first` still set means the run was whitespace only, which is
-            // exactly the separator case.
-            space_pending =
-                !run.text.is_empty() && (first || run.text.ends_with(char::is_whitespace));
+            flush(&mut word, &mut spaces, &mut breaks);
         }
         words
     }
@@ -380,15 +414,27 @@ impl Layout {
         let mut line_height = base_height;
 
         for word in words {
+            // A break the source asked for ends the line wherever it stands,
+            // and a run of them leaves empty lines behind, which is what a
+            // blank line inside a `pre` block is.
+            for _ in 0..word.breaks {
+                let line = std::mem::take(&mut items);
+                self.push_aligned(line, line_height, plan, avail, pen, y);
+                line_height = base_height;
+                pen = 0;
+            }
             let width = text::width(&word.text, word.style);
-            let gap = if items.is_empty() || word.glued {
+            // A space at the head of a line is dropped where spaces collapse
+            // and kept where they do not, since an indented `pre` line is
+            // nothing but its leading spaces.
+            let gap = if word.glued || (items.is_empty() && !plan.ws.keeps_spaces()) {
                 0
             } else {
-                text::width(" ", word.style)
+                word.spaces * text::width(" ", word.style)
             };
             // A word wider than the column gets its own line rather than being
             // cut: a URL broken across lines is worse than a ragged edge.
-            if !items.is_empty() && pen + gap + width > avail {
+            if plan.ws.wraps() && !items.is_empty() && pen + gap + width > avail {
                 let line = std::mem::take(&mut items);
                 self.push_aligned(line, line_height, plan, avail, pen, y);
                 line_height = base_height;
@@ -409,30 +455,6 @@ impl Layout {
         }
         if !items.is_empty() {
             self.push_aligned(items, line_height, plan, avail, pen, y);
-        }
-    }
-
-    /// `pre`, whose newlines are the layout and whose overflow is clipped
-    /// rather than wrapped, the way `white-space: pre` behaves.
-    fn preformatted(&mut self, block: &Block, plan: &Plan, avail: u32, y: &mut i32) {
-        let line_height = leading(plan.line, plan.style);
-        for line in block.text().lines() {
-            let mut used = 0;
-            let items = if line.trim().is_empty() {
-                Vec::new()
-            } else {
-                let text = block.css.transform.apply(line);
-                used = text::width(&text, plan.style);
-                vec![Fragment {
-                    x: (plan.indent + PAGE_PAD) as i32,
-                    width: used,
-                    text: text.into_owned(),
-                    style: plan.style,
-                    link: None,
-                    underline: false,
-                }]
-            };
-            self.push_aligned(items, line_height, plan, avail, used, y);
         }
     }
 
@@ -487,7 +509,9 @@ struct Plan {
     gap_before: u32,
     gap_after: u32,
     marker: Option<String>,
-    preformatted: bool,
+    /// `white-space`: whether the source's spaces and newlines are the layout,
+    /// and whether a line may be broken to fit the column.
+    ws: css::WhiteSpace,
     /// The measure `width`/`max-width` asked for, already resolved to pixels
     /// by the cascade. `None` is the whole column.
     measure: Option<u32>,
@@ -545,6 +569,9 @@ fn plan(block: &Block) -> Plan {
     plan.measure = css.measure;
     plan.center = css.center;
     plan.align = css.align;
+    // `<pre>` reaches here with the UA default already on it, so the block's
+    // own value is the whole answer.
+    plan.ws = css.white_space.unwrap_or_default();
     plan.background = css.background;
     plan.pad = Sides {
         top: css.padding.top.unwrap_or(0),
@@ -577,7 +604,7 @@ fn default_plan(block: &Block) -> Plan {
         gap_before: 0,
         gap_after: space(2),
         marker: None,
-        preformatted: false,
+        ws: css::WhiteSpace::Normal,
         measure: None,
         center: false,
         align: Align::Left,
@@ -607,7 +634,6 @@ fn default_plan(block: &Block) -> Plan {
             style: Style::mono(Theme::DEFAULT.syn_string.raw()),
             indent: QUOTE_INDENT,
             gap_before: space(2),
-            preformatted: true,
             ..base
         },
         BlockKind::Quote => Plan {
