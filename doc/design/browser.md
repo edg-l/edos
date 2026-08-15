@@ -444,3 +444,51 @@ POSIX libc, pthreads, dynamic linking, `AF_UNIX` with descriptor passing for its
 multiprocess IPC (EDOS has no `AF_UNIX` at all), OpenGL or Vulkan for WebRender,
 and a C++ runtime with exceptions — all before it links. It fails on everything
 at once, which makes it a useless probe of what is actually missing.
+
+## The box tree, and taffy
+
+`taffy` was proven to build for this target before any of the browser was
+written (the table above says so) and then was not used: `view.rs` positions
+boxes itself. That is why there is no `float`, no `flex`, no `grid`, and why
+`inline-block` parses and then lays out as plain inline.
+
+**The blocker was the document model, not taffy.** `Document` was a flat
+`Vec<Block>`, and a flat list cannot say that three paragraphs share a
+container, which is the whole of what flex and grid arrange. `BlockKind::
+ListItem` carrying a `depth` number instead of nesting is the same shortage
+showing through.
+
+`doc.rs` emits a `Node` tree now -- `Container { css, children }` and
+`Leaf(Block)` -- built from a stack of open frames, with an element's inline
+content flushed into an anonymous leaf when a box interrupts it, the way CSS
+anonymous block boxes work. A container holding exactly one leaf collapses to
+that leaf, so the tree carries structure rather than one wrapper per paragraph.
+`Document::blocks` is the tree flattened into document order and is still what
+the inline engine walks, so nothing downstream changed: `welcome.html` renders
+byte-identically against the v0.5.0 ISO, and reports `91 blocks in a tree of
+108 boxes 7 deep`.
+
+**What is left, and the shape it takes.** `taffy` lays out boxes and asks a
+measure function how big a leaf is; it does not break lines. So `view.rs`'s
+inline engine is not replaced, it *becomes* the measure function, and the split
+that has to happen inside `Layout::build` is measure-from-emit: today the 463
+lines from the block loop to the line push do both at once, positioning a box
+and emitting its lines in the same pass. Under taffy the same code runs twice --
+once to answer "how tall at width W", once to emit at the position taffy
+computed.
+
+Proven on this target before planning around it, with `compute_layout_with_
+measure` and a flex row of a fixed 60px box beside measured text: the box lands
+at x=0, the text at x=60, and the leaf size comes from the callback. So the
+integration is a known quantity; the work is the measure/emit split.
+
+`taffy` does **not** do `float`. That is CSS2 and taffy deliberately omits it,
+so float stays unavailable whatever happens here.
+
+Other crates checked against this target at the same time, since the same
+question will come up: `cssparser` builds, `selectors` builds -- that is servo's
+real selector engine, specificity and `:nth-*` and combinators, most of what
+`css.rs` hand-rolled -- and `simplecss` builds and is *already in the lockfile*,
+pulled in by `usvg`. `lightningcss` does not build: it wants a `getrandom`
+handler registered the way `edos_http::tls` does, which was not taken far enough
+to call either way.

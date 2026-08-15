@@ -83,9 +83,11 @@ fn main() {
     // Said on stdout as well as drawn, so a headless run can tell a page that
     // arrived empty from one that never loaded.
     println!(
-        "edos-web: {} - {} blocks from {}",
+        "edos-web: {} - {} blocks in a tree of {} boxes {} deep, from {}",
         document.display_title(),
         document.blocks.len(),
+        document.root.count(),
+        document.root.depth(),
         address
     );
 

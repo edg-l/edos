@@ -93,6 +93,65 @@ pub struct Run {
     pub css: Computed,
 }
 
+/// A box in the layout tree.
+///
+/// The tree exists because a box engine needs one: a flat list of blocks cannot
+/// say that three paragraphs share a container, which is the whole of what
+/// `display: flex` and `display: grid` arrange. [`Document::blocks`] is this
+/// tree flattened into document order, and is what the inline engine walks.
+#[derive(Clone, Debug)]
+pub enum Node {
+    /// A box holding other boxes. Its own `css` carries the box properties --
+    /// display, margins, padding, the flex and grid tracks -- that arrange
+    /// them.
+    Container {
+        // Read by the box engine, which arranges the children from it. The
+        // flattening path deliberately does not: a container's own box is
+        // exactly what a flat list of leaves cannot express.
+        #[allow(dead_code)]
+        css: Computed,
+        children: Vec<Node>,
+    },
+    /// A box holding inline content, which is what the line breaker lays out.
+    Leaf(Block),
+}
+
+impl Node {
+    /// The leaves in document order.
+    ///
+    /// Flattening is lossless for everything the old flat model could express,
+    /// which is what lets the two live side by side while the box engine is
+    /// wired up underneath.
+    pub fn flatten_into(&self, out: &mut Vec<Block>) {
+        match self {
+            Node::Leaf(block) => out.push(block.clone()),
+            Node::Container { children, .. } => {
+                for child in children {
+                    child.flatten_into(out);
+                }
+            }
+        }
+    }
+
+    /// How deep this subtree nests, a container counting as one level.
+    pub fn depth(&self) -> usize {
+        match self {
+            Node::Leaf(_) => 1,
+            Node::Container { children, .. } => {
+                1 + children.iter().map(Node::depth).max().unwrap_or(0)
+            }
+        }
+    }
+
+    /// The number of boxes in this subtree, counting itself.
+    pub fn count(&self) -> usize {
+        match self {
+            Node::Leaf(_) => 1,
+            Node::Container { children, .. } => 1 + children.iter().map(Node::count).sum::<usize>(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub kind: BlockKind,
@@ -199,7 +258,10 @@ struct Source {
 /// resizes.
 pub struct Document {
     pub title: String,
+    /// The tree flattened into document order. What the inline engine walks.
     pub blocks: Vec<Block>,
+    /// The box tree, which is what a box engine arranges.
+    pub root: Node,
     source: Source,
 }
 
@@ -216,22 +278,27 @@ impl Document {
              parse, and was not loaded.",
             nesting, MAX_SOURCE_NESTING
         );
+        let block = Block {
+            kind: BlockKind::Paragraph,
+            runs: vec![Run {
+                text,
+                link: None,
+                bold: false,
+                italic: false,
+                code: false,
+                script: Script::default(),
+                css: Computed::default(),
+            }],
+            css: Computed::default(),
+            picture: None,
+        };
         Document {
             title: String::from("Refused"),
-            blocks: vec![Block {
-                kind: BlockKind::Paragraph,
-                runs: vec![Run {
-                    text,
-                    link: None,
-                    bold: false,
-                    italic: false,
-                    code: false,
-                    script: Script::default(),
-                    css: Computed::default(),
-                }],
+            blocks: vec![block.clone()],
+            root: Node::Container {
                 css: Computed::default(),
-                picture: None,
-            }],
+                children: vec![Node::Leaf(block)],
+            },
             source: Source {
                 html: Rc::new(Vec::new()),
                 base,
@@ -434,7 +501,7 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         fetch: &cached,
         images: 0,
         title: String::new(),
-        blocks: Vec::new(),
+        frames: vec![Frame::default()],
         runs: Vec::new(),
         kind: BlockKind::Paragraph,
         style: Style::default(),
@@ -448,10 +515,21 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
     };
     builder.walk(&dom.document, Siblings::default(), &Rc::new(Vec::new()));
     builder.flush();
+    while builder.frames.len() > 1 {
+        builder.close_frame();
+    }
+
+    let root = Node::Container {
+        css: Computed::default(),
+        children: builder.frames.pop().expect("the document frame").children,
+    };
+    let mut blocks = Vec::new();
+    root.flatten_into(&mut blocks);
 
     Document {
         title: builder.title,
-        blocks: builder.blocks,
+        blocks,
+        root,
         source,
     }
 }
@@ -504,13 +582,22 @@ struct List {
     next: usize,
 }
 
+/// One open container while the tree is being built.
+#[derive(Default)]
+struct Frame {
+    css: Computed,
+    children: Vec<Node>,
+}
+
 struct Builder<'a> {
     base: Url,
     fetch: &'a dyn Fn(&str) -> Option<Vec<u8>>,
     /// How many images have been fetched, against [`MAX_IMAGES`].
     images: usize,
     title: String,
-    blocks: Vec<Block>,
+    /// The open containers, outermost first. The last is where a flushed block
+    /// lands, and the first is the document itself, which never closes.
+    frames: Vec<Frame>,
     runs: Vec<Run>,
     kind: BlockKind,
     style: Style,
@@ -602,7 +689,11 @@ impl Builder<'_> {
                 };
 
                 if let Some(kind) = block {
+                    // Close whatever inline content the parent had accumulated
+                    // before this box interrupted it -- an anonymous block box,
+                    // in CSS terms -- then open this element's own container.
                     self.flush();
+                    self.open_frame(self.computed);
                     self.kind = kind;
                     self.block_css = self.computed;
                 }
@@ -665,6 +756,7 @@ impl Builder<'_> {
                 }
                 if block.is_some() {
                     self.flush();
+                    self.close_frame();
                 }
                 self.style = saved_style;
                 self.block_css = saved_block_css;
@@ -770,7 +862,7 @@ impl Builder<'_> {
                 }]
             })
             .unwrap_or_default();
-        self.blocks.push(Block {
+        self.push_leaf(Block {
             kind: BlockKind::Image,
             runs,
             css: self.computed,
@@ -913,7 +1005,7 @@ impl Builder<'_> {
         let kind = std::mem::replace(&mut self.kind, BlockKind::Paragraph);
         let css = self.block_css;
         if kind == BlockKind::Rule {
-            self.blocks.push(Block {
+            self.push_leaf(Block {
                 kind,
                 runs: Vec::new(),
                 css,
@@ -930,12 +1022,55 @@ impl Builder<'_> {
             return;
         }
         runs.retain(|r| !r.text.is_empty());
-        self.blocks.push(Block {
+        self.push_leaf(Block {
             kind,
             runs,
             css,
             picture: None,
         });
+    }
+
+    /// Put a finished block into the innermost open container.
+    fn push_leaf(&mut self, block: Block) {
+        self.frames
+            .last_mut()
+            .expect("the document frame is never popped")
+            .children
+            .push(Node::Leaf(block));
+    }
+
+    /// Open a container for an element that makes a box holding other boxes.
+    fn open_frame(&mut self, css: Computed) {
+        self.frames.push(Frame {
+            css,
+            children: Vec::new(),
+        });
+    }
+
+    /// Close the innermost container and attach it to its parent.
+    ///
+    /// A container that holds exactly one leaf is replaced by that leaf: the
+    /// wrapper would arrange a single child the same way its absence does, and
+    /// keeping it would put a box between every paragraph and its parent. A
+    /// container that holds nothing is dropped for the same reason.
+    fn close_frame(&mut self) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        let mut children = frame.children;
+        let node = match children.len() {
+            0 => return,
+            1 if matches!(children[0], Node::Leaf(_)) => children.pop().expect("len is 1"),
+            _ => Node::Container {
+                css: frame.css,
+                children,
+            },
+        };
+        self.frames
+            .last_mut()
+            .expect("the document frame is never popped")
+            .children
+            .push(node);
     }
 }
 
