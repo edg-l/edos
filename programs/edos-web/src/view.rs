@@ -197,6 +197,13 @@ impl Layout {
             if let Some(measure) = plan.measure {
                 container = container.min(measure).max(1);
             }
+            // css-sizing-3 §5.1: the floor wins over the ceiling, so it is
+            // applied last and only the column bounds it.
+            if let Some(min) = plan.min_width {
+                container = container
+                    .max(min)
+                    .min(column.saturating_sub(plan.indent).max(1));
+            }
             if plan.center {
                 plan.indent += column.saturating_sub(plan.indent + container) / 2;
             }
@@ -672,6 +679,10 @@ struct Plan {
     height: Option<u32>,
     min_height: Option<u32>,
     max_height: Option<u32>,
+    /// `min-width`: a floor under the box, applied after the measure has
+    /// narrowed it. It cannot push the box past the column, since there is no
+    /// horizontal scroll to reach what would sit outside.
+    min_width: Option<u32>,
     /// `margin-right`: how much of the column the box gives back on its right,
     /// which narrows it without moving where it starts.
     trail: u32,
@@ -764,6 +775,7 @@ fn plan(block: &Block) -> Plan {
     plan.height = css.height;
     plan.min_height = css.min_height;
     plan.max_height = css.max_height;
+    plan.min_width = css.min_width;
     plan.center = css.center;
     plan.align = css.align;
     // `<pre>` reaches here with the UA default already on it, so the block's
@@ -810,6 +822,7 @@ fn default_plan(block: &Block) -> Plan {
         height: None,
         min_height: None,
         max_height: None,
+        min_width: None,
         trail: 0,
         center: false,
         align: Align::Left,

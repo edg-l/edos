@@ -72,7 +72,7 @@ length or `normal`), `text-transform`, `text-indent`, `white-space`,
 `word-break`/`overflow-wrap`, `letter-spacing`/`word-spacing`,
 `list-style-type` (and the type keyword in the
 `list-style` shorthand), all four margins,
-the measure a box asks for with `width`/`max-width`, the height it asks for
+the measure a box asks for with `width`/`max-width`/`min-width`, the height it asks for
 with `height`/`min-height`/`max-height`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands, on a block or on a run), `display` and `visibility`.
@@ -154,6 +154,13 @@ without them, and each is small:
   `visibility: visible` inside a hidden parent is painted and is the only thing
   that parent draws. `collapse` is answered as `hidden`, which is what it means
   outside a table.
+- **`min-width` floors the measure, and the floor wins.** `width` and
+  `max-width` fold into one `Computed::measure` because neither can widen a
+  box, so both are a `min`. `min-width` is the opposite direction and cannot
+  join them: it lands on its own field, does not inherit, and `view.rs` applies
+  it after the measure has narrowed the container, per css-sizing-3 §5.1. The
+  column still bounds it — there is no horizontal scroll, so a floor wider than
+  the window would put the box somewhere nothing can reach.
 - **A declared height sizes the box the way the measure sizes its width.**
   `height`, `min-height` and `max-height` land on `Computed` and reach
   `view::block_height`, which is applied once the block's content, padding and

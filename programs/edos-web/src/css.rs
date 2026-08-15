@@ -402,6 +402,10 @@ pub struct Computed {
     /// clamped between. css-sizing-3 §5.
     pub min_height: Option<u32>,
     pub max_height: Option<u32>,
+    /// `min-width`: a floor under the box's own width, which css-sizing-3 §5.1
+    /// makes win over `max-width`. Unlike `measure` it does not inherit, since
+    /// widening a descendant is not what a wrapper's floor asks for.
+    pub min_width: Option<u32>,
     /// A horizontal margin written `auto`, which centres the box in its column.
     /// Inherited for the same reason `measure` is.
     pub center: bool,
@@ -468,6 +472,7 @@ impl Computed {
             height: None,
             min_height: None,
             max_height: None,
+            min_width: None,
             margin_top: None,
             margin_bottom: None,
             margin_left: None,
@@ -748,6 +753,11 @@ impl Computed {
                 if let Some(px) = parse_measure(value, root_px, self.em(parent_px), basis) {
                     self.measure = Some(self.measure.map_or(px, |narrower| narrower.min(px)));
                 }
+            }
+            // A percentage `min-width` is of the containing block's width,
+            // which the basis already carries.
+            "min-width" => {
+                self.min_width = parse_measure(value, root_px, self.em(parent_px), basis);
             }
             // A percentage height is of the containing block's height, which a
             // flowed column never has: css-sizing-3 §5.1 makes that case behave
@@ -3075,6 +3085,14 @@ mod tests {
         assert_eq!(computed.inherit().height, None);
         assert_eq!(computed.inherit().min_height, None);
         assert_eq!(computed.inherit().max_height, None);
+    }
+
+    #[test]
+    fn a_min_width_is_read_and_does_not_inherit() {
+        let sheet = sheet("div { min-width: 20em }");
+        let computed = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(computed.min_width, Some(20 * 14));
+        assert_eq!(computed.inherit().min_width, None);
     }
 
     #[test]

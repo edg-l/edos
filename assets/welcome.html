@@ -120,6 +120,8 @@
       .tall { height: 120px; background: #3b4252; border-left: 4px solid #88c0d0 }
       .floored { min-height: 90px; background: #434c5e }
       .capped { max-height: 30px; background: #4c566a }
+      /* A floor under the width wins over the ceiling above it. */
+      .widened { min-width: 500px; max-width: 200px; background: #434c5e }
     </style>
   </head>
   <body>
@@ -334,6 +336,9 @@ while the newline above them is kept.</p>
     <p class="capped">A paragraph capped at 30px, whose second and third lines
       run past the bottom of the box that was drawn for it, since nothing here
       clips them.</p>
+
+    <p class="widened">A paragraph held to 200px by its ceiling and to 500px by
+      its floor, which css-sizing-3 gives to the floor.</p>
 
     <h2>What a list may be numbered in</h2>
     <ol class="roman" start="3">

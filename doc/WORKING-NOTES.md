@@ -1626,7 +1626,7 @@ does not have to invent them.
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,401 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
-| host unit tests | 105 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
+| host unit tests | 106 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 161, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
