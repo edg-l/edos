@@ -7736,3 +7736,43 @@ Scaling the strike with `style.px` rather than with the line box matters because
 
 The fixture's `.ruled` paragraph and the `<del>`/`<ins>`/`.plain` line show all
 four outcomes, including the link the page asked to leave unruled.
+
+## `vertical-align`: the fragments were never on a baseline to begin with (2026-08-15)
+
+`vertical-align: super`/`sub` and the UA shift `<sup>`/`<sub>` carry look like
+one property, and adding them exposed that `view.rs` had no baseline at all.
+Every fragment on a line was drawn at `y + line.lead`, its *top* edge, so a run
+set smaller than its neighbours -- which a superscript is, since the UA sets it
+at 5/6 -- hung from the line's ceiling instead of standing on its floor. A
+shift applied on top of that would have moved the wrong thing.
+
+So `Line` now carries `natural`, the tallest face on the line, and a fragment is
+drawn at `lead + (natural - own) - shift`. For a line whose runs are all one
+size the correction is zero and nothing moves, which is what makes the change
+safe; it is only visible where a line mixes sizes, and there it is a fix in its
+own right.
+
+Two things follow from the shift rather than from the baseline:
+
+- **The line has to grow, or a superscript prints into the line above.** The
+  rise and the drop are taken from the fragments in `push_line`, the height
+  becomes at least `natural + rise + drop`, and `lead` is at least the rise. A
+  page that also sets `line-height` keeps whichever is larger.
+- **The rules follow the run.** `text-decoration` is drawn from the fragment's
+  own top and its own face height, not from the line's, so an underlined
+  footnote marker is underlined where it now sits. Two neighbouring fragments
+  only share one continuous rule when their shifts match as well as their size
+  and colour.
+
+The rise is a fraction of the size the run *would* have been set at, not of the
+size it ends up at: `Script::shift` is handed the block's base px, before
+`Script::px` shrinks it. Measuring it against the shrunk size gives a
+superscript that barely leaves the baseline.
+
+`vertical-align` inherits here, unlike in CSS. The reason is the one `measure`
+already gives: the inline model is flat, so a `<sup>` is not a box any later
+stage sees and the `<b>` inside it has no other way to learn it is a script.
+The keywords that align against the line box rather than a baseline -- `top`,
+`middle`, `bottom`, `text-top`, `text-bottom` -- parse to a zero shift on
+purpose: there is no line box to align against, and leaving the run on the
+baseline is better than putting it somewhere arbitrary.

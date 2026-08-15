@@ -47,6 +47,10 @@ pub struct Fragment {
     /// on the fragment rather than on the style because a `Style` is the face
     /// the whole shell shares, and tracking is a property of this page's run.
     pub letter: i32,
+    /// `vertical-align` as pixels off the shared baseline, positive raising the
+    /// run. The baseline itself is [`Line::natural`], so a run set smaller than
+    /// its neighbours sits on their feet before this moves it.
+    pub shift: i32,
 }
 
 /// What a line draws.
@@ -79,6 +83,9 @@ pub struct Line {
     /// below the text, so a page that asks for open leading gets it around
     /// its lines rather than under them.
     pub lead: u32,
+    /// The tallest face on the line. Every fragment is set on its bottom, so a
+    /// smaller run shares the baseline instead of hanging from the line's top.
+    pub natural: u32,
     pub items: Vec<Fragment>,
     pub kind: LineKind,
 }
@@ -139,6 +146,9 @@ struct Word {
     /// the word because a `<span>` can set either partway through a line.
     letter: i32,
     word_gap: i32,
+    /// `vertical-align`, resolved: what the page asked for, or what the element
+    /// that opened the run asks for by being a `<sup>` or a `<sub>`.
+    shift: i32,
 }
 
 impl Layout {
@@ -200,6 +210,7 @@ impl Layout {
                     y,
                     height,
                     lead: 0,
+                    natural: height,
                     items: Vec::new(),
                     kind: LineKind::Rule {
                         x: box_x + left as i32,
@@ -216,6 +227,7 @@ impl Layout {
                     link: None,
                     decoration: css::Decorations::default(),
                     letter: plan.letter,
+                    shift: 0,
                 });
 
                 let start = out.lines.len();
@@ -317,11 +329,13 @@ impl Layout {
             link,
             decoration: css::Decorations::default(),
             letter: 0,
+            shift: 0,
         }];
         self.lines.push(Line {
             y: *y,
             height,
             lead: 0,
+            natural: height,
             items,
             kind: LineKind::Image { pixels, width },
         });
@@ -362,6 +376,10 @@ impl Layout {
             let height = leading(run.css.line, style);
             let letter = run.css.letter_spacing;
             let word_gap = run.css.word_spacing;
+            // A script's rise is a fraction of the size it would have been set
+            // at, not of the size it ends up at, so it is measured against the
+            // base the run shrank from.
+            let shift = run.css.shift.unwrap_or(run.script.shift(base.px));
             let mut word = String::new();
             let mut flush = |word: &mut String, spaces: &mut u32, breaks: &mut u32| {
                 if word.is_empty() {
@@ -388,6 +406,7 @@ impl Layout {
                     breaks: *breaks,
                     letter,
                     word_gap,
+                    shift,
                 });
                 word.clear();
                 *spaces = 0;
@@ -486,6 +505,7 @@ impl Layout {
                             link: word.link,
                             decoration: word.decoration,
                             letter: word.letter,
+                            shift: word.shift,
                         });
                         pen += head_width;
                         let line = std::mem::take(&mut items);
@@ -517,6 +537,7 @@ impl Layout {
                     link: word.link,
                     decoration: word.decoration,
                     letter: word.letter,
+                    shift: word.shift,
                 });
                 pen += width;
                 break;
@@ -555,10 +576,18 @@ impl Layout {
             .map(|item| text::line_height(item.style))
             .max()
             .unwrap_or(height);
+        // A shifted run leaves the band the line's own faces occupy, so the
+        // line grows by whatever the tallest rise and the deepest drop ask for
+        // rather than letting a superscript print over the line above.
+        let shifts = || items.iter().map(|item| item.shift);
+        let rise = shifts().max().unwrap_or(0).max(0) as u32;
+        let drop = shifts().min().unwrap_or(0).min(0).unsigned_abs();
+        let height = height.max(natural + rise + drop);
         self.lines.push(Line {
             y: *y,
             height,
-            lead: height.saturating_sub(natural) / 2,
+            lead: (height.saturating_sub(natural) / 2).max(rise),
+            natural,
             items,
             kind: LineKind::Text,
         });
@@ -772,8 +801,12 @@ fn run_style(run: &Run, base: Style) -> Style {
         Some(false) => style.weight = Weight::Regular,
         None => {}
     }
-    if let Some(px) = css.font_px {
-        style.px = px;
+    // A `<sup>` is set smaller than its surroundings unless the page put a size
+    // on it, which is the one thing that keeps a script from breaking the line
+    // it sits in.
+    match css.font_px {
+        Some(px) => style.px = px,
+        None => style.px = run.script.px(style.px),
     }
     // The theme has no italic face, so CSS italic borrows the accent colour on
     // the same terms `<em>` does, and only where the run is not already saying
@@ -894,10 +927,16 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             LineKind::Text => {}
         }
         for (index, item) in line.items.iter().enumerate() {
+            // Fragments share a baseline rather than a top edge: a smaller face
+            // is dropped to the tallest one's feet, and `vertical-align` then
+            // moves it off that baseline.
+            let own = text::line_height(item.style);
+            let text_top =
+                y + line.lead as i32 + line.natural.saturating_sub(own) as i32 - item.shift;
             text::draw_tracked(
                 &mut surface,
                 item.x,
-                y + line.lead as i32,
+                text_top,
                 &item.text,
                 item.style,
                 item.letter,
@@ -911,6 +950,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                     if next.decoration == item.decoration
                         && next.style.px == item.style.px
                         && next.style.color == item.style.color
+                        && next.shift == item.shift
                         && next.x >= item.x + item.width as i32 =>
                 {
                     (next.x - item.x) as u32
@@ -918,8 +958,10 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                 _ => item.width,
             };
             // Against the text, not against the line: open leading would
-            // otherwise leave the rules floating away from the words they mark.
-            let underline = y + (line.height - line.lead) as i32 - 3;
+            // otherwise leave the rules floating away from the words they mark,
+            // and a superscript's rule would stay behind on the baseline it
+            // left.
+            let underline = text_top + own as i32 - 3;
             let rules = [
                 (item.decoration.underline, underline),
                 // A strike sits through the lowercase, which is about a third
@@ -928,7 +970,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                     item.decoration.line_through,
                     underline - (item.style.px as i32) * 3 / 10,
                 ),
-                (item.decoration.overline, y + line.lead as i32),
+                (item.decoration.overline, text_top),
             ];
             for (drawn, rule_y) in rules {
                 if drawn {

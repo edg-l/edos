@@ -428,9 +428,28 @@ candidates, in order:
 
 1. **The instrument is not alone on its CPU.** The threads are pinned to one
    CPU, but the other 55 cases in the suite run concurrently on a 4-CPU boot
-   and are not pinned away from it. Settle this first by running the case on
-   `run-single` or by measuring the holder's share directly against
-   `/proc/sched`, before reading anything into the scheduler.
+   and are not pinned away from it. **Measured 2026-08-15 and it is not
+   settled by a single-CPU boot**, which is the wrong instrument rather than a
+   cleaner one: the harness queues all 56 cases at once, so a 1-CPU boot puts
+   every other case's threads on the same CPU this one pins to. It reads
+   *worse*, not better:
+
+   ```
+   prio-inversion: the top-priority waiter blocked 170342 us on a 10000 us
+   section (17.03x), holder stretched 15.14x by a hog 5 levels above it
+   ```
+
+   That 17.03x is against 7.67x on the 4-CPU boot at the same commit, and the
+   difference is the rest of the suite, not the hog. What would settle it is
+   the case running alone -- a boot that queues this one test -- or the
+   holder's share read directly from `/proc/sched`. Do not read the 1-CPU
+   number as evidence about lending either way.
+
+   Two facts about that boot, both worth knowing before running it again:
+   `make test-single` cannot pass, because `load-parked-is-not-load` never
+   completes with one CPU and the suite times out at 55/56; and the target has
+   no `-accel kvm`, so it runs under TCG unless `QEMUFLAGS=-accel kvm` is
+   passed.
 2. **The loan does not re-place the holder.** It raises the weight, so
    `charge_vruntime` slows the holder's virtual clock from the next charge on,
    but the `vdeadline` it is holding was computed at the old weight and is only

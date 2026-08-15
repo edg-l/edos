@@ -386,6 +386,14 @@ pub struct Computed {
     pub letter_spacing: i32,
     /// `word-spacing`, inherited, added to every space between two words.
     pub word_spacing: i32,
+    /// `vertical-align` as a baseline shift in pixels, positive raising the
+    /// run. `None` is "the page said nothing", which leaves the shift to the
+    /// element: a `<sup>` rises, a `<sub>` drops.
+    ///
+    /// It inherits, unlike the property it comes from, because the inline
+    /// model here is flat: a `<sup>` is not a box any later stage sees, so the
+    /// `<b>` inside it has no other way to learn it is set as a superscript.
+    pub shift: Option<i32>,
     /// `background-color`, painted behind the block's own box.
     pub background: Option<u32>,
     pub padding: Sides<Option<u32>>,
@@ -555,6 +563,26 @@ impl Computed {
             "word-spacing" => {
                 if let Some(px) = parse_spacing(value, root_px, self.em(parent_px)) {
                     self.word_spacing = px;
+                }
+            }
+            // `super` and `sub` are font-relative and left to the face by
+            // css-inline-3 §3.3; the fractions here are the usual ones. The
+            // keywords that align against the line box rather than a baseline
+            // -- `top`, `middle`, `bottom` and their `text-` forms -- have no
+            // expression in a flat inline model, so they leave the run where
+            // the baseline puts it rather than being silently misplaced.
+            "vertical-align" => {
+                let em = self.em(parent_px) as i32;
+                let resolved = match value {
+                    "super" => Some(em / 3),
+                    "sub" => Some(-em / 5),
+                    "baseline" | "top" | "middle" | "bottom" | "text-top" | "text-bottom" => {
+                        Some(0)
+                    }
+                    _ => parse_signed_length(value, root_px, self.em(parent_px)),
+                };
+                if let Some(px) = resolved {
+                    self.shift = Some(px);
                 }
             }
             "margin" => {
@@ -2051,6 +2079,27 @@ mod tests {
         let stack = vec![element("div", &[]), element("span", &[])];
         let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
         assert_eq!(inner.decoration, outer.decoration);
+    }
+
+    #[test]
+    fn vertical_align_resolves_against_the_font() {
+        let sheet = sheet(
+            "p { font-size: 30px } \
+             .up { vertical-align: super } \
+             .down { vertical-align: sub } \
+             .flat { vertical-align: baseline } \
+             .box { vertical-align: middle } \
+             .len { vertical-align: -4px }",
+        );
+        let shift = |class: &str| cascade(&sheet, &[element("p", &[("class", class)])], None).shift;
+        assert_eq!(shift("up"), Some(10));
+        assert_eq!(shift("down"), Some(-6));
+        assert_eq!(shift("flat"), Some(0));
+        // No baseline to align against in a flat inline model, so the run
+        // stays put rather than being put somewhere arbitrary.
+        assert_eq!(shift("box"), Some(0));
+        assert_eq!(shift("len"), Some(-4));
+        assert_eq!(shift(""), None);
     }
 
     #[test]

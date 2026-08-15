@@ -33,6 +33,7 @@
       .tight { letter-spacing: -1px }
       /* The rules a page draws across its text, and the one it takes away. */
       .ruled { text-decoration: underline overline }
+      .lifted { vertical-align: super }
       .plain { text-decoration: none }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
@@ -123,6 +124,10 @@ while the newline above them is kept.</p>
     <p>A <del>price the page struck out</del> beside <ins>the one that replaced it</ins>,
       and <a class="plain" href="./welcome.html">a link the page asked to leave unruled</a>.</p>
     <p class="ruled">A line with a rule above it and a rule below it.</p>
+    <p>Water is H<sub>2</sub>O, a square is x<sup>2</sup>, and a footnote hangs
+      off the sentence<sup><a href="./welcome.html">1</a></sup> that owns it.
+      A <span class="lifted">span the page lifted itself</span> rises without
+      being shrunk.</p>
 
     <p class="quiet">
       This column is 38em wide and centred in the window rather than filling

@@ -82,6 +82,8 @@ pub struct Run {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    /// `<sup>`/`<sub>`, which set the run smaller and off the baseline.
+    pub script: Script,
     /// What the document's own CSS asked for, which overrides all three flags
     /// above wherever it says anything.
     pub css: Computed,
@@ -341,6 +343,40 @@ struct Style {
     bold: bool,
     italic: bool,
     code: bool,
+    script: Script,
+}
+
+/// Where a run sits against the line's baseline, from the element that opened
+/// it. `vertical-align` overrides it wherever the page says anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Script {
+    #[default]
+    Baseline,
+    Super,
+    Sub,
+}
+
+impl Script {
+    /// The shift a run of `px` text takes, in pixels, positive raising it.
+    /// Both are fractions of the size the superscript would have been set at
+    /// had it not been shrunk, which is why the caller passes the parent's.
+    pub fn shift(self, px: u32) -> i32 {
+        match self {
+            Script::Baseline => 0,
+            Script::Super => px as i32 / 3,
+            Script::Sub => -(px as i32) / 5,
+        }
+    }
+
+    /// How large the run is set. A superscript at the size of its surroundings
+    /// reads as a broken line rather than as a script, so the UA shrinks it
+    /// (html §15.3.3 sets `font-size: smaller` on both).
+    pub fn px(self, px: u32) -> u32 {
+        match self {
+            Script::Baseline => px,
+            _ => (px * 5 / 6).max(1),
+        }
+    }
 }
 
 /// A list being built, so `li` knows whether it is bulleted or numbered.
@@ -471,6 +507,8 @@ impl Builder<'_> {
                     local_name!("code") | local_name!("kbd") | local_name!("samp") => {
                         self.style.code = true
                     }
+                    local_name!("sup") => self.style.script = Script::Super,
+                    local_name!("sub") => self.style.script = Script::Sub,
                     // A break is a newline no collapsing may swallow, so it is
                     // appended rather than pushed as text: every other newline
                     // in a collapsing box has become a space by then, which is
@@ -542,6 +580,7 @@ impl Builder<'_> {
                     bold: style.bold,
                     italic: style.italic,
                     code: style.code,
+                    script: style.script,
                     css: self.computed,
                 }]
             })
@@ -666,6 +705,7 @@ impl Builder<'_> {
                     && run.bold == style.bold
                     && run.italic == style.italic
                     && run.code == style.code
+                    && run.script == style.script
                     && run.css == css =>
             {
                 run.text.push_str(text)
@@ -676,6 +716,7 @@ impl Builder<'_> {
                 bold: style.bold,
                 italic: style.italic,
                 code: style.code,
+                script: style.script,
                 css,
             }),
         }
