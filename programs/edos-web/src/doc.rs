@@ -263,7 +263,41 @@ impl Block {
 /// Misses are cached alongside hits: a stylesheet that could not be had once
 /// cannot be had now either, and a rebuild is not the place to spend a network
 /// timeout finding that out again.
-type Cache = Arc<Mutex<BTreeMap<String, Option<Vec<u8>>>>>;
+///
+/// One of these is shared by every page a window loads, not made afresh per
+/// document: the pages of a site link the same stylesheets, and following a
+/// link fetched all of them again -- around 100 KB of CSS on `edos.edgl.dev`,
+/// over a TLS handshake each.
+pub type Cache = Arc<Mutex<BTreeMap<String, Option<Vec<u8>>>>>;
+
+/// How much fetched content one of those may hold before it is emptied.
+///
+/// Emptied rather than evicted by age: nothing here records when an entry was
+/// used, a miss costs a refetch rather than a wrong answer, and a browser
+/// holding every image of every page visited is the failure this bounds.
+const CACHE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// What a load needs besides the bytes.
+#[derive(Clone)]
+pub struct Context {
+    /// The window the page is laid out for, which is what its media queries
+    /// are answered against.
+    pub viewport: Viewport,
+    /// Whether to lay out the page's `<main>` alone. See [`Document::has_main`].
+    pub reader: bool,
+    /// The subresources this window has already fetched.
+    pub cache: Cache,
+}
+
+impl Context {
+    pub fn new(viewport: Viewport, reader: bool) -> Context {
+        Context {
+            viewport,
+            reader,
+            cache: Cache::default(),
+        }
+    }
+}
 
 /// What a document needs to be built again at a different viewport.
 struct Source {
@@ -542,21 +576,20 @@ pub fn parse(
     html: &[u8],
     base: Url,
     fetch: &dyn Fn(&str) -> Option<Vec<u8>>,
-    viewport: Viewport,
-    reader: bool,
+    context: &Context,
 ) -> Document {
     let nesting = source_nesting(html);
     if nesting > MAX_SOURCE_NESTING {
-        return Document::refused(base, viewport, nesting);
+        return Document::refused(base, context.viewport, nesting);
     }
     build(
         Source {
             html: Arc::new(html.to_vec()),
             base,
-            cache: Cache::default(),
-            reader,
+            cache: Arc::clone(&context.cache),
+            reader: context.reader,
             media: MediaQueries::default(),
-            viewport,
+            viewport: context.viewport,
         },
         fetch,
     )
@@ -575,6 +608,10 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         }
         let bytes = fetch(url);
         if let Ok(mut cache) = cache.lock() {
+            let held: usize = cache.values().flatten().map(Vec::len).sum();
+            if held > CACHE_BUDGET {
+                cache.clear();
+            }
             cache.insert(url.to_string(), bytes.clone());
         }
         bytes

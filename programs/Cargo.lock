@@ -535,6 +535,7 @@ name = "edos_http"
 version = "0.1.0"
 dependencies = [
  "edos_lib",
+ "flate2",
  "getrandom",
  "rustls",
  "rustls-rustcrypto",

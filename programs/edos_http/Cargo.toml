@@ -17,6 +17,9 @@ url = "2"
 # opposite of every other crypto crate here -- `default-features = false`
 # strips its `alloc` feature and it answers with a compile_error.
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+# Transfer compression. Every other user of it in the tree takes the same
+# rust_backend, since the C one wants a toolchain this target has not got.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 rustls-rustcrypto = "0.0.2-alpha"
 webpki-roots = "1"
 

@@ -4,6 +4,7 @@
 //! program in the tree links `edos_lib`, and rustls has no business inside
 //! `true` and `yes`.
 
+use flate2::write::GzDecoder;
 use std::{
     fmt,
     io::{self, BufReader, Read, Write},
@@ -77,6 +78,15 @@ pub struct Options {
     /// Correct an unset clock over SNTP before a TLS handshake. See
     /// [`tls::ensure_clock_usable`].
     pub fix_clock: bool,
+    /// Ask for the body gzipped, and inflate what comes back.
+    ///
+    /// Worth it for anything the server does not already store compressed: a
+    /// documentation page's stylesheet is around 100 KB of text, and this
+    /// machine's TLS is software, so the bytes it does not have to receive and
+    /// decrypt cost more than the inflate does. A download of something
+    /// already compressed -- a package, an image -- gains nothing, which is
+    /// what `grab` turns this off for.
+    pub accept_gzip: bool,
     pub extra_headers: Vec<(String, String)>,
 }
 
@@ -88,6 +98,7 @@ impl Default for Options {
             connect_timeout: Duration::from_secs(5),
             user_agent: concat!("grab/", env!("CARGO_PKG_VERSION"), " (EDOS)").to_string(),
             fix_clock: true,
+            accept_gzip: true,
             extra_headers: Vec::new(),
         }
     }
@@ -170,11 +181,60 @@ pub fn fetch(
             }
         }
 
-        read_body(&mut reader, &head, opts, sink, progress)?;
+        // A gzipped body is inflated on the way to the sink rather than
+        // buffered and inflated after: the caller asked for a stream, and a
+        // response that is 100 KB on the wire and a megabyte after it should
+        // not exist twice in memory to make that true.
+        if opts.accept_gzip && head.header("Content-Encoding").is_some_and(is_gzip) {
+            let mut decoder = GzDecoder::new(Limited {
+                sink,
+                written: 0,
+                limit: opts.max_body,
+            });
+            read_body(&mut reader, &head, opts, &mut decoder, progress)?;
+            decoder.finish()?;
+        } else {
+            read_body(&mut reader, &head, opts, sink, progress)?;
+        }
         return Ok(head);
     }
 
     Err(Error::TooManyRedirects(opts.max_redirects))
+}
+
+/// Whether a `Content-Encoding` names gzip. `x-gzip` is the older spelling and
+/// still arrives from servers configured a decade ago.
+fn is_gzip(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value == "gzip" || value == "x-gzip"
+}
+
+/// A sink that refuses to take more than `limit` bytes.
+///
+/// `max_body` bounds what arrives on the wire, and compressed bytes are not
+/// what fills a machine: a few kilobytes of gzip expand to as much as the
+/// sender likes. This is what makes the limit mean the same thing either way.
+struct Limited<'a> {
+    sink: &'a mut dyn Write,
+    written: u64,
+    limit: u64,
+}
+
+impl Write for Limited<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.written += buf.len() as u64;
+        if self.written > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the body inflates past {} bytes", self.limit),
+            ));
+        }
+        self.sink.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sink.flush()
+    }
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -220,10 +280,11 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
         target.host_header(),
         opts.user_agent
     );
-    // Asking for `identity` keeps a content-decode path out of the client. A
-    // package is already gzip content; gzipping the transfer as well buys
-    // nothing and adds a branch that only some servers exercise.
-    request.push_str("Accept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
+    let encoding = if opts.accept_gzip { "gzip" } else { "identity" };
+    request.push_str(&format!(
+        "Accept: */*\r\nAccept-Encoding: {}\r\nConnection: close\r\n",
+        encoding
+    ));
     for (name, value) in &opts.extra_headers {
         request.push_str(&format!("{}: {}\r\n", name, value));
     }

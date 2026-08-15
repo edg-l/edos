@@ -67,7 +67,8 @@ fn main() {
         // which is the honest answer for `-d` too: the text dump is the same
         // document, read out rather than drawn.
         let viewport = Viewport::new(ui::WIN_W, ui::WIN_H, doc::ROOT_PX);
-        let document = doc::parse(&html, base, &fetch_subresource, viewport, reader);
+        let context = doc::Context::new(viewport, reader);
+        let document = doc::parse(&html, base, &fetch_subresource, &context);
         let rendered = text::render(&document, width, links);
         // Writing the whole rendering in one go: a redirect to /dev/klog turns
         // every write into a log line, and a per-line write would interleave

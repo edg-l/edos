@@ -72,6 +72,10 @@ pub fn fetch_package(
         // The slack covers nothing but a mis-declared length; the hash below is
         // what actually decides.
         max_body: package.size + 4096,
+        // A package is already gzip content: asking for the transfer to be
+        // gzipped as well buys nothing, and the size the index declares is the
+        // size on the wire.
+        accept_gzip: false,
         ..Options::default()
     };
 

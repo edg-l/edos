@@ -382,6 +382,17 @@ Three deliberate limits:
   which is what an unimplemented property does anyway. A dangling combinator --
   leading, trailing or doubled -- is dropped by the same rule, as is an
   unclosed `[`.
+- **A subresource is fetched once per window, not once per page.** The cache
+  belongs to the loader rather than to the document: every page of a site links
+  the same stylesheets, and fetching them again per navigation cost around
+  100 KB and a TLS handshake each on `edos.edgl.dev`. It is emptied whole once
+  it holds more than `doc::CACHE_BUDGET`, since nothing here records when an
+  entry was last used and a miss is a refetch rather than a wrong answer.
+- **The transfer is gzipped where the server offers it.** `edos_http` sends
+  `Accept-Encoding: gzip` and inflates on the way to the sink, bounded by the
+  same `max_body` the wire is, because a few kilobytes of gzip expand to as
+  much as the sender likes. `grab` turns it off for a package, which is already
+  compressed.
 - **At most `doc::MAX_SHEETS` external sheets are fetched, and each one
   serially**, on the thread that is about to lay the page out. A page linking
   more than six is linking print and font sheets; a browser that fetched all of

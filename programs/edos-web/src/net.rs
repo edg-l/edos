@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 
 use crate::css::Viewport;
-use crate::doc::{self, Document};
+use crate::doc::{self, Context, Document};
 
 /// What a load says while it is happening.
 pub enum Update {
@@ -47,6 +47,9 @@ pub struct Loader {
     inbox: Receiver<(u64, Update)>,
     /// The load whose updates still count.
     ticket: u64,
+    /// Every subresource this window has fetched, kept across pages: the pages
+    /// of a site link the same stylesheets.
+    cache: doc::Cache,
 }
 
 impl Loader {
@@ -56,6 +59,7 @@ impl Loader {
             updates,
             inbox,
             ticket: 0,
+            cache: doc::Cache::default(),
         }
     }
 
@@ -65,7 +69,12 @@ impl Loader {
         let ticket = self.ticket;
         let updates = self.updates.clone();
         let target = target.to_string();
-        thread::spawn(move || load(&updates, ticket, &target, viewport, reader));
+        let context = Context {
+            viewport,
+            reader,
+            cache: doc::Cache::clone(&self.cache),
+        };
+        thread::spawn(move || load(&updates, ticket, &target, &context));
     }
 
     /// Stop caring about the load in flight. What it eventually produces is
@@ -88,13 +97,7 @@ impl Loader {
 }
 
 /// Fetch, parse and style one page, reporting each fetch it makes.
-fn load(
-    updates: &Sender<(u64, Update)>,
-    ticket: u64,
-    target: &str,
-    viewport: Viewport,
-    reader: bool,
-) {
+fn load(updates: &Sender<(u64, Update)>, ticket: u64, target: &str, context: &Context) {
     let say = |update| {
         let _ = updates.send((ticket, update));
     };
@@ -108,6 +111,6 @@ fn load(
         say(Update::Fetching(url.to_string()));
         crate::fetch_subresource(url)
     };
-    let document = doc::parse(&html, base, &fetch, viewport, reader);
+    let document = doc::parse(&html, base, &fetch, context);
     say(Update::Loaded(Box::new(Page { document, address })));
 }
