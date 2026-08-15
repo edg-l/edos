@@ -11,7 +11,8 @@
 //! `/dev/klog` so the host can read it off the serial log.
 
 use std::fs;
-use std::io::Write;
+
+use edos_lib::io::Tee;
 
 /// File sizes, in bytes. Chosen to cover the shapes that broke:
 /// sub-page, exactly one page, a partial tail, and enough pages to outrun
@@ -31,10 +32,7 @@ fn content(n: usize, len: usize) -> Vec<u8> {
 }
 
 fn report(verdict: &str) {
-    println!("{verdict}");
-    if let Ok(mut klog) = fs::OpenOptions::new().write(true).open("/dev/klog") {
-        let _ = writeln!(klog, "{verdict}");
-    }
+    Tee::new(true).line(verdict);
 }
 
 fn usage() -> ! {

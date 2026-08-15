@@ -27,41 +27,13 @@
 //!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
-use std::io::Write;
 use std::time::Instant;
 
-use edos_lib::io::{PollState, SelectFd, close, poll};
+use edos_lib::io::{PollState, SelectFd, Tee, close, poll};
 use edos_lib::net::{self, SockAddrIn};
 use edos_lib::process::{pipe, read, sched_yield, set_nonblocking, write};
 
 const COUNTS: [usize; 5] = [1, 2, 4, 16, 64];
-
-/// Report sink: stdout, and optionally the kernel log as well.
-struct Out {
-    klog: Option<std::fs::File>,
-}
-
-impl Out {
-    fn new(enabled: bool) -> Self {
-        Self {
-            klog: enabled
-                .then(|| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open("/dev/klog")
-                        .ok()
-                })
-                .flatten(),
-        }
-    }
-
-    fn line(&mut self, text: &str) {
-        println!("{text}");
-        if let Some(klog) = &mut self.klog {
-            let _ = writeln!(klog, "{text}");
-        }
-    }
-}
 
 /// What a pipe holds before a writer has to wait, from
 /// `kernel/src/thread/pipe.rs`. The fill loop below asserts against it, so a
@@ -122,7 +94,7 @@ fn main() {
             },
         }
     }
-    let mut out = Out::new(klog);
+    let mut out = Tee::new(klog);
 
     let mut empty: [SelectFd; 0] = [];
     let floor = time_poll(&mut empty, iters);

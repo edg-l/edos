@@ -1,6 +1,7 @@
 //! Widget toolkit for building GUI applications.
 
 pub mod button;
+pub mod canvas;
 pub mod checkbox;
 pub mod container;
 pub mod label;
@@ -10,6 +11,7 @@ pub mod terminal;
 pub mod text_input;
 
 pub use button::Button;
+pub use canvas::Canvas;
 pub use checkbox::Checkbox;
 pub use container::WidgetContainer;
 pub use label::Label;

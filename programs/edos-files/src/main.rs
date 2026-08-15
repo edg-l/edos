@@ -20,8 +20,9 @@ use edos_render::metrics::space;
 use edos_render::widgets::{Rect, TextInput, WidgetContainer, WidgetEvent, WidgetId};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
+use edos_render::widgets::Canvas;
 use model::{Entry, Kind, Place, Volume};
-use view::{Canvas, Columns, Layout};
+use view::{Columns, Layout};
 
 /// Opening size. Wide enough for the details pane, short enough to leave the
 /// desktop visible behind it.

@@ -25,7 +25,8 @@ use edos_render::window::{Window, WindowEvent, WindowEventType};
 use grab::Progress;
 use grab_index::Package;
 
-use view::{Canvas, Layout};
+use edos_render::widgets::Canvas;
+use view::Layout;
 
 /// Opening size.
 const WIN_W: u32 = 920;

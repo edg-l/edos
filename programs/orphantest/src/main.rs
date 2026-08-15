@@ -19,13 +19,12 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::process::exit;
 
+use edos_lib::io::Tee;
+
 /// Guest output only reaches the host through `/dev/klog`; stdout goes to the
 /// GUI terminal, which the serial capture never sees.
 fn klog(line: &str) {
-    if let Ok(mut f) = OpenOptions::new().write(true).open("/dev/klog") {
-        let _ = writeln!(f, "{line}");
-    }
-    println!("{line}");
+    Tee::new(true).line(line);
 }
 
 fn main() {

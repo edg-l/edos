@@ -32,39 +32,12 @@
 //!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
-use std::io::Write;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use edos_lib::io::Tee;
 use edos_lib::process::{close, pipe, read, write};
-
-/// Report sink: stdout, and optionally the kernel log as well.
-struct Out {
-    klog: Option<std::fs::File>,
-}
-
-impl Out {
-    fn new(enabled: bool) -> Self {
-        Self {
-            klog: enabled
-                .then(|| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open("/dev/klog")
-                        .ok()
-                })
-                .flatten(),
-        }
-    }
-
-    fn line(&mut self, text: &str) {
-        println!("{text}");
-        if let Some(klog) = &mut self.klog {
-            let _ = writeln!(klog, "{text}");
-        }
-    }
-}
 
 /// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
 fn cpus_online() -> u64 {
@@ -130,7 +103,7 @@ fn main() {
             },
         }
     }
-    let mut out = Out::new(klog);
+    let mut out = Tee::new(klog);
 
     if wake_mode {
         wake_burst(&mut out, workers_arg);
@@ -291,7 +264,7 @@ fn await_ack(ack_read: u64, worker: usize) -> u32 {
 /// with no work in them, one CPU could serve the whole burst and a perfect score
 /// would mean nothing. `wall / solo` is the report: 1.00 is every worker running
 /// at once, N is the burst served one worker at a time.
-fn wake_burst(out: &mut Out, workers_arg: Option<u64>) {
+fn wake_burst(out: &mut Tee, workers_arg: Option<u64>) {
     let cpus = cpus_online();
     let workers = workers_arg.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
     out.line(&format!(
@@ -382,7 +355,7 @@ fn wake_burst(out: &mut Out, workers_arg: Option<u64>) {
 /// Printed beside the timings because the two answer the same question from
 /// opposite ends: `/proc/sched` is what placement believed, the straggler
 /// spread is what it cost.
-fn report_sched(out: &mut Out, when: &str) {
+fn report_sched(out: &mut Tee, when: &str) {
     let Ok(text) = std::fs::read_to_string("/proc/sched") else {
         return;
     };

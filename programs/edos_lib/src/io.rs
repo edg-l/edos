@@ -629,3 +629,66 @@ where
         let _ = klog.write_all(std::format!("{tag} {}", line.as_ref()).as_bytes());
     }
 }
+
+/// Stdout and the kernel log at once, for a program whose output has to reach
+/// a headless host.
+///
+/// Stdout goes to the GUI terminal, which a serial capture never sees, so a
+/// benchmark or a test that reports only there is invisible to the harness
+/// driving it. Every such program needs both channels, and each one had grown
+/// its own copy of this.
+///
+/// **One `write_all` per line, never `writeln!`.** Each write to `/dev/klog` is
+/// one log message (`kernel/src/logs.rs`), and `write_fmt` is free to issue one
+/// write per format fragment -- which turns a single reported line into several
+/// log lines, interleaved with whatever else the kernel is saying.
+pub struct Tee {
+    klog: Option<std::fs::File>,
+    /// Prefixed to the kernel-log copy, so a reader can pick this program's
+    /// lines out of an interleaved log. Empty for no prefix.
+    tag: String,
+}
+
+impl Tee {
+    /// A tee whose kernel-log half is on only when `to_klog`, which is what a
+    /// benchmark's `--klog` flag switches.
+    pub fn new(to_klog: bool) -> Self {
+        Self::tagged(to_klog, "")
+    }
+
+    /// As [`Tee::new`], with every kernel-log line prefixed by `tag`.
+    pub fn tagged(to_klog: bool, tag: &str) -> Self {
+        Self {
+            klog: to_klog
+                .then(|| {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open("/dev/klog")
+                        .ok()
+                })
+                .flatten(),
+            tag: tag.to_string(),
+        }
+    }
+
+    /// Write one line to both channels.
+    pub fn line(&mut self, text: &str) {
+        use std::io::Write;
+
+        std::println!("{text}");
+        if let Some(klog) = &mut self.klog {
+            let message = if self.tag.is_empty() {
+                std::format!("{text}\n")
+            } else {
+                std::format!("{} {text}\n", self.tag)
+            };
+            let _ = klog.write_all(message.as_bytes());
+        }
+    }
+
+    /// A blank separator. The kernel log drops it, since an empty write is not
+    /// a message, so this only opens up the terminal's copy.
+    pub fn blank(&mut self) {
+        self.line("");
+    }
+}

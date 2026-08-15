@@ -7,9 +7,9 @@
 use edos_render::font::{Weight, size};
 use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, TEXT_CELL_HEIGHT, space};
-use edos_render::text::{self, Style, Surface};
+use edos_render::text::{self, Style, elide};
 use edos_render::theme::Theme;
-use edos_render::widgets::{Rect, draw_rect};
+use edos_render::widgets::{Canvas, Rect};
 
 use crate::model::{Entry, Kind, Place, Volume, format_size};
 
@@ -44,7 +44,6 @@ pub const SCROLLBAR_W: u32 = space(1);
 /// Height of the meter at the foot of the rail.
 pub const METER_H: u32 = space(1);
 /// What stands in for the part of a name that did not fit.
-const ELLIPSIS: &str = "…";
 
 /// A window divided into its panels.
 pub struct Layout {
@@ -281,77 +280,6 @@ fn entry_icon(entry: &Entry) -> &'static icons::Mask {
         Kind::Special => &icons::CHIP,
         Kind::File => &icons::FILE,
     }
-}
-
-// --- Canvas ------------------------------------------------------------------
-
-/// A window's back buffer, with the handful of operations this program draws
-/// with.
-pub struct Canvas<'a> {
-    pub buf: &'a mut [u32],
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Canvas<'_> {
-    pub fn fill(&mut self, rect: Rect, color: u32) {
-        draw_rect(
-            self.buf,
-            self.width,
-            self.height,
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            color,
-        );
-    }
-
-    pub fn hline(&mut self, x: i32, y: i32, width: u32, color: u32) {
-        self.fill(Rect::new(x, y, width, 1), color);
-    }
-
-    pub fn icon(&mut self, x: i32, y: i32, mask: &icons::Mask, color: u32) {
-        icons::draw(self.buf, self.width, self.height, x, y, mask, color);
-    }
-
-    /// Draw a line of text with its top edge at `y`, and report its width.
-    pub fn text(&mut self, x: i32, y: i32, string: &str, style: Style) -> u32 {
-        let mut surface = Surface::new(self.buf, self.width, self.height);
-        text::draw(&mut surface, x, y, string, style);
-        text::width(string, style)
-    }
-
-    /// Draw text vertically centred in `rect`, starting at `x`.
-    pub fn text_in(&mut self, x: i32, rect: Rect, string: &str, style: Style) -> u32 {
-        let y = rect.y + (rect.height as i32 - text::line_height(style) as i32) / 2;
-        self.text(x, y, string, style)
-    }
-
-    /// Draw text ending at `right`, vertically centred in `rect`.
-    pub fn text_right(&mut self, right: i32, rect: Rect, string: &str, style: Style) {
-        let width = text::width(string, style) as i32;
-        self.text_in(right - width, rect, string, style);
-    }
-}
-
-/// Shorten `string` until it fits `available` pixels, marking what was cut.
-pub fn elide(string: &str, available: u32, style: Style) -> String {
-    if text::width(string, style) <= available {
-        return string.to_string();
-    }
-    let room = available.saturating_sub(text::width(ELLIPSIS, style));
-    let mut kept = String::new();
-    for ch in string.chars() {
-        let mut candidate = kept.clone();
-        candidate.push(ch);
-        if text::width(&candidate, style) > room {
-            break;
-        }
-        kept = candidate;
-    }
-    kept.push_str(ELLIPSIS);
-    kept
 }
 
 // --- Panels ------------------------------------------------------------------

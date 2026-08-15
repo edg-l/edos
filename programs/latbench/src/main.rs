@@ -26,40 +26,13 @@
 //!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use edos_lib::io::Tee;
 use edos_lib::process::{SchedAttr, sched_getattr, sched_setattr};
-
-/// Report sink: stdout, and optionally the kernel log as well.
-struct Out {
-    klog: Option<std::fs::File>,
-}
-
-impl Out {
-    fn new(enabled: bool) -> Self {
-        Self {
-            klog: enabled
-                .then(|| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open("/dev/klog")
-                        .ok()
-                })
-                .flatten(),
-        }
-    }
-
-    fn line(&mut self, text: &str) {
-        println!("{text}");
-        if let Some(klog) = &mut self.klog {
-            let _ = writeln!(klog, "{text}");
-        }
-    }
-}
 
 /// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
 fn cpus_online() -> u64 {
@@ -273,7 +246,7 @@ fn main() {
             }
         }
     }
-    let mut out = Out::new(klog);
+    let mut out = Tee::new(klog);
 
     let cpus = cpus_online();
     out.line(&format!(
@@ -302,7 +275,7 @@ fn main() {
 /// shorter request is an earlier virtual deadline, which is how EEVDF is told
 /// "run this sooner"; it should show up as a shorter tail here and as more
 /// switches, and as no change at all in what the hogs got through.
-fn default(out: &mut Out) {
+fn default(out: &mut Tee) {
     let Ok(attr) = sched_getattr(0) else {
         out.line("latbench: sched_getattr failed, is this kernel new enough?");
         return;
@@ -347,7 +320,7 @@ fn default(out: &mut Out) {
 /// shorten the wait by taking more turns, and every turn is a switch plus the
 /// cache it leaves behind — which the hog column, not the switch column, is the
 /// honest measure of.
-fn sweep(out: &mut Out) {
+fn sweep(out: &mut Tee) {
     out.line("latbench sweep: every thread at the same slice");
     for slice_us in SWEEP_US {
         let reading = measure(slice_us * 1000, slice_us * 1000);
@@ -360,7 +333,7 @@ fn sweep(out: &mut Out) {
 /// A clamp rather than an error, so a program written against another
 /// scheduler's range gets the nearest thing this one serves. The check is that
 /// it says so: `sched_getattr` reports what was granted, not what was asked.
-fn clamp(out: &mut Out) {
+fn clamp(out: &mut Tee) {
     let Ok(original) = sched_getattr(0) else {
         out.line("latbench: sched_getattr failed");
         return;

@@ -17,10 +17,10 @@ mod counters;
 mod harness;
 mod workloads;
 
-use std::io::Write;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use edos_lib::io::Tee;
 use edos_lib::sys::{SYS_SYNC, syscall0};
 
 use counters::Counters;
@@ -103,69 +103,41 @@ impl Mode {
     }
 }
 
-/// Report sink: stdout, and optionally the kernel log as well.
-///
-/// The guest terminal holds far fewer lines than a full run prints, and
-/// `/dev/klog` is teed to the host's serial capture, so `--klog` is how a whole
-/// run gets read off a headless machine.
-struct Out {
-    klog: Option<std::fs::File>,
+// The report goes to stdout and, with `--klog`, to the kernel log as well: the
+// guest terminal holds far fewer lines than a full run prints, and `/dev/klog`
+// is teed to the host's serial capture, so that flag is how a whole run gets
+// read off a headless machine. The sink is `edos_lib::io::Tee`; only this
+// suite's own columns are below.
+
+/// The column headings a phase's rows are set under.
+fn header(out: &mut Tee, title: &str) {
+    out.blank();
+    out.line(&format!(
+        "{title:<33} {:>8} {:>9} {:>8} {:>8} {:>9}",
+        "MiB/s", "ops/s", "p50", "p99", "max"
+    ));
 }
 
-impl Out {
-    fn new(enabled: bool) -> Self {
-        Self {
-            klog: enabled
-                .then(|| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open("/dev/klog")
-                        .ok()
-                })
-                .flatten(),
-        }
+/// Print one result. Returns 1 if the benchmark failed, for the exit code.
+fn report_row(out: &mut Tee, r: &Report) -> u32 {
+    let label = format!("{} {}", r.name, r.unit);
+    if let Some(error) = &r.error {
+        out.line(&format!("{label:<33} SKIP: {error}"));
+        return 1;
     }
-
-    fn line(&mut self, text: &str) {
-        println!("{text}");
-        if let Some(klog) = &mut self.klog {
-            let _ = writeln!(klog, "{text}");
-        }
-    }
-
-    fn blank(&mut self) {
-        self.line("");
-    }
-
-    fn header(&mut self, title: &str) {
-        self.blank();
-        self.line(&format!(
-            "{title:<33} {:>8} {:>9} {:>8} {:>8} {:>9}",
-            "MiB/s", "ops/s", "p50", "p99", "max"
-        ));
-    }
-
-    /// Print one result. Returns 1 if the benchmark failed, for the exit code.
-    fn report(&mut self, r: &Report) -> u32 {
-        let label = format!("{} {}", r.name, r.unit);
-        if let Some(error) = &r.error {
-            self.line(&format!("{label:<33} SKIP: {error}"));
-            return 1;
-        }
-        let throughput = if r.bytes == 0 {
-            "-".to_string()
-        } else {
-            rate(r.mib_per_sec())
-        };
-        self.line(&format!(
-            "{label:<33} {throughput:>8} {:>9} {:>8} {:>8} {:>9}",
-            rate(r.ops_per_sec()),
-            duration(r.latency.p50),
-            duration(r.latency.p99),
-            duration(r.latency.max),
-        ));
-        0
-    }
+    let throughput = if r.bytes == 0 {
+        "-".to_string()
+    } else {
+        rate(r.mib_per_sec())
+    };
+    out.line(&format!(
+        "{label:<33} {throughput:>8} {:>9} {:>8} {:>8} {:>9}",
+        rate(r.ops_per_sec()),
+        duration(r.latency.p50),
+        duration(r.latency.p99),
+        duration(r.latency.max),
+    ));
+    0
 }
 
 fn usage() -> ! {
@@ -294,7 +266,7 @@ fn parse_args() -> Options {
 
 fn main() -> ExitCode {
     let opts = parse_args();
-    let mut out = Out::new(opts.klog);
+    let mut out = Tee::new(opts.klog);
 
     if opts.mode == Mode::Clean {
         workloads::cleanup(&opts.path);
@@ -328,17 +300,17 @@ fn main() -> ExitCode {
 
     match opts.mode {
         Mode::Raw => {
-            out.header("RAW DEVICE READ");
+            header(&mut out, "RAW DEVICE READ");
             for &chunk in SWEEP {
                 let report = workloads::raw_read(&opts.path, chunk, RAW_SKIP, RAW_SPAN, budget);
-                failures += out.report(&report);
+                failures += report_row(&mut out, &report);
             }
         }
         Mode::RawWrite => {
-            out.header("RAW DEVICE WRITE");
+            header(&mut out, "RAW DEVICE WRITE");
             for &chunk in SWEEP {
                 let report = workloads::raw_write(&opts.path, chunk, RAW_SKIP, RAW_SPAN, budget);
-                failures += out.report(&report);
+                failures += report_row(&mut out, &report);
             }
         }
         Mode::RaPrep => match workloads::ra_prepare(&opts.path, opts.ra_bytes()) {
@@ -436,7 +408,7 @@ fn main() -> ExitCode {
 /// * `ncq_max_inflight` — the high-water mark. It is never reset, so only the
 ///   rise across the pass belongs to it; a pass that leaves it unmoved has
 ///   asked for no queue depth at all.
-fn ra_report(out: &mut Out, r: &workloads::RaReport) -> u32 {
+fn ra_report(out: &mut Tee, r: &workloads::RaReport) -> u32 {
     out.blank();
     out.line(&format!(
         "READAHEAD  cold sequential pass, {} in {} calls of {}",
@@ -499,26 +471,26 @@ fn ra_report(out: &mut Out, r: &workloads::RaReport) -> u32 {
     }
 }
 
-fn write_phase(out: &mut Out, dir: &str, budget: Budget) -> u32 {
+fn write_phase(out: &mut Tee, dir: &str, budget: Budget) -> u32 {
     let mut failures = 0;
 
-    out.header("WRITE");
+    header(out, "WRITE");
     for &chunk in SWEEP {
-        failures += out.report(&workloads::write_seq(dir, chunk, budget));
+        failures += report_row(out, &workloads::write_seq(dir, chunk, budget));
     }
-    failures += out.report(&workloads::write_buffered(dir, budget));
-    failures += out.report(&workloads::write_whole_file(dir, 1 << 20, budget));
-    failures += out.report(&workloads::write_positional(dir, 65536, budget));
+    failures += report_row(out, &workloads::write_buffered(dir, budget));
+    failures += report_row(out, &workloads::write_whole_file(dir, 1 << 20, budget));
+    failures += report_row(out, &workloads::write_positional(dir, 65536, budget));
     for &chunk in SWEEP {
-        failures += out.report(&workloads::overwrite_seq(dir, chunk, budget));
+        failures += report_row(out, &workloads::overwrite_seq(dir, chunk, budget));
     }
-    failures += out.report(&workloads::write_random(dir, WORKING_SET, budget));
+    failures += report_row(out, &workloads::write_random(dir, WORKING_SET, budget));
     // Every row above stops timing while the bytes are still in the page
     // cache. These two are the durable numbers.
     for &chunk in &[4096usize, 1 << 20] {
-        failures += out.report(&workloads::write_durable(dir, chunk, budget));
+        failures += report_row(out, &workloads::write_durable(dir, chunk, budget));
     }
-    failures += out.report(&workloads::write_mmap(dir, 4 << 20, budget));
+    failures += report_row(out, &workloads::write_mmap(dir, 4 << 20, budget));
 
     // Durability is a separate cost from throughput, and it is the cost every
     // number above excludes: the writes are still in flight when their test
@@ -531,28 +503,28 @@ fn write_phase(out: &mut Out, dir: &str, budget: Budget) -> u32 {
         duration(t0.elapsed().as_nanos() as u64)
     ));
 
-    out.header("METADATA");
-    failures += out.report(&workloads::meta_create_unlink(dir, budget));
-    failures += out.report(&workloads::meta_stat(dir, budget));
-    failures += out.report(&workloads::meta_readdir(dir, budget));
+    header(out, "METADATA");
+    failures += report_row(out, &workloads::meta_create_unlink(dir, budget));
+    failures += report_row(out, &workloads::meta_stat(dir, budget));
+    failures += report_row(out, &workloads::meta_readdir(dir, budget));
 
     failures
 }
 
-fn read_phase(out: &mut Out, dir: &str, budget: Budget) -> u32 {
+fn read_phase(out: &mut Tee, dir: &str, budget: Budget) -> u32 {
     let mut failures = 0;
 
-    out.header("READ");
+    header(out, "READ");
     for &chunk in SWEEP {
-        failures += out.report(&workloads::read_seq(dir, chunk, false, budget));
+        failures += report_row(out, &workloads::read_seq(dir, chunk, false, budget));
     }
-    failures += out.report(&workloads::read_positional(dir, 65536, budget));
-    failures += out.report(&workloads::read_whole_file(dir, 1 << 20, budget));
-    failures += out.report(&workloads::read_random(dir, budget));
-    failures += out.report(&workloads::read_mmap(dir, 4 << 20, budget));
+    failures += report_row(out, &workloads::read_positional(dir, 65536, budget));
+    failures += report_row(out, &workloads::read_whole_file(dir, 1 << 20, budget));
+    failures += report_row(out, &workloads::read_random(dir, budget));
+    failures += report_row(out, &workloads::read_mmap(dir, 4 << 20, budget));
     // Same file, same call size, guaranteed cache hit: the difference against
     // the first `read 1MiB` line is what the page cache is worth.
-    failures += out.report(&workloads::read_seq(dir, 1 << 20, true, budget));
+    failures += report_row(out, &workloads::read_seq(dir, 1 << 20, true, budget));
 
     failures
 }

@@ -24,40 +24,13 @@
 //!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
 
+use edos_lib::io::Tee;
 use edos_lib::process::{close, fork, pipe, read, sched_yield, write};
-
-/// Report sink: stdout, and optionally the kernel log as well.
-struct Out {
-    klog: Option<std::fs::File>,
-}
-
-impl Out {
-    fn new(enabled: bool) -> Self {
-        Self {
-            klog: enabled
-                .then(|| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open("/dev/klog")
-                        .ok()
-                })
-                .flatten(),
-        }
-    }
-
-    fn line(&mut self, text: &str) {
-        println!("{text}");
-        if let Some(klog) = &mut self.klog {
-            let _ = writeln!(klog, "{text}");
-        }
-    }
-}
 
 /// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
 fn cpus_online() -> u64 {
@@ -143,7 +116,7 @@ fn main() {
             },
         }
     }
-    let mut out = Out::new(klog);
+    let mut out = Tee::new(klog);
 
     let cpus = cpus_online();
     out.line(&format!("switchbench {iters} iters, {cpus} cpus online"));
@@ -214,7 +187,7 @@ fn main() {
 /// table lookup and the error return, so the difference between the two is
 /// what every call that touches a descriptor pays before reaching its own
 /// work. Both are the floor under `pipe echo` below.
-fn syscall_floor(out: &mut Out, iters: u64) {
+fn syscall_floor(out: &mut Tee, iters: u64) {
     let getpid = best_ns(iters, || {
         edos_lib::process::getpid();
     });
@@ -239,7 +212,7 @@ fn syscall_floor(out: &mut Out, iters: u64) {
 /// whole remainder to the wake path -- which is wrong, the wake itself is
 /// about 50 ns. Whatever this case costs is the part that has nothing to do
 /// with handing over a CPU.
-fn pipe_no_block(out: &mut Out, iters: u64) {
+fn pipe_no_block(out: &mut Tee, iters: u64) {
     let Some((r, w)) = pipe() else {
         out.line("switchbench: pipe failed, skipping the non-blocking case");
         return;
@@ -273,7 +246,7 @@ fn pipe_no_block(out: &mut Out, iters: u64) {
 /// machine is dominated by the woken thread waiting its turn behind everything
 /// already queued -- under the 50-thread `sched-test` suite a 50 ms sleep
 /// takes 130-280 ms, and none of that is the timer.
-fn sleep_overshoot(out: &mut Out) {
+fn sleep_overshoot(out: &mut Tee) {
     // The first sleep of a process pays for whatever its return path touches
     // for the first time, which lands as a millisecond of overshoot on a
     // measurement that is otherwise accurate to tens of microseconds.
@@ -346,7 +319,7 @@ fn alloc_pages(pages: usize) -> Vec<u8> {
 ///
 /// It is best-of-batches, unlike the cross-process case, which is a single
 /// batch of `iters` and reads 16% apart between runs for that reason.
-fn pipe_round_trip_threads(out: &mut Out, iters: u64, touch: usize) {
+fn pipe_round_trip_threads(out: &mut Tee, iters: u64, touch: usize) {
     let (Some((up_r, up_w)), Some((down_r, down_w))) = (pipe(), pipe()) else {
         out.line("switchbench: pipe failed, skipping the thread round trip");
         return;
@@ -396,7 +369,7 @@ fn pipe_round_trip_threads(out: &mut Out, iters: u64, touch: usize) {
 
 /// Time a one-byte round trip through a pair of pipes, forked child at the
 /// far end. Both sides block, so each trip is two parks and two wakes.
-fn pipe_round_trip(out: &mut Out, iters: u64, touch: usize) {
+fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
     let (Some((up_r, up_w)), Some((down_r, down_w))) = (pipe(), pipe()) else {
         out.line("switchbench: pipe failed, skipping the pipe case");
         return;

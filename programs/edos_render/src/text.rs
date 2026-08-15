@@ -198,6 +198,47 @@ pub fn width_tracked(text: &str, style: Style, letter: i32) -> u32 {
     (width(text, style) as i32 + letter * count).max(0) as u32
 }
 
+/// What marks a string that was cut to fit.
+pub const ELLIPSIS: &str = "…";
+
+/// Advance of one character set in `style`, unrounded.
+///
+/// Unrounded because [`width`] rounds the whole string once: accumulating
+/// per-character *pixels* overstates a prefix by up to a pixel per character,
+/// and a caller comparing that running total against a column would cut text
+/// that fits.
+fn advance(ch: char, style: Style) -> f32 {
+    if !font::available() {
+        return bitmap::advance() as f32;
+    }
+    font::glyph(style.family, style.weight, style.px, ch)
+        .map(|glyph| glyph.advance)
+        .unwrap_or(0.0)
+}
+
+/// `text` cut to `available` pixels, with an [`ELLIPSIS`] where it was cut.
+///
+/// One pass, accumulating advances. Measuring each candidate prefix from the
+/// start instead is quadratic in both the metric lookups and the allocations,
+/// which a path bar redrawing on every pointer move pays for every frame.
+pub fn elide(text: &str, available: u32, style: Style) -> String {
+    if width(text, style) <= available {
+        return text.to_string();
+    }
+    let room = available.saturating_sub(width(ELLIPSIS, style));
+    let mut kept = String::new();
+    let mut used = 0.0f32;
+    for ch in text.chars() {
+        used += advance(ch, style);
+        if used.ceil() as u32 > room {
+            break;
+        }
+        kept.push(ch);
+    }
+    kept.push_str(ELLIPSIS);
+    kept
+}
+
 /// Height of one line set in `style`, in pixels.
 pub fn line_height(style: Style) -> u32 {
     if !font::available() {

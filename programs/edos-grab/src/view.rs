@@ -9,9 +9,13 @@ use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, space};
 use edos_render::text::Style;
 use edos_render::theme::Theme;
-use edos_render::widgets::{
-    Rect, draw_rect, draw_rect_outline, draw_text_styled, text_height, text_width,
-};
+use edos_render::widgets::{Canvas, Rect, text_height, text_width};
+
+/// `text` cut to `limit` pixels in the interface face, which is the only face
+/// this program sets its chrome in.
+fn elide(text: &str, limit: u32) -> String {
+    edos_render::text::elide(text, limit, Style::new(0))
+}
 
 /// Margin from a panel's edge to its contents.
 pub const PAD: u32 = space(3);
@@ -26,7 +30,6 @@ pub const BUTTON_W: u32 = space(22);
 /// Share of the window the package list takes, in percent.
 const LIST_PERCENT: u32 = 55;
 /// What stands in for the part of a string that did not fit.
-const ELLIPSIS: &str = "…";
 
 /// A window divided into its panels. Derived state: rebuilt whenever it is
 /// needed rather than kept, so a resize cannot leave a click landing on a
@@ -103,85 +106,6 @@ impl Layout {
         let slot = ((y - self.list.y) as u32 / ROW_H) as usize;
         (slot < self.visible_rows()).then_some(slot)
     }
-}
-
-/// A pixel buffer with the drawing this program does hung off it.
-pub struct Canvas<'a> {
-    pub buf: &'a mut [u32],
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Canvas<'_> {
-    pub fn fill(&mut self, rect: Rect, color: u32) {
-        draw_rect(
-            self.buf,
-            self.width,
-            self.height,
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            color,
-        );
-    }
-
-    pub fn outline(&mut self, rect: Rect, color: u32) {
-        draw_rect_outline(
-            self.buf,
-            self.width,
-            self.height,
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            color,
-        );
-    }
-
-    pub fn text(&mut self, x: i32, y: i32, text: &str, style: Style) {
-        draw_text_styled(self.buf, self.width, self.height, x, y, text, style);
-    }
-
-    /// Draw `pixels`, a `w` x `h` opaque image, with its top-left at (`x`, `y`).
-    pub fn blit(&mut self, x: i32, y: i32, w: u32, h: u32, pixels: &[u32]) {
-        for row in 0..h {
-            let py = y + row as i32;
-            if py < 0 || py >= self.height as i32 {
-                continue;
-            }
-            for col in 0..w {
-                let px = x + col as i32;
-                if px < 0 || px >= self.width as i32 {
-                    continue;
-                }
-                let src = (row * w + col) as usize;
-                let dst = (py as u32 * self.width + px as u32) as usize;
-                if let (Some(&value), Some(slot)) = (pixels.get(src), self.buf.get_mut(dst)) {
-                    *slot = value;
-                }
-            }
-        }
-    }
-}
-
-/// `text` cut to `limit` pixels, with an ellipsis where it was cut.
-pub fn elide(text: &str, limit: u32) -> String {
-    if text_width(text) <= limit {
-        return text.to_string();
-    }
-    let room = limit.saturating_sub(text_width(ELLIPSIS));
-    let mut out = String::new();
-    for ch in text.chars() {
-        let mut candidate = out.clone();
-        candidate.push(ch);
-        if text_width(&candidate) > room {
-            break;
-        }
-        out = candidate;
-    }
-    out.push_str(ELLIPSIS);
-    out
 }
 
 /// Break `text` into lines no wider than `limit` pixels, on word boundaries.

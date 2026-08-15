@@ -9,7 +9,6 @@
 //! host's serial capture.
 
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::time::Instant;
 
 use edos_render::widgets::{Terminal, Widget};
@@ -135,11 +134,7 @@ fn main() {
     );
 
     print!("{}", out);
-    if let Ok(mut klog) = std::fs::OpenOptions::new().write(true).open("/dev/klog") {
-        for line in out.lines() {
-            let _ = klog.write_all(format!("termbench: {}", line).as_bytes());
-        }
-    }
+    edos_lib::io::klog_dump("termbench:", out.lines());
 }
 
 fn new_terminal() -> Terminal {
