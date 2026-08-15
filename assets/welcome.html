@@ -92,6 +92,13 @@
       .kin h3 + p { color: #a3be8c }
       .kin h3 ~ p { border-left: 4px solid #b48ead; padding-left: 8px }
       .kin p + p + p { font-weight: bold }
+      /* Logical combinators: `:not()` excludes, `:is()` gathers a list into one
+         rule, and `:where()` does the same while weighing nothing, so the bare
+         `.logic p` written after it still wins on the paragraph they share. */
+      .logic p:not(.keep) { color: #a3be8c }
+      .logic p:is(.keep, .also) { border-left: 4px solid #88c0d0; padding-left: 8px }
+      .logic p:where(.keep) { color: #bf616a }
+      .logic p { color: #ebcb8b }
     </style>
   </head>
   <body>
@@ -247,6 +254,17 @@ while the newline above them is kept.</p>
         bar and the page's own colour.</p>
       <p>The third, which <code>p + p + p</code> reaches as well, so it is
         bold.</p>
+    </div>
+
+    <h2>Which paragraph a logical selector reaches</h2>
+    <div class="logic">
+      <p>No class at all, so <code>:not(.keep)</code> reaches it and it is
+        green.</p>
+      <p class="keep">Excluded from that rule, and the <code>:where(.keep)</code>
+        one weighs nothing, so it is amber like the bare rule asks. It carries
+        the bar from <code>:is(.keep, .also)</code>.</p>
+      <p class="also">The other arm of the same <code>:is()</code> list, so it
+        wears the bar too, and stays green.</p>
     </div>
 
     <h2>What a list may be numbered in</h2>

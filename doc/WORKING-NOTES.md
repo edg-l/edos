@@ -7761,7 +7761,7 @@ baseline is better than putting it somewhere arbitrary.
 ## `make host-tests` is the userspace suite (2026-08-15)
 
 `make test` boots a guest and runs the in-kernel suite; nothing ran the unit
-tests in `programs/` at all. There are 94 of them across four crates — URL
+tests in `programs/` at all. There are 98 of them across four crates — URL
 resolution (`edos_http/src/url.rs`), the CSS cascade
 (`edos-web/src/css.rs`), the SSH wire format, key exchange and auth
 (`sshd/src/*.rs`), and `grab`'s merge — and every one is decidable without a
@@ -7887,3 +7887,40 @@ italic renders identically to upright and a screenshot proves nothing about it.
 The same is true of the `:nth-last-child(2)` rule already in the fixture. Use a
 weight, a colour or a box to demonstrate a selector there; check the cascade
 itself with a host test.
+
+## `:not()` fails open, and a selector list was never split safely (2026-08-15)
+
+`:not()`, `:is()` and `:where()` are one test in `css.rs` — does any argument
+compound match — with `:not()` inverting it. Two things about them are worth
+keeping.
+
+**An unread `:not()` matches more, not less.** Everywhere else in this parser,
+refusing to read a construct is the conservative move: an unknown pseudo-class
+drops its rule and nothing gets styled. Negation reverses that. Drop the
+argument from `p:not(.lead)` and the rule applies to every `p` on the page
+rather than to none, so "parse what you can and ignore the rest" would restyle
+the document. `parse_compound` therefore rejects anything it cannot represent
+inside an argument — whitespace and `>` now join `+`, `~` and the stray
+parens/brackets it already refused — and the whole selector is dropped. Before
+that, `:not(.a > .b)` parsed as two classes, one of them named `a > `, which no
+element can carry: the negation was then always true and the rule applied
+everywhere.
+
+**Specificity is the heaviest argument, not one class each.** CSS Selectors 4
+§17: `:where()` weighs zero, `:not()`/`:is()` weigh their largest argument.
+That could not be expressed while `Compound::specificity` counted
+`pseudos.len()` at the class level, so each `Pseudo` now reports its own
+weight and the compound sums them. The structural family still answers
+`(0, 1, 0)`, which is what that line meant before.
+
+**`parse_selectors` split the prelude on a plain `split(',')`.** That was
+already wrong for `p[title="a,b"], p` — the attribute value ended the selector
+and both halves were dropped — and `:is(.x, .y)` made it visible. The fix is
+`split_selector_list`, which splits on commas outside `(`, `[` and quotes; it
+serves both the top-level prelude and the argument of a logical pseudo-class.
+The pseudo-class argument reader had the matching bug: it stopped at the first
+`)`, so `:not(:nth-child(2))` was truncated. It now tracks nesting and quotes.
+
+The parser recurses through an argument, so `MAX_SELECTOR_NESTING` (4) bounds
+it; a page nesting `:not(:is(:not(…)))` deeper than that is not describing
+anything.

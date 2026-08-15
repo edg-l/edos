@@ -61,7 +61,7 @@ Turns "readable" into "looks close to right".
 Where it stands: `css.rs` is the cascade. It reads every `<style>` element,
 every `<link rel=stylesheet>` the document fetches, and every `style=`
 attribute; matches selectors that are comma-separated chains of
-tag/`.class`/`#id`/`*`/`[attr]`/`:nth-child()` compounds joined by the
+tag/`.class`/`#id`/`*`/`[attr]`/`:nth-child()`/`:not()` compounds joined by the
 descendant, child (`>`) or sibling (`+`, `~`) combinators; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
@@ -116,6 +116,18 @@ without them, and each is small:
   costs one copy per parent rather than a growing prefix per child; the entries
   in that row carry an empty row of their own, since a chain like `p + p + p`
   keeps walking the subject's row and never asks a sibling for its siblings.
+- **Logical combinators.** `:not()`, `:is()` and `:where()` over a
+  comma-separated list of compounds. The test is the same one in all three —
+  does any argument match — with `:not()` inverting the answer. Specificity is
+  the heaviest argument's, not a sum and not a class each: `:where()` weighs
+  nothing at all, which is the whole reason a sheet reaches for it. An argument
+  carrying a combinator is not read, and dropping the rule is the safe answer
+  rather than the conservative-looking one — a `:not()` matched without its
+  argument matches *more* elements, not fewer, so guessing would restyle the
+  document. Nesting stops at `MAX_SELECTOR_NESTING`, since the parser recurses
+  through the argument. The selector list is split on commas outside brackets,
+  parentheses and quotes, which a plain `split(',')` got wrong for
+  `[title="a,b"]` as well.
 - **`@layer` bodies are parsed**, since a modern stylesheet puts nearly all of
   itself inside one and skipping them drops the sheet. Layer *order* is not
   honoured — rules keep their document order — which differs from a real

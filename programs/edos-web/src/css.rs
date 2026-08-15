@@ -888,10 +888,10 @@ impl AttrTest {
     }
 }
 
-/// One structural pseudo-class, per CSS Selectors 4 §9. The whole family
-/// reduces to two questions, since `:first-child` is `:nth-child(1)` and
-/// `:last-of-type` is `:nth-last-of-type(1)`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// One pseudo-class. The structural family of CSS Selectors 4 §9 reduces to two
+/// questions, since `:first-child` is `:nth-child(1)` and `:last-of-type` is
+/// `:nth-last-of-type(1)`; the logical combinators of §4 are the third.
+#[derive(Clone, Debug)]
 enum Pseudo {
     /// `:nth-child(An+B)` and its three relatives.
     Nth {
@@ -904,13 +904,25 @@ enum Pseudo {
     },
     /// `:only-child`, or `:only-of-type` when `of_type`.
     Only { of_type: bool },
+    /// `:not()`, `:is()` and `:where()` over a selector list, per CSS Selectors
+    /// 4 §4. The arguments are compounds: an argument carrying a combinator is
+    /// not read, so the rule using it is dropped rather than applied wrongly.
+    Logical {
+        /// The test passes when any one of these matches.
+        any: Vec<Compound>,
+        /// `:not()` inverts that answer.
+        negate: bool,
+        /// `:where()` contributes no specificity at all; the other two
+        /// contribute the largest among their arguments.
+        weightless: bool,
+    },
 }
 
 impl Pseudo {
     fn matches(&self, element: &Element) -> bool {
         let at = &element.position;
-        match *self {
-            Pseudo::Nth {
+        match self {
+            &Pseudo::Nth {
                 a,
                 b,
                 from_end,
@@ -927,13 +939,37 @@ impl Pseudo {
                 let index = if from_end { count + 1 - index } else { index };
                 nth_matches(a, b, index as i32)
             }
-            Pseudo::Only { of_type } => {
+            &Pseudo::Only { of_type } => {
                 if of_type {
                     at.type_count == 1
                 } else {
                     at.count == 1
                 }
             }
+            Pseudo::Logical { any, negate, .. } => {
+                any.iter().any(|c| c.matches(element)) != *negate
+            }
+        }
+    }
+
+    /// What this pseudo-class adds to the compound holding it.
+    fn specificity(&self) -> (u32, u32, u32) {
+        match self {
+            Pseudo::Logical {
+                any, weightless, ..
+            } => {
+                if *weightless {
+                    (0, 0, 0)
+                } else {
+                    any.iter()
+                        .map(Compound::specificity)
+                        .max()
+                        .unwrap_or((0, 0, 0))
+                }
+            }
+            // A structural pseudo-class counts alongside a class
+            // (CSS Selectors 4 §17).
+            _ => (0, 1, 0),
         }
     }
 }
@@ -974,13 +1010,20 @@ impl Compound {
     }
 
     fn specificity(&self) -> (u32, u32, u32) {
-        (
+        let mut spec = (
             self.id.is_some() as u32,
-            // An attribute selector and a pseudo-class both count alongside a
-            // class (CSS Selectors 4 §17).
-            (self.classes.len() + self.attrs.len() + self.pseudos.len()) as u32,
+            // An attribute selector counts alongside a class
+            // (CSS Selectors 4 §17).
+            (self.classes.len() + self.attrs.len()) as u32,
             self.tag.is_some() as u32,
-        )
+        );
+        for pseudo in &self.pseudos {
+            let (id, class, tag) = pseudo.specificity();
+            spec.0 += id;
+            spec.1 += class;
+            spec.2 += tag;
+        }
+        spec
     }
 }
 
@@ -1474,11 +1517,43 @@ fn strip_comments(source: &str) -> String {
     out
 }
 
+/// Split a comma-separated selector list, with `(...)`, `[...]` and quoted
+/// strings opaque, so a comma inside an attribute value or a `:not()` argument
+/// does not end a selector.
+fn split_selector_list(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in text.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            current.push(ch);
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    out.push(current);
+    out
+}
+
 /// A comma-separated selector list, dropping any selector using syntax this
 /// does not implement rather than matching it too loosely.
 fn parse_selectors(prelude: &str) -> Vec<Selector> {
-    prelude
-        .split(',')
+    split_selector_list(prelude)
+        .iter()
         .filter_map(|text| parse_selector(text.trim()))
         .collect()
 }
@@ -1510,7 +1585,7 @@ fn parse_selector(text: &str) -> Option<Selector> {
             continue;
         }
         parts.push(Step {
-            compound: parse_compound(&word)?,
+            compound: parse_compound(&word, 0)?,
             combinator: pending.take().unwrap_or(Combinator::Descendant),
         });
     }
@@ -1572,7 +1647,14 @@ fn tokenize_selector(text: &str) -> Option<Vec<String>> {
     (!tokens.is_empty()).then_some(tokens)
 }
 
-fn parse_compound(word: &str) -> Option<Compound> {
+/// One compound selector. `depth` counts the enclosing logical pseudo-classes,
+/// since `:not()` takes selectors that may themselves hold one; a page nesting
+/// them beyond a handful is not describing anything, and reading it would
+/// recurse as deep as the source is long.
+fn parse_compound(word: &str, depth: u32) -> Option<Compound> {
+    if depth > MAX_SELECTOR_NESTING {
+        return None;
+    }
     let mut compound = Compound::default();
     let mut current = String::new();
     let mut kind = b' ';
@@ -1639,11 +1721,28 @@ fn parse_compound(word: &str) -> Option<Compound> {
                 if chars.peek() == Some(&'(') {
                     chars.next();
                     let mut body = String::new();
+                    let mut nesting = 1usize;
+                    let mut quote: Option<char> = None;
                     let mut closed = false;
                     for ch in chars.by_ref() {
-                        if ch == ')' {
-                            closed = true;
-                            break;
+                        match quote {
+                            Some(q) => {
+                                if ch == q {
+                                    quote = None;
+                                }
+                            }
+                            None => match ch {
+                                '"' | '\'' => quote = Some(ch),
+                                '(' => nesting += 1,
+                                ')' => {
+                                    nesting -= 1;
+                                    if nesting == 0 {
+                                        closed = true;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            },
                         }
                         body.push(ch);
                     }
@@ -1652,13 +1751,17 @@ fn parse_compound(word: &str) -> Option<Compound> {
                     }
                     arg = Some(body);
                 }
-                compound.pseudos.push(parse_pseudo(&name, arg.as_deref())?);
+                compound
+                    .pseudos
+                    .push(parse_pseudo(&name, arg.as_deref(), depth)?);
             }
             // A combinator is the tokenizer's business and never reaches a
-            // compound; anything here is a stray, or an unopened functional
-            // notation, and a compound matched without it would apply far too
-            // widely.
-            '+' | '~' | '(' | ')' | ']' => return None,
+            // compound; anything here is a stray, an unopened functional
+            // notation, or a combinator inside a logical pseudo-class, whose
+            // arguments are compounds. A compound matched without it would
+            // apply far too widely.
+            '+' | '~' | '>' | '(' | ')' | ']' => return None,
+            _ if ch.is_whitespace() => return None,
             _ => current.push(ch),
         }
     }
@@ -1675,9 +1778,12 @@ fn parse_compound(word: &str) -> Option<Compound> {
     Some(compound)
 }
 
-/// One `:name` or `:name(...)`, per CSS Selectors 4 §9. `None` for anything
-/// not implemented, which drops the whole selector.
-fn parse_pseudo(name: &str, arg: Option<&str>) -> Option<Pseudo> {
+/// How deep `:not(:is(...))` may nest before a selector is refused.
+const MAX_SELECTOR_NESTING: u32 = 4;
+
+/// One `:name` or `:name(...)`, per CSS Selectors 4 §4 and §9. `None` for
+/// anything not implemented, which drops the whole selector.
+fn parse_pseudo(name: &str, arg: Option<&str>, depth: u32) -> Option<Pseudo> {
     let name = name.to_lowercase();
     let nth = |a: i32, b: i32, from_end: bool, of_type: bool| {
         Some(Pseudo::Nth {
@@ -1685,6 +1791,17 @@ fn parse_pseudo(name: &str, arg: Option<&str>) -> Option<Pseudo> {
             b,
             from_end,
             of_type,
+        })
+    };
+    let logical = |arg: &str, negate: bool, weightless: bool| {
+        let mut any = Vec::new();
+        for text in split_selector_list(arg) {
+            any.push(parse_compound(text.trim(), depth + 1)?);
+        }
+        Some(Pseudo::Logical {
+            any,
+            negate,
+            weightless,
         })
     };
     match (name.as_str(), arg) {
@@ -1698,6 +1815,9 @@ fn parse_pseudo(name: &str, arg: Option<&str>) -> Option<Pseudo> {
         ("nth-last-child", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, true, false)),
         ("nth-of-type", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, false, true)),
         ("nth-last-of-type", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, true, true)),
+        ("not", Some(arg)) => logical(arg, true, false),
+        ("is", Some(arg)) => logical(arg, false, false),
+        ("where", Some(arg)) => logical(arg, false, true),
         _ => None,
     }
 }
@@ -2561,6 +2681,98 @@ mod tests {
         subject.siblings = Rc::new(vec![before, subject.clone()]);
         let stack = vec![element("div", &[]), subject];
         assert_eq!(cascade(&sheet, &stack, None).bold, Some(true));
+    }
+
+    #[test]
+    fn logical_pseudo_classes_negate_and_gather() {
+        let sheet = sheet(
+            "p:not(.lead) { color: red }
+             p:is(.lead, .note) { font-weight: bold }
+             p:where(.lead) { font-style: italic }
+             p:not(.lead):not(.note) { text-indent: 3px }",
+        );
+        let plain = cascade(&sheet, &[element("p", &[])], None);
+        assert_eq!(plain.color, Some(rgb(255, 0, 0)));
+        assert_eq!(plain.bold, None);
+        assert_eq!(plain.indent, 3);
+        let lead = cascade(&sheet, &[element("p", &["lead"])], None);
+        assert_eq!(lead.color, None);
+        assert_eq!(lead.bold, Some(true));
+        assert_eq!(lead.italic, Some(true));
+        assert_eq!(lead.indent, 0);
+        // Either arm of the `:is()` list answers it; neither arm of the pair of
+        // `:not()`s may.
+        let note = cascade(&sheet, &[element("p", &["note"])], None);
+        assert_eq!(note.bold, Some(true));
+        assert_eq!(note.indent, 0);
+    }
+
+    #[test]
+    fn a_logical_pseudo_class_takes_its_arguments_specificity() {
+        // `:not(.x)` weighs a class, so it beats the bare tag written after it;
+        // `:where(.x)` weighs nothing, so the same tag beats it.
+        let negated = sheet("p:not(.lead) { color: red } p { color: blue }");
+        assert_eq!(
+            cascade(&negated, &[element("p", &[])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        let weightless = sheet("p:where(.lead) { color: red } p { color: blue }");
+        assert_eq!(
+            cascade(&weightless, &[element("p", &["lead"])], None).color,
+            Some(rgb(0, 0, 255))
+        );
+        // A list weighs its heaviest argument, not its last one.
+        let listed = sheet("p:is(#head, .lead) { color: red } p.lead { color: blue }");
+        let mut head = element("p", &["lead"]);
+        head.id = Some("head".to_string());
+        assert_eq!(
+            cascade(&listed, &[head], None).color,
+            Some(rgb(255, 0, 0)),
+            "the id arm weighs the list, so it outranks a rule weighing a class"
+        );
+    }
+
+    #[test]
+    fn a_logical_pseudo_class_this_cannot_read_drops_its_rule() {
+        // A combinator inside the argument, an empty list, and a nesting depth
+        // past the limit are all unread rather than approximated — matching
+        // `:not()` too widely would style the whole document.
+        for source in [
+            "p:not(.a .b) { color: red }",
+            "p:not(.a > .b) { color: red }",
+            "p:not() { color: red }",
+            "p:not(.a, ) { color: red }",
+            "p:not(:is(:not(:is(:not(.a))))) { color: red }",
+        ] {
+            assert_eq!(
+                cascade(&sheet(source), &[element("p", &[])], None).color,
+                None,
+                "{source} should be dropped"
+            );
+        }
+        // Nesting up to the limit still reads, double negation and all.
+        let nested = sheet("p:not(:is(:not(.a))) { color: red }");
+        assert_eq!(
+            cascade(&nested, &[element("p", &["a"])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        assert_eq!(cascade(&nested, &[element("p", &[])], None).color, None);
+    }
+
+    #[test]
+    fn a_selector_list_splits_outside_brackets_and_parentheses() {
+        // The comma in the attribute value and the one in the `:is()` list are
+        // both inside the selector they belong to.
+        let sheet = sheet("p[title=\"a,b\"], p:is(.x, .y) { color: red }");
+        assert_eq!(
+            cascade(&sheet, &[element_with("p", &[("title", "a,b")])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        assert_eq!(
+            cascade(&sheet, &[element("p", &["y"])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        assert_eq!(cascade(&sheet, &[element("p", &[])], None).color, None);
     }
 
     #[test]
