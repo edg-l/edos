@@ -395,3 +395,34 @@ on through the log.
 | No cursor in a screenshot | expected: the cursor is on its own plane, see above |
 | `Could not access KVM kernel module` | not in the `kvm` group in this session |
 | Viewer disconnects | QEMU exited, since QEMU *is* the VNC server |
+
+## usb-tablet, not usb-mouse
+
+Measured 2026-08-15, and it is the whole of a "the window lags behind the
+pointer and the cursor wobbles" report from a QEMU-on-Windows guest.
+
+A relative pointing device does not tell the guest where the pointer is, only
+how far it moved. So QEMU has to walk the guest's pointer to where the host's
+already is, one small delta at a time, and each delta is its own HID report, its
+own transfer, its own interrupt. The same scripted drag, counted with
+`mouse_reports` in `/proc/gpu_stats`:
+
+| device | endpoint interval | reports for one drag |
+|---|---|---|
+| `usb-tablet` | `bInterval=4`, 1 ms | 21 |
+| `usb-mouse` | `bInterval=7`, 8 ms | 325 |
+
+Fifteen times the reports, drained through a poll that is eight times slower.
+The guest keeps a single transfer outstanding on the interrupt endpoint, so 325
+reports take about 2.6 seconds to get through, and for the whole of a drag the
+pointer is behind a queue it cannot empty. It catches up in bursts, which is the
+wobble.
+
+`scripts/edos-vm` has defaulted to `usb-tablet` since the report-descriptor
+parser landed; `make run` did not, and an invocation copied out of the
+GNUmakefile inherited the slow path. Both use it now.
+
+If a relative device is ever needed again (it is still `--pointer mouse`, for
+testing that path), the guest-side fix is to keep several TRBs queued on the
+interrupt endpoint instead of re-arming one at a time, so the controller never
+has to wait for the driver between reports.

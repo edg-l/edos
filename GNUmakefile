@@ -40,6 +40,15 @@ run-hdd: run-hdd-$(KARCH)
 # Display device configurations
 # blob=on enables zero-copy display (requires host CONFIG_UDMABUF=y + memfd backend)
 DISPLAY_VGA := -device VGA,vgamem_mb=32
+# usb-tablet, not usb-mouse. A relative device makes QEMU walk the pointer to
+# where the host's is with a stream of small deltas: measured, one drag that
+# costs 21 reports on the tablet costs 325 on the mouse, and usb-mouse also
+# advertises an 8 ms poll against the tablet's 1 ms. The guest keeps one
+# transfer outstanding, so those 325 take about 2.6 s to drain and the pointer
+# spends the whole drag behind a queue it cannot empty. That is what "the window
+# lags behind and the cursor wobbles" is.
+USB_INPUT := -device qemu-xhci -device usb-kbd -device usb-tablet
+
 DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display sdl
 DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display gtk,zoom-to-fit=off
 
@@ -69,7 +78,7 @@ define run_qemu_uefi
 		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img,aio=$(QEMU_AIO),discard=unmap \
 		-device ide-hd,drive=sata0,bus=ide.1 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
-		-device qemu-xhci -device usb-kbd -device usb-mouse \
+		$(USB_INPUT) \
 		-netdev user,id=net0 -device e1000e,netdev=net0 \
 		-audiodev $(AUDIODEV),id=snd0 \
 		-device intel-hda -device hda-output,audiodev=snd0 \
