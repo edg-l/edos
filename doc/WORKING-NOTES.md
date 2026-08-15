@@ -7201,9 +7201,14 @@ unsafe.
 **Three decisions in the parser that look like gaps and are not.** An
 `@supports` body is skipped whole, because applying rules conditional on a
 feature set this cannot answer for lets a page's fallback and its real styling
-both land. A selector containing `:`, `[`, `>`, `+`, `~` or `*` is dropped rather
+both land. A selector containing `:`, `[`, `+` or `~` is dropped rather
 than matched loosely, since a `p[hidden]` matched as `p` restyles the whole
-document. And an unparseable value leaves the inherited one standing rather
+document. The child combinator `>` and the universal selector `*` ARE
+supported: a `Selector` is a list of `Step`s, each carrying the compound and
+whether a `>` joins it to the one on its left, and matching right to left takes
+the parent instead of searching ancestors wherever that flag is set. `*` parses
+to an empty compound, which constrains nothing and contributes no
+specificity. And an unparseable value leaves the inherited one standing rather
 than falling back to a default the page never asked for.
 
 `assets/welcome.html` is installed at `/share/web/welcome.html` by the

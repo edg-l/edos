@@ -60,8 +60,9 @@ Turns "readable" into "looks close to right".
 
 Where it stands: `css.rs` is the cascade. It reads every `<style>` element,
 every `<link rel=stylesheet>` the document fetches, and every `style=`
-attribute; matches selectors that are comma-separated descendant chains of
-tag/`.class`/`#id` compounds; orders them by real specificity with the inline
+attribute; matches selectors that are comma-separated chains of
+tag/`.class`/`#id`/`*` compounds joined by the descendant or child (`>`)
+combinator; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration` (`underline`, `line-through`, `overline`
@@ -219,10 +220,11 @@ Three deliberate limits:
   about is not one this can answer for, and a rule set applied on a guess is
   worse than one lost.
 - **A selector using anything not implemented is dropped, not approximated.**
-  `a:hover`, `p[hidden]`, `>` and `*` all refuse to parse, because a selector
-  matched loosely applies far too widely; the failure mode of dropping one is a
-  style that does not appear, which is what an unimplemented property does
-  anyway.
+  `a:hover`, `p[hidden]` and the sibling combinators refuse to parse, because a
+  selector matched loosely applies far too widely; the failure mode of dropping
+  one is a style that does not appear, which is what an unimplemented property
+  does anyway. A dangling `>` -- leading, trailing or doubled -- is dropped by
+  the same rule.
 - **At most `doc::MAX_SHEETS` external sheets are fetched, and each one
   serially**, on the thread that is about to lay the page out. A page linking
   more than six is linking print and font sheets; a browser that fetched all of

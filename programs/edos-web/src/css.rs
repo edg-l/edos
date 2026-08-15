@@ -855,16 +855,26 @@ impl Compound {
     }
 }
 
-/// A descendant chain, the subject last: `nav ul li` is three compounds.
+/// One compound and how it is joined to the compound on its left.
+#[derive(Clone, Debug)]
+struct Step {
+    compound: Compound,
+    /// `true` when a `>` separates this compound from the one before it, so
+    /// that one must be its parent rather than any ancestor.
+    child: bool,
+}
+
+/// A chain, the subject last: `nav ul li` and `nav > ul li` are both three
+/// steps, differing only in the first one's combinator.
 #[derive(Clone, Debug)]
 struct Selector {
-    parts: Vec<Compound>,
+    parts: Vec<Step>,
 }
 
 impl Selector {
     /// Match right to left against the open element stack, whose last entry is
-    /// the element being matched. Ancestors are searched greedily from the
-    /// nearest, which is what a descendant combinator means.
+    /// the element being matched. A descendant combinator searches ancestors
+    /// greedily from the nearest; a child combinator takes the parent or fails.
     fn matches(&self, stack: &[Element]) -> bool {
         let Some((subject, ancestors)) = self.parts.split_last() else {
             return false;
@@ -872,22 +882,34 @@ impl Selector {
         let Some((element, rest)) = stack.split_last() else {
             return false;
         };
-        if !subject.matches(element) {
+        if !subject.compound.matches(element) {
             return false;
         }
         let mut remaining = rest;
-        for part in ancestors.iter().rev() {
-            match remaining.iter().rposition(|e| part.matches(e)) {
-                Some(index) => remaining = &remaining[..index],
-                None => return false,
+        let mut parent_only = subject.child;
+        for step in ancestors.iter().rev() {
+            if parent_only {
+                let Some((parent, before)) = remaining.split_last() else {
+                    return false;
+                };
+                if !step.compound.matches(parent) {
+                    return false;
+                }
+                remaining = before;
+            } else {
+                match remaining.iter().rposition(|e| step.compound.matches(e)) {
+                    Some(index) => remaining = &remaining[..index],
+                    None => return false,
+                }
             }
+            parent_only = step.child;
         }
         true
     }
 
     fn specificity(&self) -> (u32, u32, u32) {
         self.parts.iter().fold((0, 0, 0), |acc, part| {
-            let s = part.specificity();
+            let s = part.compound.specificity();
             (acc.0 + s.0, acc.1 + s.1, acc.2 + s.2)
         })
     }
@@ -1255,24 +1277,46 @@ fn parse_selector(text: &str) -> Option<Selector> {
     // the `html` element and nothing else, and it is where a stylesheet
     // declares the custom properties the rest of it reads.
     let text = text.replace(":root", "html");
-    // A combinator other than descendant, an attribute selector, any other
-    // pseudo, or the universal selector inside a compound: all unsupported, and
-    // a selector matched without them would apply far too widely.
-    if text.contains([':', '[', '>', '+', '~', '(', '*']) {
+    // A sibling combinator, an attribute selector or any other pseudo: all
+    // unsupported, and a selector matched without them would apply far too
+    // widely.
+    if text.contains([':', '[', '+', '~', '(']) {
         return None;
     }
-    let mut parts = Vec::new();
+    // `>` is a token of its own whether or not the page spaced it.
+    let text = text.replace('>', " > ");
+    let mut parts: Vec<Step> = Vec::new();
+    let mut child = false;
     for word in text.split_whitespace() {
-        parts.push(parse_compound(word)?);
+        if word == ">" {
+            // A chain cannot start with a combinator, and two in a row is not
+            // a selector either.
+            if parts.is_empty() || child {
+                return None;
+            }
+            child = true;
+            continue;
+        }
+        parts.push(Step {
+            compound: parse_compound(word)?,
+            child,
+        });
+        child = false;
     }
-    (!parts.is_empty()).then_some(Selector { parts })
+    (!parts.is_empty() && !child).then_some(Selector { parts })
 }
 
 fn parse_compound(word: &str) -> Option<Compound> {
     let mut compound = Compound::default();
     let mut current = String::new();
     let mut kind = b' ';
+    // `*` matches every element, so it constrains nothing: an empty compound
+    // already says that, and `*.card` is exactly `.card`.
+    let universal = word.contains('*');
     for ch in word.chars() {
+        if ch == '*' {
+            continue;
+        }
         if ch == '#' || ch == '.' {
             push_part(kind, &mut current, &mut compound);
             kind = ch as u8;
@@ -1281,7 +1325,8 @@ fn parse_compound(word: &str) -> Option<Compound> {
         }
     }
     push_part(kind, &mut current, &mut compound);
-    if compound.tag.is_none() && compound.id.is_none() && compound.classes.is_empty() {
+    if !universal && compound.tag.is_none() && compound.id.is_none() && compound.classes.is_empty()
+    {
         return None;
     }
     Some(compound)
@@ -1888,6 +1933,59 @@ mod tests {
         let sheet = sheet("a:hover { display: none } p[hidden] { display: none }");
         let stack = vec![element("a", &[])];
         assert!(!cascade(&sheet, &stack, None).hidden);
+    }
+
+    #[test]
+    fn a_child_combinator_wants_the_parent_and_not_an_ancestor() {
+        let sheet = sheet("div > p { color: red }");
+        let child = vec![element("div", &[]), element("p", &[])];
+        let grandchild = vec![element("div", &[]), element("ul", &[]), element("p", &[])];
+        assert_eq!(cascade(&sheet, &child, None).color, Some(rgb(255, 0, 0)));
+        assert_eq!(cascade(&sheet, &grandchild, None).color, None);
+    }
+
+    #[test]
+    fn a_child_combinator_needs_no_spaces_and_chains() {
+        let sheet = sheet("nav>ul li { color: red }");
+        let matching = vec![
+            element("nav", &[]),
+            element("ul", &[]),
+            element("div", &[]),
+            element("li", &[]),
+        ];
+        // `ul` is not `nav`'s child here, so the chain fails at its left end
+        // even though every tag in it appears.
+        let missing = vec![
+            element("nav", &[]),
+            element("div", &[]),
+            element("ul", &[]),
+            element("li", &[]),
+        ];
+        assert_eq!(cascade(&sheet, &matching, None).color, Some(rgb(255, 0, 0)));
+        assert_eq!(cascade(&sheet, &missing, None).color, None);
+    }
+
+    #[test]
+    fn the_universal_selector_matches_anything_and_adds_no_specificity() {
+        let sheet = sheet("* { color: red } p { color: blue } .card * { color: lime }");
+        assert_eq!(
+            cascade(&sheet, &[element("div", &[])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        // A tag beats `*` on specificity however the sheet is ordered.
+        assert_eq!(
+            cascade(&sheet, &[element("p", &[])], None).color,
+            Some(rgb(0, 0, 255))
+        );
+        let inside = vec![element("div", &["card"]), element("p", &[])];
+        assert_eq!(cascade(&sheet, &inside, None).color, Some(rgb(0, 255, 0)));
+    }
+
+    #[test]
+    fn a_dangling_combinator_is_not_a_selector() {
+        let sheet = sheet("> p { color: red } div > { color: red } p > > b { color: red }");
+        let stack = vec![element("div", &[]), element("p", &[]), element("b", &[])];
+        assert_eq!(cascade(&sheet, &stack, None).color, None);
     }
 
     #[test]

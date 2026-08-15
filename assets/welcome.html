@@ -65,6 +65,12 @@
       @media (min-width: 850px) { .narrow-only { display: none } }
       @media (max-width: 849px) { .wide-only { display: none } }
       @layer page { .layered { color: var(--accent); font-weight: bold } }
+      /* A child combinator picks the parent's own item and leaves a nested
+         one alone -- shown with a background, since a colour would reach the
+         nested item anyway by inheritance. The universal selector inside the
+         same list reaches both. */
+      .kin > li { background: #3b4252 }
+      .kin * { font-style: italic }
     </style>
   </head>
   <body>
@@ -177,6 +183,13 @@ while the newline above them is kept.</p>
             <ul><li>Like this one.</li></ul>
           </li>
         </ul>
+      </li>
+    </ul>
+
+    <h2>Which items a selector reaches</h2>
+    <ul class="kin">
+      <li>A direct child, so <code>.kin &gt; li</code> gives it a box.
+        <ul><li>A grandchild, outside that rule and on the page's own ground.</li></ul>
       </li>
     </ul>
 
