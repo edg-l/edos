@@ -464,10 +464,12 @@ impl Procfs {
     /// accepted but nothing is delivering it, and every flip is finding its own
     /// completions by looking.
     fn render_gpu_stats() -> String {
+        use crate::drivers::usb::hid::MOUSE_REPORTS;
         use crate::interrupts::io::VIRTIO_GPU_IRQS_FIRED;
         alloc::format!(
-            "virtio_gpu_irqs {}\n",
-            VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed)
+            "virtio_gpu_irqs {}\nmouse_reports {}\n",
+            VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed),
+            MOUSE_REPORTS.load(Ordering::Relaxed),
         )
     }
 

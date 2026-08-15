@@ -679,6 +679,7 @@ impl XhciController {
 
         Ok(UsbDevice {
             slot_id,
+            speed,
             ep0_ring,
             input_ctx,
             output_ctx,
@@ -911,6 +912,16 @@ impl XhciController {
         // Formula: ep_index = ep_num * 2 + (if IN then 1 else 0)
         let ep_dci = ep_num * 2 + if ep_dir_in { 1 } else { 0 };
 
+        let interval_val = device.speed.interrupt_interval(interval);
+        println!(
+            "xhci: ep {:#04x} {:?} bInterval={} -> interval {} ({} us)",
+            ep_addr,
+            device.speed,
+            interval,
+            interval_val,
+            125u32 << interval_val
+        );
+
         let ctx_size = self.context_size;
         let ring = TransferRing::new(64);
 
@@ -940,9 +951,8 @@ impl XhciController {
         let ep_ctx =
             unsafe { input_ctx.as_ptr().add((ep_dci as usize + 1) * ctx_size) } as *mut u32;
         unsafe {
-            // Dword 0: Interval (bits [23:16])
-            // For FS/HS interrupt endpoints the xHCI spec wants the exponent: bInterval-1
-            let interval_val = if interval > 0 { interval - 1 } else { 0 };
+            // Dword 0: Interval (bits [23:16]). What `bInterval` means depends
+            // on the speed; see `UsbSpeed::interrupt_interval`.
             core::ptr::write_volatile(ep_ctx, (interval_val as u32) << 16);
 
             // Dword 1: EP Type (bits [5:3]) = 7 (Interrupt IN), Max Packet Size (bits [31:16])

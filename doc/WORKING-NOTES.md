@@ -6,6 +6,42 @@ session.
 
 ---
 
+## `bInterval` does not mean the same thing at every speed
+
+`configure_interrupt_endpoint` wrote `bInterval - 1` into the endpoint context's
+Interval field for every device, with a comment saying "for FS/HS interrupt
+endpoints". That formula is high-speed only.
+
+The controller's period is always `2^Interval * 125us`. What varies is the
+descriptor (USB 2.0 §9.6.6):
+
+- High and super speed: `bInterval` is already an exponent, period
+  `2^(bInterval-1) * 125us`, so the field is `bInterval - 1`.
+- Full and low speed: `bInterval` counts **milliseconds**, so the field is
+  `3 + log2(bInterval)`, since `2^3 * 125us` is 1 ms.
+
+A full-speed mouse asking for 10 ms was therefore programmed as `Interval = 9`,
+which is `2^9 * 125us` = 64 ms. Six times slower than it asked, and silently:
+nothing fails, the pointer just steps.
+
+`UsbSpeed::interrupt_interval` does the conversion and `UsbDevice` carries the
+speed to reach it. xHCI 6.2.3.6 bounds the field to 3..=10 at full and low
+speed, so it is clamped there.
+
+**This is not what the Windows reporter is hitting.** QEMU's `usb-mouse` on
+`qemu-xhci` enumerates as *high* speed with `bInterval = 4`, which the old
+formula got right: `2^3 * 125us` = 1 ms. The boot log names it now
+(`xhci: ep 0x81 High bInterval=4 -> interval 3 (1000 us)`). It matters for real
+hardware, where a physical HID device is often full speed.
+
+Their `moves` count of about 29 per second against a 76 Hz compositor is still
+unexplained, and the ceiling on how smooth a drag can look. `/proc/gpu_stats`
+carries `mouse_reports` to split the two cases: if it climbs at roughly the rate
+`moves` reports, the guest is seeing every report the host sends and the rate is
+the host's; if it climbs much faster, the reports arrive and something above
+drops them. Do not guess between those without the number.
+
+
 ## The cursor resource was recreated on every shape change, and leaked its buffer
 
 Reported from a Windows guest: `RESOURCE_CREATE_2D resource 100 failed: 0x0`,

@@ -120,6 +120,35 @@ pub enum UsbSpeed {
 }
 
 impl UsbSpeed {
+    /// The xHCI Endpoint Context `Interval` for an interrupt endpoint with this
+    /// `b_interval`.
+    ///
+    /// The period the controller uses is always `2^Interval * 125us`, but
+    /// `bInterval` is not the same quantity at every speed (USB 2.0 §9.6.6):
+    ///
+    /// * High and super speed: `bInterval` is already an exponent and the
+    ///   period is `2^(bInterval-1) * 125us`, so the field is `bInterval - 1`.
+    /// * Full and low speed: `bInterval` is a count of **milliseconds**, so the
+    ///   field is `3 + log2(bInterval)`, since `2^3 * 125us` is 1 ms.
+    ///
+    /// Reading a full-speed `bInterval` as an exponent is how a mouse that asks
+    /// to be polled every 10 ms gets polled every 64 ms instead, which is the
+    /// difference between a pointer that tracks the hand and one that steps
+    /// after it. xHCI 6.2.3.6 bounds the field to 3..=10 for full and low
+    /// speed.
+    pub fn interrupt_interval(&self, b_interval: u8) -> u8 {
+        match self {
+            UsbSpeed::High | UsbSpeed::Super => b_interval.saturating_sub(1).min(15),
+            UsbSpeed::Full | UsbSpeed::Low => {
+                let ms = b_interval.max(1) as u32;
+                // Floor, so a `bInterval` that is not a power of two is polled
+                // slightly more often than asked rather than less.
+                let log2 = u32::BITS - 1 - ms.leading_zeros();
+                (3 + log2).clamp(3, 10) as u8
+            }
+        }
+    }
+
     /// Default maximum packet size for EP0 based on speed.
     pub fn default_max_packet_size(&self) -> u16 {
         match self {
@@ -163,6 +192,12 @@ impl UsbSpeed {
 /// An enumerated USB device with its associated xHCI resources.
 pub struct UsbDevice {
     pub slot_id: u8,
+    /// The bus speed this device enumerated at.
+    ///
+    /// Kept because `bInterval` means different things by speed, and an
+    /// interrupt endpoint programmed with the wrong reading is polled at the
+    /// wrong rate rather than failing.
+    pub speed: UsbSpeed,
     pub ep0_ring: TransferRing,
     pub input_ctx: DmaBuffer,
     /// Output Device Context buffer whose physical address is registered in the

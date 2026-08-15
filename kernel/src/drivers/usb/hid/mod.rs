@@ -229,7 +229,17 @@ pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> KeyEve
 ///
 /// Returns `Some(MouseEvent)` if the report was valid and an event was broadcast,
 /// `None` if the report is too short to be useful.
+/// Pointer reports the HID layer has accepted.
+///
+/// The instrument for "is the guest being told the pointer moved, or is the
+/// compositor missing it". Compare against `moves` in the `wmfps` line: if this
+/// climbs by roughly what `moves` reports, the guest is seeing every report the
+/// host sends and the rate is the host's; if it climbs much faster, the reports
+/// are arriving and something above is dropping them.
+pub static MOUSE_REPORTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn process_boot_mouse_report(report: &[u8], report_len: usize) -> Option<MouseEvent> {
+    MOUSE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if report_len < 3 {
         return None;
     }
@@ -252,6 +262,7 @@ pub fn process_boot_mouse_report(report: &[u8], report_len: usize) -> Option<Mou
 /// and a mouse are decoded by the same code rather than by two hard-coded
 /// layouts and a guess about which one arrived.
 pub fn process_pointer_report(fields: &PointerReport, report: &[u8]) -> Option<MouseEvent> {
+    MOUSE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let body = fields.body(report)?;
     let buttons = fields.buttons_of(body);
     let scroll = fields
