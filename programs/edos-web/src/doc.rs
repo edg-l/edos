@@ -18,8 +18,8 @@ use html5ever::{LocalName, local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::css::{
-    self, Computed, Decorations, Element, ListStyle, MediaQueries, Siblings, Stylesheet, Vars,
-    Viewport, WhiteSpace,
+    self, Computed, Decorations, Display, Element, ListStyle, MediaQueries, Siblings, Stylesheet,
+    Vars, Viewport, WhiteSpace,
 };
 
 /// What a block is, which decides its font size and its leading marker.
@@ -466,12 +466,31 @@ impl Builder<'_> {
 
                 let saved_style = self.style.clone();
                 let saved_block_css = self.block_css;
-                let block = block_kind(&tag);
+                // `display` overrides the box the element would open on its
+                // own, in both directions: a `<span>` asking for `block` gets
+                // a block of its own, and a `<li>` asking for `inline` stays
+                // in the line its parent is building. A box the page said
+                // nothing about is the element's own.
+                let block = match self.computed.display {
+                    Some(Display::Inline) => None,
+                    Some(Display::Block | Display::ListItem) => {
+                        Some(block_kind(&tag).unwrap_or(BlockKind::Paragraph))
+                    }
+                    None => block_kind(&tag),
+                };
 
                 if let Some(kind) = block {
                     self.flush();
                     self.kind = kind;
                     self.block_css = self.computed;
+                }
+                // A marker belongs to `display: list-item` and to nothing
+                // else, which is why `li { display: block }` loses its bullet.
+                if self.computed.display == Some(Display::ListItem)
+                    || (tag == local_name!("li") && self.computed.display.is_none())
+                {
+                    let (depth, marker) = self.marker();
+                    self.kind = BlockKind::ListItem { depth, marker };
                 }
                 match tag {
                     local_name!("ul") => self.lists.push(List {
@@ -482,10 +501,6 @@ impl Builder<'_> {
                         ordered: true,
                         next: start_attr(node).unwrap_or(1),
                     }),
-                    local_name!("li") => {
-                        let (depth, marker) = self.marker();
-                        self.kind = BlockKind::ListItem { depth, marker };
-                    }
                     local_name!("a") => {
                         self.style.link = attr(node, "href").and_then(|h| self.resolve(&h))
                     }

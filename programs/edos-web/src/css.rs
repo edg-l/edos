@@ -271,6 +271,44 @@ fn parse_list_style(value: &str) -> Option<ListStyle> {
     })
 }
 
+/// The box `display` asks for, reduced to what a block-and-inline model can
+/// answer. `display: none` is not here: it is `Computed::hidden`, since
+/// `visibility: hidden` reaches the same outcome by another property.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Display {
+    /// An inline-level box, which stays in the line its parent block is
+    /// building. `inline-block` and friends land here too: the inline model is
+    /// flat, so an inline-level box of any kind is a run of text.
+    Inline,
+    /// A block-level box, which breaks the line and starts one of its own.
+    /// Every layout mode this cannot lay out — `flex`, `grid`, `table` — is a
+    /// block, because that is the part of them a block model can honour.
+    Block,
+    /// A block-level box that also draws a marker. `<li>` gets this from the
+    /// UA stylesheet, which is why `li { display: block }` loses its bullet.
+    ListItem,
+}
+
+/// `display`, as a keyword the box model can act on. A two-keyword value
+/// (`inline flow-root`) is answered by the first keyword that names something,
+/// which is the outer display type in every ordering CSS allows.
+/// css-display-3 §2.
+fn parse_display(value: &str) -> Option<Option<Display>> {
+    value.split_whitespace().find_map(|word| {
+        Some(match word {
+            "none" => None,
+            // `contents` drops the box and keeps the children, which in a flat
+            // inline model is what an inline box that opens nothing does.
+            "inline" | "inline-block" | "inline-flex" | "inline-grid" | "inline-table"
+            | "contents" | "table-cell" | "ruby" => Some(Display::Inline),
+            "block" | "flow-root" | "flex" | "grid" | "table" | "table-row" | "table-row-group"
+            | "table-header-group" | "table-footer-group" | "table-caption" => Some(Display::Block),
+            "list-item" => Some(Display::ListItem),
+            _ => return None,
+        })
+    })
+}
+
 /// `text-transform`, the case a box sets for the text inside it.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Transform {
@@ -398,10 +436,14 @@ pub struct Computed {
     pub background: Option<u32>,
     pub padding: Sides<Option<u32>>,
     pub borders: Sides<Border>,
-    /// `display: none`. Not inherited: a hidden element hides its subtree by
-    /// not being walked at all, which is not the same thing as its children
-    /// inheriting a value.
+    /// `display: none`, and `visibility: hidden` with it. Not inherited: a
+    /// hidden element hides its subtree by not being walked at all, which is
+    /// not the same thing as its children inheriting a value.
     pub hidden: bool,
+    /// `display`, when the page named a box other than the element's own.
+    /// Not inherited. `None` is "the page said nothing", which leaves the box
+    /// to the element: a `<div>` blocks, a `<span>` does not.
+    pub display: Option<Display>,
 }
 
 impl Computed {
@@ -410,6 +452,7 @@ impl Computed {
     pub fn inherit(&self) -> Computed {
         Computed {
             hidden: false,
+            display: None,
             margin_top: None,
             margin_bottom: None,
             margin_left: None,
@@ -446,7 +489,12 @@ impl Computed {
                     self.color = Some(color);
                 }
             }
-            "display" => self.hidden = value.eq_ignore_ascii_case("none"),
+            "display" => {
+                if let Some(display) = parse_display(&value.to_ascii_lowercase()) {
+                    self.hidden = display.is_none();
+                    self.display = display;
+                }
+            }
             "visibility" => {
                 if value.eq_ignore_ascii_case("hidden") {
                     self.hidden = true;
@@ -2400,6 +2448,57 @@ mod tests {
         let stack = vec![element("p", &["lead"])];
         let computed = cascade(&sheet, &stack, None);
         assert_eq!(computed.color, Some(rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn display_names_the_box_the_element_opens() {
+        let sheet = sheet(
+            "span { display: BLOCK } li { display: inline } em { display: list-item } \
+             i { display: inline flow-root } b { display: contents } u { display: marquee }",
+        );
+        let of = |tag: &str| cascade(&sheet, &[element(tag, &[])], None);
+        assert_eq!(of("span").display, Some(Display::Block));
+        assert_eq!(of("li").display, Some(Display::Inline));
+        assert_eq!(of("em").display, Some(Display::ListItem));
+        assert_eq!(of("i").display, Some(Display::Inline));
+        assert_eq!(of("b").display, Some(Display::Inline));
+        // An unknown keyword leaves the declaration invalid, so the element
+        // keeps the box it would have opened on its own.
+        assert_eq!(of("u").display, None);
+        assert!(!of("span").hidden);
+    }
+
+    #[test]
+    fn display_none_hides_and_names_no_box() {
+        let sheet = sheet("p { display: block } p { display: none }");
+        let computed = cascade(&sheet, &[element("p", &[])], None);
+        assert!(computed.hidden);
+        assert_eq!(computed.display, None);
+    }
+
+    #[test]
+    fn display_does_not_inherit() {
+        let sheet = sheet("div { display: block }");
+        let parent = sheet
+            .cascade(
+                &[element("div", &[])],
+                None,
+                &Computed::default(),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        let child = sheet
+            .cascade(
+                &[element("div", &[]), element("span", &[])],
+                None,
+                &parent,
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(parent.display, Some(Display::Block));
+        assert_eq!(child.display, None);
     }
 
     #[test]

@@ -99,6 +99,13 @@
       .logic p:is(.keep, .also) { border-left: 4px solid #88c0d0; padding-left: 8px }
       .logic p:where(.keep) { color: #bf616a }
       .logic p { color: #ebcb8b }
+      /* `display` names the box, in both directions: a `<span>` may block, a
+         `<li>` may stay in the line, and the bullet belongs to `list-item`
+         rather than to the element that usually carries it. */
+      .boxes .own { display: block; background: #3b4252; padding: 4px }
+      .boxes .marked { display: list-item; color: #a3be8c }
+      .run li { display: inline; color: #88c0d0 }
+      .blocked li { display: block; color: #d08770 }
     </style>
   </head>
   <body>
@@ -266,6 +273,24 @@ while the newline above them is kept.</p>
       <p class="also">The other arm of the same <code>:is()</code> list, so it
         wears the bar too, and stays green.</p>
     </div>
+
+    <h2>Which box an element opens</h2>
+    <div class="boxes">
+      <p>A paragraph carrying <span class="own">a span asking for
+        <code>display: block</code>, which breaks the line and paints its own
+        box</span> and then continuing after it.</p>
+      <span class="marked">A span asking for <code>display: list-item</code>,
+        which is where a bullet comes from.</span>
+    </div>
+    <ul class="run">
+      <li>Three items,</li>
+      <li>each asking for <code>display: inline</code>,</li>
+      <li>so they share one line and wear no markers.</li>
+    </ul>
+    <ul class="blocked">
+      <li>Two items asking for <code>display: block</code>,</li>
+      <li>so they keep a line each but lose the bullet a list item carries.</li>
+    </ul>
 
     <h2>What a list may be numbered in</h2>
     <ol class="roman" start="3">

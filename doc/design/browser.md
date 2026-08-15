@@ -74,7 +74,7 @@ length or `normal`), `text-transform`, `text-indent`, `white-space`,
 `list-style` shorthand), all four margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
-per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
+per-edge longhands), and `display`. `doc.rs` carries the computed style onto every `Run` and every
 `Block`, and `view.rs` lets it override the plan the tag alone implies — where
 it says nothing, the reader typography stands.
 
@@ -128,6 +128,19 @@ without them, and each is small:
   through the argument. The selector list is split on commas outside brackets,
   parentheses and quotes, which a plain `split(',')` got wrong for
   `[title="a,b"]` as well.
+- **`display` names the box.** The element decides what box it opens only
+  where the page said nothing. `block`, `inline` and `list-item` are honoured
+  as themselves; every layout mode this cannot lay out is reduced to the outer
+  box it is (`flex`, `grid`, `table` and the table-part values block;
+  `inline-block`, `inline-flex` and `table-cell` inline). `contents` is inline
+  too, which is the right answer here rather than an approximation: it asks for
+  the box to be dropped and the children kept, and an inline box in a flat
+  inline model opens nothing. A two-keyword value is answered by the first
+  keyword that names something, which is the outer type in every ordering
+  css-display-3 §2 allows, and an unrecognised keyword leaves the declaration
+  invalid so the element keeps its own box. The marker follows `list-item`
+  rather than the `<li>` tag, so `li { display: block }` loses its bullet the
+  way a browser does, and a `<span>` may gain one.
 - **`@layer` bodies are parsed**, since a modern stylesheet puts nearly all of
   itself inside one and skipping them drops the sheet. Layer *order* is not
   honoured — rules keep their document order — which differs from a real

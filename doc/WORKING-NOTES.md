@@ -7924,3 +7924,44 @@ The pseudo-class argument reader had the matching bug: it stopped at the first
 The parser recurses through an argument, so `MAX_SELECTOR_NESTING` (4) bounds
 it; a page nesting `:not(:is(:not(…)))` deeper than that is not describing
 anything.
+
+## `display` names the box; the element only decides where it says nothing
+
+`css.rs` read `display` as one question — is it `none`? — which meant a
+`<span style="display:block">` stayed inline and a `<li>` in a nav bar styled
+`display: inline` still opened a block and drew a bullet. `Computed` now
+carries a `display: Option<Display>` beside `hidden`, and `doc.rs` picks the
+box from it:
+
+```rust
+let block = match self.computed.display {
+    Some(Display::Inline) => None,
+    Some(Display::Block | Display::ListItem) => {
+        Some(block_kind(&tag).unwrap_or(BlockKind::Paragraph))
+    }
+    None => block_kind(&tag),
+};
+```
+
+Three things that are easy to get wrong here:
+
+- **`hidden` stays its own field.** `visibility: hidden` reaches the same
+  outcome by another property, so folding "not rendered" into a `Display::None`
+  variant would have made the walk ask two questions instead of one.
+- **`display` must not inherit.** It is reset in `Computed::inherit`, next to
+  the margins. Most of `Computed` inherits deliberately — `shift` does, even
+  though the CSS property does not — so a new non-inherited property that skips
+  that reset silently blocks every descendant of the first `display: block`.
+- **The marker belongs to `list-item`, not to `<li>`.** Browsers drop the
+  bullet for `li { display: block }`, which is why that idiom appears in nav
+  bars at all. The marker is now drawn when the computed display *is*
+  `list-item`, or when the page said nothing at all and the tag is `<li>`, and
+  `marker()` already handled an empty list stack, so `display: list-item` on a
+  `<span>` outside any list gets a disc at depth 0.
+
+An unrecognised keyword leaves the declaration invalid rather than guessing a
+box, and a two-keyword value (`inline flow-root`) is answered by the first
+keyword that names something: css-display-3 §2 puts the outer type first in
+every ordering it allows. `contents` maps to `Inline` and that is exact, not an
+approximation — it asks for the box to be dropped and the children kept, and an
+inline box in a flat inline model opens nothing.
