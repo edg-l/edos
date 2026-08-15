@@ -21,7 +21,7 @@ mod control;
 mod service;
 
 use control::{Control, RunState};
-use service::Service;
+use service::{Restart, Service};
 
 /// A service that dies faster than this is treated as failing to start rather
 /// than as having run and exited.
@@ -153,9 +153,25 @@ fn supervise(service: Arc<Service>, control: Arc<Control>) {
                 continue;
             }
 
+            // A service that finished rather than failed is taken at its word,
+            // where its policy says to. `code` was previously only ever
+            // printed, so a window the user closed and a process that died
+            // were indistinguishable and both came back.
+            let policy = service.restart;
+            let finished = code == 0;
+            if policy == Restart::Never || (policy == Restart::OnFailure && finished) {
+                println!("init: {name} exited with {code}, not restarting");
+                control.update(name, |e| {
+                    e.state = RunState::Stopped;
+                    e.failures = 0;
+                    e.want_up = false;
+                });
+                continue;
+            }
+
             if ran_for >= HEALTHY_RUNTIME {
                 // It came up, did its job, and exited. Restart it promptly:
-                // this is the ordinary case for a terminal the user closed.
+                // this is the ordinary case for a crash after a long run.
                 println!("init: {name} exited with {code} after {ran_for:?}, restarting");
                 control.update(name, |e| {
                     e.failures = 0;

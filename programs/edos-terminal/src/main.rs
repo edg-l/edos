@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use edos_lib::process::ChildProcess;
+use edos_lib::process::{self, ChildProcess};
 use edos_render::widgets::{Terminal, Widget};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
@@ -218,6 +218,17 @@ fn main() {
                 output_len = n as usize;
                 let output = String::from_utf8_lossy(&read_buf[..n as usize]);
                 terminal.write_str(&output);
+            }
+            // A terminal is a window onto its child. When the shell exits --
+            // `exit`, a signal, an EOF on its stdin -- there is nothing left to
+            // show, so the window goes with it. Reading the master fd cannot
+            // tell that: a PTY with no data pending and a PTY whose slave has
+            // closed both come back empty, so the child is asked directly.
+            //
+            // The read above happens first, so the last thing the shell wrote
+            // before exiting is drawn rather than discarded.
+            if process::waitpid_nonblocking(child.pid).is_some() {
+                return;
             }
         }
 

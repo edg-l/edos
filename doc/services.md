@@ -37,6 +37,7 @@ enabled_by  /etc/httpd.conf
 | `shell` | `yes` to grant the privilege to move, resize, frame and focus other processes' windows. Granted per spawn, since it is per pid and dies with the process |
 | `requires` | device nodes that must exist before the first spawn is worth trying |
 | `enabled_by` | a file whose absence means the service is not configured, and so is not started at all |
+| `restart` | `always` (the default), `on-failure`, or `never`. What to do when the service exits |
 
 `requires` and `enabled_by` answer different questions and are not
 interchangeable. `requires` is a race: drivers register their `/dev` entries
@@ -150,3 +151,24 @@ writer's into `ENXIO`, and `O_RDWR` is not a rendezvous at all. `O_NONBLOCK` is
 recorded on the descriptor the open returns, so it governs the transfer too: a
 read with nothing to read and a write with no room report `EAGAIN` rather than
 waiting, and `fcntl(F_SETFL)` changes it afterwards.
+
+## What happens when a service exits
+
+`restart` is what separates a process that *failed* from one that *finished*.
+Init used to make no distinction: the exit code was logged and never read, so a
+window the user closed and a process that died both came back. A terminal you
+closed reappeared, and because a service that had run for more than ten seconds
+also has its failure count reset, it reappeared with no backoff and no limit.
+
+- **`always`** — the default, and right for anything the session cannot be used
+  without. `edos-wm` and `edos-taskbar` take it: a desktop with no compositor is
+  not a desktop, whatever the compositor thought it was doing when it stopped.
+- **`on-failure`** — comes back if it failed, stays gone if it finished.
+  `edos-terminal` takes it. Closing the window exits 0 and is taken at its word;
+  the panel menu is how another one is opened. A terminal that is killed or
+  crashes still comes back.
+- **`never`** — only `svc start` will run it again.
+
+A service that is not restarted is left `stopped` with `want_up` false, which is
+the same state `svc stop` leaves it in, so `svc start` is how you change your
+mind either way.

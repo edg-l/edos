@@ -11,6 +11,24 @@ pub const SERVICES_DIR: &str = "/etc/services";
 /// the server has, so a system without one has no business listening.
 const SSHD_CONFIG: &str = "/etc/sshd.conf";
 
+/// When a service that has exited should be started again.
+///
+/// The distinction the supervisor could not previously make is between a
+/// process that failed and one that finished. A terminal the user closed exits
+/// 0 and means it; restarting it puts a window back on screen that the user
+/// just dismissed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Restart {
+    /// Always bring it back. Right for anything the session cannot be used
+    /// without -- the compositor, the panel.
+    #[default]
+    Always,
+    /// Bring it back only if it failed. A clean exit is taken at its word.
+    OnFailure,
+    /// Never bring it back on its own; `svc start` is the only way.
+    Never,
+}
+
 pub struct Service {
     /// What the service is called, on the command line and in the status file.
     /// Taken from the file name of a declared service, or from the binary's
@@ -40,6 +58,8 @@ pub struct Service {
     /// service that treats the open as optional comes up permanently without
     /// that device. Waiting here keeps both out of every service.
     pub requires: Vec<String>,
+    /// What to do when it exits. See [`Restart`].
+    pub restart: Restart,
     /// A file whose absence means the service is not configured, and so is not
     /// started at all.
     ///
@@ -59,6 +79,7 @@ impl Service {
             args: Vec::new(),
             essential: false,
             shell: false,
+            restart: Restart::default(),
             requires: Vec::new(),
             enabled_by: None,
         }
@@ -92,6 +113,18 @@ impl Service {
                     service.requires = value.split_whitespace().map(str::to_string).collect()
                 }
                 "enabled_by" => service.enabled_by = Some(value.to_string()),
+                "restart" => {
+                    service.restart = match value {
+                        "always" => Restart::Always,
+                        "on-failure" => Restart::OnFailure,
+                        "never" => Restart::Never,
+                        other => {
+                            return Err(format!(
+                                "{where_}: restart wants always, on-failure or never, got {other:?}"
+                            ));
+                        }
+                    }
+                }
                 "essential" => service.essential = parse_bool(value, &where_)?,
                 "shell" => service.shell = parse_bool(value, &where_)?,
                 other => return Err(format!("{where_}: unknown keyword {other:?}")),
@@ -130,7 +163,12 @@ fn defaults() -> Vec<Service> {
             shell: true,
             ..Service::new("edos-taskbar", "/bin/edos-taskbar")
         },
-        Service::new("edos-terminal", "/bin/edos-terminal"),
+        Service {
+            // A terminal the user closed stays closed. It exits 0 to say so,
+            // and the panel menu is how another one is opened.
+            restart: Restart::OnFailure,
+            ..Service::new("edos-terminal", "/bin/edos-terminal")
+        },
         Service {
             enabled_by: Some(SSHD_CONFIG.to_string()),
             ..Service::new("sshd", "/bin/sshd")
