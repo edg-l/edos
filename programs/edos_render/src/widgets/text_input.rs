@@ -106,6 +106,17 @@ impl TextInput {
         self.placeholder = placeholder.to_string();
     }
 
+    /// Take a new width, for a field that spans a window that can be resized.
+    pub fn set_width(&mut self, width: u32) {
+        self.width = width;
+    }
+
+    /// Whether the field has the focus, which decides where a key press goes
+    /// for a program routing input itself rather than through a container.
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+
     /// Insert a character at the cursor position.
     fn insert_char(&mut self, ch: char) {
         if self.cursor_pos <= self.char_len() {

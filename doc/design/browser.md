@@ -40,18 +40,77 @@ demo, and it is a real one: the site is Starlight-generated HTML with no
 hand-holding for us.
 
 Where it stands: fetch, parse and the block list are in `doc.rs`; the text
-rendering is in `text.rs` behind `-d`; the window, its header and its scrolling
-are in `ui.rs`, and the layout that feeds it is in `view.rs`. Driving the guest
-renders `edos.edgl.dev` in a window with its headings at the right sizes, its
-links underlined and its lists marked. What is left in this stage is the click:
-`view::Fragment` already carries an index into `Layout::links`, so following one
-is a hit test against the fragment boxes, a re-fetch, and a stack for the back
-action.
+rendering is in `text.rs` behind `-d`; the window, its toolbar and its scrolling
+are in `ui.rs`, the layout that feeds it is in `view.rs`, and the loading of a
+page is in `net.rs`. Driving the guest renders `edos.edgl.dev` in a window with
+its headings at the right sizes, its links underlined and its lists marked.
 
-One limit is stage-2 work, not a defect: an element set the page lays out
-with CSS -- a `nav` of bare `<a>` with no whitespace between them -- renders
-run-together, because without CSS there is nothing in the document to say those
-are separate boxes.
+The stage is closed. What it took beyond the list above:
+
+- **A click follows a link**, hit-tested against the fragment boxes, with a
+  history stack behind Back and a forward stack behind it, each holding the
+  document it parsed rather than a URL to fetch again. **The space between two
+  words of one link is part of it**: a fragment is a word, so hit-testing only
+  the words leaves a dead gap between every pair of them, and the reader sees
+  one underlined phrase and a click that did nothing.
+- **A fragment is a scroll, not a fetch.** Every heading link and every table
+  of contents on a documentation site names a place in the page it is already
+  on. `doc.rs` records the `id` of the element that opened each block, `view.rs`
+  records where each one landed, and `ui.rs` compares the target's page against
+  the address on screen: same page, scroll; anything else, load. A link to the
+  page's own address carrying no fragment is a reload, which is what a browser
+  does with one.
+- **An address bar that can be typed into**, which is `edos_render`'s
+  `TextInput` in the toolbar beside Back, Forward and Reload. Ctrl+L empties it
+  and takes the caret, since a field with no selection can either replace what
+  it holds or keep it, and replacing is what the shortcut is reached for;
+  clicking into it keeps the address, which is what editing one asks for.
+
+### Loading is not a pause
+
+`edos_http` is blocking and a page is not one fetch: the document, then every
+stylesheet and image it refers to, each with its own connection. Done between
+two frames that left the window unable to redraw, scroll or close for as long
+as the slowest server took.
+
+`net.rs` runs a load on a thread of its own and posts what it is doing back to
+the window, which is why `doc.rs`'s shared parts are `Arc` and its subresource
+cache is a `Mutex`: a whole `Document` crosses the boundary when the page is
+built. One load at a time, and a second abandons the first by ticket rather
+than by stopping the thread, because a thread inside a TLS handshake cannot be
+interrupted -- it finishes into a channel nobody is listening to.
+
+**The page gives way to the loading view the moment the load starts.** Leaving
+the old page up until the new one is ready reads as a click that was ignored.
+What stands in its place says what is on the wire right now, how many
+subresources have arrived and how long it has been, with an indeterminate band
+rather than a bar: nothing knows how many resources a page refers to until it
+has been parsed, and parsing needs the document that is still on its way. Esc
+and the toolbar's stop button abandon it and leave the page that was there.
+
+### Reader mode, and the reason for it
+
+`position: fixed` and `position: sticky` are not implemented, so a sidebar a
+real browser pins beside the article lands above it in the flow: a Starlight
+page opened at its top is a screen and a half of navigation links before the
+first paragraph. That is measured, not supposed -- `edos.edgl.dev/introduction/`
+is 72 blocks whole and 42 from `<main>` alone.
+
+So the window lays out the `<main>` the page marked, and `m` or the toolbar's
+document button switches to the whole document. The walk enters the chain of
+ancestors down to `<main>` rather than starting there, so the cascade keeps the
+ancestors a selector matches against and the custom properties `:root` declares
+-- starting at `<main>` drops a modern page's whole palette. `<head>` is walked
+whatever else is skipped, since the title is in it.
+
+`-a` does the same for `-d`.
+
+One CSS limit was worth answering in the cascade rather than in layout: a box
+declared 1x1 with its overflow hidden is the visually-hidden idiom every
+accessible site uses to carry text for a screen reader alone, and nothing here
+clips, so every heading on the site read "What runs today" followed by "Section
+titled What runs today". A box that small can show nothing whatever its
+overflow says, so the size answers it.
 
 ### Stage 2 — a CSS subset
 

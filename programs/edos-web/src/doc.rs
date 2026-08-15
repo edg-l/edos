@@ -6,10 +6,10 @@
 //! emphasis, the link it belongs to -- is on a `Run`, so a text dump and a
 //! window draw the same list.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use edos_http::url::Url;
 use edos_render::graphics::Color;
@@ -97,9 +97,10 @@ pub struct Run {
     /// image does: it does not break, and its size comes from laying its own
     /// subtree out rather than from measuring `text`, which is empty.
     ///
-    /// `Rc` because a document is kept alive behind the next one in the history
-    /// and a box may hold a whole subtree.
-    pub boxed: Option<Rc<Node>>,
+    /// `Arc` because a document is kept alive behind the next one in the
+    /// history and a box may hold a whole subtree, and because a document is
+    /// built on the loader thread and handed to the window.
+    pub boxed: Option<Arc<Node>>,
 }
 
 /// A box in the layout tree.
@@ -185,7 +186,11 @@ pub struct Block {
     /// because the history keeps a document alive after the next one is
     /// parsed, and a page of photographs is the one thing here worth not
     /// copying.
-    pub picture: Option<Rc<Picture>>,
+    pub picture: Option<Arc<Picture>>,
+    /// The `id` of the element that opened this block, which is what a link
+    /// carrying a fragment names. Only a block-level id is recorded: a
+    /// fragment points at a place to scroll to, and a place is a line.
+    pub anchor: Option<String>,
 }
 
 /// A decoded image, kept in whichever form it was decoded to.
@@ -258,13 +263,15 @@ impl Block {
 /// Misses are cached alongside hits: a stylesheet that could not be had once
 /// cannot be had now either, and a rebuild is not the place to spend a network
 /// timeout finding that out again.
-type Cache = Rc<RefCell<BTreeMap<String, Option<Vec<u8>>>>>;
+type Cache = Arc<Mutex<BTreeMap<String, Option<Vec<u8>>>>>;
 
 /// What a document needs to be built again at a different viewport.
 struct Source {
-    html: Rc<Vec<u8>>,
+    html: Arc<Vec<u8>>,
     base: Url,
     cache: Cache,
+    /// Whether to lay out the page's `<main>` alone. See [`Document::reader`].
+    reader: bool,
     /// The media queries the build answered, and the viewport it answered them
     /// against.
     media: MediaQueries,
@@ -283,6 +290,9 @@ pub struct Document {
     pub blocks: Vec<Block>,
     /// The box tree, which is what a box engine arranges.
     pub root: Node,
+    /// Whether the page carries a `<main>`, which is what reader mode lays out
+    /// and what makes offering it worth anything.
+    has_main: bool,
     source: Source,
 }
 
@@ -313,8 +323,10 @@ impl Document {
             }],
             css: Computed::default(),
             picture: None,
+            anchor: None,
         };
         Document {
+            has_main: false,
             title: String::from("Refused"),
             blocks: vec![block.clone()],
             root: Node::Container {
@@ -322,13 +334,69 @@ impl Document {
                 children: vec![Node::Leaf(block)],
             },
             source: Source {
-                html: Rc::new(Vec::new()),
+                html: Arc::new(Vec::new()),
                 base,
                 cache: Cache::default(),
+                reader: true,
                 media: MediaQueries::default(),
                 viewport,
             },
         }
+    }
+
+    /// A page with nothing on it: what the window holds before its first load
+    /// finishes, and what stands in the history's place while a page is moved
+    /// out of it.
+    pub fn blank() -> Document {
+        Document {
+            has_main: false,
+            title: String::new(),
+            blocks: Vec::new(),
+            root: Node::Container {
+                css: Computed::default(),
+                children: Vec::new(),
+            },
+            source: Source {
+                html: Arc::new(Vec::new()),
+                // Every document has an origin, and a blank one's is the
+                // machine it is running on, so a relative address typed into
+                // the address bar still resolves.
+                base: Url::parse("http://localhost/").expect("a literal URL parses"),
+                cache: Cache::default(),
+                reader: true,
+                media: MediaQueries::default(),
+                viewport: Viewport::default(),
+            },
+        }
+    }
+
+    /// Whether this page marks its main content, and so whether reader mode
+    /// changes anything about it.
+    ///
+    /// A page's navigation is laid out in the flow here, because `position:
+    /// fixed` and `position: sticky` are not implemented: a sidebar a real
+    /// browser pins beside the article lands above it instead, and a
+    /// documentation page opens on a screen of links rather than on what it is
+    /// about. Reader mode lays out the `<main>` the page itself marked and
+    /// leaves the rest of the document out.
+    pub fn has_main(&self) -> bool {
+        self.has_main
+    }
+
+    /// The same page built in the other mode. Nothing is fetched again: the
+    /// bytes and every subresource are the ones this document already holds.
+    pub fn set_reader(&self, reader: bool, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Document {
+        build(
+            Source {
+                html: Arc::clone(&self.source.html),
+                base: self.source.base.clone(),
+                cache: Arc::clone(&self.source.cache),
+                reader,
+                media: MediaQueries::default(),
+                viewport: self.source.viewport,
+            },
+            fetch,
+        )
     }
 
     /// The title to show for the page, for the documents that carry none.
@@ -357,14 +425,21 @@ impl Document {
         }
         Some(build(
             Source {
-                html: Rc::clone(&self.source.html),
+                html: Arc::clone(&self.source.html),
                 base: self.source.base.clone(),
-                cache: Rc::clone(&self.source.cache),
+                cache: Arc::clone(&self.source.cache),
+                reader: self.source.reader,
                 media: MediaQueries::default(),
                 viewport,
             },
             fetch,
         ))
+    }
+}
+
+impl Default for Document {
+    fn default() -> Document {
+        Document::blank()
     }
 }
 
@@ -468,6 +543,7 @@ pub fn parse(
     base: Url,
     fetch: &dyn Fn(&str) -> Option<Vec<u8>>,
     viewport: Viewport,
+    reader: bool,
 ) -> Document {
     let nesting = source_nesting(html);
     if nesting > MAX_SOURCE_NESTING {
@@ -475,9 +551,10 @@ pub fn parse(
     }
     build(
         Source {
-            html: Rc::new(html.to_vec()),
+            html: Arc::new(html.to_vec()),
             base,
             cache: Cache::default(),
+            reader,
             media: MediaQueries::default(),
             viewport,
         },
@@ -488,13 +565,18 @@ pub fn parse(
 /// Parse and style `source`'s bytes, fetching what it references through its
 /// own cache so a rebuild costs no network.
 fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Document {
-    let cache = Rc::clone(&source.cache);
+    let cache = Arc::clone(&source.cache);
+    // The lock is never held across the fetch: a document is built on the
+    // loader thread while the window reads none of this, so the only thing
+    // holding it there could do is make a slow server hold a lock as well.
     let cached = |url: &str| -> Option<Vec<u8>> {
-        if let Some(hit) = cache.borrow().get(url) {
-            return hit.clone();
+        if let Some(hit) = cache.lock().ok().and_then(|cache| cache.get(url).cloned()) {
+            return hit;
         }
         let bytes = fetch(url);
-        cache.borrow_mut().insert(url.to_string(), bytes.clone());
+        if let Ok(mut cache) = cache.lock() {
+            cache.insert(url.to_string(), bytes.clone());
+        }
         bytes
     };
 
@@ -503,6 +585,7 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         .read_from(&mut &source.html[..])
         .expect("reading from a slice cannot fail");
 
+    let main = main_path(&dom.document);
     let viewport = source.viewport;
     // The sheet has to be whole before the first element is styled, and a
     // `<style>` or a `<link>` may sit anywhere in the document, so collecting
@@ -534,6 +617,12 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         vars: Vars::root(),
         block_css: Computed::default(),
         depth: 0,
+        anchor: None,
+        path: match &main {
+            Some(path) if source.reader => path.clone(),
+            _ => Vec::new(),
+        },
+        in_main: false,
     };
     builder.walk(&dom.document, Siblings::default(), &Rc::new(Vec::new()));
     builder.flush();
@@ -552,6 +641,7 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         title: builder.title,
         blocks,
         root,
+        has_main: main.is_some(),
         source,
     }
 }
@@ -637,6 +727,16 @@ struct Builder<'a> {
     /// How many levels of element the walk is currently inside, against
     /// [`MAX_DEPTH`].
     depth: usize,
+    /// The elements from the document root down to its `<main>`, when the page
+    /// has one and reader mode is on. Above `<main>` the walk enters only
+    /// these, so the page's own navigation is not laid out; inside it,
+    /// everything.
+    path: Vec<Handle>,
+    /// Whether the walk has reached `<main>`.
+    in_main: bool,
+    /// The `id` of the innermost element seen since the last block was
+    /// emitted, waiting for the block it names.
+    anchor: Option<String>,
 }
 
 impl Builder<'_> {
@@ -666,6 +766,12 @@ impl Builder<'_> {
                 }
 
                 let mut context = element_context(node, &tag, position);
+                // The outermost id wins, since a fragment naming a section
+                // means the top of it rather than the first thing inside that
+                // happens to be identified as well.
+                if self.anchor.is_none() {
+                    self.anchor = context.id.clone();
+                }
                 context.siblings = Rc::clone(row);
                 self.stack.push(context);
                 let saved_computed = self.computed;
@@ -695,6 +801,10 @@ impl Builder<'_> {
                     self.computed.white_space = Some(WhiteSpace::Pre);
                 }
 
+                let entered_main = !self.in_main && self.is_main(node);
+                if entered_main {
+                    self.in_main = true;
+                }
                 let saved_style = self.style.clone();
                 let saved_block_css = self.block_css;
                 // `display` overrides the box the element would open on its
@@ -805,12 +915,15 @@ impl Builder<'_> {
                                 code: false,
                                 script: Script::default(),
                                 css: self.computed,
-                                boxed: Some(Rc::new(node)),
+                                boxed: Some(Arc::new(node)),
                             });
                         }
                     } else {
                         self.close_frame();
                     }
+                }
+                if entered_main {
+                    self.in_main = false;
                 }
                 self.style = saved_style;
                 self.block_css = saved_block_css;
@@ -836,6 +949,21 @@ impl Builder<'_> {
         self.depth -= 1;
     }
 
+    /// Whether `node` is one of the elements the reader-mode walk may enter.
+    ///
+    /// The chain above `<main>` is entered rather than skipped to, so the
+    /// cascade keeps the ancestors a selector matches against and the custom
+    /// properties `:root` declares -- starting the walk at `<main>` instead
+    /// would drop a modern page's whole palette.
+    fn on_path(&self, node: &Handle) -> bool {
+        self.path.iter().any(|step| Rc::ptr_eq(step, node))
+    }
+
+    /// Whether `node` is the `<main>` the reader-mode walk is heading for.
+    fn is_main(&self, node: &Handle) -> bool {
+        self.path.last().is_some_and(|last| Rc::ptr_eq(last, node))
+    }
+
     fn walk_children_inner(&mut self, node: &Handle) {
         let children = node.children.borrow();
         let positions = sibling_positions(&children);
@@ -852,6 +980,11 @@ impl Builder<'_> {
                 .collect(),
         );
         for (child, position) in children.iter().zip(positions) {
+            // The row above was built from every element child, matched or
+            // not, so a sibling combinator still sees the document.
+            if !self.path.is_empty() && !self.in_main && !self.on_path(child) && !is_head(child) {
+                continue;
+            }
             self.walk(child, position, &row);
         }
     }
@@ -917,11 +1050,13 @@ impl Builder<'_> {
                 }]
             })
             .unwrap_or_default();
+        let anchor = self.anchor.take();
         self.push_leaf(Block {
             kind: BlockKind::Image,
             runs,
             css: self.computed,
-            picture: Some(Rc::new(picture)),
+            picture: Some(Arc::new(picture)),
+            anchor,
         });
         self.kind = interrupted;
     }
@@ -968,9 +1103,15 @@ impl Builder<'_> {
         (depth, Marker { style, n })
     }
 
+    /// The absolute URL an `href` names, or `None` for one that names nothing
+    /// this browser can go to.
+    ///
+    /// A fragment-only reference resolves to this document plus that fragment,
+    /// per RFC 3986 §5.2, and is kept: it is what a table of contents is made
+    /// of, and the window answers it by scrolling rather than by fetching.
     fn resolve(&self, href: &str) -> Option<String> {
         let href = href.trim();
-        if href.is_empty() || href.starts_with('#') {
+        if href.is_empty() {
             return None;
         }
         self.base.join(href).ok().map(|u| u.to_string())
@@ -1061,11 +1202,13 @@ impl Builder<'_> {
         let kind = std::mem::replace(&mut self.kind, BlockKind::Paragraph);
         let css = self.block_css;
         if kind == BlockKind::Rule {
+            let anchor = self.anchor.take();
             self.push_leaf(Block {
                 kind,
                 runs: Vec::new(),
                 css,
                 picture: None,
+                anchor,
             });
             return;
         }
@@ -1080,11 +1223,16 @@ impl Builder<'_> {
         // A box carries no text and would otherwise be dropped here, along with
         // the whole `inline-block` it stands for.
         runs.retain(|r| !r.text.is_empty() || r.boxed.is_some());
+        // Taken only where a block is actually emitted, so the id of a wrapper
+        // whose own block holds nothing lands on the first block inside it
+        // rather than being dropped with the wrapper.
+        let anchor = self.anchor.take();
         self.push_leaf(Block {
             kind,
             runs,
             css,
             picture: None,
+            anchor,
         });
     }
 
@@ -1226,6 +1374,32 @@ fn block_kind(tag: &html5ever::LocalName) -> Option<BlockKind> {
         | local_name!("body") => BlockKind::Paragraph,
         _ => return None,
     })
+}
+
+/// Whether `node` is the `<head>`, which reader mode walks whatever else it
+/// skips: the document's title is in there and belongs to the page either way.
+fn is_head(node: &Handle) -> bool {
+    matches!(&node.data, NodeData::Element { name, .. } if name.local == local_name!("head"))
+}
+
+/// The chain from the document root down to its first `<main>`, or `None` for
+/// a page that marks no main content.
+///
+/// `<main>` is the element the HTML Standard defines as "the dominant contents
+/// of the document", which is exactly the question reader mode asks.
+fn main_path(node: &Handle) -> Option<Vec<Handle>> {
+    if let NodeData::Element { name, .. } = &node.data {
+        if name.local == local_name!("main") {
+            return Some(vec![node.clone()]);
+        }
+    }
+    for child in node.children.borrow().iter() {
+        if let Some(mut path) = main_path(child) {
+            path.insert(0, node.clone());
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// What a selector can ask about an element: its tag, its id, its classes, its

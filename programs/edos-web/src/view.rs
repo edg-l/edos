@@ -7,7 +7,8 @@
 //! blitter draws with -- a character count times a cell width would put a
 //! link's underline in the wrong place at the first non-ASCII glyph.
 
-use std::rc::Rc;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use edos_render::font::{Family, Weight, size};
 use edos_render::metrics::space;
@@ -166,6 +167,9 @@ pub struct Layout {
     pub decor: Vec<Decor>,
     /// Every link target on the page, in document order.
     pub links: Vec<String>,
+    /// Where each `id` in the document ended up, so a link carrying a fragment
+    /// is a scroll rather than a fetch of the page it is already on.
+    pub anchors: BTreeMap<String, u32>,
     /// Total page height, which is what scrolling is bounded by.
     pub height: u32,
     /// The width this was laid out for, so a redraw knows when it is stale.
@@ -219,7 +223,7 @@ struct Word {
 /// which is what makes the line grow to hold the box.
 #[derive(Clone)]
 pub(crate) struct BoxedRun {
-    node: Rc<Node>,
+    node: Arc<Node>,
     width: u32,
 }
 
@@ -246,6 +250,7 @@ impl Layout {
             lines: Vec::new(),
             decor: Vec::new(),
             links: Vec::new(),
+            anchors: BTreeMap::new(),
             height: 0,
             width,
             origin_x: pad,
@@ -351,6 +356,11 @@ impl Layout {
     fn lay_block(&mut self, block: &Block, mut y: i32) -> (i32, u32) {
         let mut plan = plan(block);
         y += plan.gap_before as i32;
+        // Recorded before the block is laid out, since a fragment names the
+        // top of what it points at. The margin above it is not part of it.
+        if let Some(anchor) = &block.anchor {
+            self.anchors.insert(anchor.clone(), y.max(0) as u32);
+        }
 
         // The measure the page asked for, never wider than the column it
         // sits in: there is no horizontal scroll, so the window is the
@@ -478,11 +488,23 @@ impl Layout {
             .lines
             .iter()
             .find(|line| y >= line.y && y < line.y + line.height as i32)?;
-        let item = line
-            .items
-            .iter()
-            .find(|item| !item.hidden && x >= item.x && x < item.x + item.width as i32)?;
-        self.links.get(item.link?).map(String::as_str)
+        let shown = || line.items.iter().filter(|item| !item.hidden);
+        if let Some(item) = shown().find(|item| x >= item.x && x < item.x + item.width as i32) {
+            return self.links.get(item.link?).map(String::as_str);
+        }
+        // The space between two words of one link belongs to it. A fragment is
+        // a word, so without this a multi-word link has a dead gap between
+        // every pair of words, and the reader -- who sees one underlined
+        // phrase -- has clicked the link and had nothing happen.
+        let before = shown()
+            .filter(|item| item.x + item.width as i32 <= x)
+            .next_back()?;
+        let after = shown().find(|item| item.x > x)?;
+        let link = before.link?;
+        (after.link == Some(link))
+            .then(|| self.links.get(link))
+            .flatten()
+            .map(String::as_str)
     }
 
     /// Place a decoded picture as one line, scaled to fit the column. Returns
@@ -644,7 +666,7 @@ impl Layout {
                     background: None,
                     hidden: run.css.invisible,
                     boxed: Some(BoxedRun {
-                        node: Rc::clone(node),
+                        node: Arc::clone(node),
                         width: content,
                     }),
                 });
@@ -939,6 +961,7 @@ fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
         lines: Vec::new(),
         decor: Vec::new(),
         links: Vec::new(),
+        anchors: BTreeMap::new(),
         height: 0,
         width: offer,
         origin_x: 0,

@@ -505,6 +505,10 @@ pub struct Computed {
     pub align: Align,
     /// `text-transform`, likewise inherited.
     pub transform: Transform,
+    /// The `width` this element declared for itself, which unlike
+    /// [`Computed::measure`] neither inherits nor folds in `max-width`. It
+    /// answers one question: whether the box is the visually-hidden idiom.
+    own_width: Option<u32>,
     /// `list-style-type`, inherited so a rule on the list reaches its items.
     /// `None` is "the page said nothing", which leaves the marker to the kind
     /// of list the element opened and how deeply it is nested.
@@ -570,6 +574,7 @@ impl Computed {
             margin_left: None,
             margin_right: None,
             background: None,
+            own_width: None,
             padding: Sides::default(),
             borders: Sides::default(),
             ..*self
@@ -890,6 +895,9 @@ impl Computed {
             "width" | "max-width" => {
                 if let Some(px) = parse_measure(value, root_px, self.em(parent_px), basis) {
                     self.measure = Some(self.measure.map_or(px, |narrower| narrower.min(px)));
+                    if name == "width" {
+                        self.own_width = Some(px);
+                    }
                 }
             }
             // A percentage `min-width` is of the containing block's width,
@@ -1546,6 +1554,17 @@ impl Stylesheet {
             if let Some(value) = substitute(&decl.value, &vars, 0) {
                 computed.apply(&decl.name, &value, root_px, parent_px, basis);
             }
+        }
+        // The visually-hidden idiom -- a box sized 1x1 with its overflow
+        // hidden, which every accessible site uses to carry text for a screen
+        // reader alone -- shows nothing in a browser either. `overflow` is not
+        // implemented and nothing here clips, so without this the text lands
+        // in the page at full size: a heading on a documentation site reads
+        // "What runs today" followed by "Section titled What runs today".
+        // The size is the whole test, since a box that small can show nothing
+        // whatever its overflow says.
+        if computed.own_width.is_some_and(|w| w <= 1) && computed.height.is_some_and(|h| h <= 1) {
+            computed.hidden = true;
         }
         (computed, vars)
     }
@@ -2662,6 +2681,31 @@ mod tests {
         sheet
             .cascade(stack, inline, &Computed::default(), &Vars::root(), 14)
             .0
+    }
+
+    /// The visually-hidden idiom, which every accessible site uses to carry
+    /// text meant for a screen reader alone: a 1x1 box with its overflow
+    /// hidden. Nothing here clips, so the size is what has to answer it.
+    #[test]
+    fn a_box_sized_one_pixel_square_is_not_laid_out() {
+        let sheet =
+            sheet(".sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden }");
+        assert!(cascade(&sheet, &[element("span", &["sr-only"])], None).hidden);
+    }
+
+    /// A narrow box is not a hidden one, and neither is a child of one: the
+    /// measure inherits so that a wrapper can set the column its paragraphs
+    /// are laid out in, and reading that as "this element asked to be 1px
+    /// wide" would drop the whole page under a narrow container.
+    #[test]
+    fn only_the_element_that_declared_both_is_hidden() {
+        let sheet = sheet("div { width: 1px } p { height: 1px }");
+        let div = cascade(&sheet, &[element("div", &[])], None);
+        assert!(!div.hidden);
+        let inner = sheet
+            .cascade(&[element("p", &[])], None, &div, &Vars::root(), 14)
+            .0;
+        assert!(!inner.hidden, "a child inherits the measure, not the width");
     }
 
     #[test]

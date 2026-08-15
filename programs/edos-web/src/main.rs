@@ -12,6 +12,7 @@ use crate::css::Viewport;
 
 mod css;
 mod doc;
+mod net;
 mod text;
 mod ui;
 mod view;
@@ -24,6 +25,7 @@ fn main() {
     let mut width = DEFAULT_WIDTH;
     let mut links = false;
     let mut dump = false;
+    let mut reader = true;
     let mut target: Option<String> = None;
     let mut i = 1;
 
@@ -34,6 +36,7 @@ fn main() {
                 process::exit(0);
             }
             "-d" | "--dump" => dump = true,
+            "-a" | "--all" => reader = false,
             "-l" | "--links" => links = true,
             "-w" | "--width" => {
                 i += 1;
@@ -55,19 +58,16 @@ fn main() {
         process::exit(1);
     };
 
-    let (html, base) = match load(&target) {
-        Ok(loaded) => loaded,
-        Err(message) => fail(&message),
-    };
-
-    let address = base.to_string();
-    // The window the page is about to open in answers its media queries, and it
-    // is the honest answer for `-d` too: the text dump is the same document,
-    // read out rather than drawn.
-    let viewport = Viewport::new(ui::WIN_W, ui::WIN_H, doc::ROOT_PX);
-    let document = doc::parse(&html, base, &fetch_subresource, viewport);
-
     if dump {
+        let (html, base) = match load(&target) {
+            Ok(loaded) => loaded,
+            Err(message) => fail(&message),
+        };
+        // The window the page would have opened in answers its media queries,
+        // which is the honest answer for `-d` too: the text dump is the same
+        // document, read out rather than drawn.
+        let viewport = Viewport::new(ui::WIN_W, ui::WIN_H, doc::ROOT_PX);
+        let document = doc::parse(&html, base, &fetch_subresource, viewport, reader);
         let rendered = text::render(&document, width, links);
         // Writing the whole rendering in one go: a redirect to /dev/klog turns
         // every write into a log line, and a per-line write would interleave
@@ -80,19 +80,13 @@ fn main() {
         return;
     }
 
-    // Said on stdout as well as drawn, so a headless run can tell a page that
-    // arrived empty from one that never loaded.
-    println!(
-        "edos-web: {} - {} blocks in a tree of {} boxes {} deep, from {}",
-        document.display_title(),
-        document.blocks.len(),
-        document.root.count(),
-        document.root.depth(),
-        address
-    );
-
-    match ui::Browser::open(document, address) {
-        Ok(mut browser) => browser.run(),
+    // The window comes up before the first byte is asked for, so the loading
+    // view covers the first page the way it covers every later one.
+    match ui::Browser::open(doc::Document::blank(), String::new(), reader) {
+        Ok(mut browser) => {
+            browser.navigate(&target);
+            browser.run();
+        }
         Err(err) => fail(&format!("cannot create a window: {err}")),
     }
 }
@@ -166,11 +160,15 @@ fn usage() {
     eprintln!("usage: edos-web [-d [-l] [-w COLUMNS]] URL|FILE");
     eprintln!("  -d, --dump      print the page as text instead of opening a window");
     eprintln!("  -l, --links     number links and list their targets");
+    eprintln!("  -a, --all       lay out the whole page, not just its <main>");
     eprintln!(
         "  -w, --width N   wrap to N columns (default {})",
         DEFAULT_WIDTH
     );
-    eprintln!("in the window: click a link to follow it, Backspace or Back goes back");
+    eprintln!("in the window: click a link to follow it, or type an address and press Enter");
+    eprintln!("  Ctrl+L address bar, F5 or Ctrl+R reload, Esc stops a load");
+    eprintln!("  m shows the whole page rather than its main content, and back");
+    eprintln!("  Backspace goes back, Shift+Backspace forward");
     eprintln!("  arrows, PageUp/PageDown, Home/End scroll; q closes");
 }
 

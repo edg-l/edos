@@ -133,7 +133,8 @@
   </head>
   <body>
     <h1>Welcome to EDOS</h1>
-    <nav><a href="/share/web/welcome.html">Reload</a></nav>
+    <nav><a href="/share/web/welcome.html">Reload</a>
+      <a href="#the-end">Jump to the end</a></nav>
 
     <p>
       An x86_64 operating system written in Rust: an SMP preemptive kernel, its
@@ -375,6 +376,10 @@ while the newline above them is kept.</p>
       <p class="cell c">next row</p>
     </div>
     <hr>
+    <h2 id="the-end">What a fragment reaches</h2>
+    <p>The link at the top of this page points at this heading's
+      <code>id</code>. Following it scrolls here rather than loading the page
+      again, and the address bar keeps the fragment.</p>
     <p class="mono flush-right">/share/web/welcome.html</p>
   </body>
 </html>
