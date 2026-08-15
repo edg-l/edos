@@ -337,13 +337,18 @@ impl Layout {
     }
 
     /// Lay one block out at the origin and column the caller set, returning the
-    /// `y` it ends at.
+    /// `y` it ends at and the inset standing to the right of its content.
     ///
     /// The box engine calls this twice per block: once to learn how tall the
     /// block is at a given width, and once to emit it where that engine decided
     /// it goes. Measuring by laying out into a scratch [`Layout`] is what keeps
     /// one line breaker rather than a measuring copy of it that can drift.
-    fn lay_block(&mut self, block: &Block, mut y: i32) -> i32 {
+    ///
+    /// The trailing inset is returned because nothing in the emitted lines
+    /// records it: content is placed from the box's left edge, so the padding,
+    /// border and margin on that side leave no fragment behind to measure. A
+    /// caller sizing the box from its content has to add it back.
+    fn lay_block(&mut self, block: &Block, mut y: i32) -> (i32, u32) {
         let mut plan = plan(block);
         y += plan.gap_before as i32;
 
@@ -460,7 +465,7 @@ impl Layout {
             });
         }
         y += plan.gap_after as i32;
-        y
+        (y, right + plan.trail)
     }
 
     /// The link target at page coordinates, if a link's text is under them.
@@ -597,11 +602,14 @@ impl Layout {
                 // it out at `avail` and measuring that would just report
                 // `avail` back, since a line fills the column it is given.
                 let probe = Layout::build_tree(node, MAX_CONTENT_PROBE, 0);
-                // **Measured as each line's extent, not as its rightmost edge.**
+                // **Measured as each line's extent, not as its rightmost edge,
+                // and not as the width the engine arranged the tree in.**
                 // `text-align` is inherited, so a box inside a centred
                 // paragraph has its fragments shifted half the probe column to
                 // the right; reading `x + width` then measures the shift and
-                // reports a box as wide as the column it was probed in.
+                // reports a box as wide as the column it was probed in. The
+                // arranged root is no better -- a block box fills the column it
+                // is given, so it reports the probe back.
                 let intrinsic = probe
                     .lines
                     .iter()
@@ -919,6 +927,13 @@ impl Layout {
 /// that is what intrinsic sizing means and what a flex or grid track is sized
 /// from. Reporting the offer instead makes every item as wide as the space it
 /// was shown, which is how a row collapses into a column.
+///
+/// **The width reported is the border box's, not the content's.** A leaf wears
+/// its own padding, border and margin -- taffy is told about none of them -- so
+/// a width that stopped at the last fragment names a box narrower than the one
+/// that will be drawn. The engine then hands the leaf that width back, the
+/// re-layout subtracts the insets from it a second time, and the content wraps
+/// a word early inside a box it fits in.
 fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
     let mut scratch = Layout {
         lines: Vec::new(),
@@ -929,7 +944,8 @@ fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
         origin_x: 0,
         column: offer,
     };
-    let height = scratch.lay_block(block, 0).max(0) as u32;
+    let (bottom, trailing) = scratch.lay_block(block, 0);
+    let height = bottom.max(0) as u32;
     let text = scratch
         .lines
         .iter()
@@ -951,7 +967,7 @@ fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
     // the width the box was *given*, so taking them as evidence of intrinsic
     // width answers "as wide as you offered" to every question, and a box that
     // should shrink to fit fills the line instead.
-    (text.max(rules), height)
+    (text.max(rules) + trailing, height)
 }
 
 /// Mirror the document's box tree into taffy's.

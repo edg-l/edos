@@ -537,7 +537,7 @@ coordinates and translates it to where the line put it, re-indexing its links on
 the way. The engine is reused rather than reimplemented: a box is
 `Layout::build_tree` on a `Node`, which is what the page itself is.
 
-**Three bugs on the way, and the third is the interesting one.**
+**Four bugs on the way, and the last two are the interesting ones.**
 
 - A boxed run carries no text, and `flush` ended with
   `runs.retain(|r| !r.text.is_empty())`. The whole feature was being deleted one
@@ -552,16 +552,31 @@ the way. The engine is reused rather than reimplemented: a box is
   centred paragraph that measures the *centring shift*, not the content: every
   box came out as wide as the probe column and so took a line to itself. Each
   line's own extent, `max(x + width) - min(x)`, is what is alignment-independent.
+- **`measure_block` reported a width that was neither the content's nor the
+  box's.** A leaf wears its own padding, border and margin, and taffy is told
+  about none of them: `container_style` deliberately sets only what arranges
+  *children*, so a leaf's own insets stay with `lay_block`. Content is placed
+  from the box's left edge, so the left inset is inside `x` and the right one
+  leaves no fragment behind — the measured width carried one and not the other.
+  The engine handed that width back as the leaf's size, `lay_block` subtracted
+  both insets from it a second time, and the content re-flowed in a column
+  `padding-right` too narrow. The fixture's `padding: 4px 8px` badge lost 8px
+  and its two lines came out as three. `lay_block` returns the trailing inset
+  now and `measure_block` adds it back, so the width it reports is the border
+  box's.
 
 Verified against `welcome.html` and against the real site, whose three hero
 buttons now stand side by side instead of running together as one string of
-text.
+text. The fixture's `a box<br>on two lines` badge sets in two lines, with the
+text before and after it on the same line, and the three-in-a-row badges share
+one line.
 
-**Known imprecision.** The box is sized from the widest line of the trial
-layout, and re-laying it out at exactly that width can still wrap one word
-early: the fixture's two-line box comes out in three. The sizing is a pixel or
-two short somewhere between the trial and the real layout, and it has not been
-run down.
+**Do not measure a box from the arranged root instead.** It reads as the
+obvious simplification — `taffy` has just laid the subtree out, so ask it how
+wide the tree came out — and it is wrong for the same reason the decor was: a
+block box fills the column it is given, so the root reports `MAX_CONTENT_PROBE`
+straight back and every badge takes a line to itself. Only the *lines* know how
+wide the content is.
 
 `float` is still absent and is not coming from `taffy`, which does not implement
 it.
