@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+#
+# Cut an EDOS release.
+#
+# Two commands, because exactly one part of a release is judgement and the rest
+# is mechanical:
+#
+#   scripts/release prepare 0.5.0
+#       Bumps the version, runs every gate, builds the ISO, checksums it, and
+#       writes release/0.5.0/MATERIAL.md -- the commit range grouped by
+#       subsystem, the remeasured counts, and the asset sizes. Changes nothing
+#       outside the working tree and pushes nothing.
+#
+#   scripts/release publish 0.5.0
+#       Tags, and creates the GitHub release from release/0.5.0/NOTES.md with
+#       the ISO and SHA256SUMS attached. Refuses if NOTES.md is missing.
+#
+# Between the two, a human (or an agent) writes NOTES.md from MATERIAL.md. That
+# is deliberate: the notes are the release. See "the house style" below.
+#
+# THE VERSION LIVES IN ONE PLACE: `version` in kernel/Cargo.toml. The kernel
+# renders it into /proc/version, edos-sh reads that for its banner, and the site
+# and README quote it. Nothing else hardcodes it, so the bump here is the whole
+# bump.
+#
+# THE HOUSE STYLE, from v0.2.0 through v0.4.0, so the next one matches:
+#   * Title is `EDOS vX.Y.Z: <what a user can now do>`, in plain words -- "a
+#     system you can log in to", "one bootable file". Not a feature list.
+#   * Open with two or three sentences saying what changed since the last one,
+#     then the commit count.
+#   * A `## Fix this first` section AT THE TOP if the previous release has a
+#     defect that loses data or otherwise bites whoever is running it. It comes
+#     before the new features, however good they are.
+#   * Sections per theme, `##`, ordered by what a reader cares about.
+#   * Say what does NOT work and what is off by default. v0.4.0 said sshd ships
+#     disabled and why; that is the tone.
+#   * Close with the counts: programs, lines of Rust, syscalls.
+#
+# THE GATES RUN BEFORE THE ISO IS BUILT, and a red one stops the release. This
+# is the one place where `make test` being slow does not earn it a skip.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+REPO_ROOT=$(pwd)
+ISO=edos-x86_64.iso
+
+die() { echo "release: $*" >&2; exit 1; }
+
+usage() {
+	cat >&2 <<-EOF
+	usage: scripts/release prepare <version>
+	       scripts/release publish <version>
+
+	<version> is bare, without the leading v: 0.5.0
+	EOF
+	exit 2
+}
+
+[ $# -eq 2 ] || usage
+CMD=$1
+VERSION=$2
+TAG="v${VERSION}"
+OUT="release/${VERSION}"
+
+[[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] ||
+	die "version must look like 0.5.0, got '${VERSION}'"
+
+previous_tag() {
+	git tag --list 'v[0-9]*' --sort=-v:refname | grep -v "^${TAG}$" | head -1
+}
+
+# ---------------------------------------------------------------------------
+
+prepare() {
+	git diff --quiet && git diff --cached --quiet ||
+		die "working tree is dirty; commit or stash first"
+
+	local branch prev
+	branch=$(git rev-parse --abbrev-ref HEAD)
+	[ "$branch" = trunk ] || die "on '${branch}', expected trunk"
+	git tag --list "$TAG" | grep -q . && die "${TAG} already exists"
+
+	prev=$(previous_tag)
+	[ -n "$prev" ] || die "no previous version tag found"
+	echo "release: ${prev} -> ${TAG}, $(git rev-list --count "${prev}"..HEAD) commits"
+
+	# The bump, and the lockfile that records it.
+	sed -i -E "0,/^version = \".*\"/s//version = \"${VERSION}\"/" kernel/Cargo.toml
+	grep -q "^version = \"${VERSION}\"$" kernel/Cargo.toml ||
+		die "kernel/Cargo.toml version did not take"
+	(cd kernel && cargo update -p edos-kernel --offline >/dev/null 2>&1) || true
+
+	echo "release: gates"
+	make -C kernel check >/dev/null || die "kernel check failed"
+	(cd kernel && cargo clippy --target x86_64-unknown-none 2>&1 | grep -qE '^warning: ') &&
+		die "kernel clippy is not clean"
+	(cd programs && cargo +edos build --target x86_64-unknown-edos >/dev/null 2>&1) ||
+		die "programs build failed"
+	(cd kernel && cargo fmt --check) || die "kernel fmt is dirty"
+	(cd programs && cargo +edos fmt --check) || die "programs fmt is dirty"
+	./scripts/host-tests >/dev/null || die "host tests failed"
+	make test AUDIODEV=none >/dev/null || die "in-kernel suite failed"
+	echo "release: gates green"
+
+	# `make test` leaves a sched-test kernel in the ISO, so the shippable one
+	# is built after it and never before.
+	make all >/dev/null || die "ISO build failed"
+
+	mkdir -p "$OUT"
+	sha256sum "$ISO" > "${OUT}/SHA256SUMS"
+	cp "$ISO" "${OUT}/${ISO}"
+
+	material "$prev" > "${OUT}/MATERIAL.md"
+
+	cat <<-EOF
+
+	release: prepared ${TAG}
+	  assets   ${OUT}/${ISO} ($(numfmt --to=iec < <(stat -c%s "$ISO")))
+	           ${OUT}/SHA256SUMS
+	  material ${OUT}/MATERIAL.md
+
+	Next: write ${OUT}/NOTES.md from MATERIAL.md, commit the version bump,
+	then scripts/release publish ${VERSION}
+	EOF
+}
+
+# The facts a release note is written from, so they are never re-derived by
+# hand. Everything here is measured now, not quoted from a doc.
+material() {
+	local prev=$1
+	echo "# Material for ${TAG}"
+	echo
+	echo "Range \`${prev}..HEAD\`, $(git rev-list --count "${prev}"..HEAD) commits,"
+	echo "$(git log "${prev}"..HEAD --format=%ad --date=short | tail -1) to $(git log -1 --format=%ad --date=short)."
+	echo
+	echo '## Counts'
+	echo
+	echo '| | value |'
+	echo '|---|---|'
+	echo "| syscalls | $(grep -c 'const SYS_' kernel/src/syscalls/mod.rs) |"
+	echo "| userspace programs | $(($(grep -cE '^\s+"' programs/Cargo.toml) - 3)) |"
+	echo "| binaries in filesystem/bin | $(ls filesystem/bin | wc -l) |"
+	echo "| Rust | $(tokei -t=Rust --output json 2>/dev/null | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -1) code lines |"
+	echo "| kernel Rust | $(tokei -t=Rust kernel/src 2>/dev/null | awk '/^ Rust/{print $4}') code lines |"
+	echo "| commits, all time | $(git rev-list --count HEAD) |"
+	echo "| in-kernel suite | $(grep -aoE 'ALL [0-9]+ TESTS PASSED' run_log.txt 2>/dev/null | tail -1) |"
+	echo "| host unit tests | $(./scripts/host-tests 2>/dev/null | grep -oE 'ok\. [0-9]+ passed' | awk '{s+=$2} END {print s}') |"
+	echo "| ISO | $(numfmt --to=iec < <(stat -c%s "$ISO")) |"
+	echo
+	echo '## Commits by area'
+	echo
+	echo 'Grouped by the first word of the subject, which this tree uses as the area.'
+	echo
+	git log "${prev}"..HEAD --reverse --format='%s' |
+		awk -F'[:,]' '{
+			area = $1
+			if (area !~ /^[a-z0-9_-]+$/ || length(area) > 20) area = "(general)"
+			bucket[area] = bucket[area] "\n- " $0
+			count[area]++
+		}
+		END { for (a in bucket) printf "### %s (%d)\n%s\n\n", a, count[a], bucket[a] }' |
+		sed 's/^- \(.*\)/- \1/'
+	echo
+	echo '## Full log'
+	echo
+	git log "${prev}"..HEAD --reverse --format='- `%h` %s'
+}
+
+# ---------------------------------------------------------------------------
+
+publish() {
+	local notes="${OUT}/NOTES.md"
+	[ -f "$notes" ] || die "write ${notes} first (scripts/release prepare wrote MATERIAL.md beside it)"
+	[ -f "${OUT}/${ISO}" ] || die "no ISO in ${OUT}; run prepare"
+	grep -q "^version = \"${VERSION}\"$" kernel/Cargo.toml ||
+		die "kernel/Cargo.toml is not at ${VERSION}; run prepare"
+	git diff --quiet && git diff --cached --quiet ||
+		die "working tree is dirty; commit the version bump first"
+	[ -z "$(git log '@{u}'..HEAD --oneline)" ] || die "unpushed commits; push first"
+
+	local title
+	title=$(head -1 "$notes" | sed 's/^# *//')
+	[ -n "$title" ] || die "${notes} must start with '# <title>'"
+
+	git tag -a "$TAG" -m "$title"
+	git push origin "$TAG"
+
+	gh release create "$TAG" \
+		--title "$title" \
+		--notes-file <(tail -n +2 "$notes") \
+		"${OUT}/${ISO}#edos-x86_64.iso" \
+		"${OUT}/SHA256SUMS#SHA256SUMS"
+
+	echo "release: published ${TAG}"
+	echo "release: remember the site -- version and counts in /usr/src/edos-web, then npm run build"
+}
+
+case "$CMD" in
+	prepare) prepare ;;
+	publish) publish ;;
+	*) usage ;;
+esac
