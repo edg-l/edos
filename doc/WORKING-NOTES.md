@@ -1610,7 +1610,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-15 (after `edos-web` stages 1 and 2)
+## Counts, remeasured 2026-08-15 (after `edos-web` stage 2's CSS selector work)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1622,10 +1622,11 @@ does not have to invent them.
 | userspace programs | 123 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 124 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 107,803 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 109,229 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,383 | `git rev-list --count HEAD` |
+| commits | 1,396 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
+| host unit tests | 101 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 161, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
@@ -1654,10 +1655,25 @@ count and a `filesystem/bin` count therefore differ by more than `edos-edit`
 leaving the image.
 
 The project site at `/usr/src/edos-web` is a separate repo carrying the same
-numbers, and it drifts on its own. It agrees with the table above as of its
-commit for repo 20b54c1, where its syscall inventory was set-diffed against the
-kernel's and came back empty both ways, and its program list against
-`filesystem/bin` the same.
+numbers, and it drifts on its own. Its headline counts and its program list
+agree with the table above; its **syscall inventory does not**. `src/data/syscalls.ts`
+is missing three entries the kernel has -- 289 `mprotect`, 314 `sched_setattr`
+and 315 `sched_getattr` -- so it transcribes 115 distinct numbers while
+`index.astro` says 119 and the kernel dispatches 119. The headline was refreshed
+each time and the table behind it was not, which is precisely why the check
+below is a set-diff and not a count:
+
+```bash
+cd /usr/src/edos-web
+grep -oE 'num:\s*[0-9]+' src/data/syscalls.ts | awk -F': *' '{print $2}' | sort -n | uniq > /tmp/site_sys.txt
+grep -oE 'const SYS_[A-Z0-9_]+: u64 = [0-9]+' \
+  /home/edgar/dev/edos-v2/kernel/src/syscalls/mod.rs | awk -F'= ' '{print $2}' | sort -n | uniq > /tmp/kern_sys.txt
+comm -3 /tmp/kern_sys.txt /tmp/site_sys.txt   # must be empty
+```
+
+That kernel-side grep reports 118, not 119: `SYS_ERRNO` is written `0x400` and
+its decimal form does not match, so it is the one constant `grep -c 'const SYS_'`
+counts and this diff does not. Expect the difference and do not chase it.
 
 Its line counts drift faster than its inventories, and for a reason worth
 knowing: deleting dead code moves the LOC figure on every commit while adding
