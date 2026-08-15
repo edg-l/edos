@@ -187,7 +187,17 @@ impl FrameLog {
             self.full_screens += 1;
         }
 
-        if frame.interval_us > self.budget_us * STALL_MULTIPLE {
+        // A long gap is only a stall if the loop had work and did not get to
+        // it. The compositor parks when nothing has changed, so a quiet desktop
+        // produces gaps of any length by design: at boot, before the first
+        // window is mapped, that is well over a second. Counting those made
+        // every log open with a stall nobody could act on, and buried the ones
+        // that mean something.
+        //
+        // `in_motion` is the test rather than `idle_repaint`, because a frame
+        // that genuinely stalled may well end up repainting nothing, and the
+        // question is whether there was anything to be late *for*.
+        if frame.in_motion && frame.interval_us > self.budget_us * STALL_MULTIPLE {
             self.stalls += 1;
             // Named immediately rather than waited for, because the report is
             // an average of a second and a stall is a single event.
