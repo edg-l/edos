@@ -13,7 +13,10 @@ use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 
 use crate::css::{self, Align, Sides};
-use crate::doc::{Block, BlockKind, Document, Picture, Run};
+use crate::doc::{Block, BlockKind, Document, Node, Picture, Run};
+use taffy::{
+    AvailableSpace, NodeId, Size as TaffySize, Style as TaffyStyle, TaffyError, TaffyTree,
+};
 
 /// Margin between the page and the window edge.
 pub const PAGE_PAD: u32 = space(4);
@@ -176,7 +179,15 @@ struct Word {
 
 impl Layout {
     /// Lay `document` out in a column `width` pixels wide.
+    ///
+    /// The box tree is arranged by `taffy`, which stacks and sizes the boxes;
+    /// what goes *inside* a box is this file's own line breaker, reached
+    /// through [`Layout::lay_block`] and handed to taffy as its measure
+    /// function. A leaf is measured by laying it out into a scratch `Layout`
+    /// and taking the height it ends at, so there is one line breaker rather
+    /// than a measuring copy of it that can drift.
     pub fn build(document: &Document, width: u32) -> Layout {
+        let column = width.saturating_sub(PAGE_PAD * 2).max(1);
         let mut out = Layout {
             lines: Vec::new(),
             decor: Vec::new(),
@@ -184,16 +195,84 @@ impl Layout {
             height: 0,
             width,
             origin_x: PAGE_PAD,
-            column: width.saturating_sub(PAGE_PAD * 2).max(1),
+            column,
         };
-        let mut y = PAGE_PAD as i32;
 
-        for block in &document.blocks {
-            y = out.lay_block(block, y);
+        let mut tree: TaffyTree<&Block> = TaffyTree::new();
+        let Ok(root) = add_node(&mut tree, &document.root) else {
+            return out;
+        };
+        let space = TaffySize {
+            width: AvailableSpace::Definite(column as f32),
+            height: AvailableSpace::MaxContent,
+        };
+        let arranged =
+            tree.compute_layout_with_measure(root, space, |known, avail, _id, ctx, _| {
+                let Some(block) = ctx else {
+                    return TaffySize::ZERO;
+                };
+                if let TaffySize {
+                    width: Some(w),
+                    height: Some(h),
+                } = known
+                {
+                    return TaffySize {
+                        width: w,
+                        height: h,
+                    };
+                }
+                let w = match avail.width {
+                    AvailableSpace::Definite(w) if w > 0.0 => w as u32,
+                    _ => column,
+                };
+                let mut scratch = Layout {
+                    lines: Vec::new(),
+                    decor: Vec::new(),
+                    links: Vec::new(),
+                    height: 0,
+                    width: w,
+                    origin_x: 0,
+                    column: w,
+                };
+                let end = scratch.lay_block(block, 0);
+                TaffySize {
+                    width: w as f32,
+                    height: end.max(0) as f32,
+                }
+            });
+        if arranged.is_err() {
+            return out;
         }
 
+        let mut y = PAGE_PAD as i32;
+        out.emit(&tree, root, PAGE_PAD as i32, &mut y);
         out.height = (y + PAGE_PAD as i32).max(0) as u32;
         out
+    }
+
+    /// Walk the arranged tree in document order and lay each leaf out where
+    /// taffy put it.
+    ///
+    /// `y` trails the bottom of the last leaf emitted, which is what the page
+    /// height is taken from. Taffy reports a location relative to the parent,
+    /// so the horizontal offset accumulates down the walk.
+    fn emit(&mut self, tree: &TaffyTree<&Block>, node: NodeId, x: i32, y: &mut i32) {
+        let Ok(layout) = tree.layout(node) else {
+            return;
+        };
+        let x = x + layout.location.x as i32;
+        if let Some(block) = tree.get_node_context(node) {
+            self.origin_x = x.max(0) as u32;
+            self.column = (layout.size.width as u32).max(1);
+            *y = self.lay_block(block, *y);
+            return;
+        }
+        let Ok(children) = tree.children(node) else {
+            return;
+        };
+        for child in children {
+            self.emit(tree, child, x, y);
+        }
     }
 
     /// Lay one block out at the origin and column the caller set, returning the
@@ -663,6 +742,22 @@ impl Layout {
             hidden: false,
         });
         *y += height as i32;
+    }
+}
+
+/// Mirror the document's box tree into taffy's.
+///
+/// A leaf carries its [`Block`] as taffy's node context, which is how the
+/// measure function knows what to lay out; a container carries none, which is
+/// what tells the emit walk to recurse rather than to draw.
+fn add_node<'a>(tree: &mut TaffyTree<&'a Block>, node: &'a Node) -> Result<NodeId, TaffyError> {
+    match node {
+        Node::Leaf(block) => tree.new_leaf_with_context(TaffyStyle::DEFAULT, block),
+        Node::Container { children, .. } => {
+            let kids: Result<Vec<NodeId>, TaffyError> =
+                children.iter().map(|child| add_node(tree, child)).collect();
+            tree.new_with_children(TaffyStyle::DEFAULT, &kids?)
+        }
     }
 }
 

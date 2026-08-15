@@ -9,5 +9,8 @@ edos_lib = { path = "../edos_lib" }
 # `svg` because a page's pictures are as often vector as raster, and the
 # decoder is already in the tree.
 edos_render = { path = "../edos_render", features = ["svg"] }
+# The box engine. It arranges boxes and asks a measure function how big a leaf
+# is; it does not break lines, so `view.rs`'s inline engine is what answers it.
+taffy = { version = "0.9", default-features = false, features = ["std", "taffy_tree", "block_layout", "flexbox", "grid"] }
 html5ever = "0.39"
 markup5ever_rcdom = "0.39.0-unofficial"
