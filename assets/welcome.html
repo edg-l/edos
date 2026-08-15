@@ -128,6 +128,7 @@
       .cell.a { background-color: #2b6cb0; }
       .cell.b { background-color: #2f855a; }
       .cell.c { background-color: #975a16; }
+      .badge { display: inline-block; background-color: #5e81ac; color: #fff; padding: 4px 8px; }
     </style>
   </head>
   <body>
@@ -354,6 +355,10 @@ while the newline above them is kept.</p>
     <ul class="plain">
       <li>A list with no marker at all, kept at its indent.</li>
     </ul>
+    <h2>What an inline-block holds</h2>
+    <p>Text before <span class="badge">a box<br>on two lines</span> and text after it, all on the same line.</p>
+    <p>Three in a row: <span class="badge">one</span> <span class="badge">two</span> <span class="badge">three</span>.</p>
+    <hr>
     <h2>What a flex container arranges</h2>
     <div class="row">
       <p class="cell a">first</p>

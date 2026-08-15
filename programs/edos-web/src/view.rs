@@ -7,6 +7,8 @@
 //! blitter draws with -- a character count times a cell width would put a
 //! link's underline in the wrong place at the first non-ASCII glyph.
 
+use std::rc::Rc;
+
 use edos_render::font::{Family, Weight, size};
 use edos_render::metrics::space;
 use edos_render::text::{self, Style, Surface};
@@ -33,6 +35,30 @@ const QUOTE_INDENT: u32 = space(4);
 const TAB_SPACES: u32 = 4;
 /// Width of the scrollbar drawn when the page is taller than the viewport.
 pub const SCROLLBAR_W: u32 = space(2);
+/// A column wide enough that nothing in a box wraps, so a trial layout in it
+/// reports the width the content actually wants.
+const MAX_CONTENT_PROBE: u32 = 1 << 16;
+
+/// The padding and border on both sides of a box.
+///
+/// The content extent is measured as a line's own width, so neither inset is in
+/// it. Leaving them out makes a padded box narrower than its contents by
+/// exactly the padding it asked for, which shows as text wrapping inside a box
+/// that looked wide enough.
+fn horizontal_inset(node: &Node) -> u32 {
+    match node {
+        Node::Leaf(block) => {
+            block.css.padding.left.unwrap_or(0)
+                + block.css.padding.right.unwrap_or(0)
+                + block.css.borders.left.px()
+                + block.css.borders.right.px()
+        }
+        Node::Container { children, .. } => {
+            children.iter().map(horizontal_inset).max().unwrap_or(0)
+        }
+    }
+}
+
 /// Tallest an image is drawn. A page's hero picture is often taller than the
 /// window, and one that has to be scrolled past to reach the first paragraph
 /// reads as a page that failed to load.
@@ -65,6 +91,10 @@ pub struct Fragment {
     /// space it was laid out in and paints nothing, and the hit test steps over
     /// it, since a hidden link is not a link the reader can reach.
     pub hidden: bool,
+    /// An `inline-block`'s subtree. Its contents are merged into the page once
+    /// the line it sits on has a `y`, which is the first moment the box's own
+    /// origin is known.
+    pub(crate) boxed: Option<BoxedRun>,
 }
 
 /// What a line draws.
@@ -178,6 +208,19 @@ struct Word {
     /// `visibility: hidden` on the run, which lays the word out and paints
     /// nothing where it stands.
     hidden: bool,
+    /// An `inline-block`'s subtree, when this "word" is a box rather than text.
+    /// It never splits and its size is its own, not its text's.
+    boxed: Option<BoxedRun>,
+}
+
+/// An atomic inline box: the subtree, and the width it laid out at.
+///
+/// The height is not kept: it reaches the line through the word's own `height`,
+/// which is what makes the line grow to hold the box.
+#[derive(Clone)]
+pub(crate) struct BoxedRun {
+    node: Rc<Node>,
+    width: u32,
 }
 
 impl Layout {
@@ -190,19 +233,27 @@ impl Layout {
     /// and taking the height it ends at, so there is one line breaker rather
     /// than a measuring copy of it that can drift.
     pub fn build(document: &Document, width: u32) -> Layout {
-        let column = width.saturating_sub(PAGE_PAD * 2).max(1);
+        Layout::build_tree(&document.root, width, PAGE_PAD)
+    }
+
+    /// Lay a box tree out in `width` pixels, inset by `pad` on every side.
+    ///
+    /// The page is one of these with the page padding; an `inline-block` is one
+    /// with none, laid out on its own and then merged into the line it sits in.
+    fn build_tree(root_node: &Node, width: u32, pad: u32) -> Layout {
+        let column = width.saturating_sub(pad * 2).max(1);
         let mut out = Layout {
             lines: Vec::new(),
             decor: Vec::new(),
             links: Vec::new(),
             height: 0,
             width,
-            origin_x: PAGE_PAD,
+            origin_x: pad,
             column,
         };
 
         let mut tree: TaffyTree<&Block> = TaffyTree::new();
-        let Ok(root) = add_node(&mut tree, &document.root) else {
+        let Ok(root) = add_node(&mut tree, root_node) else {
             return out;
         };
         let space = TaffySize {
@@ -247,12 +298,12 @@ impl Layout {
             return out;
         }
 
-        out.emit(&tree, root, PAGE_PAD as i32, PAGE_PAD as i32);
-        // The page is as tall as the engine made the tree, plus the padding
-        // below it. Taking it from the last leaf emitted would miss a box that
-        // a container placed beside a taller sibling rather than after it.
+        out.emit(&tree, root, pad as i32, pad as i32);
+        // As tall as the engine made the tree, plus the padding below it.
+        // Taking it from the last leaf emitted would miss a box that a
+        // container placed beside a taller sibling rather than after it.
         let arranged_h = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
-        out.height = (arranged_h as u32).saturating_add(PAGE_PAD * 2);
+        out.height = (arranged_h as u32).saturating_add(pad * 2);
         out
     }
 
@@ -366,10 +417,11 @@ impl Layout {
                 shift: 0,
                 background: None,
                 hidden: plan.invisible,
+                boxed: None,
             });
 
             let start = self.lines.len();
-            let words = self.words(&block.runs, &plan);
+            let words = self.words(&block.runs, &plan, avail);
             self.flow(words, &plan, avail, &mut y);
 
             // The marker hangs in the left margin of the first line, which
@@ -476,6 +528,7 @@ impl Layout {
             shift: 0,
             background: None,
             hidden: plan.invisible,
+            boxed: None,
         }];
         self.lines.push(Line {
             y: *y,
@@ -507,7 +560,7 @@ impl Layout {
     /// `white-space` keeps them needs the source's own spacing back: the gap
     /// before a word and the breaks before it are carried on the word itself,
     /// which is also how a separator that falls on a run boundary survives.
-    fn words(&mut self, runs: &[Run], plan: &Plan) -> Vec<Word> {
+    fn words(&mut self, runs: &[Run], plan: &Plan, avail: u32) -> Vec<Word> {
         let (base, ws) = (plan.style, plan.ws);
         let mut words = Vec::new();
         let mut spaces = 0;
@@ -533,6 +586,62 @@ impl Layout {
             // text rather than a highlighted span inside it, so only a colour
             // the run set for itself is painted per word.
             let background = run.css.background.filter(|&c| Some(c) != plan.background);
+            // An inline-block is laid out on its own, once, and then joins the
+            // line as a single item that never splits. Its width is its
+            // content's, bounded by the column, which is what makes it shrink
+            // to fit the way the box model says.
+            if let Some(node) = &run.boxed {
+                // Shrink to fit: the box is as wide as its content wants, up to
+                // the room left on the line. Its max-content width is taken
+                // from a trial layout in a column nothing can wrap in; laying
+                // it out at `avail` and measuring that would just report
+                // `avail` back, since a line fills the column it is given.
+                let probe = Layout::build_tree(node, MAX_CONTENT_PROBE, 0);
+                // **Measured as each line's extent, not as its rightmost edge.**
+                // `text-align` is inherited, so a box inside a centred
+                // paragraph has its fragments shifted half the probe column to
+                // the right; reading `x + width` then measures the shift and
+                // reports a box as wide as the column it was probed in.
+                let intrinsic = probe
+                    .lines
+                    .iter()
+                    .filter_map(|line| {
+                        let left = line.items.iter().map(|i| i.x).min()?;
+                        let right = line.items.iter().map(|i| i.x + i.width as i32).max()?;
+                        Some((right - left).max(0) as u32)
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    + horizontal_inset(node);
+                let content = intrinsic.min(avail).max(1);
+                let laid = Layout::build_tree(node, content, 0);
+                // The separators standing before the box belong to it, the way
+                // they do to a word. Leaving them on the running counters
+                // instead drops the space between two adjacent boxes and then
+                // hands it to whatever text follows them.
+                let box_spaces = std::mem::take(&mut spaces);
+                let box_breaks = std::mem::take(&mut breaks);
+                words.push(Word {
+                    text: String::new(),
+                    style,
+                    link,
+                    decoration: css::Decorations::default(),
+                    height: laid.height.max(height),
+                    glued: box_spaces == 0 && box_breaks == 0 && !words.is_empty(),
+                    spaces: box_spaces,
+                    breaks: box_breaks,
+                    letter: 0,
+                    word_gap,
+                    shift,
+                    background: None,
+                    hidden: run.css.invisible,
+                    boxed: Some(BoxedRun {
+                        node: Rc::clone(node),
+                        width: content,
+                    }),
+                });
+                continue;
+            }
             let mut word = String::new();
             let mut flush = |word: &mut String, spaces: &mut u32, breaks: &mut u32| {
                 if word.is_empty() {
@@ -562,6 +671,7 @@ impl Layout {
                     shift,
                     background,
                     hidden: run.css.invisible,
+                    boxed: None,
                 });
                 word.clear();
                 *spaces = 0;
@@ -636,17 +746,23 @@ impl Layout {
             // loop cannot run twice without making progress.
             let mut text = word.text;
             loop {
-                let width = text::width_tracked(&text, word.style, word.letter);
+                let width = match &word.boxed {
+                    Some(b) => b.width,
+                    None => text::width_tracked(&text, word.style, word.letter),
+                };
                 if plan.ws.wraps() && pen + gap + width > avail {
                     let room = avail.saturating_sub(pen + gap);
                     // Without a break property a word wider than the column
                     // gets its own line rather than being cut, since a URL
                     // broken across lines is worse than a ragged edge.
+                    // A box is atomic: it moves to the next line whole rather
+                    // than being cut through.
                     let cut = plan
                         .wrap
                         .breaks(width > avail)
                         .then(|| fit_prefix(&text, word.style, room, word.letter))
-                        .flatten();
+                        .flatten()
+                        .filter(|_| word.boxed.is_none());
                     if let Some(cut) = cut {
                         pen += gap;
                         let head = text[..cut].to_string();
@@ -663,6 +779,7 @@ impl Layout {
                             shift: word.shift,
                             background: word.background,
                             hidden: word.hidden,
+                            boxed: None,
                         });
                         pen += head_width;
                         let line = std::mem::take(&mut items);
@@ -697,6 +814,7 @@ impl Layout {
                     shift: word.shift,
                     background: word.background,
                     hidden: word.hidden,
+                    boxed: word.boxed.clone(),
                 });
                 pen += width;
                 break;
@@ -705,6 +823,34 @@ impl Layout {
         if !items.is_empty() {
             self.push_aligned(items, line_height, plan, avail, pen, y);
         }
+    }
+
+    /// Lay an `inline-block`'s subtree out and merge it into the page at
+    /// `(x, y)`.
+    ///
+    /// The box is laid out in its own coordinates and then translated, rather
+    /// than being laid out at its final position, because the engine that
+    /// arranges it knows nothing about the line it will land in. Links are
+    /// re-indexed on the way, since the box's indices are its own.
+    fn place_box(&mut self, boxed: &BoxedRun, x: i32, y: i32) {
+        let mut inner = Layout::build_tree(&boxed.node, boxed.width, 0);
+        let link_base = self.links.len();
+        self.links.append(&mut inner.links);
+        for decor in &mut inner.decor {
+            decor.x += x;
+            decor.y += y;
+        }
+        for line in &mut inner.lines {
+            line.y += y;
+            for item in &mut line.items {
+                item.x += x;
+                if let Some(index) = item.link.as_mut() {
+                    *index += link_base;
+                }
+            }
+        }
+        self.decor.append(&mut inner.decor);
+        self.lines.append(&mut inner.lines);
     }
 
     /// Push a line with its fragments moved to where `text-align` puts them.
@@ -742,8 +888,16 @@ impl Layout {
         let rise = shifts().max().unwrap_or(0).max(0) as u32;
         let drop = shifts().min().unwrap_or(0).min(0).unsigned_abs();
         let height = height.max(natural + rise + drop);
+        // A box's contents are placed now and not before: this is the first
+        // moment its origin is known, since the line's `y` is settled here and
+        // its `x` was settled when the fragment was pushed.
+        let boxes: Vec<(i32, BoxedRun)> = items
+            .iter()
+            .filter_map(|item| item.boxed.clone().map(|b| (item.x, b)))
+            .collect();
+        let line_y = *y;
         self.lines.push(Line {
-            y: *y,
+            y: line_y,
             height,
             lead: (height.saturating_sub(natural) / 2).max(rise),
             natural,
@@ -751,6 +905,9 @@ impl Layout {
             kind: LineKind::Text,
             hidden: false,
         });
+        for (x, boxed) in boxes {
+            self.place_box(&boxed, x, line_y);
+        }
         *y += height as i32;
     }
 }
@@ -790,13 +947,11 @@ fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
         })
         .max()
         .unwrap_or(0);
-    let boxes = scratch
-        .decor
-        .iter()
-        .map(|d| d.x.max(0) as u32 + d.width)
-        .max()
-        .unwrap_or(0);
-    (text.max(rules).max(boxes), height)
+    // Deliberately not the decor. A block's background and border are drawn at
+    // the width the box was *given*, so taking them as evidence of intrinsic
+    // width answers "as wide as you offered" to every question, and a box that
+    // should shrink to fit fills the line instead.
+    (text.max(rules), height)
 }
 
 /// Mirror the document's box tree into taffy's.

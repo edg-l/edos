@@ -91,6 +91,15 @@ pub struct Run {
     /// What the document's own CSS asked for, which overrides all three flags
     /// above wherever it says anything.
     pub css: Computed,
+    /// An `inline-block`'s contents, when this run is a box rather than text.
+    ///
+    /// The run then takes its place in the line as one atomic item, the way an
+    /// image does: it does not break, and its size comes from laying its own
+    /// subtree out rather than from measuring `text`, which is empty.
+    ///
+    /// `Rc` because a document is kept alive behind the next one in the history
+    /// and a box may hold a whole subtree.
+    pub boxed: Option<Rc<Node>>,
 }
 
 /// A box in the layout tree.
@@ -124,7 +133,19 @@ impl Node {
     /// wired up underneath.
     pub fn flatten_into(&self, out: &mut Vec<Block>) {
         match self {
-            Node::Leaf(block) => out.push(block.clone()),
+            Node::Leaf(block) => {
+                out.push(block.clone());
+                // An `inline-block`'s contents hang off a run rather than
+                // sitting in the tree, so a walk that only follows children
+                // misses them and the text vanishes from anything reading this
+                // list. Layout does not use it -- it arranges `root` -- so the
+                // box appearing after the line it sits on costs nothing.
+                for run in &block.runs {
+                    if let Some(node) = &run.boxed {
+                        node.flatten_into(out);
+                    }
+                }
+            }
             Node::Container { children, .. } => {
                 for child in children {
                     child.flatten_into(out);
@@ -288,6 +309,7 @@ impl Document {
                 code: false,
                 script: Script::default(),
                 css: Computed::default(),
+                boxed: None,
             }],
             css: Computed::default(),
             picture: None,
@@ -682,17 +704,31 @@ impl Builder<'_> {
                 // nothing about is the element's own.
                 let block = match self.computed.display {
                     Some(Display::Inline) => None,
+                    Some(Display::InlineBlock) => {
+                        Some(block_kind(&tag).unwrap_or(BlockKind::Paragraph))
+                    }
                     Some(Display::Block | Display::ListItem | Display::Flex | Display::Grid) => {
                         Some(block_kind(&tag).unwrap_or(BlockKind::Paragraph))
                     }
                     None => block_kind(&tag),
                 };
 
+                // An inline-block is an inline-*level* box: the line it sits in
+                // carries on around it, so the parent's runs are set aside
+                // rather than flushed into a block of their own.
+                let inline_box = self.computed.display == Some(Display::InlineBlock);
+                let mut outer_runs = Vec::new();
+                let mut outer_kind = BlockKind::Paragraph;
                 if let Some(kind) = block {
-                    // Close whatever inline content the parent had accumulated
-                    // before this box interrupted it -- an anonymous block box,
-                    // in CSS terms -- then open this element's own container.
-                    self.flush();
+                    if inline_box {
+                        outer_runs = core::mem::take(&mut self.runs);
+                        outer_kind = self.kind;
+                    } else {
+                        // Close whatever inline content the parent had
+                        // accumulated before this box interrupted it, an
+                        // anonymous block box in CSS terms.
+                        self.flush();
+                    }
                     self.open_frame(self.computed);
                     self.kind = kind;
                     self.block_css = self.computed;
@@ -756,7 +792,25 @@ impl Builder<'_> {
                 }
                 if block.is_some() {
                     self.flush();
-                    self.close_frame();
+                    if inline_box {
+                        let boxed = self.take_frame();
+                        self.runs = outer_runs;
+                        self.kind = outer_kind;
+                        if let Some(node) = boxed {
+                            self.runs.push(Run {
+                                text: String::new(),
+                                link: self.style.link.clone(),
+                                bold: false,
+                                italic: false,
+                                code: false,
+                                script: Script::default(),
+                                css: self.computed,
+                                boxed: Some(Rc::new(node)),
+                            });
+                        }
+                    } else {
+                        self.close_frame();
+                    }
                 }
                 self.style = saved_style;
                 self.block_css = saved_block_css;
@@ -859,6 +913,7 @@ impl Builder<'_> {
                     code: style.code,
                     script: style.script,
                     css: self.computed,
+                    boxed: None,
                 }]
             })
             .unwrap_or_default();
@@ -995,6 +1050,7 @@ impl Builder<'_> {
                 code: style.code,
                 script: style.script,
                 css,
+                boxed: None,
             }),
         }
     }
@@ -1021,7 +1077,9 @@ impl Builder<'_> {
         if runs.is_empty() {
             return;
         }
-        runs.retain(|r| !r.text.is_empty());
+        // A box carries no text and would otherwise be dropped here, along with
+        // the whole `inline-block` it stands for.
+        runs.retain(|r| !r.text.is_empty() || r.boxed.is_some());
         self.push_leaf(Block {
             kind,
             runs,
@@ -1054,23 +1112,30 @@ impl Builder<'_> {
     /// keeping it would put a box between every paragraph and its parent. A
     /// container that holds nothing is dropped for the same reason.
     fn close_frame(&mut self) {
-        let Some(frame) = self.frames.pop() else {
-            return;
-        };
+        if let Some(node) = self.take_frame() {
+            self.frames
+                .last_mut()
+                .expect("the document frame is never popped")
+                .children
+                .push(node);
+        }
+    }
+
+    /// Pop the innermost container and hand back what it held, if anything.
+    ///
+    /// Separate from `close_frame` because an `inline-block` wants the subtree
+    /// rather than a sibling: it goes back into the parent's line as one run.
+    fn take_frame(&mut self) -> Option<Node> {
+        let frame = self.frames.pop()?;
         let mut children = frame.children;
-        let node = match children.len() {
-            0 => return,
-            1 if matches!(children[0], Node::Leaf(_)) => children.pop().expect("len is 1"),
-            _ => Node::Container {
+        match children.len() {
+            0 => None,
+            1 if matches!(children[0], Node::Leaf(_)) => children.pop(),
+            _ => Some(Node::Container {
                 css: frame.css,
                 children,
-            },
-        };
-        self.frames
-            .last_mut()
-            .expect("the document frame is never popped")
-            .children
-            .push(node);
+            }),
+        }
     }
 }
 
@@ -1078,6 +1143,9 @@ impl Builder<'_> {
 /// ends of a block are trimmed and a run boundary may fall anywhere.
 fn trim_edges(mut runs: Vec<Run>) -> Vec<Run> {
     while let Some(first) = runs.first_mut() {
+        if first.boxed.is_some() {
+            break;
+        }
         let trimmed = first.text.trim_start().to_string();
         if trimmed.is_empty() {
             runs.remove(0);
@@ -1087,6 +1155,9 @@ fn trim_edges(mut runs: Vec<Run>) -> Vec<Run> {
         }
     }
     while let Some(last) = runs.last_mut() {
+        if last.boxed.is_some() {
+            break;
+        }
         let trimmed = last.text.trim_end().to_string();
         if trimmed.is_empty() {
             runs.pop();

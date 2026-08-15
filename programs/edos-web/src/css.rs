@@ -287,6 +287,9 @@ pub enum Display {
     /// A block-level box that also draws a marker. `<li>` gets this from the
     /// UA stylesheet, which is why `li { display: block }` loses its bullet.
     ListItem,
+    /// An inline-level box that is laid out as a block inside and takes its
+    /// place in a line as one atomic item, like an image does.
+    InlineBlock,
     /// A block-level box that arranges its children along an axis.
     Flex,
     /// A block-level box that arranges its children on a track grid.
@@ -376,8 +379,9 @@ fn parse_display(value: &str) -> Option<Option<Display>> {
             "none" => None,
             // `contents` drops the box and keeps the children, which in a flat
             // inline model is what an inline box that opens nothing does.
-            "inline" | "inline-block" | "inline-flex" | "inline-grid" | "inline-table"
-            | "contents" | "table-cell" | "ruby" => Some(Display::Inline),
+            "inline-block" => Some(Display::InlineBlock),
+            "inline" | "inline-flex" | "inline-grid" | "inline-table" | "contents"
+            | "table-cell" | "ruby" => Some(Display::Inline),
             "flex" => Some(Display::Flex),
             "grid" => Some(Display::Grid),
             "block" | "flow-root" | "table" | "table-row" | "table-row-group"

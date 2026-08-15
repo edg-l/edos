@@ -521,3 +521,47 @@ next three onto a second row on the same tracks. The rest of the page is
 taffy limitation: the inline model here has no concept of a box inside a line,
 so an inline-level box would need the line breaker to embed and measure one.
 That is the next piece, and it is independent of the box engine.
+
+## `display: inline-block`
+
+An inline-block is an inline-*level* box: the line carries on around it, and it
+is laid out as a block inside. The model had no place for that, since a line was
+made of text runs and nothing else, so `inline-block` parsed and then laid out
+as plain inline.
+
+`Run` carries an optional subtree now. `doc.rs` sets the parent's runs aside
+rather than flushing them when such an element opens, and on close puts the
+subtree back into the line as one atomic run. `view.rs` turns that into a word
+that never splits, and `Layout::place_box` lays the subtree out in its own
+coordinates and translates it to where the line put it, re-indexing its links on
+the way. The engine is reused rather than reimplemented: a box is
+`Layout::build_tree` on a `Node`, which is what the page itself is.
+
+**Three bugs on the way, and the third is the interesting one.**
+
+- A boxed run carries no text, and `flush` ended with
+  `runs.retain(|r| !r.text.is_empty())`. The whole feature was being deleted one
+  line before it reached layout. `trim_edges` would have done the same at the
+  ends of a block.
+- A block's background is painted at the width the box was *given*, so reading
+  the decor back as "content width" answers "as wide as you offered" to every
+  question. `measure_block` ignores decor now, which also stopped flex items
+  filling their row.
+- **`text-align` inherits.** The intrinsic width was measured from a trial
+  layout in a very wide column by taking the rightmost `x + width`, and inside a
+  centred paragraph that measures the *centring shift*, not the content: every
+  box came out as wide as the probe column and so took a line to itself. Each
+  line's own extent, `max(x + width) - min(x)`, is what is alignment-independent.
+
+Verified against `welcome.html` and against the real site, whose three hero
+buttons now stand side by side instead of running together as one string of
+text.
+
+**Known imprecision.** The box is sized from the widest line of the trial
+layout, and re-laying it out at exactly that width can still wrap one word
+early: the fixture's two-line box comes out in three. The sizing is a pixel or
+two short somewhere between the trial and the real layout, and it has not been
+run down.
+
+`float` is still absent and is not coming from `taffy`, which does not implement
+it.
