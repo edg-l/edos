@@ -61,6 +61,32 @@ impl Border {
     }
 }
 
+/// `line-height`, the leading a box sets for the lines inside it.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum LineHeight {
+    /// The face decides, which is what the reader typography already gives.
+    #[default]
+    Normal,
+    /// A unitless number, kept as the factor rather than resolved here: it
+    /// inherits as the factor, so a heading inside a body set `1.6` is led in
+    /// proportion to its own size and not to the body's.
+    Scale(f32),
+    Px(u32),
+}
+
+impl LineHeight {
+    /// The leading for text set at `font_px`, or `None` when the face decides.
+    pub fn px(self, font_px: u32) -> Option<u32> {
+        match self {
+            LineHeight::Normal => None,
+            // Clamped to a pixel: `line-height: 0` is legal and stacks every
+            // line on the one above it, which is not a rendering.
+            LineHeight::Scale(factor) => Some(((font_px as f32 * factor).round() as u32).max(1)),
+            LineHeight::Px(px) => Some(px.max(1)),
+        }
+    }
+}
+
 /// A property value that a `Computed` carries after the cascade.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Computed {
@@ -72,6 +98,8 @@ pub struct Computed {
     pub italic: Option<bool>,
     pub mono: Option<bool>,
     pub underline: Option<bool>,
+    /// `line-height`, which inherits the way the property itself does.
+    pub line: LineHeight,
     pub margin_top: Option<u32>,
     pub margin_bottom: Option<u32>,
     pub margin_left: Option<u32>,
@@ -146,6 +174,14 @@ impl Computed {
                 _ => {}
             },
             "font-family" => self.mono = Some(value.contains("monospace")),
+            // A relative `line-height` is of the element's own font size, not
+            // its parent's, which is what `self.em` gives once `font-size` has
+            // been applied.
+            "line-height" => {
+                if let Some(line) = parse_line_height(value, root_px, self.em(parent_px)) {
+                    self.line = line;
+                }
+            }
             "text-decoration" | "text-decoration-line" => {
                 self.underline = Some(value.contains("underline"));
             }
@@ -1161,6 +1197,20 @@ fn parse_font_size(value: &str, root_px: u32, parent_px: u32) -> Option<u32> {
     }
 }
 
+/// `normal`, a unitless number, or a length. The number is the common case on
+/// a real page and the only one that survives a font-size change downtree, so
+/// it is kept unresolved.
+fn parse_line_height(value: &str, root_px: u32, em_px: u32) -> Option<LineHeight> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("normal") {
+        return Some(LineHeight::Normal);
+    }
+    if let Ok(factor) = value.parse::<f32>() {
+        return (factor > 0.0).then_some(LineHeight::Scale(factor));
+    }
+    parse_length(value, root_px, em_px).map(LineHeight::Px)
+}
+
 /// A length in pixels. Relative units resolve against `em_px`; anything with a
 /// unit that depends on a viewport or a container is refused, since guessing
 /// one produces a size the document never asked for.
@@ -1630,5 +1680,81 @@ mod tests {
             (d.top, d.right, d.bottom, d.left),
             (Some(5), Some(10), Some(5), Some(10))
         );
+    }
+
+    #[test]
+    fn line_height_takes_a_number_a_length_or_normal() {
+        let sheet = sheet(
+            "p { line-height: 1.5 } pre { line-height: 24px } \
+             blockquote { line-height: 150% } h1 { line-height: normal }",
+        );
+        let line = |tag| cascade(&sheet, &[element(tag, &[])], None).line;
+        assert_eq!(line("p"), LineHeight::Scale(1.5));
+        assert_eq!(line("pre"), LineHeight::Px(24));
+        // A percentage is of the element's own font size, resolved once here.
+        assert_eq!(line("blockquote"), LineHeight::Px(21));
+        assert_eq!(line("h1"), LineHeight::Normal);
+    }
+
+    #[test]
+    fn a_number_line_height_inherits_as_the_factor() {
+        let sheet = sheet("body { line-height: 1.5; font-size: 10px } h1 { font-size: 40px }");
+        let body = sheet.cascade(
+            &[element("body", &[])],
+            None,
+            &Computed::default(),
+            &Vars::root(),
+            14,
+        );
+        let heading = sheet
+            .cascade(
+                &[element("body", &[]), element("h1", &[])],
+                None,
+                &body.0,
+                &body.1,
+                14,
+            )
+            .0;
+        // The parent resolves to 15px, but the heading is led against its own
+        // 40px rather than inheriting the length the parent landed on.
+        assert_eq!(body.0.line.px(body.0.font_px.unwrap()), Some(15));
+        assert_eq!(heading.line.px(heading.font_px.unwrap()), Some(60));
+    }
+
+    #[test]
+    fn a_length_line_height_inherits_as_the_length() {
+        let sheet = sheet("body { line-height: 20px } h1 { font-size: 40px }");
+        let body = sheet.cascade(
+            &[element("body", &[])],
+            None,
+            &Computed::default(),
+            &Vars::root(),
+            14,
+        );
+        let heading = sheet
+            .cascade(
+                &[element("body", &[]), element("h1", &[])],
+                None,
+                &body.0,
+                &body.1,
+                14,
+            )
+            .0;
+        assert_eq!(heading.line.px(40), Some(20));
+    }
+
+    #[test]
+    fn line_height_refuses_what_it_cannot_represent() {
+        let sheet = sheet(
+            "p { line-height: 0px } div { line-height: calc(1em + 2px) } \
+             pre { line-height: -1 }",
+        );
+        // A zero length stacks every line on the one above it, so it is
+        // clamped to a pixel; a negative factor and a `calc()` are refused
+        // outright, leaving the inherited value standing.
+        let line = |tag| cascade(&sheet, &[element(tag, &[])], None).line;
+        assert_eq!(line("p").px(16), Some(1));
+        assert_eq!(line("div"), LineHeight::Normal);
+        assert_eq!(line("pre"), LineHeight::Normal);
     }
 }

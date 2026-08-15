@@ -7494,3 +7494,26 @@ refuses the installed copy and a change made only there is invisible to the
 commit while being perfectly visible in the guest. The install is `cp -u`
 (GNUmakefile), so the edited copy is newer than its source and `make filesystem`
 will not restore it either — the two files simply disagree until someone looks.
+
+## `line-height` inherits as a factor, not as the length it resolved to (2026-08-15)
+
+`css::LineHeight` is three-valued — `Normal`, `Scale(f32)`, `Px(u32)` — rather
+than an `Option<u32>`, and the distinction is the whole point. A unitless
+`line-height: 1.5` inherits as the number and is resolved against *each*
+element's own font size (CSS 2.1 §10.8.1), so a `h1 { font-size: 2em }` inside a
+`body { line-height: 1.5 }` is led at 1.5 × its own size. Resolve the factor to
+pixels at the parent and every heading downtree gets the body's leading, which
+reads as headings that touch the paragraph under them. A length or a percentage
+does resolve once, at the element that wrote it, and inherits as that length —
+that asymmetry is in the spec, not an approximation.
+
+`view.rs` keeps the resulting leading per word (`Word::height`), because a span
+may carry its own `line-height` and the line takes the tallest. The extra space
+is split above and below the text: `Line::lead` is `(height - tallest face)/2`
+and the draw pass offsets both the glyphs and a link's underline by it.
+Half-leading is what makes an open `line-height` look like breathing room rather
+than like text stuck to the top of an over-tall box.
+
+`line-height: 0` is refused as a factor (it would stack every line on the one
+above) while `0px` clamps to a pixel, and anything with a `calc()` is refused
+like every other value this subset cannot compute.

@@ -66,6 +66,11 @@ pub enum LineKind {
 pub struct Line {
     pub y: i32,
     pub height: u32,
+    /// How far below the line's top the glyph boxes sit. CSS splits the
+    /// difference between the leading and the face's own height above and
+    /// below the text, so a page that asks for open leading gets it around
+    /// its lines rather than under them.
+    pub lead: u32,
     pub items: Vec<Fragment>,
     pub kind: LineKind,
 }
@@ -110,6 +115,9 @@ struct Word {
     style: Style,
     link: Option<usize>,
     underline: bool,
+    /// The leading this word asks for: the page's `line-height` where it set
+    /// one, the face's own height otherwise.
+    height: u32,
     /// True when no space separates this word from the one before it, which is
     /// what `<b>bold</b>face` gives.
     glued: bool,
@@ -169,6 +177,7 @@ impl Layout {
                 out.lines.push(Line {
                     y,
                     height,
+                    lead: 0,
                     items: Vec::new(),
                     kind: LineKind::Rule {
                         x: box_x + left as i32,
@@ -292,6 +301,7 @@ impl Layout {
         self.lines.push(Line {
             y: *y,
             height,
+            lead: 0,
             items,
             kind: LineKind::Image { pixels, width },
         });
@@ -323,7 +333,8 @@ impl Layout {
             // A link is underlined unless the document says otherwise, so
             // emphasis is not carried by colour alone.
             let underline = run.css.underline.unwrap_or(link.is_some());
-            let leading = run.text.starts_with(char::is_whitespace);
+            let height = leading(run.css.line, style);
+            let space_before = run.text.starts_with(char::is_whitespace);
             let mut first = true;
             for word in run.text.split_whitespace() {
                 words.push(Word {
@@ -331,7 +342,8 @@ impl Layout {
                     style,
                     link,
                     underline,
-                    glued: first && !leading && !space_pending,
+                    height,
+                    glued: first && !space_before && !space_pending,
                 });
                 first = false;
             }
@@ -345,7 +357,7 @@ impl Layout {
 
     /// Greedy wrap: place words until one does not fit, then start a line.
     fn flow(&mut self, words: Vec<Word>, plan: &Plan, avail: u32, y: &mut i32) {
-        let base_height = text::line_height(plan.style);
+        let base_height = leading(plan.line, plan.style);
         let mut items: Vec<Fragment> = Vec::new();
         let mut pen = 0u32;
         // The tallest word on the line sets its height. CSS can put a size on
@@ -370,7 +382,7 @@ impl Layout {
             } else {
                 pen += gap;
             }
-            line_height = line_height.max(text::line_height(word.style));
+            line_height = line_height.max(word.height);
             items.push(Fragment {
                 x: (plan.indent + PAGE_PAD + pen) as i32,
                 width,
@@ -389,7 +401,7 @@ impl Layout {
     /// `pre`, whose newlines are the layout and whose overflow is clipped
     /// rather than wrapped, the way `white-space: pre` behaves.
     fn preformatted(&mut self, block: &Block, plan: &Plan, avail: u32, y: &mut i32) {
-        let line_height = text::line_height(plan.style);
+        let line_height = leading(plan.line, plan.style);
         for line in block.text().lines() {
             let mut used = 0;
             let items = if line.trim().is_empty() {
@@ -429,9 +441,18 @@ impl Layout {
     }
 
     fn push_line(&mut self, items: Vec<Fragment>, height: u32, y: &mut i32) {
+        // The half-leading is measured against the tallest face on the line,
+        // so a line whose height came from the page's `line-height` centres
+        // its text and a line that took the face's own height is unmoved.
+        let natural = items
+            .iter()
+            .map(|item| text::line_height(item.style))
+            .max()
+            .unwrap_or(height);
         self.lines.push(Line {
             y: *y,
             height,
+            lead: height.saturating_sub(natural) / 2,
             items,
             kind: LineKind::Text,
         });
@@ -442,6 +463,8 @@ impl Layout {
 /// How one block is set: its base style, where it sits, and what it wears.
 struct Plan {
     style: Style,
+    /// The block's `line-height`, which its words inherit unless they set one.
+    line: css::LineHeight,
     indent: u32,
     gap_before: u32,
     gap_after: u32,
@@ -455,6 +478,13 @@ struct Plan {
     background: Option<u32>,
     pad: Sides<u32>,
     border: Sides<Edge>,
+}
+
+/// The height a line of `style` occupies: what the page asked for with
+/// `line-height`, or the face's own metrics when it asked for nothing.
+fn leading(line: css::LineHeight, style: Style) -> u32 {
+    line.px(style.px)
+        .unwrap_or_else(|| text::line_height(style))
 }
 
 /// How far into a box of `avail` pixels a line of `used` pixels starts.
@@ -485,6 +515,7 @@ fn plan(block: &Block) -> Plan {
     if css.mono == Some(true) {
         plan.style.family = Family::Mono;
     }
+    plan.line = css.line;
     if let Some(top) = css.margin_top {
         plan.gap_before = top;
     }
@@ -521,6 +552,7 @@ fn default_plan(block: &Block) -> Plan {
     let text_color = Theme::DEFAULT.text_primary.raw();
     let base = Plan {
         style: Style::new(text_color),
+        line: css::LineHeight::Normal,
         indent: 0,
         gap_before: 0,
         gap_after: space(2),
@@ -717,9 +749,17 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             LineKind::Text => {}
         }
         for item in &line.items {
-            text::draw(&mut surface, item.x, y, &item.text, item.style);
+            text::draw(
+                &mut surface,
+                item.x,
+                y + line.lead as i32,
+                &item.text,
+                item.style,
+            );
             if item.underline {
-                let underline = y + line.height as i32 - 3;
+                // Under the text, not under the line: open leading would
+                // otherwise leave the rule floating below the words it marks.
+                let underline = y + (line.height - line.lead) as i32 - 3;
                 fill(
                     surface.pixels,
                     width,

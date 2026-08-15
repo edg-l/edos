@@ -65,7 +65,8 @@ tag/`.class`/`#id` compounds; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
-left, since the blitter cannot stretch a line), the vertical and left margins,
+left, since the blitter cannot stretch a line), `line-height` (a factor, a
+length or `normal`), the vertical and left margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
