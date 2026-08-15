@@ -35,9 +35,9 @@
 #     moved. Before the features, however good they are.
 #   * Then `## Features`, `## Bug fixes`, `## Performance`, `## Internal`, in
 #     that order. Omit any section that has nothing in it.
-#   * Each entry is a bullet leading with a bolded summary, then the mechanism
-#     in a sentence or two. Say what changed and why it mattered, not which
-#     commit did it.
+#   * Each entry is ONE LINE: what changed, bolded. No mechanism, no tour of
+#     how it works, no second sentence unless the reader has to act on it.
+#     Somebody who wants the reasoning has the source and the commit.
 #   * Say what does NOT work and what is off by default.
 #   * Close with the counts: programs, lines of Rust, syscalls.
 #
