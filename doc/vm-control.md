@@ -418,9 +418,10 @@ reports take about 2.6 seconds to get through, and for the whole of a drag the
 pointer is behind a queue it cannot empty. It catches up in bursts, which is the
 wobble.
 
-`scripts/edos-vm` has defaulted to `usb-tablet` since the report-descriptor
-parser landed; `make run` did not, and an invocation copied out of the
-GNUmakefile inherited the slow path. Both use it now.
+`scripts/edos-vm` defaults to `usb-tablet`, which is the right choice when the
+point is to drive the guest rather than to test its input path. `make run`
+deliberately keeps `usb-mouse`: a physical mouse is relative, and the relative
+path's problems are invisible on an absolute device.
 
 **The guest-side half is fixed too**: an interrupt endpoint now keeps eight
 report buffers queued rather than re-arming one at a time. With a single TRB the

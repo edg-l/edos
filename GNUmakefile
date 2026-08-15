@@ -40,14 +40,25 @@ run-hdd: run-hdd-$(KARCH)
 # Display device configurations
 # blob=on enables zero-copy display (requires host CONFIG_UDMABUF=y + memfd backend)
 DISPLAY_VGA := -device VGA,vgamem_mb=32
-# usb-tablet, not usb-mouse. A relative device makes QEMU walk the pointer to
-# where the host's is with a stream of small deltas: measured, one drag that
-# costs 21 reports on the tablet costs 325 on the mouse, and usb-mouse also
-# advertises an 8 ms poll against the tablet's 1 ms. The guest keeps one
-# transfer outstanding, so those 325 take about 2.6 s to drain and the pointer
-# spends the whole drag behind a queue it cannot empty. That is what "the window
-# lags behind and the cursor wobbles" is.
-USB_INPUT := -device qemu-xhci -device usb-kbd -device usb-tablet
+# usb-mouse on purpose, even though usb-tablet feels better here.
+#
+# A physical mouse is a relative device; usb-tablet only exists in a VM. Running
+# the relative path by default is what keeps it honest, because its problems are
+# invisible on an absolute one: an interrupt endpoint that misses a service
+# interval, a report buffer that is not re-armed in time, a driver that assumes
+# it will be told where the pointer is rather than how far it moved.
+#
+# It is also the slower path here, and that is not the guest's doing. QEMU has to
+# walk the guest's pointer to wherever the host's already is, so one drag that
+# costs 21 reports on a tablet costs 325 on a mouse, through an endpoint whose
+# descriptor asks for 8 ms against the tablet's 1 ms. An interrupt endpoint
+# carries one packet per interval, so that is a ceiling of 125 a second and about
+# 2.6 s of backlog for a drag. A real mouse never builds that queue: it produces
+# reports at the rate its own bInterval is chosen for.
+#
+# `scripts/edos-vm` defaults to --pointer tablet, which is the right choice when
+# the point is to drive the guest rather than to test its input path.
+USB_INPUT := -device qemu-xhci -device usb-kbd -device usb-mouse
 
 DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display sdl
 DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display gtk,zoom-to-fit=off
