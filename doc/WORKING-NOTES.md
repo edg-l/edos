@@ -6,6 +6,64 @@ session.
 
 ---
 
+## `edos_http::Url` is the `url` crate now, and two bugs fell out of the port
+
+The hand-rolled parser was 278 lines and correct against the spec it named: all
+34 RFC 3986 §5.4 examples passed, IPv6 literals were handled, and userinfo was
+rejected rather than mangled. It was replaced anyway, because RFC 3986 is not
+the specification a browser implements and it was missing two capabilities
+`edos-web` needs and cannot reach from where it stood.
+
+**Percent-encoding did not exist anywhere in the tree.** Any `href` carrying a
+space or a non-ASCII character produced a request line the server could not
+parse. **IDNA did not either**, and that has a precise failure point:
+`tls.rs::server_name` hands the host to `rustls::ServerName::try_from`, which
+does no IDNA of its own, so a non-ASCII hostname failed there as "not a valid
+server name" — with HTTPS otherwise working fine.
+
+Measured before deciding, on `x86_64-unknown-edos`, as bytes added to a linked
+release binary:
+
+| | over base |
+|---|---|
+| `percent-encoding` | +4.5 KB |
+| `+ form_urlencoded` | +6.7 KB |
+| `+ punycode` (RFC 3492 only) | +10 KB |
+| `+ idna` (UTS-46) | +185 KB |
+| the whole `url` crate | +258 KB |
+
+So 93% of the weight is UTS-46, the Unicode mapping and normalisation layer
+above punycode — which is what rejects a confusable hostname rather than merely
+connecting to it. Against `wget` at 2.3 MB and `edos-web` at 5.5 MB, and
+against `rustls` already being in this crate's dependency list, that is not a
+number worth optimising.
+
+Two bugs the port surfaced, both pre-existing and both caught by writing the
+tests the new behaviour deserved:
+
+- **`filename()` never returned `index.html` for a directory**, which is the
+  one case its doc comment promised. It trimmed the trailing slash *before*
+  taking the last segment, so `/a/` and `/a` were indistinguishable and `wget
+  http://h/a/` saved to a file called `a`. The slash is tested first now.
+- **`authority()` produced an unparseable address for an IPv6 literal.** The
+  old parser stripped the brackets at parse time, so `[::1]:8080` came back out
+  as `::1:8080` and `TcpStream::connect` could not split the port off. Brackets
+  are kept where they are the syntax (`authority()`, the `Host` header per RFC
+  7230 §5.4) and dropped where the consumer wants a bare address (`host()`, for
+  the resolver and for SNI).
+
+One deliberate behaviour change: **a fragment is kept on the `Url` and dropped
+from the request target.** The old `join` stripped fragments entirely, which
+silently discarded every anchor link; the RFC's own §5.4.1 expected values
+include the fragment, so the old tests were encoding the implementation rather
+than the spec. `path()` is what goes on the wire and it stops at the query.
+
+The `Url` fields are methods now (`scheme()`, `host()`, `port()`, `path()`)
+because they are derived from the inner URL and a stale public field would be a
+silent liar. Three call sites in `lib.rs` moved; nothing else outside this
+module read them.
+
+
 ## Two ways a scheduler measurement lies, both found in one session
 
 Closing the four things EEVDF left open (`doc/SCHED-ROADMAP.md`) needed a
@@ -1649,11 +1707,11 @@ does not have to invent them.
 | userspace programs | 123 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 124 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 109,414 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 109,384 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,404 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
-| host unit tests | 106 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
+| host unit tests | 114 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 161, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 

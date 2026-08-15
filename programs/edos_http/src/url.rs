@@ -1,7 +1,19 @@
-//! URL parsing, for the subset an HTTP client needs.
+//! URL parsing, over the WHATWG URL Standard.
+//!
+//! The parsing, reference resolution, percent-encoding and IDNA all come from
+//! the `url` crate, which is the specification browsers implement. This module
+//! is the narrow face an HTTP client wants over it: the two schemes that can be
+//! fetched, an authority shaped for `TcpStream::connect`, and a request target.
+//!
+//! `url` normalises on the way in, so a host arrives lowercased and
+//! punycoded and a path arrives percent-encoded. That last pair is what makes
+//! a non-ASCII hostname reachable at all: `rustls` and the resolver both take
+//! the ASCII form, and neither does IDNA of its own.
 
 use crate::Error;
 use std::fmt;
+
+use url::Position;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scheme {
@@ -27,251 +39,130 @@ impl Scheme {
 
 #[derive(Clone, Debug)]
 pub struct Url {
-    pub scheme: Scheme,
-    pub host: String,
-    pub port: u16,
-    /// Path and query together, as they go on the request line.
-    pub path: String,
+    inner: url::Url,
+    scheme: Scheme,
 }
 
 impl Url {
     /// Parse an absolute URL, defaulting a missing scheme to `http://`.
     ///
-    /// A bare `host/path` is accepted because that is what the existing `http`
-    /// program has always taken.
+    /// A bare `host/path` is accepted because that is what the `http` program
+    /// has always taken. The crate rejects it as a relative reference with no
+    /// base, which is the signal to retry it as one.
     pub fn parse(input: &str) -> Result<Url, Error> {
-        let (scheme, rest) = if let Some(rest) = input.strip_prefix("https://") {
-            (Scheme::Https, rest)
-        } else if let Some(rest) = input.strip_prefix("http://") {
-            (Scheme::Http, rest)
-        } else if let Some(i) = input.find("://") {
-            return Err(Error::Url(format!("unsupported scheme: {}", &input[..i])));
-        } else {
-            (Scheme::Http, input)
+        let parsed = match url::Url::parse(input) {
+            Ok(parsed) => parsed,
+            Err(url::ParseError::RelativeUrlWithoutBase) => {
+                url::Url::parse(&format!("http://{}", input))
+                    .map_err(|e| Error::Url(format!("{}: {}", input, e)))?
+            }
+            Err(e) => return Err(Error::Url(format!("{}: {}", input, e))),
         };
-
-        // The authority ends at the first '/', '?' or '#'.
-        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let (authority, tail) = rest.split_at(end);
-
-        // Userinfo is parsed only to reject it: it would otherwise be read as
-        // part of the hostname and produce a baffling DNS failure.
-        if let Some(i) = authority.find('@') {
-            return Err(Error::Url(format!(
-                "credentials in a URL are not supported: {}@",
-                &authority[..i]
-            )));
-        }
-
-        let (host, port) = split_host_port(authority, scheme)?;
-        if host.is_empty() {
-            return Err(Error::Url("no host".to_string()));
-        }
-
-        let path = match tail.find('#') {
-            Some(i) => &tail[..i],
-            None => tail,
-        };
-        let path = if path.is_empty() || path.starts_with('?') {
-            format!("/{}", path)
-        } else {
-            path.to_string()
-        };
-
-        Ok(Url {
-            scheme,
-            host: host.to_string(),
-            port,
-            path,
-        })
+        Url::from_parsed(parsed)
     }
 
-    /// Resolve a reference against this URL, per RFC 3986 §5.2.
+    /// Narrow a parsed URL to one this client can actually fetch.
+    fn from_parsed(inner: url::Url) -> Result<Url, Error> {
+        let scheme = match inner.scheme() {
+            "http" => Scheme::Http,
+            "https" => Scheme::Https,
+            other => return Err(Error::Url(format!("unsupported scheme: {}", other))),
+        };
+        // Userinfo is rejected rather than carried: it would otherwise be sent
+        // to a server this client has no way to authenticate to, and the
+        // failure would read as a hostname problem.
+        if !inner.username().is_empty() || inner.password().is_some() {
+            return Err(Error::Url(format!(
+                "credentials in a URL are not supported: {}@",
+                inner.username()
+            )));
+        }
+        if inner.host().is_none() {
+            return Err(Error::Url("no host".to_string()));
+        }
+        Ok(Url { inner, scheme })
+    }
+
+    /// Resolve a reference against this URL.
     ///
     /// Covers what a `Location` header and an `href` actually contain:
     /// absolute, network relative (`//host/path`), absolute path, relative
     /// path with `.` and `..` segments, query only, and empty.
     pub fn join(&self, reference: &str) -> Result<Url, Error> {
-        // A fragment names a place in the retrieved document and never reaches
-        // the server, so it is stripped before anything else looks at it.
-        let reference = match reference.find('#') {
-            Some(i) => &reference[..i],
-            None => reference,
-        };
-
-        match scheme_prefix(reference) {
-            Some("http") | Some("https") => return Url::parse(reference),
-            Some(other) => return Err(Error::Url(format!("unsupported scheme: {}", other))),
-            None => {}
-        }
-        if let Some(rest) = reference.strip_prefix("//") {
-            return Url::parse(&format!("{}://{}", self.scheme.as_str(), rest));
-        }
-
-        let (base_path, base_query) = split_query(&self.path);
-        let (ref_path, ref_query) = split_query(reference);
-
-        let path = if ref_path.is_empty() {
-            base_path.to_string()
-        } else if ref_path.starts_with('/') {
-            remove_dot_segments(ref_path)
-        } else {
-            remove_dot_segments(&merge(base_path, ref_path))
-        };
-        // An empty reference path keeps the base's query, but only when the
-        // reference carries none of its own (RFC 3986 §5.2.2).
-        let query = if ref_path.is_empty() && ref_query.is_none() {
-            base_query
-        } else {
-            ref_query
-        };
-
-        Ok(Url {
-            path: match query {
-                Some(q) => format!("{}?{}", path, q),
-                None => path,
-            },
-            ..self.clone()
-        })
+        let joined = self
+            .inner
+            .join(reference)
+            .map_err(|e| Error::Url(format!("{}: {}", reference, e)))?;
+        Url::from_parsed(joined)
     }
 
-    /// `host:port`, as `TcpStream::connect` wants it.
+    pub fn scheme(&self) -> Scheme {
+        self.scheme
+    }
+
+    /// The host as the resolver and `rustls` want it: no brackets around an
+    /// IPv6 literal, and already punycoded when the source was an IDN.
+    pub fn host(&self) -> &str {
+        let host = self.inner.host_str().unwrap_or_default();
+        host.strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host)
+    }
+
+    pub fn port(&self) -> u16 {
+        self.inner
+            .port_or_known_default()
+            .unwrap_or_else(|| self.scheme.default_port())
+    }
+
+    /// Path and query together, as they go on the request line.
+    pub fn path(&self) -> &str {
+        &self.inner[Position::BeforePath..Position::AfterQuery]
+    }
+
+    /// `host:port`, as `TcpStream::connect` wants it. An IPv6 literal keeps
+    /// its brackets here, which is what separates the address from the port.
     pub fn authority(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        format!(
+            "{}:{}",
+            self.inner.host_str().unwrap_or_default(),
+            self.port()
+        )
     }
 
-    /// The `Host` header, which omits the port when it is the default.
+    /// The `Host` header, which omits the port when it is the default and
+    /// brackets an IPv6 literal (RFC 7230 §5.4).
     pub fn host_header(&self) -> String {
-        if self.port == self.scheme.default_port() {
-            self.host.clone()
+        let host = self.inner.host_str().unwrap_or_default();
+        if self.port() == self.scheme.default_port() {
+            host.to_string()
         } else {
-            self.authority()
+            format!("{}:{}", host, self.port())
         }
     }
 
     /// The last path segment, or `index.html` when the path names a directory.
+    ///
+    /// The trailing slash is tested before the segment is taken, not trimmed
+    /// away first: trimming makes `/a/` indistinguishable from `/a`, and the
+    /// directory is the case this exists to answer.
     pub fn filename(&self) -> &str {
-        let path = match self.path.find('?') {
-            Some(i) => &self.path[..i],
-            None => &self.path,
-        };
-        let trimmed = path.trim_end_matches('/');
-        match trimmed.rfind('/') {
-            Some(i) if i + 1 < trimmed.len() => &trimmed[i + 1..],
+        let path = self.inner.path();
+        if path.ends_with('/') {
+            return "index.html";
+        }
+        match path.rfind('/') {
+            Some(i) if i + 1 < path.len() => &path[i + 1..],
             _ => "index.html",
         }
     }
 }
 
-/// The scheme of a reference that has one, per RFC 3986 §3.1.
-///
-/// A colon inside a path segment (`notes:2026/x`) is not a scheme, and neither
-/// is one that follows a `/`, `?` or `#`.
-fn scheme_prefix(reference: &str) -> Option<&str> {
-    let end = reference.find(|c| c == ':' || c == '/' || c == '?' || c == '#')?;
-    if reference.as_bytes()[end] != b':' || end == 0 {
-        return None;
-    }
-    let scheme = &reference[..end];
-    let mut bytes = scheme.bytes();
-    if !bytes.next()?.is_ascii_alphabetic() {
-        return None;
-    }
-    bytes
-        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
-        .then_some(scheme)
-}
-
-/// Split a request target into its path and its query, without the `?`.
-fn split_query(target: &str) -> (&str, Option<&str>) {
-    match target.find('?') {
-        Some(i) => (&target[..i], Some(&target[i + 1..])),
-        None => (target, None),
-    }
-}
-
-/// Merge a relative path onto a base path, per RFC 3986 §5.3.
-fn merge(base_path: &str, reference: &str) -> String {
-    // Every URL here has an authority, so an empty base path is `/`.
-    match base_path.rfind('/') {
-        Some(i) => format!("{}{}", &base_path[..=i], reference),
-        None => format!("/{}", reference),
-    }
-}
-
-/// Resolve `.` and `..` segments, per RFC 3986 §5.2.4.
-fn remove_dot_segments(path: &str) -> String {
-    let segments: Vec<&str> = path.split('/').collect();
-    let mut out: Vec<&str> = Vec::new();
-    for (i, segment) in segments.iter().enumerate() {
-        let last = i + 1 == segments.len();
-        match *segment {
-            "." => {}
-            ".." => {
-                out.pop();
-            }
-            // The empty segments a leading and a trailing `/` produce are the
-            // separators themselves; an interior one is a real empty segment.
-            "" if i == 0 || last => {}
-            segment => out.push(segment),
-        }
-    }
-
-    // A path whose last segment is empty, `.` or `..` names a directory, so
-    // the result keeps its trailing slash.
-    let directory = matches!(segments.last(), Some(&"") | Some(&".") | Some(&".."));
-    let mut resolved = String::new();
-    if path.starts_with('/') {
-        resolved.push('/');
-    }
-    resolved.push_str(&out.join("/"));
-    if directory && !resolved.ends_with('/') {
-        resolved.push('/');
-    }
-    resolved
-}
-
-fn split_host_port(authority: &str, scheme: Scheme) -> Result<(&str, u16), Error> {
-    // A bracketed IPv6 literal holds colons that are not the port separator.
-    if let Some(rest) = authority.strip_prefix('[') {
-        let Some(close) = rest.find(']') else {
-            return Err(Error::Url("unterminated IPv6 literal".to_string()));
-        };
-        let host = &rest[..close];
-        let after = &rest[close + 1..];
-        let port = match after.strip_prefix(':') {
-            Some(p) => parse_port(p)?,
-            None if after.is_empty() => scheme.default_port(),
-            None => return Err(Error::Url(format!("trailing junk in host: {}", after))),
-        };
-        return Ok((host, port));
-    }
-
-    match authority.rfind(':') {
-        Some(i) => Ok((&authority[..i], parse_port(&authority[i + 1..])?)),
-        None => Ok((authority, scheme.default_port())),
-    }
-}
-
-fn parse_port(text: &str) -> Result<u16, Error> {
-    text.parse()
-        .map_err(|_| Error::Url(format!("bad port: {}", text)))
-}
-
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.port == self.scheme.default_port() {
-            write!(f, "{}://{}{}", self.scheme.as_str(), self.host, self.path)
-        } else {
-            write!(
-                f,
-                "{}://{}:{}{}",
-                self.scheme.as_str(),
-                self.host,
-                self.port,
-                self.path
-            )
-        }
+        // The crate elides a default port and keeps everything else, which is
+        // the same shape this printed before.
+        write!(f, "{}", self.inner)
     }
 }
 
@@ -287,7 +178,9 @@ mod tests {
             .to_string()
     }
 
-    /// The normal examples from RFC 3986 §5.4.1, against its own base.
+    /// The normal examples from RFC 3986 §5.4.1, against its own base. The
+    /// WHATWG parser resolves these the same way; where it does not, the
+    /// difference is called out in its own test below.
     #[test]
     fn rfc3986_normal_examples() {
         let base = "http://a/b/c/d;p?q";
@@ -299,9 +192,12 @@ mod tests {
             ("//g", "http://g/"),
             ("?y", "http://a/b/c/d;p?y"),
             ("g?y", "http://a/b/c/g?y"),
-            ("#s", "http://a/b/c/d;p?q"),
-            ("g#s", "http://a/b/c/g"),
-            ("g?y#s", "http://a/b/c/g?y"),
+            // A fragment is part of the resolved URL and these are the RFC's
+            // own expected values. It never reaches the wire; `path()` is what
+            // goes on the request line and it stops at the query.
+            ("#s", "http://a/b/c/d;p?q#s"),
+            ("g#s", "http://a/b/c/g#s"),
+            ("g?y#s", "http://a/b/c/g?y#s"),
             (";x", "http://a/b/c/;x"),
             ("g;x", "http://a/b/c/g;x"),
             ("", "http://a/b/c/d;p?q"),
@@ -323,8 +219,8 @@ mod tests {
     }
 
     /// The abnormal examples from RFC 3986 §5.4.2: climbing past the root is
-    /// absorbed rather than an error, and a dot is only a dot when it is a
-    /// whole segment.
+    /// clamped rather than an error, and a segment that merely looks like a
+    /// dot segment is not one.
     #[test]
     fn rfc3986_abnormal_examples() {
         let base = "http://a/b/c/d;p?q";
@@ -355,11 +251,13 @@ mod tests {
 
     #[test]
     fn absolute_reference_wins_over_the_base() {
-        assert_eq!(joined("http://a/b/c", "https://x/y?z"), "https://x/y?z");
+        let base = Url::parse("http://a/b/c").unwrap();
+        assert_eq!(
+            base.join("https://other/x").unwrap().to_string(),
+            "https://other/x"
+        );
     }
 
-    /// A scheme this client cannot fetch is refused, rather than merged into
-    /// the base and turned into a nonsense HTTP request.
     #[test]
     fn foreign_scheme_is_rejected() {
         let base = Url::parse("http://a/b/c").unwrap();
@@ -368,26 +266,114 @@ mod tests {
         // A colon in the first segment makes it a scheme, so a relative
         // reference that wants one has to say `./` (RFC 3986 §4.2).
         assert!(base.join("notes:2026/x").is_err());
-        assert_eq!(base.join("./notes:2026/x").unwrap().path, "/b/notes:2026/x");
+        assert_eq!(
+            base.join("./notes:2026/x").unwrap().path(),
+            "/b/notes:2026/x"
+        );
         // A colon in a later segment is just a character.
-        assert_eq!(base.join("x/notes:2026").unwrap().path, "/b/x/notes:2026");
+        assert_eq!(base.join("x/notes:2026").unwrap().path(), "/b/x/notes:2026");
     }
 
-    /// A local page's own directory is the base, which is what lets an
-    /// installed document reference a sibling asset.
     #[test]
     fn relative_asset_of_a_local_page() {
-        let base = Url::parse("http://localhost/share/web/welcome.html").unwrap();
+        let base = Url::parse("http://host/docs/page.html").unwrap();
         assert_eq!(
-            base.join("../icons/edos.svg").unwrap().path,
-            "/share/icons/edos.svg"
+            base.join("../icons/edos.svg").unwrap().path(),
+            "/icons/edos.svg"
         );
-        assert_eq!(base.join("style.css").unwrap().path, "/share/web/style.css");
     }
 
     #[test]
     fn interior_empty_segments_survive() {
-        let base = Url::parse("http://a/b/c").unwrap();
-        assert_eq!(base.join("/x//y").unwrap().path, "/x//y");
+        let base = Url::parse("http://a/b/c/d;p?q").unwrap();
+        assert_eq!(base.join("g//h").unwrap().path(), "/b/c/g//h");
+    }
+
+    #[test]
+    fn credentials_are_rejected_rather_than_sent() {
+        assert!(Url::parse("http://user:pw@host/x").is_err());
+        assert!(Url::parse("http://user@host/x").is_err());
+    }
+
+    #[test]
+    fn a_bare_host_defaults_to_http() {
+        let url = Url::parse("example.com/x").unwrap();
+        assert_eq!(url.scheme(), Scheme::Http);
+        assert_eq!(url.host(), "example.com");
+        assert_eq!(url.port(), 80);
+        assert_eq!(url.path(), "/x");
+    }
+
+    /// A fragment is kept on the URL, because it names the place in the page a
+    /// browser has to scroll to, and is dropped from the request target,
+    /// because it is not the server's business (RFC 3986 §3.5).
+    #[test]
+    fn the_request_target_carries_the_query_and_not_the_fragment() {
+        let url = Url::parse("http://h/a/b?x=1&y=2#frag").unwrap();
+        assert_eq!(url.path(), "/a/b?x=1&y=2");
+        assert_eq!(url.to_string(), "http://h/a/b?x=1&y=2#frag");
+
+        let joined = url.join("c#other").unwrap();
+        assert_eq!(joined.path(), "/a/c");
+        assert_eq!(joined.to_string(), "http://h/a/c#other");
+    }
+
+    /// An IPv6 literal keeps its brackets where they separate the address from
+    /// the port, and loses them where the consumer wants a bare address.
+    #[test]
+    fn ipv6_literals_are_bracketed_only_where_that_is_the_syntax() {
+        let url = Url::parse("http://[::1]:8080/x").unwrap();
+        assert_eq!(url.host(), "::1");
+        assert_eq!(url.authority(), "[::1]:8080");
+        assert_eq!(url.host_header(), "[::1]:8080");
+        assert_eq!(url.path(), "/x");
+    }
+
+    #[test]
+    fn the_host_header_drops_a_default_port_and_keeps_any_other() {
+        assert_eq!(Url::parse("http://h/").unwrap().host_header(), "h");
+        assert_eq!(Url::parse("https://h/").unwrap().host_header(), "h");
+        assert_eq!(
+            Url::parse("http://h:8080/").unwrap().host_header(),
+            "h:8080"
+        );
+    }
+
+    /// The reason for the port: `rustls` and the resolver both take the ASCII
+    /// form of a name, and neither performs IDNA. A host arrives punycoded.
+    #[test]
+    fn an_idn_host_arrives_punycoded() {
+        let url = Url::parse("http://münchen.de/straße").unwrap();
+        assert_eq!(url.host(), "xn--mnchen-3ya.de");
+        assert_eq!(url.authority(), "xn--mnchen-3ya.de:80");
+        // And the path arrives percent-encoded, which is what goes on the
+        // request line.
+        assert_eq!(url.path(), "/stra%C3%9Fe");
+    }
+
+    /// A space in an `href` is percent-encoded rather than sent raw, which
+    /// would have made the request line unparseable.
+    #[test]
+    fn a_space_in_a_reference_is_encoded() {
+        let base = Url::parse("http://h/dir/page.html").unwrap();
+        assert_eq!(
+            base.join("my file.txt").unwrap().path(),
+            "/dir/my%20file.txt"
+        );
+    }
+
+    #[test]
+    fn filename_falls_back_to_index_html_for_a_directory() {
+        assert_eq!(
+            Url::parse("http://h/a/b.tar.gz").unwrap().filename(),
+            "b.tar.gz"
+        );
+        assert_eq!(Url::parse("http://h/a/").unwrap().filename(), "index.html");
+        assert_eq!(Url::parse("http://h/").unwrap().filename(), "index.html");
+        // A query does not become part of the name.
+        assert_eq!(
+            Url::parse("http://h/a/b.txt?v=1").unwrap().filename(),
+            "b.txt"
+        );
     }
 }

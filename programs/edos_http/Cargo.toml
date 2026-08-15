@@ -6,6 +6,12 @@ edition = "2024"
 [dependencies]
 edos_lib = { path = "../edos_lib" }
 
+# URL parsing, reference resolution, percent-encoding and IDNA, per the WHATWG
+# URL Standard. `rustls` and the resolver both take the ASCII form of a host and
+# neither performs IDNA, so the punycoding this does on the way in is what makes
+# a non-ASCII hostname reachable at all.
+url = "2"
+
 # rustls must lose its defaults: they pull `aws_lc_rs`, which needs a C
 # toolchain and NASM. `rustls-rustcrypto` must KEEP its defaults, which is the
 # opposite of every other crypto crate here -- `default-features = false`

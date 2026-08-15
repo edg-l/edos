@@ -216,7 +216,7 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
 
     let mut request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n",
-        target.path,
+        target.path(),
         target.host_header(),
         opts.user_agent
     );
@@ -229,12 +229,12 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
     }
     request.push_str("\r\n");
 
-    let mut conn = match target.scheme {
+    let mut conn = match target.scheme() {
         Scheme::Http => Conn::Plain(tcp),
         Scheme::Https => {
             tls::ensure_clock_usable(opts.fix_clock)?;
             let config = tls::client_config()?;
-            let name = tls::server_name(&target.host)?;
+            let name = tls::server_name(target.host())?;
             let client = rustls::ClientConnection::new(config, name).map_err(tls::explain)?;
             Conn::Tls(Box::new(rustls::StreamOwned::new(client, tcp)))
         }
