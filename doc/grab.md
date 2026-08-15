@@ -465,9 +465,12 @@ no-network case still has an editor.
 
 The mechanism has to account for `--artifact-dir=../filesystem/bin/` copying
 *every* workspace binary into the image. Excluding one is therefore a post-build
-move, not a build-list change: a `PACKAGED` list in `programs/Makefile` moves
-those binaries to a staging directory after `build`, and `tools/grab-repo` packs
-from there.
+move, not a build-list change: `programs/Makefile` moves those binaries to a
+staging directory after `build`, and `tools/grab-repo` packs from there. Which
+binaries those are it reads from the `shipped` key below, the same one
+`grab-repo` reads — a list in the makefile as well would be a second place for
+the classification to live, and the two would eventually disagree about whether
+a program is on the image.
 
 Metadata lives in a `pkg.toml` beside the program's `Cargo.toml`:
 

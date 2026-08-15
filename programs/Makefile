@@ -28,7 +28,13 @@ endef
 # build emits every workspace binary into ../filesystem/bin, so keeping one off
 # the image is a move afterwards rather than a change to what gets built. They
 # are moved after stripping, so what is published is what would have shipped.
-PACKAGED := edos-edit
+#
+# Read from the same `shipped = false` key `tools/grab-repo` reads, rather than
+# listed here as well: a program is packaged or it is not, and two places to say
+# so is one place for them to disagree. An absent key means shipped, which is
+# what makes adding a `pkg.toml` for metadata alone safe. Overridable on the
+# command line (`make PACKAGED=`) to put everything on the image for a test.
+PACKAGED := $(patsubst %/pkg.toml,%,$(shell grep -lE '^[[:space:]]*shipped[[:space:]]*=[[:space:]]*false' */pkg.toml 2>/dev/null))
 
 define stage_packaged
 	@mkdir -p ../pkgstage/bin
