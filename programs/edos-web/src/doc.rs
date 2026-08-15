@@ -14,12 +14,12 @@ use std::rc::Rc;
 use edos_http::url::Url;
 use edos_render::graphics::Color;
 use edos_render::image::{Image, Svg, decode_bmp, looks_like_svg};
-use html5ever::{local_name, parse_document, tendril::TendrilSink};
+use html5ever::{LocalName, local_name, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::css::{
-    self, Computed, Decorations, Element, ListStyle, MediaQueries, Stylesheet, Vars, Viewport,
-    WhiteSpace,
+    self, Computed, Decorations, Element, ListStyle, MediaQueries, Siblings, Stylesheet, Vars,
+    Viewport, WhiteSpace,
 };
 
 /// What a block is, which decides its font size and its leading marker.
@@ -327,7 +327,7 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         vars: Vars::root(),
         block_css: Computed::default(),
     };
-    builder.walk(&dom.document);
+    builder.walk(&dom.document, Siblings::default());
     builder.flush();
 
     Document {
@@ -409,7 +409,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn walk(&mut self, node: &Handle) {
+    fn walk(&mut self, node: &Handle, position: Siblings) {
         match &node.data {
             NodeData::Text { contents } => {
                 let text = contents.borrow();
@@ -434,7 +434,7 @@ impl Builder<'_> {
                     return;
                 }
 
-                self.stack.push(element_context(node, &tag));
+                self.stack.push(element_context(node, &tag, position));
                 let saved_computed = self.computed;
                 let saved_vars = Rc::clone(&self.vars);
                 (self.computed, self.vars) = self.sheet.cascade(
@@ -518,9 +518,7 @@ impl Builder<'_> {
                     _ => {}
                 }
 
-                for child in node.children.borrow().iter() {
-                    self.walk(child);
-                }
+                self.walk_children(node);
 
                 if matches!(tag, local_name!("ul") | local_name!("ol")) {
                     self.lists.pop();
@@ -534,11 +532,16 @@ impl Builder<'_> {
                 self.vars = saved_vars;
                 self.stack.pop();
             }
-            _ => {
-                for child in node.children.borrow().iter() {
-                    self.walk(child);
-                }
-            }
+            _ => self.walk_children(node),
+        }
+    }
+
+    /// Walk an element's children, each with its position among its element
+    /// siblings.
+    fn walk_children(&mut self, node: &Handle) {
+        let children = node.children.borrow();
+        for (child, position) in children.iter().zip(sibling_positions(&children)) {
+            self.walk(child, position);
         }
     }
 
@@ -837,9 +840,9 @@ fn block_kind(tag: &html5ever::LocalName) -> Option<BlockKind> {
     })
 }
 
-/// What a selector can ask about an element: its tag, its id, its classes and
-/// its attributes.
-fn element_context(node: &Handle, tag: &html5ever::LocalName) -> Element {
+/// What a selector can ask about an element: its tag, its id, its classes, its
+/// attributes and where it sits among its siblings.
+fn element_context(node: &Handle, tag: &html5ever::LocalName, position: Siblings) -> Element {
     Element {
         tag: tag.to_string(),
         id: attr(node, "id").map(|id| id.trim().to_string()),
@@ -849,7 +852,63 @@ fn element_context(node: &Handle, tag: &html5ever::LocalName) -> Element {
             .map(str::to_string)
             .collect(),
         attrs: attrs(node),
+        position,
     }
+}
+
+/// Where each child sits among its element siblings, one entry per child so a
+/// caller can walk children and positions together. Text and comments hold a
+/// place in the list but are counted by nothing, and an element the walk
+/// itself skips — a `<style>`, say — still counts, since `:nth-child` is a
+/// question about the document rather than about what was rendered.
+fn sibling_positions(children: &[Handle]) -> Vec<Siblings> {
+    let tags: Vec<Option<LocalName>> = children
+        .iter()
+        .map(|child| match &child.data {
+            NodeData::Element { name, .. } => Some(name.local.clone()),
+            _ => None,
+        })
+        .collect();
+    let count = tags.iter().flatten().count();
+    let mut totals: Vec<(LocalName, usize)> = Vec::new();
+    for tag in tags.iter().flatten() {
+        match totals.iter_mut().find(|(name, _)| name == tag) {
+            Some(total) => total.1 += 1,
+            None => totals.push((tag.clone(), 1)),
+        }
+    }
+
+    let mut seen: Vec<(LocalName, usize)> = Vec::new();
+    let mut index = 0;
+    let mut out = Vec::with_capacity(children.len());
+    for tag in &tags {
+        let Some(tag) = tag else {
+            out.push(Siblings::default());
+            continue;
+        };
+        index += 1;
+        let type_index = match seen.iter_mut().find(|(name, _)| name == tag) {
+            Some(slot) => {
+                slot.1 += 1;
+                slot.1
+            }
+            None => {
+                seen.push((tag.clone(), 1));
+                1
+            }
+        };
+        let type_count = totals
+            .iter()
+            .find(|(name, _)| name == tag)
+            .map_or(1, |(_, total)| *total);
+        out.push(Siblings {
+            index,
+            count,
+            type_index,
+            type_count,
+        });
+    }
+    out
 }
 
 /// Every attribute of an element, names lower-cased so a selector written in

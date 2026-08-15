@@ -79,6 +79,14 @@
       p[data-note~="second"] { font-style: italic }
       p[lang|=en] { border-left: 4px solid #88c0d0; padding-left: 8px }
       p[data-note*="SHOUT" i] { text-transform: uppercase }
+      /* Structural pseudo-classes: every other row striped, the ends of the
+         list picked out, and `:first-of-type` reaching the first `li` among
+         siblings that are not all `li`. */
+      .rows li:nth-child(odd) { background: #3b4252 }
+      .rows li:first-child { color: #a3be8c }
+      .rows li:last-child { color: #bf616a }
+      .rows li:nth-last-child(2) { font-style: italic }
+      .types p:first-of-type { font-weight: bold }
     </style>
   </head>
   <body>
@@ -210,6 +218,20 @@ while the newline above them is kept.</p>
     <p>No note at all, so none of those rules reach it.</p>
     <p><a href="https://edos.edgl.dev/">An https link, bold</a> beside
       <a href="/share/web/welcome.html">a .html one, underlined</a>.</p>
+
+    <h2>Which item a counting selector reaches</h2>
+    <ul class="rows">
+      <li>The first item, green, and striped as an odd child.</li>
+      <li>The second item, unstriped and on the page's own ground.</li>
+      <li>The third item, striped, and italic as the second from the end.</li>
+      <li>The last item, red.</li>
+    </ul>
+    <div class="types">
+      <h3>A heading, which is this box's first element child.</h3>
+      <p>The first paragraph among them, so <code>:first-of-type</code> reaches
+        it and sets it bold.</p>
+      <p>The second paragraph, which it leaves alone.</p>
+    </div>
 
     <h2>What a list may be numbered in</h2>
     <ol class="roman" start="3">

@@ -888,14 +888,74 @@ impl AttrTest {
     }
 }
 
-/// One simple selector: a tag, an id, any number of classes and any number of
-/// attribute tests, all of which must match the same element.
+/// One structural pseudo-class, per CSS Selectors 4 §9. The whole family
+/// reduces to two questions, since `:first-child` is `:nth-child(1)` and
+/// `:last-of-type` is `:nth-last-of-type(1)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pseudo {
+    /// `:nth-child(An+B)` and its three relatives.
+    Nth {
+        a: i32,
+        b: i32,
+        /// Count from the last sibling rather than the first.
+        from_end: bool,
+        /// Count only the siblings sharing the element's tag.
+        of_type: bool,
+    },
+    /// `:only-child`, or `:only-of-type` when `of_type`.
+    Only { of_type: bool },
+}
+
+impl Pseudo {
+    fn matches(&self, element: &Element) -> bool {
+        let at = &element.position;
+        match *self {
+            Pseudo::Nth {
+                a,
+                b,
+                from_end,
+                of_type,
+            } => {
+                let (index, count) = if of_type {
+                    (at.type_index, at.type_count)
+                } else {
+                    (at.index, at.count)
+                };
+                if index == 0 || index > count {
+                    return false;
+                }
+                let index = if from_end { count + 1 - index } else { index };
+                nth_matches(a, b, index as i32)
+            }
+            Pseudo::Only { of_type } => {
+                if of_type {
+                    at.type_count == 1
+                } else {
+                    at.count == 1
+                }
+            }
+        }
+    }
+}
+
+/// Whether `index` is `A*n + B` for some whole `n >= 0`.
+fn nth_matches(a: i32, b: i32, index: i32) -> bool {
+    let offset = index - b;
+    if a == 0 {
+        return offset == 0;
+    }
+    offset % a == 0 && offset / a >= 0
+}
+
+/// One simple selector: a tag, an id, any number of classes, attribute tests
+/// and pseudo-classes, all of which must match the same element.
 #[derive(Clone, Debug, Default)]
 struct Compound {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
     attrs: Vec<AttrTest>,
+    pseudos: Vec<Pseudo>,
 }
 
 impl Compound {
@@ -910,14 +970,15 @@ impl Compound {
         }
         self.classes.iter().all(|c| element.classes.contains(c))
             && self.attrs.iter().all(|a| a.matches(element))
+            && self.pseudos.iter().all(|p| p.matches(element))
     }
 
     fn specificity(&self) -> (u32, u32, u32) {
         (
             self.id.is_some() as u32,
-            // An attribute selector counts alongside a class (CSS Selectors 4
-            // §17).
-            (self.classes.len() + self.attrs.len()) as u32,
+            // An attribute selector and a pseudo-class both count alongside a
+            // class (CSS Selectors 4 §17).
+            (self.classes.len() + self.attrs.len() + self.pseudos.len()) as u32,
             self.tag.is_some() as u32,
         )
     }
@@ -988,6 +1049,30 @@ struct Rule {
     declarations: Vec<Declaration>,
 }
 
+/// Where an element sits among its siblings, which is all the `:nth-child`
+/// family asks about. Indices are 1-based and count elements only, text and
+/// comments included in neither.
+#[derive(Clone, Copy, Debug)]
+pub struct Siblings {
+    pub index: usize,
+    pub count: usize,
+    /// The same pair, counting only the siblings sharing this element's tag.
+    pub type_index: usize,
+    pub type_count: usize,
+}
+
+impl Default for Siblings {
+    /// An only child, which is what the root element is.
+    fn default() -> Siblings {
+        Siblings {
+            index: 1,
+            count: 1,
+            type_index: 1,
+            type_count: 1,
+        }
+    }
+}
+
 /// An element as the cascade sees it: everything a selector can ask about.
 #[derive(Clone, Debug, Default)]
 pub struct Element {
@@ -996,6 +1081,7 @@ pub struct Element {
     pub classes: Vec<String>,
     /// Every attribute, names lower-cased, in document order.
     pub attrs: Vec<(String, String)>,
+    pub position: Siblings,
 }
 
 impl Element {
@@ -1378,10 +1464,11 @@ fn parse_selector(text: &str) -> Option<Selector> {
     (!parts.is_empty() && !child).then_some(Selector { parts })
 }
 
-/// Split a selector into compounds and `>` tokens, with `[...]` opaque so a
-/// quoted attribute value may hold a space, a `>` or anything else. `None` for
-/// a bracket or quote left open, since a selector read past its end would
-/// apply somewhere the page never asked for.
+/// Split a selector into compounds and `>` tokens, with `[...]` and `(...)`
+/// opaque so a quoted attribute value may hold a space, a `>` or anything
+/// else, and `:nth-child(2n + 1)` stays one compound. `None` for a bracket,
+/// paren or quote left open, since a selector read past its end would apply
+/// somewhere the page never asked for.
 fn tokenize_selector(text: &str) -> Option<Vec<String>> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -1400,11 +1487,11 @@ fn tokenize_selector(text: &str) -> Option<Vec<String>> {
                 quote = Some(ch);
                 current.push(ch);
             }
-            '[' => {
+            '[' | '(' => {
                 depth += 1;
                 current.push(ch);
             }
-            ']' => {
+            ']' | ')' => {
                 depth = depth.checked_sub(1)?;
                 current.push(ch);
             }
@@ -1439,7 +1526,7 @@ fn parse_compound(word: &str) -> Option<Compound> {
     // `*` matches every element, so it constrains nothing: an empty compound
     // already says that, and `*.card` is exactly `.card`.
     let mut universal = false;
-    let mut chars = word.chars();
+    let mut chars = word.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
             '*' => universal = true,
@@ -1477,10 +1564,47 @@ fn parse_compound(word: &str) -> Option<Compound> {
                 }
                 compound.attrs.push(parse_attr(&body)?);
             }
-            // A pseudo-class, a sibling combinator or a functional notation:
-            // all unsupported, and a compound matched without one of them
-            // would apply far too widely.
-            ':' | '+' | '~' | '(' | ')' | ']' => return None,
+            ':' => {
+                push_part(kind, &mut current, &mut compound);
+                kind = b' ';
+                // A `::` selects a pseudo-element, which is not a test on this
+                // element at all.
+                if chars.peek() == Some(&':') {
+                    return None;
+                }
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    // Anything that opens another part of the compound ends
+                    // the name and belongs to the outer loop.
+                    if matches!(ch, '.' | '#' | '[' | ':' | '(') {
+                        break;
+                    }
+                    name.push(ch);
+                    chars.next();
+                }
+                let mut arg: Option<String> = None;
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut body = String::new();
+                    let mut closed = false;
+                    for ch in chars.by_ref() {
+                        if ch == ')' {
+                            closed = true;
+                            break;
+                        }
+                        body.push(ch);
+                    }
+                    if !closed {
+                        return None;
+                    }
+                    arg = Some(body);
+                }
+                compound.pseudos.push(parse_pseudo(&name, arg.as_deref())?);
+            }
+            // A sibling combinator or an unopened functional notation: both
+            // unsupported, and a compound matched without one of them would
+            // apply far too widely.
+            '+' | '~' | '(' | ')' | ']' => return None,
             _ => current.push(ch),
         }
     }
@@ -1490,10 +1614,72 @@ fn parse_compound(word: &str) -> Option<Compound> {
         && compound.id.is_none()
         && compound.classes.is_empty()
         && compound.attrs.is_empty()
+        && compound.pseudos.is_empty()
     {
         return None;
     }
     Some(compound)
+}
+
+/// One `:name` or `:name(...)`, per CSS Selectors 4 §9. `None` for anything
+/// not implemented, which drops the whole selector.
+fn parse_pseudo(name: &str, arg: Option<&str>) -> Option<Pseudo> {
+    let name = name.to_lowercase();
+    let nth = |a: i32, b: i32, from_end: bool, of_type: bool| {
+        Some(Pseudo::Nth {
+            a,
+            b,
+            from_end,
+            of_type,
+        })
+    };
+    match (name.as_str(), arg) {
+        ("first-child", None) => nth(0, 1, false, false),
+        ("last-child", None) => nth(0, 1, true, false),
+        ("first-of-type", None) => nth(0, 1, false, true),
+        ("last-of-type", None) => nth(0, 1, true, true),
+        ("only-child", None) => Some(Pseudo::Only { of_type: false }),
+        ("only-of-type", None) => Some(Pseudo::Only { of_type: true }),
+        ("nth-child", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, false, false)),
+        ("nth-last-child", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, true, false)),
+        ("nth-of-type", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, false, true)),
+        ("nth-last-of-type", Some(arg)) => parse_nth(arg).and_then(|(a, b)| nth(a, b, true, true)),
+        _ => None,
+    }
+}
+
+/// The `An+B` microsyntax of CSS Syntax 3 §5.4: `odd`, `even`, a bare integer,
+/// or a coefficient on `n` with an optional offset, whitespace anywhere.
+fn parse_nth(arg: &str) -> Option<(i32, i32)> {
+    let text: String = arg
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    match text.as_str() {
+        "odd" => return Some((2, 1)),
+        "even" => return Some((2, 0)),
+        "" => return None,
+        _ => {}
+    }
+    let Some((coefficient, offset)) = text.split_once('n') else {
+        return Some((0, text.parse().ok()?));
+    };
+    let a = match coefficient {
+        "" | "+" => 1,
+        "-" => -1,
+        _ => coefficient.parse().ok()?,
+    };
+    let b = if offset.is_empty() {
+        0
+    } else {
+        // A bare `2n5` is not the syntax: the offset carries its own sign.
+        if !offset.starts_with(['+', '-']) {
+            return None;
+        }
+        offset.parse().ok()?
+    };
+    Some((a, b))
 }
 
 /// The inside of one `[...]`, per CSS Selectors 4 §6: a name, optionally an
@@ -2910,5 +3096,145 @@ mod tests {
         // than applied to every element.
         let unclosed = sheet("p[title { color: red }");
         assert_eq!(cascade(&unclosed, &[element("p", &[])], None).color, None);
+    }
+
+    /// The `n`th of `count` `li` children, all of the same tag.
+    fn nth_child(n: usize, count: usize) -> Element {
+        Element {
+            tag: "li".to_string(),
+            position: Siblings {
+                index: n,
+                count,
+                type_index: n,
+                type_count: count,
+            },
+            ..Element::default()
+        }
+    }
+
+    #[test]
+    fn parses_the_an_plus_b_microsyntax() {
+        assert_eq!(parse_nth("odd"), Some((2, 1)));
+        assert_eq!(parse_nth("EVEN"), Some((2, 0)));
+        assert_eq!(parse_nth("3"), Some((0, 3)));
+        assert_eq!(parse_nth("-2"), Some((0, -2)));
+        assert_eq!(parse_nth("n"), Some((1, 0)));
+        assert_eq!(parse_nth("2n"), Some((2, 0)));
+        assert_eq!(parse_nth(" 2n + 1 "), Some((2, 1)));
+        assert_eq!(parse_nth("-n+3"), Some((-1, 3)));
+        assert_eq!(parse_nth("+3n-2"), Some((3, -2)));
+        // An offset carries its own sign, and a selector this cannot read is
+        // dropped rather than guessed at.
+        assert_eq!(parse_nth("2n5"), None);
+        assert_eq!(parse_nth(""), None);
+        assert_eq!(parse_nth("two"), None);
+    }
+
+    #[test]
+    fn nth_child_counts_from_either_end() {
+        let sheet = sheet(
+            "li:nth-child(2n+1) { color: red }
+             li:nth-last-child(1) { font-weight: bold }
+             li:nth-child(-n+2) { font-style: italic }",
+        );
+        let color = |n| cascade(&sheet, &[nth_child(n, 5)], None).color;
+        assert_eq!(color(1), Some(rgb(255, 0, 0)));
+        assert_eq!(color(2), None);
+        assert_eq!(color(3), Some(rgb(255, 0, 0)));
+        assert!(cascade(&sheet, &[nth_child(5, 5)], None).bold == Some(true));
+        assert!(cascade(&sheet, &[nth_child(4, 5)], None).bold.is_none());
+        // `-n+2` is the first two and nothing after them.
+        assert_eq!(cascade(&sheet, &[nth_child(2, 5)], None).italic, Some(true));
+        assert_eq!(cascade(&sheet, &[nth_child(3, 5)], None).italic, None);
+    }
+
+    #[test]
+    fn structural_pseudo_classes_read_position() {
+        let sheet = sheet(
+            "li:first-child { color: red }
+             li:last-child { color: blue }
+             li:only-child { color: lime }",
+        );
+        assert_eq!(
+            cascade(&sheet, &[nth_child(1, 3)], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        assert_eq!(
+            cascade(&sheet, &[nth_child(3, 3)], None).color,
+            Some(rgb(0, 0, 255))
+        );
+        assert_eq!(
+            cascade(&sheet, &[nth_child(1, 1)], None).color,
+            Some(rgb(0, 255, 0))
+        );
+    }
+
+    #[test]
+    fn of_type_counts_only_the_matching_tag() {
+        let sheet = sheet("p:first-of-type { color: red } p:only-of-type { color: blue }");
+        // The second element child, but the first `p` among them.
+        let first_p = Element {
+            tag: "p".to_string(),
+            position: Siblings {
+                index: 2,
+                count: 4,
+                type_index: 1,
+                type_count: 2,
+            },
+            ..Element::default()
+        };
+        assert_eq!(
+            cascade(&sheet, &[first_p], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        let only_p = Element {
+            tag: "p".to_string(),
+            position: Siblings {
+                index: 3,
+                count: 4,
+                type_index: 1,
+                type_count: 1,
+            },
+            ..Element::default()
+        };
+        assert_eq!(cascade(&sheet, &[only_p], None).color, Some(rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn a_pseudo_class_counts_as_a_class_and_an_unknown_one_drops_the_rule() {
+        let ranked = sheet("li:first-child { color: red } li { color: blue }");
+        assert_eq!(
+            cascade(&ranked, &[nth_child(1, 3)], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        // `:hover` has no answer here, and a rule matched without it would
+        // paint every item; a pseudo-element is not a test on the element at
+        // all.
+        for source in ["li:hover { color: red }", "li::before { color: red }"] {
+            assert_eq!(
+                cascade(&sheet(source), &[nth_child(1, 3)], None).color,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_pseudo_class_composes_with_the_rest_of_its_compound() {
+        let dropped = sheet("ul > li.item:nth-child(2):not-a-thing { color: red }");
+        assert_eq!(cascade(&dropped, &[nth_child(2, 3)], None).color, None);
+        let sheet = sheet("ul > li.item:nth-child( 2 ).lead { color: red }");
+        let mut item = nth_child(2, 3);
+        item.classes = vec!["item".to_string(), "lead".to_string()];
+        assert_eq!(
+            cascade(&sheet, &[element("ul", &[]), item.clone()], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        // The same element in the third position is not the second child.
+        let mut third = nth_child(3, 3);
+        third.classes = item.classes.clone();
+        assert_eq!(
+            cascade(&sheet, &[element("ul", &[]), third], None).color,
+            None
+        );
     }
 }

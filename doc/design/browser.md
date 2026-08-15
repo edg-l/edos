@@ -61,8 +61,8 @@ Turns "readable" into "looks close to right".
 Where it stands: `css.rs` is the cascade. It reads every `<style>` element,
 every `<link rel=stylesheet>` the document fetches, and every `style=`
 attribute; matches selectors that are comma-separated chains of
-tag/`.class`/`#id`/`*`/`[attr]` compounds joined by the descendant or child
-(`>`) combinator; orders them by real specificity with the inline
+tag/`.class`/`#id`/`*`/`[attr]`/`:nth-child()` compounds joined by the
+descendant or child (`>`) combinator; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration` (`underline`, `line-through`, `overline`
@@ -95,9 +95,18 @@ without them, and each is small:
   class level of specificity. A quoted value may hold a space or a `>`, so the
   selector is tokenized with bracket depth and quote state rather than split on
   whitespace.
-- **`:root`.** The one pseudo-class implemented, because it is where a sheet
-  declares its palette; in an HTML document it is `html` and nothing else, so
-  it is rewritten to that tag.
+- **`:root`.** Rewritten to `html`, because in an HTML document that is what it
+  is and nothing else, and it is where a sheet declares its palette.
+- **Structural pseudo-classes.** `:nth-child`, `:nth-last-child`,
+  `:nth-of-type` and `:nth-last-of-type` with the full `An+B` microsyntax
+  (`odd`, `even`, a bare integer, `-n+3`), plus `:first-child`, `:last-child`,
+  `:only-child` and their `-of-type` forms. `doc.rs` gives every element a
+  `Siblings`: its 1-based position among its element siblings, how many there
+  are, and the same pair counted over the siblings sharing its tag. An element
+  the walk itself skips — a `<style>` — still counts, since `:nth-child` asks
+  about the document rather than about what was rendered. They count at the
+  class level of specificity, and a `(...)` is opaque to the selector
+  tokenizer so `:nth-child(2n + 1)` stays one compound.
 - **`@layer` bodies are parsed**, since a modern stylesheet puts nearly all of
   itself inside one and skipping them drops the sheet. Layer *order* is not
   honoured — rules keep their document order — which differs from a real
