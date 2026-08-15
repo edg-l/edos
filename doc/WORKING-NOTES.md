@@ -7191,18 +7191,12 @@ set exactly as it was before.
 
 **The tests run on the host even though the crate cannot.** `cargo test -p
 edos-web` builds an `x86_64-unknown-edos` binary and then executes it, which
-SIGSEGVs on the host — the same trap any program in this workspace hits, and
-the reason `sshd`'s test modules are never run by a plain `cargo test`. But
+SIGSEGVs on the host — the same trap any program in this workspace hits. But
 `css.rs` depends on nothing outside `std`, so it can be compiled as its own
-test crate:
-
-```
-rustc +nightly --edition 2024 --test programs/edos-web/src/css.rs -o ~/.cache/csstest && ~/.cache/csstest
-```
-
-That is worth reaching for on any userspace module that is pure logic. It needs
-no `+edos` toolchain and runs in under a second, which makes it a far tighter
-loop than a guest boot for anything decidable from the input alone.
+test crate. `make host-tests` does that, and is the gate to run; see
+"`make host-tests` is the userspace suite" below for the two mechanisms it
+uses and the stale-binary trap that makes running the `rustc` line by hand
+unsafe.
 
 **Three decisions in the parser that look like gaps and are not.** An
 `@supports` body is skipped whole, because applying rules conditional on a
@@ -7334,28 +7328,10 @@ Two behaviour changes fall out of the spec rather than out of taste:
   appended to the base's directory, which is what `?page=2` on a paginated
   index means.
 
-**A crate that only links for `x86_64-unknown-edos` can still have host unit
-tests** — the trick `css.rs` uses generalises to any module that borrows only
-a name or two from its crate. `css.rs` compiles with `rustc --test` directly
-because it depends on nothing; `url.rs` needs `crate::Error`, and an `include!`
-does not work (its `//!` becomes an inner doc comment on a `use`, and the
-re-import collides). A `#[path]` module does:
-
-```rust
-// /tmp/urltest.rs
-#[derive(Debug)]
-pub enum Error { Url(String) }
-#[path = "<repo>/programs/edos_http/src/url.rs"]
-mod url;
-fn main() {}
-```
-
-```
-rustc +nightly --edition 2024 --test /tmp/urltest.rs -o /tmp/urltest && /tmp/urltest
-```
-
-`use crate::Error` then resolves to the harness's own definition, and the
-module's `#[cfg(test)] mod tests` runs. The guest build never sees the harness.
+**These tests run on the host under `make host-tests`.** `edos_http` builds
+for `x86_64-unknown-linux-gnu` unchanged, so its `url.rs` tests need only the
+target flag; no harness and no `#[path]` module. See "`make host-tests` is the
+userspace suite" at the end of this file.
 
 `assets/welcome.html` names its SVG `../icons/edos.svg` and its self-link
 `./welcome.html`, so the fixture fails visibly if dot-segment resolution
@@ -7776,3 +7752,37 @@ The keywords that align against the line box rather than a baseline -- `top`,
 `middle`, `bottom`, `text-top`, `text-bottom` -- parse to a zero shift on
 purpose: there is no line box to align against, and leaving the run on the
 baseline is better than putting it somewhere arbitrary.
+
+## `make host-tests` is the userspace suite (2026-08-15)
+
+`make test` boots a guest and runs the in-kernel suite; nothing ran the unit
+tests in `programs/` at all. There are 77 of them across four crates — URL
+resolution (`edos_http/src/url.rs`), the CSS cascade
+(`edos-web/src/css.rs`), the SSH wire format, key exchange and auth
+(`sshd/src/*.rs`), and `grab`'s merge — and every one is decidable without a
+kernel. `scripts/host-tests` runs them all in about a second.
+
+Two mechanisms, because `programs/` defaults to `x86_64-unknown-edos`:
+
+- **`cargo +nightly test --target x86_64-unknown-linux-gnu -p <crate>`** for a
+  crate whose whole dependency tree is portable: `edos_http`, `grab`, `sshd`.
+  This works today and is the reason the earlier claim that "`sshd`'s test
+  modules are never run by a plain `cargo test`" needed only the target flag,
+  not a port.
+- **`rustc +nightly --edition 2024 --test <file>`** for a single pure-`std`
+  module inside a crate that cannot build for the host. `edos-web` links
+  `edos_render` and `edos_lib`, which call `std::os::edos` and `File::ioctl`,
+  so the crate has no host build; `css.rs` on its own has no such dependency.
+
+**The trap that cost real coverage.** `rustc -o` leaves the previous binary in
+place when compilation fails. Running the `rustc` line and then the binary by
+hand — which is how `css.rs`'s tests were run for a dozen iterations — reports
+a green suite from stale code. It hid a `vertical_align_resolves_against_the_font`
+test that never compiled: it called the `element(tag, classes)` helper with
+`&[("class", class)]`, and the last several "44 host css tests passed" claims
+were a binary built before that test was written. `scripts/host-tests` deletes
+the binary first and runs under `set -e`, which is most of why it exists.
+
+Adding a test module to a program means adding its crate to the `-p` list in
+that script, or its file to `STANDALONE` if the crate cannot build for the
+host. Nothing discovers them automatically.

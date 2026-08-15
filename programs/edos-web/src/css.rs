@@ -2091,7 +2091,7 @@ mod tests {
              .box { vertical-align: middle } \
              .len { vertical-align: -4px }",
         );
-        let shift = |class: &str| cascade(&sheet, &[element("p", &[("class", class)])], None).shift;
+        let shift = |class: &str| cascade(&sheet, &[element("p", &[class])], None).shift;
         assert_eq!(shift("up"), Some(10));
         assert_eq!(shift("down"), Some(-6));
         assert_eq!(shift("flat"), Some(0));

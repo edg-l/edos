@@ -314,6 +314,13 @@ kernel: programs
 check: programs
 	$(MAKE) -C kernel check
 
+# Userspace unit tests that need no guest: URL resolution, the CSS cascade, the
+# SSH wire format, `grab`'s merge. Seconds, not a boot; see the script for why a
+# plain `cargo test` cannot run them.
+.PHONY: host-tests
+host-tests:
+	scripts/host-tests
+
 $(IMAGE_NAME).iso: limine/limine kernel live-root.img
 	rm -rf iso_root
 	mkdir -p iso_root/boot

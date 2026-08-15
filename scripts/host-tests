@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Run every userspace unit test that is decidable on the host.
+#
+# `make test` boots a guest and runs the in-kernel suite; it says nothing about
+# the pure-logic modules in `programs/`, which are where URL resolution, the CSS
+# cascade, the SSH wire format and `grab`'s merge live. Those need no kernel, so
+# they run here in about a second and catch a broken parser long before a boot
+# would.
+#
+# Two mechanisms, because the workspace defaults to `x86_64-unknown-edos`:
+#
+#   * `cargo test --target x86_64-unknown-linux-gnu` for crates whose whole
+#     dependency tree is portable. A plain `cargo test` instead builds an edos
+#     binary and executes it, which SIGSEGVs on the host.
+#   * `rustc --test` on a single file for a crate that is NOT portable.
+#     `edos-web` links `edos_render` and `edos_lib`, which call `std::os::edos`,
+#     so the crate cannot build for the host at all -- but `css.rs` depends on
+#     nothing outside `std` and compiles as its own test crate.
+#
+# The second mechanism has a trap that has already cost real coverage: `rustc
+# -o` leaves the PREVIOUS binary in place when compilation fails, so running it
+# by hand after an edit reports a green suite from stale code. The `rm -f`
+# below, and `set -e`, are the whole point of this script existing.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+HOST_TARGET=x86_64-unknown-linux-gnu
+SCRATCH="${TMPDIR:-$HOME/.cache}/edos-host-tests"
+mkdir -p "$SCRATCH"
+
+echo "== cargo test --target $HOST_TARGET (edos_http, grab, sshd)"
+(cd programs && cargo +nightly test --target "$HOST_TARGET" \
+	-p edos_http -p grab -p sshd)
+
+# One file per line: a module that is pure `std` logic inside a crate that
+# cannot build for the host.
+STANDALONE="programs/edos-web/src/css.rs"
+
+for src in $STANDALONE; do
+	bin="$SCRATCH/$(echo "$src" | tr / _)"
+	echo "== rustc --test $src"
+	rm -f "$bin"
+	rustc +nightly --edition 2024 --test "$src" -o "$bin"
+	"$bin"
+done
+
+echo "host tests: all green"

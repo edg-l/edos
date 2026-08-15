@@ -261,26 +261,10 @@ the root is absorbed rather than an error, a fragment is stripped before the
 reference is read, an empty or query-only reference keeps the base's path, and
 a reference naming a scheme this client cannot fetch — `mailto:`,
 `javascript:` — is an error, so `doc.rs` drops the link instead of turning it
-into a nonsense HTTP request. Its 34 RFC §5.4 examples run on the host the same
-way `css.rs`'s do, through a harness that supplies the one item the module
-borrows from its crate:
-
-```rust
-// /tmp/urltest.rs
-#[derive(Debug)]
-pub enum Error { Url(String) }
-#[path = "<repo>/programs/edos_http/src/url.rs"]
-mod url;
-fn main() {}
-```
-
-```
-rustc +nightly --edition 2024 --test /tmp/urltest.rs -o /tmp/urltest && /tmp/urltest
-```
-
-`css.rs` depends on nothing but `std`, so its unit tests run on the host even
-though the crate only links for `x86_64-unknown-edos`:
-`rustc +nightly --edition 2024 --test programs/edos-web/src/css.rs -o /tmp/t && /tmp/t`.
+into a nonsense HTTP request. Its 34 RFC §5.4 examples, and
+`css.rs`'s cascade tests, run on the host under `make host-tests` — see
+`doc/WORKING-NOTES.md` for the two mechanisms that takes and the stale-binary
+trap in the second one.
 
 `assets/welcome.html` is installed at `/share/web/welcome.html` and exercises
 exactly this subset, which makes it the page to open when a style stops being
