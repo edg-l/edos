@@ -1,6 +1,8 @@
 # lookupd
 
-A caching name lookup daemon. This is the design; nothing of it is built yet.
+A caching name lookup daemon. Built and in `make guest-check`: `programs/lookupd`
+is the daemon, `programs/lookuptest` is its regression suite, and `SYS_SETDNS`
+(316) is the one piece of it in the kernel.
 
 ## 1. Problem
 
@@ -75,15 +77,20 @@ port, `sendto` and `recvfrom` carrying the peer address, loopback delivery,
 
 A client asks `SYS_GETDNS`, so that is where the redirect goes.
 
-Add **`SYS_SETDNS`, number 316** (315 is the current highest), with the usual
-three parts: the dispatch arm, a row in `syscalls/table.rs` so `strace` names
-it, and a wrapper in `edos_lib`. The daemon calls it once at startup to point
-the stack's resolver at `127.0.0.1`.
+**`SYS_SETDNS` is 316**, with the usual three parts: the dispatch arm, a row in
+`syscalls/table.rs` so `strace` names it, and a wrapper in `edos_lib`. The
+daemon calls it once at startup, after binding, to point the stack's resolver at
+`127.0.0.1`. Passing `0.0.0.0` clears the override.
 
-The kernel holds `resolver_override: Option<([u8; 4], Tid)>` beside
-`dns_server` in `net::stack`. `sys_getdns` returns the override if its owning
-thread is still in the registry, and otherwise clears it and returns the
-DHCP-learned address.
+The kernel holds `resolver_override: Option<([u8; 4], ThreadId)>` beside
+`dns_server` in `net::stack`. One function decides what a lookup should use:
+`net::stack::effective_resolver` returns the override if its owning thread is
+still running, and otherwise drops it and returns the DHCP-learned address. Both
+`sys_getdns` and `/proc/net` ask it, so what the machine reports and what it
+does cannot drift apart.
+
+Any process may call it. There is no privilege model here to hang it on, and the
+same is true of every other configuration syscall in this kernel.
 
 Two things about that design are deliberate.
 
@@ -102,10 +109,12 @@ publish loop, and no effect at all on binaries already on disk. The syscall
 works for every program already built.
 
 The one wrinkle is tid reuse: a dead daemon's tid could be handed to something
-else, which would then appear to own the override. The window is small, the
-consequence is that the override outlives its owner briefly, and a restarted
-`lookupd` re-asserts the override at startup, so the state self-heals. That is
-cheap enough to accept rather than design around.
+else, which would then appear to own the override. The window is small and the
+consequence is that the override outlives its owner briefly. It is covered
+rather than designed around: the daemon reclaims the slot on any idle tick that
+finds `getdns` no longer naming loopback, so the state self-heals within a
+second, and the same mechanism covers a second process overwriting the slot
+outright.
 
 ## 5. What the cache does
 
@@ -116,14 +125,25 @@ as the upstream's own response bytes.
 derived from the protocol rather than picked. Positive entries expire on the
 TTL the answer carried. Negative entries expire on the SOA MINIMUM per RFC 2308
 section 5, which is where a resolver is told how long an NXDOMAIN may be
-believed. A TTL is clamped only at the top, to stop a broken or hostile zone
-pinning an entry for a week.
+believed. A TTL is clamped only at the top: `TTL_CEILING` of a day for a
+positive answer, so a broken or hostile zone cannot pin an entry for a week, and
+five minutes for a negative one, which is the maximum RFC 2308 section 5 asks
+every implementation to impose.
 
-**Coalescing**, and this is the part a per-process cache can never do: a query
-arriving for a question already in flight attaches to the outstanding request
-rather than starting a second one, and every waiter is answered from the one
-response. A page pulling three subresources from the same host at once
-generates one query.
+**Coalescing**, and this is the part a per-process cache can never do: two
+programs asking the same question at the same moment cost one query on the
+wire, not two.
+
+It falls out of the loop being single-threaded rather than being built. The
+daemon reads one datagram, answers it, and only then reads the next; a query
+that arrives while an upstream request is outstanding waits in the socket
+buffer and is answered from the cache the request just filled. A page pulling
+three subresources from one host generates one query.
+
+What that costs is head-of-line blocking: one slow upstream query delays every
+client behind it, by up to the two second timeout. That is the right trade at
+this volume and it is the thing to revisit first if it ever is not. The fix is
+an in-flight table and a thread per outstanding request, not a second cache.
 
 **Negative caching** matters more on a desktop than it looks. Typos and dead
 hosts are most of what anything resolves twice.
@@ -169,43 +189,89 @@ the daemon installs the override itself, after binding.
 
 ## 8. Configuration and lifecycle
 
-`/etc/services/lookupd.conf` declares it, with `enabled_by /etc/lookupd.conf`
-so a system without that file never starts it, the way `sshd` is gated today.
-`svc start lookupd` and `svc stop lookupd` work through the existing control
-FIFO with no new mechanism. See `doc/services.md`.
+`lookupd` is one of init's compiled-in services, beside `edos-wm` and `sshd`,
+gated by `enabled_by /etc/lookupd.conf`. The image ships that file, so the
+resolver is **on by default** and deleting the file is the off switch. A system
+without it resolves exactly as it did before the daemon existed, which is what
+makes turning it off safe.
 
-`/etc/lookupd.conf` carries the upstream address, defaulting to whatever DHCP
-learned, and the cache size. One value per line with `#` comments above it, per
-`edos_lib::config`.
+The file holds one value, per `edos_lib::config`: the upstream resolver's
+address, or `dhcp` to use the leased one. The cache size is a constant in the
+program rather than a second setting, because a second value would need a
+second file and nothing has yet wanted to change it.
 
-**SIGHUP flushes the cache** and logs a counter line to `/dev/klog`. That is
-the BSD convention for exactly this, it gives the tests an observable, and it
-needs no new signal: this kernel has SIGHUP but no SIGUSR1 or SIGINFO.
+**`SIGHUP` flushes the cache** and logs a counter line to `/dev/klog`. That is
+the BSD convention, it gives the tests an observable, and it needs no new
+signal: this kernel has SIGHUP but no SIGUSR1 or SIGINFO.
+
+**Counters are published to `/tmp/lookupd.stats`**, one `key: value` per line
+in the shape of a `/proc` file, rewritten at most once a second. `/tmp` is
+memfs and forgets at reboot, which is right: this is a record of what this
+boot's resolver has done, not a setting. A reader must therefore wait for a
+counter to move rather than expect it to have moved already.
+
+**The override is reclaimed once a second.** It is a single slot in the kernel,
+so whoever writes it last owns it, and a process that installs its own and
+exits leaves the machine pointed back at the upstream. The daemon compares
+`getdns` against loopback on each idle tick and claims it again if something
+displaced it, which makes that self-healing rather than permanent. It is also
+what covers the tid-reuse wrinkle in section 4.
 
 ## 9. Testing
 
-The wire handling (parse a question, rewrite an ID, decrement TTLs, decide
-expiry) should live in a library with **host unit tests**, which run in about a
-second alongside the other 114 and need no guest.
+The wire handling and the cache are in `programs/lookupd/src/dns.rs`, which
+depends on nothing but `std` and takes time as a parameter, so its **16 host
+unit tests** run in `make host-tests` in about a second: question parsing and
+its refusals, case-insensitive keying, the message TTL being its shortest
+record, ageing in place, OPT records being left alone, negative TTLs from the
+SOA, LRU eviction, and the fresh/stale/miss boundary.
 
-In the guest, `programs/dnsprobe` is already the client this needs: it builds a
-raw query and takes the server as its second argument, so `dnsprobe example.com
-127.0.0.1` talks to `lookupd` directly with nothing else in the way. Three
-cases, all worth adding to `make guest-check`:
+In the guest, `programs/lookuptest` is the suite, and it is in
+`make guest-check`. Six cases:
 
-1. Resolve a name twice and assert the second is a hit, read from the SIGHUP
-   counter line.
-2. Resolve the same name from **two processes** and assert the second is a hit.
-   This is the whole reason the daemon exists rather than a cache in
-   `edos_rt`, so it is the case that must go red without it.
-3. Kill `lookupd` and assert a lookup still answers, promptly, from the
-   DHCP-learned address. This is the section 7 failure mode, and it is the one
-   that would otherwise be discovered by a 6 second stall in the browser.
+1. `/proc/net` and `getdns` both name the local resolver.
+2. A name looked up twice is a hit the second time.
+3. A **second process** is answered from the first one's lookup. This is the
+   case that separates a system-wide cache from one inside a library, so it is
+   the one that must go red without the daemon.
+4. `SIGHUP` empties the cache without resetting the totals.
+5. An override whose owner exited is revoked, and the lookup that follows
+   answers promptly from the DHCP address. Without this it is the six second
+   stall in section 7: the child points the system at `127.0.0.2`, where
+   nothing listens.
+6. The daemon reclaims the override afterwards.
 
-## 10. Sizing
+`programs/dnsprobe` remains the tool for looking at raw bytes by hand: it takes
+the server as its second argument, so `dnsprobe example.com 127.0.0.1` talks to
+`lookupd` with nothing in between.
 
-`SYS_SETDNS`, the override field and the `getdns` change are an afternoon. The
-daemon is a day, and a useful one beyond DNS: it is the first program in the
-tree that is a server for other local programs, so it exercises the UDP receive
-path with several peers on one socket, and gives `svc` something to start and
-stop that is not `sshd`.
+Like `socktest`, this needs a working upstream: the cases turn on an answer
+coming back at all.
+
+## 10. What it cost, and what was found building it
+
+The kernel side was an afternoon as estimated: an `Option<([u8; 4], ThreadId)>`
+beside `dns_server`, `effective_resolver` in `net::stack` as the one place that
+decides, `sys_setdns`, and a `resolver:` line in `/proc/net` that asks the same
+function so a dead resolver's override stops being reported at the same moment
+it stops being used. The daemon and its suite came to about 900 lines including
+tests.
+
+Three things worth keeping:
+
+**`requires /dev/eth0` was wrong and cost fifteen seconds of every boot.** There
+is no `/dev` node for the NIC on this system, so init waited out its whole
+device timeout and started the daemon anyway. The daemon reads its upstream
+from `/proc/net`, which answers before DHCP has finished, so it needs no wait at
+all.
+
+**`process::spawn` takes `argv[1..]`, not `argv[0]`.** Passing the program name
+as the first argument made `dns` try to resolve the name "dns", and made
+`lookuptest` re-run its whole suite instead of taking its `--steal` branch,
+which recursed until the guest was stopped. Init's own `args` field documents
+the convention; the spawn wrapper does not.
+
+**A formatted line reaches `/dev/klog` in fragments.** `writeln!` issues a write
+per fragment and the log interleaves them with everything else on the machine,
+so `lookupd:` and the message arrived as two lines. Build the string, then write
+it once.

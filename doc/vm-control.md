@@ -41,7 +41,7 @@ make test-headless    # kernel sched-test suite; `make test` needs a desktop
                       # session for its PipeWire audio backend, this does not
 make storage-check    # scripts/fs-regression (EFS then FAT32) + scripts/fsbench-run
 make guest-check      # the guest's own suites -- iotest, socktest, mmaptest and
-                      # eleven more -- in one boot, judged by their exit codes
+                      # twelve more -- in one boot, judged by their exit codes
 ```
 
 All three exit 0 only when the run passed. The sched-test suite reports through

@@ -537,6 +537,12 @@ filesystem: $(WALLPAPERS) $(SOUNDS)
 	mkdir -p filesystem $(addprefix filesystem/,$(FILESYSTEM_DIRS))
 	cp -u assets/edos.svg filesystem/share/icons/edos.svg
 	cp -u assets/welcome.html filesystem/share/web/welcome.html
+	@# The caching resolver is on unless this file is removed, which is what
+	@# init's `enabled_by` reads. Not overwritten: an edited upstream survives
+	@# a rebuild.
+	@test -f filesystem/etc/lookupd.conf || printf '%s\n' \
+		'# Upstream resolver for lookupd: an address, or dhcp for the leased one.' \
+		'dhcp' > filesystem/etc/lookupd.conf
 	@for pair in $(FONT_COPIES); do \
 		src=$${pair%%:*}; dst=$${pair##*:}; \
 		if [ -f "$$src" ]; then \

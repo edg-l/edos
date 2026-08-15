@@ -51,6 +51,8 @@ pub const SYS_SIGRETURN: u64 = 239;
 pub const SYS_TRACE_CTL: u64 = 235;
 pub const SYS_TRACE_READ: u64 = 236;
 pub const SYS_NETINFO: u64 = 250;
+pub const SYS_GETDNS: u64 = 256;
+pub const SYS_SETDNS: u64 = 316;
 pub const SYS_REBOOT: u64 = 169;
 
 pub const AF_INET: u32 = 2;

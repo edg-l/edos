@@ -587,7 +587,23 @@ impl Procfs {
         let _ = writeln!(out, "inet: {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
         let _ = writeln!(out, "prefix: {prefix}");
         let _ = writeln!(out, "gateway: {}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
+        // `dns` is always the address DHCP learned, so a resolver daemon can
+        // read its own upstream here after redirecting everyone else to itself.
         let _ = writeln!(out, "dns: {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+
+        // Where a lookup actually goes, which differs only while something has
+        // installed an override. Asked through the same function the syscall
+        // uses, so a dead resolver's override stops being reported here at the
+        // same moment it stops being used.
+        if let Some(resolver) = crate::net::stack::effective_resolver()
+            && resolver != dns
+        {
+            let _ = writeln!(
+                out,
+                "resolver: {}.{}.{}.{}",
+                resolver[0], resolver[1], resolver[2], resolver[3]
+            );
+        }
         out
     }
 

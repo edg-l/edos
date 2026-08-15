@@ -10,9 +10,9 @@ privilege the compositor and the panel need.
 Two sources, and the second only ever adds to the first.
 
 **The desktop session is compiled in** — `edos-wm`, `edos-taskbar`,
-`edos-terminal`, `sshd` — so a filesystem with nothing on it still boots to a
-usable machine, and a mistake in a config file cannot cost the session its
-window manager.
+`edos-terminal`, `sshd`, `lookupd` — so a filesystem with nothing on it still
+boots to a usable machine, and a mistake in a config file cannot cost the
+session its window manager.
 
 **`/etc/services/*.conf` declares the rest.** One file per service, named for
 it: `/etc/services/httpd.conf` declares `httpd`. A file naming a compiled-in
@@ -50,6 +50,11 @@ service that treats the device as optional comes up permanently without it.
 plaintext line in `/etc/sshd.conf`, so a system without that file has no
 business listening, and starting it anyway would only log a failure on every
 boot of a machine whose owner never asked for it.
+
+`lookupd` uses it the other way round, as an off switch: the image ships
+`/etc/lookupd.conf`, so the caching resolver runs unless that file is deleted,
+and a system without it resolves names exactly as it did before the daemon
+existed. See `doc/design/lookupd.md`.
 
 A file that does not parse is reported and skipped. Init coming up without one
 service beats init not coming up.

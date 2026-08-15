@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the guest's own regression suites and report one verdict.
 
-`programs/` carries twenty-one test programs. Before this, three of them were
+`programs/` carries twenty-two test programs. Before this, three of them were
 run by anything: `fstest` by `fs-regression` and `recovery-check`, `orphantest`
 by `orphan-check`, `inflighttest` by a make target. The rest -- `iotest`'s 23
 syscall cases, `socktest`'s 16, `mmaptest`'s 13, and nine more -- ran only when
@@ -56,6 +56,7 @@ SUITES = [
     ("auxvtest", "", 90),
     ("lockordertest", "", 120),
     ("inflighttest", "", 120),
+    ("lookuptest", "", 120),
 ]
 
 MARKER = "GUESTCHECK"

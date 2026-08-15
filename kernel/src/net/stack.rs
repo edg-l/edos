@@ -12,9 +12,46 @@ use super::socket::SocketNotifications;
 use super::tcp::TcpConnection;
 use super::{arp, ethernet, icmp, ipv4, socket, tcp, udp};
 use crate::thread::scheduler::{current_thread, thread_sleep};
+use crate::thread::thread::{State, ThreadId, get_thread_by_id};
 use socket::SocketAddr;
 
 pub static NET_STACK: spin::Once<Mutex<NetStack>> = spin::Once::new();
+
+/// The address a name lookup should be sent to.
+///
+/// The one place that decides: an override installed by `SYS_SETDNS` while the
+/// thread that installed it lives, and otherwise the address DHCP learned. A
+/// dead owner's override is dropped here, on the read, because process teardown
+/// is under the drop contract and must not reach for this lock.
+///
+/// `None` only when there is no stack at all.
+pub fn effective_resolver() -> Option<[u8; 4]> {
+    let stack = NET_STACK.get()?;
+    let (dhcp, over) = {
+        let s = ranked_lock!(RANK_NET_STACK, "effective_resolver", stack);
+        (s.dns_server, s.resolver_override)
+    };
+
+    // The registry lookup happens with the stack lock dropped: nesting one
+    // inside the other buys nothing here.
+    match over {
+        Some((addr, owner)) if resolver_owner_alive(owner) => Some(addr),
+        Some(_) => {
+            ranked_lock!(RANK_NET_STACK, "effective_resolver::revoke", stack).resolver_override =
+                None;
+            Some(dhcp)
+        }
+        None => Some(dhcp),
+    }
+}
+
+/// Whether the thread that installed the resolver override is still running.
+///
+/// A dying thread no longer counts, so the override goes at `thread_exit`
+/// rather than at reap.
+fn resolver_owner_alive(owner: ThreadId) -> bool {
+    get_thread_by_id(owner).is_some_and(|t| t.state() != State::Dying)
+}
 
 pub fn net_stack() -> &'static Mutex<NetStack> {
     NET_STACK.get().expect("net stack not initialized")
@@ -33,6 +70,15 @@ pub struct NetStack {
     pub gateway_ip: [u8; 4],
     /// Resolver address, from the DHCP lease when the server offers one.
     pub dns_server: [u8; 4],
+    /// A resolver address installed by `SYS_SETDNS`, and the thread that
+    /// installed it. A local caching resolver points this at loopback so every
+    /// program reaches it without being rebuilt.
+    ///
+    /// The owner is recorded so the override can be revoked when that thread is
+    /// gone. Revocation happens on the read, in `sys_getdns`: the teardown path
+    /// is under the drop contract (`doc/invariants/drop-contract.md`) and must
+    /// not reach for this lock.
+    pub resolver_override: Option<([u8; 4], ThreadId)>,
     pub arp_cache: ArpCache,
     /// Keyed by (id, seq).
     pub ping_waiters: BTreeMap<(u16, u16), PingWaiter>,
@@ -57,6 +103,7 @@ impl NetStack {
             subnet_mask: [255, 255, 255, 0],
             gateway_ip: [10, 0, 2, 2],
             dns_server: [10, 0, 2, 3],
+            resolver_override: None,
             arp_cache: ArpCache::new(),
             ping_waiters: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),

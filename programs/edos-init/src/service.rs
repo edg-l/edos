@@ -11,6 +11,14 @@ pub const SERVICES_DIR: &str = "/etc/services";
 /// the server has, so a system without one has no business listening.
 const SSHD_CONFIG: &str = "/etc/sshd.conf";
 
+/// Configuration that turns the caching resolver on. It names the upstream
+/// resolver, or `dhcp` to use the one the lease offered.
+///
+/// The image ships this file, so the resolver is on unless it is deleted.
+/// Removing it is the off switch, and a system without one resolves exactly as
+/// it did before the daemon existed.
+const LOOKUPD_CONFIG: &str = "/etc/lookupd.conf";
+
 /// When a service that has exited should be started again.
 ///
 /// The distinction the supervisor could not previously make is between a
@@ -172,6 +180,14 @@ fn defaults() -> Vec<Service> {
         Service {
             enabled_by: Some(SSHD_CONFIG.to_string()),
             ..Service::new("sshd", "/bin/sshd")
+        },
+        Service {
+            enabled_by: Some(LOOKUPD_CONFIG.to_string()),
+            // No device to wait for: the stack has no `/dev` node, and the
+            // daemon reads its upstream from `/proc/net`, which answers before
+            // DHCP has finished. A lease arriving later costs one restart at
+            // worst, and the override dies with the process either way.
+            ..Service::new("lookupd", "/bin/lookupd")
         },
     ]
 }

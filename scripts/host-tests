@@ -37,7 +37,8 @@ echo "== cargo test --target $HOST_TARGET (edos_http, grab, sshd)"
 
 # One file per line: a module that is pure `std` logic inside a crate that
 # cannot build for the host.
-STANDALONE="programs/edos-web/src/css.rs"
+STANDALONE="programs/edos-web/src/css.rs
+programs/lookupd/src/dns.rs"
 
 for src in $STANDALONE; do
 	bin="$SCRATCH/$(echo "$src" | tr / _)"

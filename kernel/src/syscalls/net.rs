@@ -9,7 +9,7 @@ use core::time::Duration;
 
 use crate::thread::UserThreadInfo;
 use crate::thread::irqlock::IrqSpinlock;
-use crate::thread::scheduler::current_thread_info;
+use crate::thread::scheduler::{current_thread_id, current_thread_info};
 use crate::thread::waitqueue::WaitOutcome;
 use crate::timer::Instant;
 use crate::{
@@ -1081,6 +1081,11 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
 /// A resolver is configuration, not a socket operation, and there is no
 /// filesystem convention for it here the way `/etc/resolv.conf` serves Unix,
 /// so userspace asks the stack that learned it from DHCP.
+///
+/// An override installed by [`sys_setdns`] wins while the thread that installed
+/// it is alive. Checking that here, on the read, is what lets a caching
+/// resolver die without taking name resolution down with it: the next lookup
+/// sees the owner gone and goes back to the address DHCP learned.
 pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -1090,15 +1095,57 @@ pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> u64 {
         return !0u64;
     }
 
-    let Some(stack) = crate::net::stack::NET_STACK.get() else {
+    let Some(dns) = crate::net::stack::effective_resolver() else {
         info.lock().errno = Errno::ENOTCONN;
         return !0u64;
     };
-    let dns = stack.lock().dns_server;
 
     if !unsafe { try_write_user(addr_ptr, dns) } {
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }
+    0
+}
+
+/// Point the system resolver at `addr`, or clear the override when `addr` is
+/// `0.0.0.0`, in which case lookups go back to the address DHCP learned.
+///
+/// This exists so a caching resolver can redirect every program on the machine
+/// to itself without any of them being rebuilt: they already ask [`sys_getdns`]
+/// for the address to query. The override is held against the calling thread
+/// and dies with it; see `doc/design/lookupd.md`.
+///
+/// Any process may call this. There is no privilege model here to hang it on,
+/// and the same is true of every other configuration syscall in this kernel.
+pub fn sys_setdns(addr_ptr: *const [u8; 4]) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if addr_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let Some(addr) = (unsafe { try_read_user(addr_ptr) }) else {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    };
+
+    let Some(stack) = crate::net::stack::NET_STACK.get() else {
+        info.lock().errno = Errno::ENOTCONN;
+        return !0u64;
+    };
+
+    let Some(tid) = current_thread_id() else {
+        info.lock().errno = Errno::ESRCH;
+        return !0u64;
+    };
+
+    let mut s = ranked_lock!(RANK_NET_STACK, "sys_setdns", stack);
+    s.resolver_override = if addr == [0, 0, 0, 0] {
+        None
+    } else {
+        Some((addr, tid))
+    };
     0
 }

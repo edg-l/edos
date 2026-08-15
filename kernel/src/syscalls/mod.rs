@@ -440,6 +440,8 @@ const SYS_SCHED_YIELD: u64 = 282;
 const SYS_SCHED_SETATTR: u64 = 314;
 /// Read a thread's scheduling attributes back.
 const SYS_SCHED_GETATTR: u64 = 315;
+/// Point the system resolver at an address, or clear it back to DHCP's.
+const SYS_SETDNS: u64 = 316;
 const SYS_SYNC: u64 = 162;
 const SYS_REBOOT: u64 = 169;
 
@@ -1178,6 +1180,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_GETDNS => {
             ctx.rax = net::sys_getdns(ctx.rdi as *mut [u8; 4]);
+        }
+        SYS_SETDNS => {
+            ctx.rax = net::sys_setdns(ctx.rdi as *const [u8; 4]);
         }
         SYS_SYNC => {
             io::sys_sync();

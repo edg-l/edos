@@ -325,6 +325,25 @@ pub fn resolve_host(host: &str) -> Option<[u8; 4]> {
     }
 }
 
+/// The address name lookups are sent to: an override installed by
+/// [`set_dns`] while its owner lives, and otherwise what DHCP learned.
+pub fn get_dns() -> Option<[u8; 4]> {
+    let mut addr = [0u8; 4];
+    let ret = unsafe { sys::syscall1(sys::SYS_GETDNS, &mut addr as *mut [u8; 4] as u64) };
+    if sys::is_err(ret) { None } else { Some(addr) }
+}
+
+/// Point every lookup on the machine at `addr`, or hand resolution back to the
+/// DHCP-learned address by passing `0.0.0.0`.
+///
+/// The override belongs to the calling thread and is revoked when it exits, so
+/// a resolver that dies does not take name resolution with it. `/proc/net`
+/// reports both the override and the DHCP address it displaced.
+pub fn set_dns(addr: [u8; 4]) -> Result<(), ()> {
+    let ret = unsafe { sys::syscall1(sys::SYS_SETDNS, &addr as *const [u8; 4] as u64) };
+    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+}
+
 pub fn ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> Option<u64> {
     let rtt = unsafe {
         sys::syscall4(
