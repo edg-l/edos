@@ -265,6 +265,15 @@ impl Layout {
             }
 
             y += (plan.pad.bottom + plan.border.bottom.px) as i32;
+
+            // The declared height sizes the border box, the way the measure
+            // sizes its width, and the clamps apply in the order css-sizing-3
+            // §5.4 gives: the maximum first, then the minimum over it, so a
+            // box asked for both keeps the floor. Taller content is left
+            // overflowing rather than cut, since nothing here clips.
+            let box_h = block_height(&plan, (y - box_top).max(0) as u32);
+            y = box_top + box_h as i32;
+
             let edges = [
                 plan.border.top,
                 plan.border.right,
@@ -658,6 +667,11 @@ struct Plan {
     /// The measure `width`/`max-width` asked for, already resolved to pixels
     /// by the cascade. `None` is the whole column.
     measure: Option<u32>,
+    /// `height`, `min-height` and `max-height`, in pixels, sizing the border
+    /// box the way the measure does. `None` in all three is content height.
+    height: Option<u32>,
+    min_height: Option<u32>,
+    max_height: Option<u32>,
     /// `margin-right`: how much of the column the box gives back on its right,
     /// which narrows it without moving where it starts.
     trail: u32,
@@ -692,6 +706,19 @@ fn fit_prefix(text: &str, style: Style, room: u32, letter: i32) -> Option<usize>
         fits = Some(index);
     }
     fits
+}
+
+/// The border box's height: what the page declared, clamped, or the `content`
+/// it came out to when it declared nothing.
+fn block_height(plan: &Plan, content: u32) -> u32 {
+    let mut used = plan.height.unwrap_or(content);
+    if let Some(max) = plan.max_height {
+        used = used.min(max);
+    }
+    if let Some(min) = plan.min_height {
+        used = used.max(min);
+    }
+    used
 }
 
 /// How far into a box of `avail` pixels a line of `used` pixels starts.
@@ -734,6 +761,9 @@ fn plan(block: &Block) -> Plan {
     plan.first_indent = css.indent;
     plan.letter = css.letter_spacing;
     plan.measure = css.measure;
+    plan.height = css.height;
+    plan.min_height = css.min_height;
+    plan.max_height = css.max_height;
     plan.center = css.center;
     plan.align = css.align;
     // `<pre>` reaches here with the UA default already on it, so the block's
@@ -777,6 +807,9 @@ fn default_plan(block: &Block) -> Plan {
         ws: css::WhiteSpace::Normal,
         wrap: css::Wrap::Word,
         measure: None,
+        height: None,
+        min_height: None,
+        max_height: None,
         trail: 0,
         center: false,
         align: Align::Left,

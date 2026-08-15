@@ -115,6 +115,11 @@
       .unseen { visibility: hidden; background: #bf616a; border: 1px solid #eceff4 }
       .unseen .back { visibility: visible; color: #a3be8c }
       .hilite .gone { visibility: hidden }
+      /* A declared height sizes the box whatever its content came to, and the
+         clamps floor and cap it. */
+      .tall { height: 120px; background: #3b4252; border-left: 4px solid #88c0d0 }
+      .floored { min-height: 90px; background: #434c5e }
+      .capped { max-height: 30px; background: #4c566a }
     </style>
   </head>
   <body>
@@ -320,6 +325,15 @@ while the newline above them is kept.</p>
       <p>The paragraph after it, which starts below the gap the hidden one
         holds.</p>
     </div>
+
+    <h2>What a box may be sized to</h2>
+    <p class="tall">A paragraph one line long asked to be 120px tall, so its
+      background runs well past its text.</p>
+    <p class="floored">A paragraph floored at 90px, which is more than the two
+      lines it sets, so the floor is what its box comes to.</p>
+    <p class="capped">A paragraph capped at 30px, whose second and third lines
+      run past the bottom of the box that was drawn for it, since nothing here
+      clips them.</p>
 
     <h2>What a list may be numbered in</h2>
     <ol class="roman" start="3">

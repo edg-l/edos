@@ -152,6 +152,22 @@ without them, and each is small:
   `visibility: visible` inside a hidden parent is painted and is the only thing
   that parent draws. `collapse` is answered as `hidden`, which is what it means
   outside a table.
+- **A declared height sizes the box the way the measure sizes its width.**
+  `height`, `min-height` and `max-height` land on `Computed` and reach
+  `view::block_height`, which is applied once the block's content, padding and
+  bottom border have been advanced over: the declared height replaces that
+  content height, `max-height` caps it and `min-height` floors it, in the order
+  css-sizing-3 §5.4 gives, so a box asked for both keeps the floor. Like the
+  measure it sizes the *border* box, matching the `box-sizing: border-box`
+  behaviour the width already has. Content taller than the box is left
+  overflowing and drawn: nothing here clips, so `overflow: visible` is the only
+  answer this can give honestly. Unlike the measure these do not inherit —
+  there is no flat-block-list argument for passing a wrapper's height to its
+  paragraphs the way there is for its column. A percentage resolves against the
+  containing block's height, which a flowed column never has, so it behaves as
+  `auto` per css-sizing-3 §5.1; `Computed::absolute` is the length parser that
+  refuses one, since the shared `parse_length` deliberately reads `%` as a
+  fraction of the em for margins and padding.
 - **A background belongs to a run as well as to a block.** A block's
   `background-color` is one `view::Decor` spanning every line it produced; a
   colour a `<span>` or a `<mark>` sets is painted per fragment instead, over

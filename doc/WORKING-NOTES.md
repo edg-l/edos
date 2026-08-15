@@ -1626,7 +1626,7 @@ does not have to invent them.
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,398 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
-| host unit tests | 101 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
+| host unit tests | 105 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 161, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
@@ -7981,3 +7981,27 @@ keyword that names something: css-display-3 §2 puts the outer type first in
 every ordering it allows. `contents` maps to `Inline` and that is exact, not an
 approximation — it asks for the box to be dropped and the children kept, and an
 inline box in a flat inline model opens nothing.
+
+## A declared height needs its own length parser (2026-08-15)
+
+`height`, `min-height` and `max-height` size a block's border box in
+`edos-web`, applied in `view::block_height` once the content, padding and
+bottom border have been advanced over — so the same number feeds the `Decor`
+the block paints and the `y` the next block starts at, and the two cannot
+disagree. Content taller than the box overflows and is still drawn: nothing in
+this renderer clips, so `overflow: visible` is the only honest answer.
+
+The trap is the percentage. `parse_length` reads `50%` as half the element's
+em, which is wrong for every property but deliberately useful for the ones it
+was written for — a percentage margin or padding is of the containing block's
+*width*, and the em is the closest thing a flat block list has to it. A
+percentage height is of the containing block's *height*, which a flowed column
+never has, and css-sizing-3 §5.1 says that case behaves as `auto`. Routing the
+three height properties through `parse_length` therefore turns
+`min-height: 25%` into a silent 3px floor rather than into nothing.
+`Computed::absolute` is the parser that refuses a percentage outright, and any
+future property whose percentage basis this layout does not have wants it too.
+
+The clamp order is the other half: css-sizing-3 §5.4 applies `max-height`
+first and `min-height` over it, so a box given both keeps the floor. Writing
+them the other way round reads identically until a page sets both.

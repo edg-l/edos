@@ -395,6 +395,13 @@ pub struct Computed {
     /// stage sees, so its measure has no other way to reach the paragraphs
     /// inside it.
     pub measure: Option<u32>,
+    /// `height`: the border box's own size, which content taller than it
+    /// overflows rather than being cut, since `overflow` is visible.
+    pub height: Option<u32>,
+    /// `min-height` and `max-height`, the floor and ceiling that box size is
+    /// clamped between. css-sizing-3 §5.
+    pub min_height: Option<u32>,
+    pub max_height: Option<u32>,
     /// A horizontal margin written `auto`, which centres the box in its column.
     /// Inherited for the same reason `measure` is.
     pub center: bool,
@@ -458,6 +465,9 @@ impl Computed {
         Computed {
             hidden: false,
             display: None,
+            height: None,
+            min_height: None,
+            max_height: None,
             margin_top: None,
             margin_bottom: None,
             margin_left: None,
@@ -739,12 +749,27 @@ impl Computed {
                     self.measure = Some(self.measure.map_or(px, |narrower| narrower.min(px)));
                 }
             }
+            // A percentage height is of the containing block's height, which a
+            // flowed column never has: css-sizing-3 §5.1 makes that case behave
+            // as `auto`, so only an absolute length is taken here.
+            "height" => self.height = self.absolute(value, root_px, parent_px),
+            "min-height" => self.min_height = self.absolute(value, root_px, parent_px),
+            "max-height" => self.max_height = self.absolute(value, root_px, parent_px),
             _ => {}
         }
     }
 
     fn length(&self, value: &str, root_px: u32, parent_px: u32) -> Option<u32> {
         parse_length(value, root_px, self.em(parent_px))
+    }
+
+    /// A length with no percentage form, for the properties whose percentage
+    /// resolves against a size this layout never has.
+    fn absolute(&self, value: &str, root_px: u32, parent_px: u32) -> Option<u32> {
+        if value.trim().ends_with('%') {
+            return None;
+        }
+        self.length(value, root_px, parent_px)
     }
 
     fn lengths(&self, written: &[&str], root_px: u32, parent_px: u32) -> Vec<Option<u32>> {
@@ -3038,6 +3063,28 @@ mod tests {
         let stack = vec![element("div", &[]), element("p", &[])];
         let inner = sheet.cascade(&stack, None, &outer, &Vars::root(), 14).0;
         assert_eq!(inner.measure, Some(300));
+    }
+
+    #[test]
+    fn heights_are_read_and_do_not_inherit() {
+        let sheet = sheet("div { height: 5em; min-height: 40px; max-height: 10rem }");
+        let computed = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(computed.height, Some(5 * 14));
+        assert_eq!(computed.min_height, Some(40));
+        assert_eq!(computed.max_height, Some(10 * 14));
+        assert_eq!(computed.inherit().height, None);
+        assert_eq!(computed.inherit().min_height, None);
+        assert_eq!(computed.inherit().max_height, None);
+    }
+
+    #[test]
+    fn a_percentage_height_behaves_as_auto() {
+        // The containing block's height is indefinite in a flowed column, so
+        // css-sizing-3 §5.1 leaves the box content-sized.
+        let sheet = sheet("div { height: 50%; min-height: 25% }");
+        let computed = cascade(&sheet, &[element("div", &[])], None);
+        assert_eq!(computed.height, None);
+        assert_eq!(computed.min_height, None);
     }
 
     #[test]
