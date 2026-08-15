@@ -71,6 +71,14 @@
          same list reaches both. */
       .kin > li { background: #3b4252 }
       .kin * { font-style: italic }
+      /* Attribute selectors: presence, a prefix, a suffix and a whole word
+         from a space-separated list, plus the case-folding flag. */
+      p[data-note] { color: #ebcb8b }
+      a[href^="https"] { font-weight: bold }
+      a[href$=".html"] { text-decoration: underline }
+      p[data-note~="second"] { font-style: italic }
+      p[lang|=en] { border-left: 4px solid #88c0d0; padding-left: 8px }
+      p[data-note*="SHOUT" i] { text-transform: uppercase }
     </style>
   </head>
   <body>
@@ -192,6 +200,16 @@ while the newline above them is kept.</p>
         <ul><li>A grandchild, outside that rule and on the page's own ground.</li></ul>
       </li>
     </ul>
+
+    <h2>What an attribute selector reaches</h2>
+    <p data-note="first">This paragraph carries a data-note, so it is amber.</p>
+    <p data-note="a second note">Its note names <code>second</code> as a word,
+      so it is italic as well.</p>
+    <p lang="en-GB">A language subtag, matched by <code>[lang|=en]</code>.</p>
+    <p data-note="a shout">A note matched case-insensitively.</p>
+    <p>No note at all, so none of those rules reach it.</p>
+    <p><a href="https://edos.edgl.dev/">An https link, bold</a> beside
+      <a href="/share/web/welcome.html">a .html one, underlined</a>.</p>
 
     <h2>What a list may be numbered in</h2>
     <ol class="roman" start="3">

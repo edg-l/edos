@@ -7761,7 +7761,7 @@ baseline is better than putting it somewhere arbitrary.
 ## `make host-tests` is the userspace suite (2026-08-15)
 
 `make test` boots a guest and runs the in-kernel suite; nothing ran the unit
-tests in `programs/` at all. There are 77 of them across four crates — URL
+tests in `programs/` at all. There are 85 of them across four crates — URL
 resolution (`edos_http/src/url.rs`), the CSS cascade
 (`edos-web/src/css.rs`), the SSH wire format, key exchange and auth
 (`sshd/src/*.rs`), and `grab`'s merge — and every one is decidable without a
@@ -7791,3 +7791,33 @@ the binary first and runs under `set -e`, which is most of why it exists.
 Adding a test module to a program means adding its crate to the `-p` list in
 that script, or its file to `STANDALONE` if the crate cannot build for the
 host. Nothing discovers them automatically.
+
+## Attribute selectors: the tokenizer, not the matcher, was the work (2026-08-15)
+
+`css.rs` matches `[attr]`, `[attr=v]`, `~=`, `|=`, `^=`, `$=`, `*=` and the
+`i`/`s` flag, and `Element` carries every attribute (names lower-cased) from
+`doc.rs::attrs` so a selector has something to ask. An attribute test counts at
+the class level of specificity, per CSS Selectors 4 §17.
+
+The part that needed care is that a selector could no longer be split with
+`split_whitespace` after `text.replace('>', " > ")`. A quoted attribute value is
+allowed to hold a space, a `>`, or a comma, so `p[title="a > b"]` is one
+compound and `a[href="x,y"]` is one selector. `tokenize_selector` walks the
+string tracking bracket depth and the open quote, and only splits at depth zero;
+`parse_selectors` still splits the prelude on `,` before that, which is the one
+remaining place a comma inside a quoted value would be read wrong. No page in
+the fixture set does that, and fixing it means moving the comma split into the
+same tokenizer.
+
+Two rules that follow from CSS rather than from taste, both covered by tests:
+
+- **`~=` matches whole words.** `[class~="lead"]` must not match `class="leader"`,
+  and a value that itself contains whitespace can never match, since no
+  whitespace-separated word contains any.
+- **`^=`, `$=` and `*=` never match an empty value.** `[href^=""]` selects
+  nothing; the naive `starts_with("")` would select every element carrying the
+  attribute.
+
+The `i` flag folds the *value*, not the name: names are already lower-cased on
+both sides because HTML attribute names are case-insensitive, while
+`[type=TEXT]` deliberately does not match `type="text"`.

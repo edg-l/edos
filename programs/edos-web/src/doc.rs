@@ -837,7 +837,8 @@ fn block_kind(tag: &html5ever::LocalName) -> Option<BlockKind> {
     })
 }
 
-/// What a selector can ask about an element: its tag, its id, its classes.
+/// What a selector can ask about an element: its tag, its id, its classes and
+/// its attributes.
 fn element_context(node: &Handle, tag: &html5ever::LocalName) -> Element {
     Element {
         tag: tag.to_string(),
@@ -847,7 +848,21 @@ fn element_context(node: &Handle, tag: &html5ever::LocalName) -> Element {
             .split_whitespace()
             .map(str::to_string)
             .collect(),
+        attrs: attrs(node),
     }
+}
+
+/// Every attribute of an element, names lower-cased so a selector written in
+/// either case finds them.
+fn attrs(node: &Handle) -> Vec<(String, String)> {
+    let NodeData::Element { attrs, .. } = &node.data else {
+        return Vec::new();
+    };
+    attrs
+        .borrow()
+        .iter()
+        .map(|a| (a.name.local.to_lowercase(), a.value.to_string()))
+        .collect()
 }
 
 /// The document's stylesheets, gathered in document order: every `<style>`

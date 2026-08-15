@@ -824,13 +824,78 @@ impl Vars {
 /// How deep a `var()` may refer through another before it is called a cycle.
 const VAR_DEPTH: u32 = 8;
 
-/// One simple selector: a tag, an id and any number of classes, all of which
-/// must match the same element.
+/// How an attribute selector compares the attribute's value, per CSS Selectors
+/// 4 §6.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AttrOp {
+    /// `[name]`: the attribute is present, whatever it holds.
+    Present,
+    /// `[name=value]`
+    Equals,
+    /// `[name~=value]`: one of the whitespace-separated words is `value`.
+    Word,
+    /// `[name|=value]`: `value`, or `value` followed by a hyphen.
+    Dash,
+    /// `[name^=value]`
+    Prefix,
+    /// `[name$=value]`
+    Suffix,
+    /// `[name*=value]`
+    Substring,
+}
+
+/// One `[...]` test inside a compound.
+#[derive(Clone, Debug)]
+struct AttrTest {
+    /// Lower-cased: HTML attribute names are matched case-insensitively.
+    name: String,
+    op: AttrOp,
+    value: String,
+    /// The `i` flag, which folds the *value* comparison to lower case.
+    fold: bool,
+}
+
+impl AttrTest {
+    fn matches(&self, element: &Element) -> bool {
+        let Some(actual) = element.attr(&self.name) else {
+            return false;
+        };
+        if self.op == AttrOp::Present {
+            return true;
+        }
+        // An empty value matches nothing at all for the substring operators,
+        // and `~=` additionally rejects a value carrying whitespace, since no
+        // single word can contain any.
+        let actual = if self.fold {
+            actual.to_lowercase()
+        } else {
+            actual.to_string()
+        };
+        let value = &self.value;
+        match self.op {
+            AttrOp::Present => true,
+            AttrOp::Equals => actual == *value,
+            AttrOp::Word => {
+                !value.is_empty()
+                    && !value.contains(char::is_whitespace)
+                    && actual.split_whitespace().any(|word| word == value)
+            }
+            AttrOp::Dash => actual == *value || actual.starts_with(&format!("{value}-")),
+            AttrOp::Prefix => !value.is_empty() && actual.starts_with(value.as_str()),
+            AttrOp::Suffix => !value.is_empty() && actual.ends_with(value.as_str()),
+            AttrOp::Substring => !value.is_empty() && actual.contains(value.as_str()),
+        }
+    }
+}
+
+/// One simple selector: a tag, an id, any number of classes and any number of
+/// attribute tests, all of which must match the same element.
 #[derive(Clone, Debug, Default)]
 struct Compound {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    attrs: Vec<AttrTest>,
 }
 
 impl Compound {
@@ -844,12 +909,15 @@ impl Compound {
             return false;
         }
         self.classes.iter().all(|c| element.classes.contains(c))
+            && self.attrs.iter().all(|a| a.matches(element))
     }
 
     fn specificity(&self) -> (u32, u32, u32) {
         (
             self.id.is_some() as u32,
-            self.classes.len() as u32,
+            // An attribute selector counts alongside a class (CSS Selectors 4
+            // §17).
+            (self.classes.len() + self.attrs.len()) as u32,
             self.tag.is_some() as u32,
         )
     }
@@ -921,11 +989,23 @@ struct Rule {
 }
 
 /// An element as the cascade sees it: everything a selector can ask about.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Element {
     pub tag: String,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    /// Every attribute, names lower-cased, in document order.
+    pub attrs: Vec<(String, String)>,
+}
+
+impl Element {
+    /// The value of `name`, which the caller has already lower-cased.
+    fn attr(&self, name: &str) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// The window a media query is answered against.
@@ -1277,17 +1357,9 @@ fn parse_selector(text: &str) -> Option<Selector> {
     // the `html` element and nothing else, and it is where a stylesheet
     // declares the custom properties the rest of it reads.
     let text = text.replace(":root", "html");
-    // A sibling combinator, an attribute selector or any other pseudo: all
-    // unsupported, and a selector matched without them would apply far too
-    // widely.
-    if text.contains([':', '[', '+', '~', '(']) {
-        return None;
-    }
-    // `>` is a token of its own whether or not the page spaced it.
-    let text = text.replace('>', " > ");
     let mut parts: Vec<Step> = Vec::new();
     let mut child = false;
-    for word in text.split_whitespace() {
+    for word in tokenize_selector(&text)? {
         if word == ">" {
             // A chain cannot start with a combinator, and two in a row is not
             // a selector either.
@@ -1298,12 +1370,66 @@ fn parse_selector(text: &str) -> Option<Selector> {
             continue;
         }
         parts.push(Step {
-            compound: parse_compound(word)?,
+            compound: parse_compound(&word)?,
             child,
         });
         child = false;
     }
     (!parts.is_empty() && !child).then_some(Selector { parts })
+}
+
+/// Split a selector into compounds and `>` tokens, with `[...]` opaque so a
+/// quoted attribute value may hold a space, a `>` or anything else. `None` for
+/// a bracket or quote left open, since a selector read past its end would
+/// apply somewhere the page never asked for.
+fn tokenize_selector(text: &str) -> Option<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in text.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            current.push(ch);
+            continue;
+        }
+        match ch {
+            '"' | '\'' if depth > 0 => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                depth = depth.checked_sub(1)?;
+                current.push(ch);
+            }
+            _ if depth > 0 => current.push(ch),
+            '>' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                tokens.push(">".to_string());
+            }
+            _ if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if depth != 0 || quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    (!tokens.is_empty()).then_some(tokens)
 }
 
 fn parse_compound(word: &str) -> Option<Compound> {
@@ -1312,24 +1438,120 @@ fn parse_compound(word: &str) -> Option<Compound> {
     let mut kind = b' ';
     // `*` matches every element, so it constrains nothing: an empty compound
     // already says that, and `*.card` is exactly `.card`.
-    let universal = word.contains('*');
-    for ch in word.chars() {
-        if ch == '*' {
-            continue;
-        }
-        if ch == '#' || ch == '.' {
-            push_part(kind, &mut current, &mut compound);
-            kind = ch as u8;
-        } else {
-            current.push(ch);
+    let mut universal = false;
+    let mut chars = word.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => universal = true,
+            '#' | '.' => {
+                push_part(kind, &mut current, &mut compound);
+                kind = ch as u8;
+            }
+            '[' => {
+                push_part(kind, &mut current, &mut compound);
+                kind = b' ';
+                let mut body = String::new();
+                let mut quote: Option<char> = None;
+                let mut closed = false;
+                for ch in chars.by_ref() {
+                    match quote {
+                        Some(q) => {
+                            if ch == q {
+                                quote = None;
+                            }
+                            body.push(ch);
+                        }
+                        None if ch == '"' || ch == '\'' => {
+                            quote = Some(ch);
+                            body.push(ch);
+                        }
+                        None if ch == ']' => {
+                            closed = true;
+                            break;
+                        }
+                        None => body.push(ch),
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+                compound.attrs.push(parse_attr(&body)?);
+            }
+            // A pseudo-class, a sibling combinator or a functional notation:
+            // all unsupported, and a compound matched without one of them
+            // would apply far too widely.
+            ':' | '+' | '~' | '(' | ')' | ']' => return None,
+            _ => current.push(ch),
         }
     }
     push_part(kind, &mut current, &mut compound);
-    if !universal && compound.tag.is_none() && compound.id.is_none() && compound.classes.is_empty()
+    if !universal
+        && compound.tag.is_none()
+        && compound.id.is_none()
+        && compound.classes.is_empty()
+        && compound.attrs.is_empty()
     {
         return None;
     }
     Some(compound)
+}
+
+/// The inside of one `[...]`, per CSS Selectors 4 §6: a name, optionally an
+/// operator and a value, optionally the `i` (or `s`) case-sensitivity flag.
+fn parse_attr(body: &str) -> Option<AttrTest> {
+    let body = body.trim();
+    let (name, op, rest) = match body.find('=') {
+        None => (body, AttrOp::Present, ""),
+        Some(eq) => {
+            let (head, tail) = body.split_at(eq);
+            let (name, op) = match head.chars().next_back() {
+                Some('~') => (&head[..head.len() - 1], AttrOp::Word),
+                Some('|') => (&head[..head.len() - 1], AttrOp::Dash),
+                Some('^') => (&head[..head.len() - 1], AttrOp::Prefix),
+                Some('$') => (&head[..head.len() - 1], AttrOp::Suffix),
+                Some('*') => (&head[..head.len() - 1], AttrOp::Substring),
+                _ => (head, AttrOp::Equals),
+            };
+            (name, op, &tail[1..])
+        }
+    };
+    let name = name.trim().to_lowercase();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let mut value = rest.trim();
+    let mut fold = false;
+    // The flag sits outside the value, so a quoted value ending in `"` cannot
+    // have eaten one.
+    if !value.ends_with(['"', '\'']) {
+        if let Some((head, flag)) = value.rsplit_once(char::is_whitespace)
+            && matches!(flag, "i" | "I" | "s" | "S")
+        {
+            fold = flag.eq_ignore_ascii_case("i");
+            value = head.trim_end();
+        }
+    }
+    let mut value = value.to_string();
+    if value.len() >= 2
+        && let Some(quote) = value.chars().next()
+        && (quote == '"' || quote == '\'')
+        && value.ends_with(quote)
+    {
+        value = value[1..value.len() - 1].to_string();
+    }
+    if fold {
+        value = value.to_lowercase();
+    }
+    Some(AttrTest {
+        name,
+        op,
+        value,
+        fold,
+    })
 }
 
 /// Add the piece just read to the compound it belongs to. The tag is folded to
@@ -1778,8 +2000,19 @@ mod tests {
     fn element(tag: &str, classes: &[&str]) -> Element {
         Element {
             tag: tag.to_string(),
-            id: None,
             classes: classes.iter().map(|c| c.to_string()).collect(),
+            ..Element::default()
+        }
+    }
+
+    fn element_with(tag: &str, attrs: &[(&str, &str)]) -> Element {
+        Element {
+            tag: tag.to_string(),
+            attrs: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Element::default()
         }
     }
 
@@ -1815,7 +2048,7 @@ mod tests {
         let stack = vec![Element {
             tag: "p".into(),
             id: Some("x".into()),
-            classes: Vec::new(),
+            ..Element::default()
         }];
         let computed = cascade(&sheet, &stack, Some("color: #00ff00"));
         assert_eq!(computed.color, Some(rgb(0, 255, 0)));
@@ -2587,5 +2820,95 @@ mod tests {
         // counting styles as they are.
         assert_eq!(ListStyle::Circle.ascii_marker(1), "o");
         assert_eq!(ListStyle::LowerRoman.ascii_marker(9), "ix.");
+    }
+
+    #[test]
+    fn attribute_selector_tests_presence_and_value() {
+        let sheet = sheet(
+            "[hidden] { display: none }              a[href] { color: red }              a[href=\"/x\"] { color: blue }",
+        );
+        let plain = vec![element_with("a", &[])];
+        let linked = vec![element_with("a", &[("href", "/y")])];
+        let exact = vec![element_with("a", &[("href", "/x")])];
+        assert_eq!(cascade(&sheet, &plain, None).color, None);
+        assert_eq!(cascade(&sheet, &linked, None).color, Some(rgb(255, 0, 0)));
+        assert_eq!(cascade(&sheet, &exact, None).color, Some(rgb(0, 0, 255)));
+        assert!(cascade(&sheet, &vec![element_with("p", &[("hidden", "")])], None).hidden);
+        assert!(!cascade(&sheet, &vec![element_with("p", &[])], None).hidden);
+    }
+
+    #[test]
+    fn attribute_operators_follow_the_spec() {
+        let sheet = sheet(
+            "[class~=\"lead\"] { color: red }              [lang|=en] { color: blue }              [href^=https] { color: #00ff00 }              [href$=\".png\"] { color: #00ffff }              [title*=\"the middle\"] { color: #ff00ff }",
+        );
+        let red = rgb(255, 0, 0);
+        assert_eq!(
+            cascade(&sheet, &[element_with("p", &[("class", "a lead b")])], None).color,
+            Some(red)
+        );
+        // `~=` compares whole words, never a substring of one.
+        assert_eq!(
+            cascade(&sheet, &[element_with("p", &[("class", "leader")])], None).color,
+            None
+        );
+        assert_eq!(
+            cascade(&sheet, &[element_with("p", &[("lang", "en-GB")])], None).color,
+            Some(rgb(0, 0, 255))
+        );
+        assert_eq!(
+            cascade(&sheet, &[element_with("p", &[("lang", "english")])], None).color,
+            None
+        );
+        assert_eq!(
+            cascade(
+                &sheet,
+                &[element_with("a", &[("href", "https://x/")])],
+                None
+            )
+            .color,
+            Some(rgb(0, 255, 0))
+        );
+        assert_eq!(
+            cascade(&sheet, &[element_with("a", &[("href", "/a.png")])], None).color,
+            Some(rgb(0, 255, 255))
+        );
+        // A quoted value keeps its space, which is what the tokenizer has to
+        // hold on to.
+        assert_eq!(
+            cascade(
+                &sheet,
+                &[element_with("p", &[("title", "in the middle of")])],
+                None
+            )
+            .color,
+            Some(rgb(255, 0, 255))
+        );
+    }
+
+    #[test]
+    fn attribute_flag_folds_only_the_value() {
+        let sheet = sheet("[lang=EN i] { color: red } [type=TEXT] { color: blue }");
+        assert_eq!(
+            cascade(&sheet, &[element_with("p", &[("lang", "en")])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        assert_eq!(
+            cascade(&sheet, &[element_with("input", &[("type", "text")])], None).color,
+            None
+        );
+    }
+
+    #[test]
+    fn attribute_selector_counts_as_a_class() {
+        let ranked = sheet("a[href] { color: red } a { color: blue }");
+        assert_eq!(
+            cascade(&ranked, &[element_with("a", &[("href", "/")])], None).color,
+            Some(rgb(255, 0, 0))
+        );
+        // An unclosed bracket is not a selector, so the rule is dropped rather
+        // than applied to every element.
+        let unclosed = sheet("p[title { color: red }");
+        assert_eq!(cascade(&unclosed, &[element("p", &[])], None).color, None);
     }
 }

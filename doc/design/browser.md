@@ -61,8 +61,8 @@ Turns "readable" into "looks close to right".
 Where it stands: `css.rs` is the cascade. It reads every `<style>` element,
 every `<link rel=stylesheet>` the document fetches, and every `style=`
 attribute; matches selectors that are comma-separated chains of
-tag/`.class`/`#id`/`*` compounds joined by the descendant or child (`>`)
-combinator; orders them by real specificity with the inline
+tag/`.class`/`#id`/`*`/`[attr]` compounds joined by the descendant or child
+(`>`) combinator; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration` (`underline`, `line-through`, `overline`
@@ -78,7 +78,7 @@ per-edge longhands), and `display: none`. `doc.rs` carries the computed style on
 `Block`, and `view.rs` lets it override the plan the tag alone implies — where
 it says nothing, the reader typography stands.
 
-Three pieces exist because a stylesheet written this decade is unreadable
+Four pieces exist because a stylesheet written this decade is unreadable
 without them, and each is small:
 
 - **Custom properties and `var()`.** `Vars` is the scope, an `Rc<BTreeMap>`
@@ -90,6 +90,11 @@ without them, and each is small:
   back to its second argument, and with no fallback the whole declaration is
   dropped, leaving the inherited value — never the property's initial one.
   Cycles stop at a depth of 8.
+- **Attribute selectors.** `[attr]`, `[attr=v]` and the four substring forms
+  plus `~=` and `|=`, with the `i` flag folding the value. They count at the
+  class level of specificity. A quoted value may hold a space or a `>`, so the
+  selector is tokenized with bracket depth and quote state rather than split on
+  whitespace.
 - **`:root`.** The one pseudo-class implemented, because it is where a sheet
   declares its palette; in an HTML document it is `html` and nothing else, so
   it is rewritten to that tag.
@@ -220,11 +225,11 @@ Three deliberate limits:
   about is not one this can answer for, and a rule set applied on a guess is
   worse than one lost.
 - **A selector using anything not implemented is dropped, not approximated.**
-  `a:hover`, `p[hidden]` and the sibling combinators refuse to parse, because a
+  `a:hover` and the sibling combinators refuse to parse, because a
   selector matched loosely applies far too widely; the failure mode of dropping
   one is a style that does not appear, which is what an unimplemented property
   does anyway. A dangling `>` -- leading, trailing or doubled -- is dropped by
-  the same rule.
+  the same rule, as is an unclosed `[`.
 - **At most `doc::MAX_SHEETS` external sheets are fetched, and each one
   serially**, on the thread that is about to lay the page out. A page linking
   more than six is linking print and font sheets; a browser that fetched all of
