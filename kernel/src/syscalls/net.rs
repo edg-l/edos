@@ -7,6 +7,8 @@ use alloc::sync::Arc;
 
 use core::time::Duration;
 
+use crate::thread::UserThreadInfo;
+use crate::thread::irqlock::IrqSpinlock;
 use crate::thread::scheduler::current_thread_info;
 use crate::thread::waitqueue::WaitOutcome;
 use crate::timer::Instant;
@@ -80,6 +82,39 @@ fn write_sockaddr_out(addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32, addr: S
     true
 }
 
+/// The socket a descriptor names, or `EBADF` recorded on the calling thread.
+///
+/// Eleven socket calls open with this lookup and the same refusal. Written out
+/// each time it is eleven places for the descriptor table's clone-then-lock
+/// order, or the code a non-socket descriptor is refused with, to drift.
+fn socket_arg(info: &Arc<IrqSpinlock<UserThreadInfo>>, fd: u64) -> Option<Arc<Mutex<Socket>>> {
+    let fd_table = info.lock().fd_table.clone();
+    match fd_table.lock().get_fd(fd).cloned() {
+        Some(FileDescriptor::Socket(sock)) => Some(sock),
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            None
+        }
+    }
+}
+
+/// As [`socket_arg`], also reporting whether the descriptor is non-blocking.
+/// One walk of the descriptor table answers both questions.
+fn socket_arg_nonblock(
+    info: &Arc<IrqSpinlock<UserThreadInfo>>,
+    fd: u64,
+) -> Option<(Arc<Mutex<Socket>>, bool)> {
+    let fd_table = info.lock().fd_table.clone();
+    let (desc, nonblock) = fd_table.lock().get_fd_nonblock(fd);
+    match desc {
+        Some(FileDescriptor::Socket(sock)) => Some((sock, nonblock)),
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            None
+        }
+    }
+}
+
 pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -119,13 +154,8 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         }
     };
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     let port = u16::from_be(addr.port);
@@ -190,14 +220,8 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         }
     };
 
-    let fd_table = info.lock().fd_table.clone();
-    let (sock_fd, nonblock) = fd_table.lock().get_fd_nonblock(fd);
-    let sock_arc = match sock_fd {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some((sock_arc, nonblock)) = socket_arg_nonblock(&info, fd) else {
+        return !0u64;
     };
 
     let port = u16::from_be(addr.port);
@@ -400,13 +424,8 @@ pub fn sys_sendto(
         return !0u64;
     }
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     // A transfer of no bytes answers only once the descriptor is known to be a
@@ -523,14 +542,8 @@ pub fn sys_recvfrom(
         return !0u64;
     }
 
-    let fd_table = info.lock().fd_table.clone();
-    let (desc, nonblock) = fd_table.lock().get_fd_nonblock(fd);
-    let sock_arc = match desc {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some((sock_arc, nonblock)) = socket_arg_nonblock(&info, fd) else {
+        return !0u64;
     };
 
     // A transfer of no bytes answers only once the descriptor is known to be a
@@ -626,13 +639,8 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     // Validate and read the bound address under the socket lock, then release
@@ -685,14 +693,8 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let fd_table = info.lock().fd_table.clone();
-    let (desc, nonblock) = fd_table.lock().get_fd_nonblock(fd);
-    let sock_arc = match desc {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some((sock_arc, nonblock)) = socket_arg_nonblock(&info, fd) else {
+        return !0u64;
     };
 
     {
@@ -769,6 +771,7 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
 
     // Allocate a new fd for the connected socket
 
+    let fd_table = info.lock().fd_table.clone();
     fd_table
         .lock()
         .allocate_fd(FileDescriptor::Socket(new_sock_arc))
@@ -807,13 +810,8 @@ pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     let how = how as i32;
@@ -852,13 +850,8 @@ pub fn sys_setsockopt(fd: u64, level: i32, optname: i32, val_ptr: *const u8, val
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     match (level, optname) {
@@ -931,13 +924,8 @@ pub fn sys_getsockopt(
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     match (level, optname) {
@@ -1044,13 +1032,8 @@ pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
         return !0u64;
     }
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     let remote = ranked_lock!(RANK_SOCKET, "sys_getpeername", sock_arc).remote_addr;
@@ -1077,13 +1060,8 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
         return !0u64;
     }
 
-    let fd_table = info.lock().fd_table.clone();
-    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(s)) => s,
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
-        }
+    let Some(sock_arc) = socket_arg(&info, fd) else {
+        return !0u64;
     };
 
     let local = ranked_lock!(RANK_SOCKET, "sys_getsockname", sock_arc).local_addr;

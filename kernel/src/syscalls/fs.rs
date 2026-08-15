@@ -167,6 +167,67 @@ fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
     remove_dir(path)
 }
 
+/// Run `act` on a path the caller named relative to its working directory.
+///
+/// `mkdir`, `rmdir`, `rmdir_all` and `unlink` differ only in `act`. Everything
+/// around it is the same in all four: clear `errno`, resolve the path, enable
+/// interrupts before doing any filesystem work, and report the outcome the way
+/// the ABI says. A copy of that body per syscall is four places for the
+/// interrupt enable or the errno convention to drift.
+fn on_cwd_path<T>(path_ptr: *const u8, act: impl FnOnce(&Path) -> Result<T, Error>) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let cwd = current_cwd(&info);
+    let path = match read_user_path(path_ptr, &cwd) {
+        Ok(path) => path,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match act(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+/// As [`on_cwd_path`], for the `*at` forms: the path is resolved against
+/// `dirfd` and carries its own length rather than a terminator.
+fn on_dir_path<T>(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    act: impl FnOnce(&Path) -> Result<T, Error>,
+) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
+        Ok(path) => path,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match act(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct RawMountEntry {
@@ -262,100 +323,19 @@ pub fn sys_mount(
 }
 
 pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let cwd = current_cwd(&info);
-    let path = match read_user_path(path_ptr, &cwd) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
-
-    interrupts::enable();
-
-    match create_dir(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    on_cwd_path(path_ptr, create_dir)
 }
 
 pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let cwd = current_cwd(&info);
-    let path = match read_user_path(path_ptr, &cwd) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
-
-    interrupts::enable();
-
-    match remove_dir(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    on_cwd_path(path_ptr, remove_dir)
 }
 
 pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let cwd = current_cwd(&info);
-    let path = match read_user_path(path_ptr, &cwd) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
-
-    interrupts::enable();
-
-    match remove_dir_recursive(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    on_cwd_path(path_ptr, remove_dir_recursive)
 }
 
 pub fn sys_unlink(path_ptr: *const u8) -> i64 {
-    let info = current_thread_info();
-
-    info.lock().errno = Errno::Clear;
-
-    let cwd = current_cwd(&info);
-    let path = match read_user_path(path_ptr, &cwd) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
-
-    interrupts::enable();
-
-    match remove_file(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    on_cwd_path(path_ptr, remove_file)
 }
 
 /// `flags` bit selecting `rmdir` semantics, as in Linux `<fcntl.h>`.
@@ -371,49 +351,11 @@ const AT_REMOVEDIR: u64 = 0x200;
 /// comes into being when the first `open` arrives, so this only puts the name
 /// and its type into the filesystem.
 pub fn sys_mkfifoat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
-
-    interrupts::enable();
-
-    match crate::fs::api::create_fifo(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    on_dir_path(dirfd, path_ptr, path_len, crate::fs::api::create_fifo)
 }
 
 pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
-
-    interrupts::enable();
-
-    match create_dir(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    on_dir_path(dirfd, path_ptr, path_len, create_dir)
 }
 
 /// unlinkat(dirfd, path, path_len, flags) -> 0 on success, -1 on error
@@ -421,37 +363,18 @@ pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
 /// `AT_REMOVEDIR` removes an empty directory instead of a file; no other flag
 /// is defined.
 pub fn sys_unlinkat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if flags & !AT_REMOVEDIR != 0 {
-        info.lock().errno = Errno::EINVAL;
+        current_thread_info().lock().errno = Errno::EINVAL;
         return -1;
     }
 
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
+    on_dir_path(dirfd, path_ptr, path_len, |path| {
+        if flags & AT_REMOVEDIR != 0 {
+            remove_dir(path)
+        } else {
+            remove_file(path)
         }
-    };
-
-    interrupts::enable();
-
-    let result = if flags & AT_REMOVEDIR != 0 {
-        remove_dir(&path)
-    } else {
-        remove_file(&path)
-    };
-
-    match result {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    })
 }
 
 #[repr(C)]
