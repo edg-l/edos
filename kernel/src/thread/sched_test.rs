@@ -853,6 +853,13 @@ extern "C" fn test_mutex_check(arg: *mut u8) -> ! {
 
 const RWLOCK_READERS: u32 = 4;
 
+/// How long a reader waits for its peers to join it inside the lock.
+///
+/// Generous on purpose: it bounds a test that should never reach it, and the
+/// whole point of a wall-clock bound here is that a CPU loaded by the other 55
+/// cases buys more waiting rather than a spurious failure.
+const RWLOCK_RENDEZVOUS: Duration = Duration::from_millis(500);
+
 extern "C" fn test_rwlock_reader(arg: *mut u8) -> ! {
     let h = get_harness(arg);
 
@@ -862,13 +869,20 @@ extern "C" fn test_rwlock_reader(arg: *mut u8) -> ! {
     let live = h.rwlock_concurrent.fetch_add(1, Ordering::AcqRel) + 1;
     h.rwlock_max_concurrent.fetch_max(live, Ordering::AcqRel);
     // Hold until every reader is inside, so the overlap the writer asserts on
-    // is produced deterministically rather than by racing. Bounded, so a
-    // rwlock that wrongly serialises readers fails the assert instead of
-    // deadlocking the suite.
-    for _ in 0..2000 {
-        if h.rwlock_concurrent.load(Ordering::Acquire) >= RWLOCK_READERS {
-            break;
-        }
+    // is produced deterministically rather than by racing.
+    //
+    // **The escape is a wall-clock deadline, not a yield count.** A count is a
+    // budget rather than a barrier: the rest of the suite competes for these
+    // CPUs, so a reader could exhaust its yields before its peers were ever
+    // scheduled inside the lock, leave with the high-water mark still at 1, and
+    // fail the writer's assert on a lock that was behaving correctly. A
+    // deadline buys more waiting on a loaded machine instead of a false
+    // negative, while still failing rather than hanging if the lock really does
+    // serialise readers.
+    let deadline = Instant::now().as_nanos() + RWLOCK_RENDEZVOUS.as_nanos() as u64;
+    while h.rwlock_concurrent.load(Ordering::Acquire) < RWLOCK_READERS
+        && Instant::now().as_nanos() < deadline
+    {
         thread_yield();
     }
     h.rwlock_max_concurrent.fetch_max(

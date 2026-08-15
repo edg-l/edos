@@ -64,9 +64,15 @@ fn main() {
                 }
             }
             Limit::Bytes(n) => {
-                let mut buf = vec![0u8; n];
-                let read = io::stdin().read(&mut buf).unwrap_or(0);
-                print_bytes(&buf, read);
+                // `Read::read` returns at most `n` and routinely returns less:
+                // a pipe hands over whatever has been written so far. Taking
+                // one read would print however much happened to have arrived,
+                // so read until `n` bytes or EOF. `take` also bounds the
+                // allocation to what the input really holds, which keeps a
+                // large `-c` from asking for the whole number up front.
+                let mut buf = Vec::new();
+                let _ = io::stdin().take(n as u64).read_to_end(&mut buf);
+                print_bytes(&buf, n);
             }
         }
     } else {

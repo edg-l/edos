@@ -204,6 +204,44 @@ pub struct Document {
 }
 
 impl Document {
+    /// A page that was refused before it was parsed, standing in for the one
+    /// that could not be built.
+    ///
+    /// It is a document rather than an error because every caller renders one:
+    /// the window, the history and the `-d` dump all take a `Document`, and a
+    /// page that says why it is blank is more use than a program that exits.
+    fn refused(base: Url, viewport: Viewport, nesting: usize) -> Document {
+        let text = format!(
+            "This page nests elements {} deep, past the {} this browser will \
+             parse, and was not loaded.",
+            nesting, MAX_SOURCE_NESTING
+        );
+        Document {
+            title: String::from("Refused"),
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                runs: vec![Run {
+                    text,
+                    link: None,
+                    bold: false,
+                    italic: false,
+                    code: false,
+                    script: Script::default(),
+                    css: Computed::default(),
+                }],
+                css: Computed::default(),
+                picture: None,
+            }],
+            source: Source {
+                html: Rc::new(Vec::new()),
+                base,
+                cache: Cache::default(),
+                media: MediaQueries::default(),
+                viewport,
+            },
+        }
+    }
+
     /// The title to show for the page, for the documents that carry none.
     pub fn display_title(&self) -> &str {
         if self.title.is_empty() {
@@ -254,6 +292,78 @@ const MAX_SHEETS: usize = 6;
 /// its appearance; a document is readable long before its twentieth picture.
 const MAX_IMAGES: usize = 12;
 
+/// How deep the element tree is walked before the rest is dropped.
+///
+/// The walk recurses once per level, and the tree comes off the network, so
+/// without a bound a page of sufficiently nested markup overflows this
+/// program's stack rather than rendering badly. Far past anything a real
+/// document nests: the deepest page in the tree's own fixtures is under 20.
+const MAX_DEPTH: usize = 512;
+
+/// How deeply the source may nest before the document is refused unparsed.
+///
+/// [`MAX_DEPTH`] bounds the *walk*, and the walk runs over a tree that
+/// `html5ever` has already built by recursing once per level. So a page nested
+/// far enough overflows this program's stack inside the parser, before the walk
+/// bound gets a chance to apply. Measured in the guest: 16384 levels parse and
+/// render, 32768 die on SIGSEGV. This sits a factor of two under the deepest
+/// depth known to survive, and three orders of magnitude above what a real
+/// document nests.
+const MAX_SOURCE_NESTING: usize = 8192;
+
+/// Elements that never nest because they have no end tag.
+const VOID_ELEMENTS: [&str; 14] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// The deepest run of unclosed element tags in `html`.
+///
+/// A scan of the bytes rather than a parse, because the parse is the thing
+/// being protected — asking the parser how deep the document is would already
+/// have overflowed. It is approximate by design: a `<` inside an attribute
+/// value is not distinguished from a tag, and the count is therefore an
+/// over-estimate. Against a limit in the thousands that costs nothing, and
+/// erring high is the safe direction.
+fn source_nesting(html: &[u8]) -> usize {
+    let mut depth = 0usize;
+    let mut max = 0usize;
+    let mut i = 0;
+    while let Some(off) = html[i..].iter().position(|&b| b == b'<') {
+        i += off + 1;
+        let Some(&first) = html.get(i) else { break };
+        // Comments, doctypes and processing instructions open nothing.
+        if first == b'!' || first == b'?' {
+            continue;
+        }
+        let closing = first == b'/';
+        let name_at = if closing { i + 1 } else { i };
+        let name: String = html[name_at..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric())
+            .map(|b| b.to_ascii_lowercase() as char)
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        // Step over the tag so that a `>` inside it is not read as the end of
+        // some later one, and so the scan is linear.
+        let Some(end) = html[name_at..].iter().position(|&b| b == b'>') else {
+            break;
+        };
+        let self_closing = html[name_at + end - 1] == b'/';
+        i = name_at + end + 1;
+
+        if closing {
+            depth = depth.saturating_sub(1);
+        } else if !self_closing && !VOID_ELEMENTS.contains(&name.as_str()) {
+            depth += 1;
+            max = max.max(depth);
+        }
+    }
+    max
+}
+
 /// Parse `html` as a document fetched from `base`, using `fetch` for the
 /// stylesheets it links.
 ///
@@ -270,6 +380,10 @@ pub fn parse(
     fetch: &dyn Fn(&str) -> Option<Vec<u8>>,
     viewport: Viewport,
 ) -> Document {
+    let nesting = source_nesting(html);
+    if nesting > MAX_SOURCE_NESTING {
+        return Document::refused(base, viewport, nesting);
+    }
     build(
         Source {
             html: Rc::new(html.to_vec()),
@@ -330,6 +444,7 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         computed: Computed::default(),
         vars: Vars::root(),
         block_css: Computed::default(),
+        depth: 0,
     };
     builder.walk(&dom.document, Siblings::default(), &Rc::new(Vec::new()));
     builder.flush();
@@ -410,6 +525,9 @@ struct Builder<'a> {
     vars: Rc<Vars>,
     /// The style of the element that opened the block being built.
     block_css: Computed,
+    /// How many levels of element the walk is currently inside, against
+    /// [`MAX_DEPTH`].
+    depth: usize,
 }
 
 impl Builder<'_> {
@@ -564,6 +682,15 @@ impl Builder<'_> {
     /// skips: a sibling combinator asks about the document, not about what was
     /// rendered.
     fn walk_children(&mut self, node: &Handle) {
+        if self.depth >= MAX_DEPTH {
+            return;
+        }
+        self.depth += 1;
+        self.walk_children_inner(node);
+        self.depth -= 1;
+    }
+
+    fn walk_children_inner(&mut self, node: &Handle) {
         let children = node.children.borrow();
         let positions = sibling_positions(&children);
         let row = Rc::new(

@@ -6,6 +6,76 @@ session.
 
 ---
 
+## A deep page crashed `edos-web`, and the walk bound was only half of it — FIXED
+
+`doc.rs::walk` recursed once per element with no bound, over a tree built from
+whatever the network returned. That is the obvious half and `MAX_DEPTH` (512)
+closes it: past that the subtree is dropped and the page renders as much as it
+has.
+
+The half that only a guest run finds is that **the walk bound never gets a
+chance on a really deep page, because `html5ever` has to build the tree before
+the walk sees it and it builds it by recursion.** Measured in the guest, one
+`<div>` per level:
+
+| nesting | before | after |
+|---|---|---|
+| 400 | renders whole | renders whole |
+| 2000 | renders whole | top renders, past 512 dropped |
+| 4096 | renders | renders |
+| 16384 | renders | renders |
+| 32768 | **SIGSEGV** | refused, exit 0 |
+| 100000 | **SIGSEGV** | refused, exit 0 |
+
+Note what the crash looked like: `edos-web` printed *nothing at all*, not even
+the paragraph before the nesting, and the shell reported `EXIT:11`. That is the
+tell that it died in the parser rather than in the walk — anything in the walk
+would have emitted the earlier blocks first.
+
+So there are two bounds now and they are not redundant. `MAX_DEPTH` bounds the
+walk and lets a moderately deep page render partially. `MAX_SOURCE_NESTING`
+(8192) is checked against a byte scan of the source *before* the parser is
+handed anything, and refuses the document outright with a page saying why. It
+sits a factor of two under 16384, the deepest nesting measured to survive.
+
+The scan is deliberately approximate — a `<` inside an attribute value counts
+as a tag — because it over-estimates, and over-estimating is the safe direction
+for a valve whose limit is three orders of magnitude above any real document.
+
+
+## The `BlockingMutex` loan could cancel a live loan on another lock — FIXED
+
+Priority inheritance published two pieces of state that could disagree: the
+loan on the holder thread (`Thread::lent_priority`) and a flag on the lock
+saying a loan existed (`BlockingMutex::lent`). A waiter set the flag *after*
+raising the holder, so a holder that released in between saw no flag, skipped
+ending the loan, and left the flag set on a lock nobody held. The next holder
+of that lock then read the stale flag on ITS release and called
+`drop_lent_priority`, which ends every loan the thread carries at once — so a
+loan it was genuinely owed on some *other* mutex was silently cancelled. No
+thread had to die for this; the ordinary interleave was enough.
+
+Two changes close it:
+
+- **The record names the holder** (`lent_to: AtomicU64`) rather than merely
+  recording that a loan exists, and `release` swaps it and compares against the
+  owner it just cleared. A record naming anybody else belongs to an owner that
+  has already gone and is discarded without touching this thread's loans.
+- **The loan is published before the owner is re-read**, not after. Ordered the
+  other way there is a window where the releasing holder has not yet seen the
+  loan and the waiter has not yet seen the release, and neither side ends it.
+
+Separately, `try_acquire` cannot publish the owner atomically with its
+compare-exchange, so a waiter arriving in that two-instruction gap read zero,
+lent to nobody, and parked — forfeiting inheritance for the whole section,
+because the next chance to lend is a wake that only a release sends.
+`BlockingMutex::holder` now spins that gap out (`OWNER_PUBLISH_SPINS`, 64).
+
+What is still true and is by design: the loan is a priority and not a stack, so
+a thread holding two of these gives up an outer loan when it releases the inner
+lock. It forfeits inheritance it was owed and never grants any it was not.
+
+
 ## `edos_http::Url` is the `url` crate now, and two bugs fell out of the port
 
 The hand-rolled parser was 278 lines and correct against the spec it named: all
@@ -101,7 +171,7 @@ itself was suspected.
 
 ---
 
-## `rwlock-writer` is a flake, and the rendezvous budget is why
+## `rwlock-writer` was a flake, and the rendezvous budget was why — FIXED
 
 Seen once in two consecutive `make test AUDIODEV=none` runs at `1722b65`: the
 suite reported `TIMEOUT: 55/56` with a panic from `test_rwlock_writer`,
@@ -121,10 +191,22 @@ above 1, and the writer's `observed > 1` assert panics a thread that was
 otherwise correct.
 
 So the failure is a statement about scheduler placement under load, not about
-the lock. Do not chase it into `thread/rwlock.rs`. The fix, when it is taken, is
-to make the readers meet on a real barrier and give the anti-deadlock escape a
-wall-clock deadline instead of a yield count, so a loaded CPU buys more waiting
-rather than a false negative.
+the lock. Do not chase it into `thread/rwlock.rs`.
+
+**The escape is a wall-clock deadline now** (`RWLOCK_RENDEZVOUS`, 500 ms), so a
+loaded CPU buys more waiting rather than a false negative, while a lock that
+really does serialise readers still fails the assert rather than hanging the
+suite.
+
+One thing was suspected and is *not* settled, so do not record it as cause: the
+charter for the run that saw this predicted that a NEW pinned test stealing a
+CPU would be the trigger, and that run added `prio-inversion`, which queues a
+400 ms mid-priority hog and a priority-15 waiter onto the shared `contend_mask`
+CPU inside a suite that finishes in about 350 ms. The unpinned rwlock readers
+can be placed on that CPU. That is a plausible mechanism for why the budget
+started being exhausted when it had not been before, but it was never tested by
+bisecting `make test` across `84d01c1`. The deadline makes the test robust
+either way, which is why it was fixed rather than bisected.
 
 ---
 
@@ -1707,7 +1789,7 @@ does not have to invent them.
 | userspace programs | 123 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 124 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 109,384 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 109,487 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,404 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
