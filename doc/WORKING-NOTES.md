@@ -7487,3 +7487,10 @@ something that is not text.
 **`hr` ignores it**, deliberately: a rule spans the box it was laid out in, and
 CSS aligns a rule with the `margin` pair, which this does not compute for a
 `<hr>`.
+
+**Edit the fixture at `assets/welcome.html`, never at
+`filesystem/share/web/welcome.html`.** `filesystem/` is gitignored, so `git add`
+refuses the installed copy and a change made only there is invisible to the
+commit while being perfectly visible in the guest. The install is `cp -u`
+(GNUmakefile), so the edited copy is newer than its source and `make filesystem`
+will not restore it either — the two files simply disagree until someone looks.
