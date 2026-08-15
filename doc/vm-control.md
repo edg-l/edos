@@ -193,7 +193,7 @@ video of text smears and lags. `scripts/edos-vm start --display spice
 text sharp".
 
 Tearing disappeared entirely at the same time. Two changes can account for
-that and this session cannot separate them: `0eb1650` gave the compositor a
+that and this session cannot separate them: `c0143ce` gave the compositor a
 back buffer, so it stopped drawing into the live scanout the host reads, and
 VNC does not do lossy video of a moving region. The guest-side half was a real
 defect either way -- see `doc/design/wm-damage.md` -- but do not assume it was

@@ -818,7 +818,7 @@ each of a pair actually received: **0.94x** with the lag carried and **1.20x to
 1.00x.
 
 **It costs ~22 ns per park/wake pair** and nothing anywhere else. `switchbench`
-on a single-CPU boot, against trunk at `a92092c`: a cross-process pipe round
+on a single-CPU boot, against trunk at `713ed5a`: a cross-process pipe round
 trip 2180 → 2224 ns (median of three, spread 2215–2237), with `yield idle` at
 238 against 239, `getpid` 81 against 82 and the pipe echo 426 against 424 — the
 controls unmoved, which is what makes the round-trip figure attributable. The
@@ -934,7 +934,7 @@ was what happens on top of it, and most sharply on the **error** return.
 
 **Bisected, and it was the negative-errno conversion.** Building the tree at
 whole commits either side, single-CPU boot, three runs each: the bad-fd read is
-140–141 ns at `4c0cffc` and 169 at `6fbb047`, so that one commit costs **+29 ns
+140–141 ns at `652b35c` and 169 at `7be0b37`, so that one commit costs **+29 ns
 on every failing syscall**. The mechanism is the line it added to
 `syscall_handler` — `current_thread_info().lock().errno` — which was a second
 registry lookup on the way out. The per-CPU cache above takes it back without
@@ -943,16 +943,16 @@ giving up the feature, and the same bisect priced the rest of the window:
 | | bad fd | pipe echo |
 |---|---|---|
 | 2026-08-11 (recorded) | 128 | 387 |
-| `61a3dec`, end of 08-13 | 144 | 452 |
-| `4c0cffc`, before negative errno | 140 | 450 |
-| `6fbb047`, negative errno | 169 | 450 |
+| `d965f88`, end of 08-13 | 144 | 452 |
+| `652b35c`, before negative errno | 140 | 450 |
+| `7be0b37`, negative errno | 169 | 450 |
 | now, with the info cache | 145 | 425 |
 | one fd-table walk per call | 137 | 410 |
 
 So the error path is recovered, and of the ~38 ns the pipe echo had lost on the
 *successful* path, **14 are back and ~23 are still unaccounted for.**
 
-The 14 were `f96e896`'s. `O_NONBLOCK` outliving the open meant a read and a
+The 14 were `3c24e7c`'s. `O_NONBLOCK` outliving the open meant a read and a
 write each asked the fd table two questions — `get_fd` then `is_nonblock` —
 under one lock but as two searches of the same `BTreeMap`. `get_fd_nonblock`
 answers both in one walk, and the size of the effect identifies it: the bad-fd
@@ -960,7 +960,7 @@ read, which is one call and one lookup, fell 145 → 137, and the pipe echo, whi
 is two calls and two lookups, fell 425 → 410. Two independent readings of a
 ~7 ns map walk. `getpid` did not move, which is what makes both attributable.
 
-What is left is ~23 ns and the same window, so `eb4dd2f` (named pipes, the
+What is left is ~23 ns and the same window, so `e5f22f3` (named pipes, the
 bounded PTY) is now the standing suspect by elimination rather than the weaker
 of two. It added a `PipeReadWrite` variant that every match on `FileDescriptor`
 in the read and write paths carries. **That is a guess, not a measurement** —

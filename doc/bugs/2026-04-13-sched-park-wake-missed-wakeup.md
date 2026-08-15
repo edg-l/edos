@@ -3,14 +3,14 @@
 ## Status
 Fixed. Took three iterations to land correctly:
 
-1. `4b8eab3` — wake-pending token (closes the lost-wake race at the
+1. `94946c8` — wake-pending token (closes the lost-wake race at the
    primitive level).
-2. `b48f2b3` — `thread_park_while` loops on spurious wake. **Wrong fix.**
+2. `956b820` — `thread_park_while` loops on spurious wake. **Wrong fix.**
    Broke the wait-queue protocol; surfaced as a hard hang where
    terminal/taskbar parked on TTY_BUFFER with the lock free and the wait
    queue empty (caught the second time wm fast-path triggered three
    back-to-back eprintlns).
-3. `42c8886` — revert (2)'s loop, fix `sys_waitpid` instead. **Right fix.**
+3. `e067ef3` — revert (2)'s loop, fix `sys_waitpid` instead. **Right fix.**
    `thread_park_while` is now "may return spuriously" matching Rust
    std's `Thread::park` contract. Every wait-queue caller already loops;
    `sys_waitpid` was the one bare caller, now wrapped.
@@ -83,7 +83,7 @@ landed.
   Subscriber::recv, BlockingMutex::lock via WaitQueue, etc.) already
   loops.
 
-### Debug visibility (`66f4c68`)
+### Debug visibility (`d08c38b`)
 - `Thread.last_syscall` (relaxed store at top of syscall_handler) plus
   `tools/debug/dump_threads.gdb` `SYSCALL` and `WP` columns. Cuts
   diagnosis time for any future park/wake hang from "GDB walk

@@ -110,11 +110,11 @@ and transitions the handle to `FAILED` so waiters retry cleanly.
 
 | Phase | Commit | Content |
 |------:|:-------|:--------|
-| 0 | `611fc2a` | Audit doc + `FrameDrop` RAII wrapper |
-| 1 | `fe8da51` | `PageFillHandle` + `in_flight` field + `get_or_fill_async_sync` free fn; `WAITQUEUE_CAP` 32→64 |
-| 2 | `30016ad` | Migrate `page_cache_read`, `page_cache_write`, `get_or_fill_page`, `loader::prefetch_file_pages` to new entry points + `get_or_fill_bulk_async_sync` |
-| 3 | `cddce8f` | Delete legacy `InodePages::get_or_fill`, clean module doc |
-| 4 | `370c31e` | `INFLIGHT_INSTALLS/JOINS/RETRIES/CANCELS/CURRENT` counters + `/proc/inflight_stats` + `programs/inflighttest` |
+| 0 | `a9a22c8` | Audit doc + `FrameDrop` RAII wrapper |
+| 1 | `34cf0ff` | `PageFillHandle` + `in_flight` field + `get_or_fill_async_sync` free fn; `WAITQUEUE_CAP` 32→64 |
+| 2 | `9352e71` | Migrate `page_cache_read`, `page_cache_write`, `get_or_fill_page`, `loader::prefetch_file_pages` to new entry points + `get_or_fill_bulk_async_sync` |
+| 3 | `a493eb5` | Delete legacy `InodePages::get_or_fill`, clean module doc |
+| 4 | `308753f` | `INFLIGHT_INSTALLS/JOINS/RETRIES/CANCELS/CURRENT` counters + `/proc/inflight_stats` + `programs/inflighttest` |
 | 5 | (this doc) | Validation + post-mortem + lock-order.md update + ideas.txt |
 
 Bug fixes caught during the session (see Edge cases below) landed between
@@ -122,7 +122,7 @@ phases and are listed separately.
 
 ## Edge cases and bugs caught
 
-### Orphan waiters in `!push_ok` path (commit `b9a6987`)
+### Orphan waiters in `!push_ok` path (commit `f6b9d0e`)
 
 Initial `get_or_fill_async_sync` on a push failure (heapless overflow on the
 in-flight map) removed the handle from `in_flight` without publishing a
@@ -130,14 +130,14 @@ terminal state first. A slow-path reader that had already cloned the handle in
 the install window would park forever — no wake_all ever fires. Fix: order is
 now `finish_failed` → remove, mirroring the success path.
 
-### `PageFillHandle.len` u32 truncation (commit `8ef42a8`)
+### `PageFillHandle.len` u32 truncation (commit `cd7b301`)
 
 `page_count` at the bulk call sites is `u64`; storing it into a `u32` `len`
 field via `as u32` silently truncated. No current caller approaches
 `u32::MAX`, but as a latent hazard on future large mmap-heavy workloads we
 changed the field to `u64`.
 
-### Ring-0 demand fault with IRQs disabled (commit `725d46f`)
+### Ring-0 demand fault with IRQs disabled (commit `8c372b5`)
 
 Phase 2 exposed a pre-existing latent bug: the ring-0 branch of the page-fault
 handler at `interrupts/idt.rs` called `handle_demand_fault` with IRQs
@@ -148,7 +148,7 @@ shard mutex contend while held under a ring-0 demand-fault path, tripping the
 Foundation #4's debugging. Fix mirrors the ring-3 branch: re-enable IRQs
 across the demand-fault call.
 
-### `emergency_println!` for KILL path (commit `9a6a3cf`)
+### `emergency_println!` for KILL path (commit `f365915`)
 
 Diagnostic work exposed a SERIAL_DBG deadlock window: when a ring-0 page
 fault's KILL logs contended on `SERIAL_DBG`, and another CPU held it for a
@@ -157,7 +157,7 @@ long println, both CPUs spun with no visible holder. New
 port 0x3F8, skipping the lock. KILL path uses it; future ring-0 faults can't
 deadlock on the serial lock. Defense, not diagnosis.
 
-### `block_page_cache: detached fallback` UART saturation (commit `2ca433b`)
+### `block_page_cache: detached fallback` UART saturation (commit `0dca329`)
 
 During the AHCI NCQ investigation we noticed ~130/s × 120-char log lines on
 "detached fallback" saturated the 115200-baud serial port, which throttled
@@ -166,7 +166,7 @@ the entire kernel via the serial spinlock and pushed drive latency past the
 self-inflicted hang layered on top of the real NCQ stall, not a Foundation
 #5 regression, but cleaning it up was a prerequisite for meaningful triage.
 
-### Lock-order Arc guard (commit `147ab53`)
+### Lock-order Arc guard (commit `238d475`)
 
 Defensive only: if `Arc::as_ptr(&thread)` is below the kernel half
 (`0xffff_8000_0000_0000`), the rank enter/exit/enter_same calls skip

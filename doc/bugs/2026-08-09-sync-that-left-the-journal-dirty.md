@@ -2,7 +2,7 @@
 
 ## Status
 
-Fixed by `6a15410`. Follow-up open: `sys_sync` still occasionally logs
+Fixed by `f9ae3e7`. Follow-up open: `sys_sync` still occasionally logs
 `journal still pending after 8 rounds` even when the resulting image is
 fsck-clean. The bound is doing its job, but the loop takes more rounds than it
 should and nobody has explained why.

@@ -2,7 +2,7 @@
 
 ## Status
 
-Fixed by `8992a30`. The invariant is documented on `WaitQueue::wait_until`.
+Fixed by `7bfb356`. The invariant is documented on `WaitQueue::wait_until`.
 
 ## Symptoms
 

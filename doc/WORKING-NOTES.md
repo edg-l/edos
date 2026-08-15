@@ -445,7 +445,7 @@ itself was suspected.
 
 ## `rwlock-writer` was a flake, and the rendezvous budget was why — FIXED
 
-Seen once in two consecutive `make test AUDIODEV=none` runs at `1722b65`: the
+Seen once in two consecutive `make test AUDIODEV=none` runs at `733fdec`: the
 suite reported `TIMEOUT: 55/56` with a panic from `test_rwlock_writer`,
 `rwlock: readers never overlapped (max 1), so the lock is serialising them like
 a mutex`. The immediate next run was `ALL 56 TESTS PASSED`. Nothing in the
@@ -477,7 +477,7 @@ CPU would be the trigger, and that run added `prio-inversion`, which queues a
 CPU inside a suite that finishes in about 350 ms. The unpinned rwlock readers
 can be placed on that CPU. That is a plausible mechanism for why the budget
 started being exhausted when it had not been before, but it was never tested by
-bisecting `make test` across `84d01c1`. The deadline makes the test robust
+bisecting `make test` across `8846115`. The deadline makes the test robust
 either way, which is why it was fixed rather than bisected.
 
 ---
@@ -722,7 +722,7 @@ drops real traffic, and this one does not.
 
 ## Where the tree stands at the end of 2026-08-12
 
-**Released as v0.4.0** at `4ce2eea`, tagged and pushed, with `edos-x86_64.iso`
+**Released as v0.4.0** at `57cc13d`, tagged and pushed, with `edos-x86_64.iso`
 and `SHA256SUMS` attached; `sshd` is what it is named for. v0.3.0 before it is
 annotated as data-losing, as is v0.2.0, which loses file data on fragmented
 writes -- anything on either ISO should be replaced. The site was rebuilt and
@@ -915,7 +915,7 @@ The kernel's fixes did not reach the checker: `tools/efs-fsck/src/replay.rs` was
 a hand-port of the same algorithm, so every kernel fix needed porting by hand and
 none had been. It bounded dirtiness by `tail_seq != head_seq`, walked past
 sequence breaks into the stale far side of a wrapped ring, and added the
-partition offset to home blocks that already carried it — the last being 6c0a96e
+partition offset to home blocks that already carried it — the last being 4d41393
 verbatim, in the tool that is supposed to be the canonical recovery path, where
 `--repair` would have scattered replayed metadata `--partition-offset` bytes up
 the disk. It also retired the ring to the persisted head, so a checked image
@@ -1847,7 +1847,7 @@ asks about the grab before it touches the registry, so the two are never
 co-held; the grab syscall settles authority through the shell table first and
 drops that guard before taking this one.
 
-The application-side Alt guard from `6b5171d` stays. It is not redundant: it
+The application-side Alt guard from `cb7cb31` stays. It is not redundant: it
 covers chords nothing has claimed, and a program should not depend on the shell
 having claimed the right things.
 
@@ -3386,7 +3386,7 @@ CPUs spinning in `IrqSpinlock::lock` on the serial port with interrupts off, and
 the fourth spinning in `tlb_shootdown` waiting for their acknowledgement.
 
 This is **not** related to the identity fix above: it reproduces identically on
-the commit before it (`f51ab70`), and slightly sooner (t=52s vs t=76s, 6 vs 10
+the commit before it (`26928b1`), and slightly sooner (t=52s vs t=76s, 6 vs 10
 completed `threadtest` runs).
 
 ### Fixed: `IrqSpinlock` waited with interrupts disabled
@@ -4295,7 +4295,7 @@ the layer, not by reading the layer.
 **A pooled DMA buffer is not zeroed on reuse, and every parser read a fixed size
 without asking how many bytes arrived.** A short transfer therefore returned the
 previous owner's bytes as device identity or as sector data. Fixed in xHCI
-descriptors (`7591982`) and USB mass storage (`41e2c41`, where `block_size == 0`
+descriptors (`d8ff718`) and USB mass storage (`bbd47f0`, where `block_size == 0`
 also faulted the CPU and an oversized one made `read_sectors` loop forever).
 
 **AHCI ATAPI has the same defect and is still open.** `execute_atapi_command`
@@ -5771,7 +5771,7 @@ it straight back in the job list. Both callers now go through
 `apply_default_action`, so the two arms cannot drift again.
 
 Ruled out along the way: `stop_if_signalled` itself (it stores `stopped=false`
-unconditionally on the way out, and the loop added in `fc39bed` means it
+unconditionally on the way out, and the loop added in `9d0c143` means it
 actually reaches that store), the level-triggered `waitpid(WUNTRACED)`, and
 `fg`'s `tcsetpgrp`/`pty_set_canonical` bracket.
 
@@ -6330,7 +6330,7 @@ answer in pieces continues from `pool.last() + 1` on each further round.
 Evidence, freshly built `sata-disk.img`, cold boot:
 
 ```
-fsbench write -n 32 /var    total 1.2 s  (1.1 s at 67fa350 — within noise;
+fsbench write -n 32 /var    total 1.2 s  (1.1 s at fd2178a — within noise;
                                           this changes placement, not the
                                           per-batch command count)
                             efs_stats.blocks_allocated +30792, orphans_marked +65
@@ -6384,7 +6384,7 @@ rediscover.
 
 ### Alt guards, the last three programs
 
-`6b5171d` gave `edos-edit` and `WidgetContainer` the rule that a binding does
+`cb7cb31` gave `edos-edit` and `WidgetContainer` the rule that a binding does
 not fire while Alt is held. `edos-files`, `imgview` and the terminal widget bind
 keys too and were never audited:
 
@@ -6396,7 +6396,7 @@ keys too and were never audited:
   `f` into the shell. `altgr` is a separate flag and still selects the third
   character on a layout.
 
-The kernel grab (`1a5ae7f`) does not make this redundant: the window manager
+The kernel grab (`35f0a39`) does not make this redundant: the window manager
 withholds only the chords it *claims*, and every other Alt chord still arrives.
 The comment in `edos-edit` that said nothing could claim one first predates that
 commit and is corrected.
@@ -7201,13 +7201,13 @@ each, reading the bad-fd `read`:
 | | bad fd | pipe echo |
 |---|---|---|
 | 2026-08-11, recorded | 128 | 387 |
-| `61a3dec`, end of 08-13 | 144 | 452 |
-| `4c0cffc`, before negative errno | 140 | 450 |
-| `6fbb047`, negative errno | 169 | 450 |
+| `d965f88`, end of 08-13 | 144 | 452 |
+| `652b35c`, before negative errno | 140 | 450 |
+| `7be0b37`, negative errno | 169 | 450 |
 
 Two separate regressions, and reading the pipe echo column is what separates
 them: it had already arrived by 08-13 and did not move on 08-14, so the +29 ns
-on 08-14 belongs to the error path alone. That is `6fbb047`, whose whole cost is
+on 08-14 belongs to the error path alone. That is `7be0b37`, whose whole cost is
 one line — `current_thread_info().lock().errno` in `syscall_handler`, on the way
 out of any call that failed.
 
@@ -7243,9 +7243,9 @@ assumed:
   CPU last ran it.
 
 **Still open: ~38 ns of the pipe echo.** It arrived between 2026-08-11 and
-`61a3dec`, it is on the successful fd path rather than the error one, and only
-two commits in that window touch the fd or pipe code — `eb4dd2f` (named pipes
-and the bounded PTY) and `f96e896` (`O_NONBLOCK` that outlives the open, which
+`d965f88`, it is on the successful fd path rather than the error one, and only
+two commits in that window touch the fd or pipe code — `e5f22f3` (named pipes
+and the bounded PTY) and `3c24e7c` (`O_NONBLOCK` that outlives the open, which
 added a second table lookup to every read and write).
 
 **The harness, which is the reusable part.** `switchbench` reports every figure

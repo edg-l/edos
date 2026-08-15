@@ -488,7 +488,7 @@ correctness, locking, perf hot spots and missing syscalls — see
 5. **Rapid spawn and exit.** `xargs` in loop mode hammers the reaper and zombie
    collection.
 6. **CPU count.** Not exposed to userspace at all today.
-7. **Named FIFOs.** Closed at eb4dd2f: `SYS_MKFIFOAT` 283 and `/bin/mkfifo`,
+7. **Named FIFOs.** Closed at e5f22f3: `SYS_MKFIFOAT` 283 and `/bin/mkfifo`,
    a `FileKind::Fifo` both EFS and memfs store, and an `open` that rendezvouses
    a reader with a writer. `mkfifo f; prog > f & other < f` works. The buffer is
    the `Pipe` that already existed, keyed by inode rather than by path;
@@ -498,7 +498,7 @@ correctness, locking, perf hot spots and missing syscalls — see
 
 ## Service management, and why it waited on a FIFO
 
-Closed at eb4dd2f; `doc/services.md` is the reference. `edos-init` supervised a
+Closed at e5f22f3; `doc/services.md` is the reference. `edos-init` supervised a
 **hardcoded array** with no runtime control of any kind. Both halves shipped:
 `/etc/services/*.conf` declares a service in keyword-value lines
 (`command`, `args`, `essential`, `shell`, `requires`, `enabled_by`) with the

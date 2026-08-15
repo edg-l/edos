@@ -188,7 +188,7 @@ asserted in two places instead of four, and a mismatch is
 ```
 
 Stealing is not disabled — `try_steal_and_run` is called two lines below. The
-context corruption it refers to was fixed in `4b8d7c2`. The comment now
+context corruption it refers to was fixed in `f8e29a4`. The comment now
 misdescribes the code in a subsystem where people trust comments.
 
 **Fixed:** replaced with what the backoff actually does.
@@ -222,7 +222,7 @@ two reads agree — a torn value would now be permanent rather than transient.
 Verified against the host clock: guest 18:01:12 UTC vs host 18:01:38 with 26 s
 of test runtime between them.
 
-### 2.2 The kernel logs on the mmap and thread-exit hot paths — FIXED (b2b02f5)
+### 2.2 The kernel logs on the mmap and thread-exit hot paths — FIXED (69a0080)
 
 `syscalls/memory.rs` has 20 `log!` sites, including one per successful `mmap`
 (`:244 "mmap: lazy mapped at ..."`) and one per call at `:103`. `thread_exit`

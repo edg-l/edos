@@ -155,12 +155,12 @@ reaper correctness in general). Roadmap in dependency order:
    `.claude/handoff/2026-04-17-3-foundation-5-phase-4-plus-ahci-ncq-hang.md`.
 
 3. **Generic async block I/O trait. DONE 2026-05-19.** `AsyncBlockDevice`
-   with AHCI callers migrated (Phase A, `04232c0`), USB MSC migrated and
-   BPC dispatch collapsed (Phase B, `35ad890`). AHCI NCQ submit/complete
-   split with an IRQ-driven dispatcher (Phase C1, `cf7938e`, fixed in
-   `83a5117`), async readahead via lazy finalization by the first joiner
-   (Phase C2, `83ddde9`), NCQ watchdog kthread (`22727bc`) and its
-   counters in `/proc/ahci_stats` (`c5455d1`).
+   with AHCI callers migrated (Phase A, `c64e1bb`), USB MSC migrated and
+   BPC dispatch collapsed (Phase B, `925c7ee`). AHCI NCQ submit/complete
+   split with an IRQ-driven dispatcher (Phase C1, `87e97a4`, fixed in
+   `2a96374`), async readahead via lazy finalization by the first joiner
+   (Phase C2, `bd125fd`), NCQ watchdog kthread (`1fc352f`) and its
+   counters in `/proc/ahci_stats` (`b60b8ce`).
 
 #1-#6 are all shipped. The foundations roadmap is closed.
 

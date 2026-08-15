@@ -563,20 +563,20 @@ line.
   zeroed through the journal, and that zeroed copy could reach the home block
   after the direct data write had already landed on it — 289 of one file's 4096
   blocks were nowhere in the image. The write path no longer stages a zeroed
-  copy of a block it is about to overwrite whole (`554b515`,
+  copy of a block it is about to overwrite whole (`041b98f`,
   `doc/WORKING-NOTES.md` "Interleaved appends drop whole blocks on the write
   path").
 - **Readahead declined any window that spanned more than one extent.** A
   prefetch window is now a set of contiguous runs, so a fragmented file goes
   from 5 asynchronous windows and 243 synchronous fallbacks to 248 and 0
-  (`4f69216`, `kernel/src/fs/readahead.rs`).
+  (`5cb65fb`, `kernel/src/fs/readahead.rs`).
 - **An appending file asked for one block at a time.** `alloc_blocks` serves a
   whole batch, so a run of appends becomes one extent rather than one per block
-  (`22b5783`, in-guest evidence at `67fa350`).
+  (`c238cb6`, in-guest evidence at `fd2178a`).
 - **A file's next block is sought where its last extent ended.** `alloc_blocks`
   takes a goal from `ExtentMap::goal_for`, tries it exactly before any scan, and
   falls back to first fit inside the goal's own group, so batch N+1 continues
-  batch N instead of restarting at group 0 (`ae0424a`). Measured on a fresh
+  batch N instead of restarting at group 0 (`3f80452`). Measured on a fresh
   disk with `fsbench raprep /var` → reboot → `fsbench ra /var`: the 16 MiB
   appended file reads as **4 reads planned 4 runs, queued in 4 submits**, i.e.
   `runs / reads` = 1.00, so an appended file is laid out contiguously and a
@@ -586,30 +586,30 @@ line.
   which share their VM-driving helpers in `scripts/vmdrive.py`
   (`doc/vm-control.md`).
 - **`fsync` could panic the kernel** — a wait predicate that took a
-  `BlockingMutex`, evaluated inside `without_interrupts` (`8992a30`,
+  `BlockingMutex`, evaluated inside `without_interrupts` (`7bfb356`,
   `doc/bugs/2026-08-09-fsync-panicked-on-a-wait-predicate.md`).
 - **A file could not have more than 13 fragments.** `MAX_INLINE_EXTENTS` is 13
   and that flat inline list was the whole block map, so a moderately fragmented
   1 MiB file failed `fsync` with `Unsupported` while writeback dropped the data.
-  Depth-1 extent trees raise the ceiling to 4420 extents (`072106b`,
+  Depth-1 extent trees raise the ceiling to 4420 extents (`0481f6c`,
   `doc/efs.md` §6.4).
 - **~19k leaked blocks per run** — an unsynchronized read-modify-write of the
-  allocation bitmap, plus a second one on the whole inode (`6a15410`, `3375ac4`,
+  allocation bitmap, plus a second one on the whole inode (`f9ae3e7`, `d4a0ecc`,
   `doc/bugs/2026-08-09-efs-lost-bitmap-and-inode-updates.md`).
 - **`sync` left the journal needing replay** — a fixed two rounds of
-  commit-then-flush is not a fixed point (`6a15410`,
+  commit-then-flush is not a fixed point (`f9ae3e7`,
   `doc/bugs/2026-08-09-sync-that-left-the-journal-dirty.md`).
 - **A command could be completed before its data landed.** `on_port_irq` read
   SACT once and then walked the slots, so a command issued between the two
   reads paired with a clear bit; `issued` does not close the window, since the
   submitter stores it after writing SACT. `complete_ncq_slot` now re-reads SACT
-  once it has observed `issued` (`9fb3af5`).
+  once it has observed `issued` (`9fa3955`).
 - **The reaper discarded evictions it could not queue**, leaking that inode's
   blocks until `efs-fsck` ran — several hundred per `fsbench /var` run. The
   reaper now parks the request on an unbounded overflow list (`EVICT_OVERFLOW`,
   rank 350) which the kthread drains ahead of the ring, so there is no capacity
   cliff to tune. `EVICT_DROPPED_COUNT` survives as queue-pressure telemetry; it
-  no longer counts leaks (`bf669f6`).
+  no longer counts leaks (`ebc91ee`).
 
 ## What has been tried and did not work
 

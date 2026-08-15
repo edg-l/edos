@@ -54,7 +54,7 @@ allocates a private frame, copies the cache page, zeroes the tail, and maps
 the page writable. Because the page is already mapped, the lazy fault path
 will never fire for it. Any RELATIVE entries targeting this page are applied
 immediately by walking `reloc_pages` after the `RelocTable` is built. This
-was introduced in commit `c53914d`.
+was introduced in commit `8030862`.
 
 ## 5. Fork
 

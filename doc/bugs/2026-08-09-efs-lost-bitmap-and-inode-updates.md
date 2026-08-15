@@ -2,7 +2,7 @@
 
 ## Status
 
-Fixed by `3375ac4` (inode) and `6a15410` (bitmap). Two independent
+Fixed by `d4a0ecc` (inode) and `f9ae3e7` (bitmap). Two independent
 unsynchronized read-modify-writes of shared on-disk structures, found in the
 same session and by the same tool. Nothing here is specific to a workload; both
 need only two threads touching one filesystem.

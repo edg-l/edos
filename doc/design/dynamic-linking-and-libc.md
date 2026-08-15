@@ -210,7 +210,7 @@ between every process that maps it without any new mechanism.
 
 Honestly: not much yet.
 
-`filesystem/bin` is 32 MB stripped (it was 117 MB before `f61abe0` stripped it),
+`filesystem/bin` is 32 MB stripped (it was 117 MB before `c467363` stripped it),
 and the live-root image's size is set by a 64 MiB floor in the `GNUmakefile`, not
 by the binaries. Sharing one copy of Rust's `std` across the whole tree would
 shrink it and cut per-process resident memory, but neither is a felt problem
