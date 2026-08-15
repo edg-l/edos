@@ -6,6 +6,26 @@ session.
 
 ---
 
+## `min-width` verified in the guest, and how to check a box's width from a screenshot
+
+The overnight run shipped `min-width` on gates alone and left a todo saying so.
+Closed now: the `.widened` paragraph in `welcome.html` sets `min-width: 500px`
+against `max-width: 200px`, and css-sizing-3 §5.1 makes the floor win, so the
+used width is `max(500, min(200, available))` and should be exactly 500.
+
+It is. Measured off the framebuffer rather than judged by eye, which is worth
+recording because the obvious version of the check is wrong: `.floored` on the
+same page uses the *same* `#434c5e` background and spans the full 532px column,
+so scanning for the widest run of that colour finds the wrong box and reports a
+pass. Collecting every run of the colour separately shows both, `x=195 w=532`
+for `.floored` and `x=211 w=500` for `.widened`.
+
+The general trick: `scripts/edos-vm shot`, then walk the rows of the PNG
+collecting contiguous runs of the box's background colour and group them by
+`(start_x, width)`. A box's width is then a fact rather than an impression, and
+two boxes sharing a colour stay distinguishable.
+
+
 ## `bInterval` does not mean the same thing at every speed
 
 `configure_interrupt_endpoint` wrote `bInterval - 1` into the endpoint context's
@@ -1958,9 +1978,9 @@ does not have to invent them.
 | userspace programs | 123 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 124 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 109,487 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 110,391 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,404 | `git rev-list --count HEAD` |
+| commits | 1,428 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
 | host unit tests | 114 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
