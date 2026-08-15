@@ -106,6 +106,10 @@
       .boxes .marked { display: list-item; color: #a3be8c }
       .run li { display: inline; color: #88c0d0 }
       .blocked li { display: block; color: #d08770 }
+      /* A background on a run covers the words and the spaces between them,
+         and nothing of the leading around the line. */
+      .hilite .tinted { background: #4c566a }
+      .hilite mark.own { background: #a3be8c; color: #2e3440 }
     </style>
   </head>
   <body>
@@ -291,6 +295,14 @@ while the newline above them is kept.</p>
       <li>Two items asking for <code>display: block</code>,</li>
       <li>so they keep a line each but lose the bullet a list item carries.</li>
     </ul>
+
+    <h2>What a highlighted run wears</h2>
+    <div class="hilite">
+      <p>A paragraph in which <mark>a marked run wears the yellow every
+        browser gives it</mark>, <mark class="own">one styled by the page
+        keeps its own pair</mark>, and <span class="tinted">a plain span
+        carries whatever background it asks for</span>.</p>
+    </div>
 
     <h2>What a list may be numbered in</h2>
     <ol class="roman" start="3">

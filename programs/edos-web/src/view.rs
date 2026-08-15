@@ -51,6 +51,10 @@ pub struct Fragment {
     /// run. The baseline itself is [`Line::natural`], so a run set smaller than
     /// its neighbours sits on their feet before this moves it.
     pub shift: i32,
+    /// `background-color` on the run itself, painted behind this fragment
+    /// alone. A block's background is a [`Decor`] spanning all its lines; an
+    /// inline one covers the text and nothing else, so it lives here.
+    pub background: Option<u32>,
 }
 
 /// What a line draws.
@@ -149,6 +153,9 @@ struct Word {
     /// `vertical-align`, resolved: what the page asked for, or what the element
     /// that opened the run asks for by being a `<sup>` or a `<sub>`.
     shift: i32,
+    /// `background-color` the run set on itself, or the highlight a `<mark>`
+    /// wears.
+    background: Option<u32>,
 }
 
 impl Layout {
@@ -228,10 +235,11 @@ impl Layout {
                     decoration: css::Decorations::default(),
                     letter: plan.letter,
                     shift: 0,
+                    background: None,
                 });
 
                 let start = out.lines.len();
-                let words = out.words(&block.runs, plan.style, plan.ws);
+                let words = out.words(&block.runs, &plan);
                 out.flow(words, &plan, avail, &mut y);
 
                 // The marker hangs in the left margin of the first line, which
@@ -330,6 +338,7 @@ impl Layout {
             decoration: css::Decorations::default(),
             letter: 0,
             shift: 0,
+            background: None,
         }];
         self.lines.push(Line {
             y: *y,
@@ -360,7 +369,8 @@ impl Layout {
     /// `white-space` keeps them needs the source's own spacing back: the gap
     /// before a word and the breaks before it are carried on the word itself,
     /// which is also how a separator that falls on a run boundary survives.
-    fn words(&mut self, runs: &[Run], base: Style, ws: css::WhiteSpace) -> Vec<Word> {
+    fn words(&mut self, runs: &[Run], plan: &Plan) -> Vec<Word> {
+        let (base, ws) = (plan.style, plan.ws);
         let mut words = Vec::new();
         let mut spaces = 0;
         let mut breaks = 0;
@@ -380,6 +390,11 @@ impl Layout {
             // at, not of the size it ends up at, so it is measured against the
             // base the run shrank from.
             let shift = run.css.shift.unwrap_or(run.script.shift(base.px));
+            // The block's own background is painted once, behind every line it
+            // produced. A run carrying that same colour is the block's own
+            // text rather than a highlighted span inside it, so only a colour
+            // the run set for itself is painted per word.
+            let background = run.css.background.filter(|&c| Some(c) != plan.background);
             let mut word = String::new();
             let mut flush = |word: &mut String, spaces: &mut u32, breaks: &mut u32| {
                 if word.is_empty() {
@@ -407,6 +422,7 @@ impl Layout {
                     letter,
                     word_gap,
                     shift,
+                    background,
                 });
                 word.clear();
                 *spaces = 0;
@@ -506,6 +522,7 @@ impl Layout {
                             decoration: word.decoration,
                             letter: word.letter,
                             shift: word.shift,
+                            background: word.background,
                         });
                         pen += head_width;
                         let line = std::mem::take(&mut items);
@@ -538,6 +555,7 @@ impl Layout {
                     decoration: word.decoration,
                     letter: word.letter,
                     shift: word.shift,
+                    background: word.background,
                 });
                 pen += width;
                 break;
@@ -933,6 +951,36 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             let own = text::line_height(item.style);
             let text_top =
                 y + line.lead as i32 + line.natural.saturating_sub(own) as i32 - item.shift;
+            // A decoration and a highlight both run through the spaces between
+            // the words they cover, reaching the next fragment when that one is
+            // set the same way. Drawn per word either would come out dashed,
+            // since a word is a fragment of its own.
+            let next = line.items.get(index + 1);
+            let joined = |same: bool| match next {
+                Some(next) if same && next.x >= item.x + item.width as i32 => {
+                    (next.x - item.x) as u32
+                }
+                _ => item.width,
+            };
+            // An inline background covers the text and not the leading around
+            // it: the box a run paints is its own, and taking the line's height
+            // would make a highlighted word in an airy paragraph a tall block.
+            if let Some(color) = item.background {
+                let highlight = joined(
+                    next.is_some_and(|n| n.background == item.background && n.shift == item.shift),
+                );
+                fill(
+                    surface.pixels,
+                    width,
+                    height,
+                    top,
+                    item.x,
+                    text_top,
+                    highlight,
+                    own,
+                    color,
+                );
+            }
             text::draw_tracked(
                 &mut surface,
                 item.x,
@@ -941,22 +989,12 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                 item.style,
                 item.letter,
             );
-            // A decoration runs through the spaces between the words it marks,
-            // so a rule reaches the next fragment when that one is set the same
-            // way. Drawn per word it would come out dashed, since a word is a
-            // fragment of its own.
-            let span = match line.items.get(index + 1) {
-                Some(next)
-                    if next.decoration == item.decoration
-                        && next.style.px == item.style.px
-                        && next.style.color == item.style.color
-                        && next.shift == item.shift
-                        && next.x >= item.x + item.width as i32 =>
-                {
-                    (next.x - item.x) as u32
-                }
-                _ => item.width,
-            };
+            let span = joined(next.is_some_and(|n| {
+                n.decoration == item.decoration
+                    && n.style.px == item.style.px
+                    && n.style.color == item.style.color
+                    && n.shift == item.shift
+            }));
             // Against the text, not against the line: open leading would
             // otherwise leave the rules floating away from the words they mark,
             // and a superscript's rule would stay behind on the baseline it

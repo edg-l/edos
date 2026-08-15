@@ -74,7 +74,7 @@ length or `normal`), `text-transform`, `text-indent`, `white-space`,
 `list-style` shorthand), all four margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
-per-edge longhands), and `display`. `doc.rs` carries the computed style onto every `Run` and every
+per-edge longhands, on a block or on a run), and `display`. `doc.rs` carries the computed style onto every `Run` and every
 `Block`, and `view.rs` lets it override the plan the tag alone implies — where
 it says nothing, the reader typography stands.
 
@@ -141,6 +141,20 @@ without them, and each is small:
   invalid so the element keeps its own box. The marker follows `list-item`
   rather than the `<li>` tag, so `li { display: block }` loses its bullet the
   way a browser does, and a `<span>` may gain one.
+- **A background belongs to a run as well as to a block.** A block's
+  `background-color` is one `view::Decor` spanning every line it produced; a
+  colour a `<span>` or a `<mark>` sets is painted per fragment instead, over
+  the text's own height rather than the line's, so a highlight inside an airy
+  paragraph does not become a tall block. It runs through the spaces between
+  the words it covers by the same rule a `text-decoration` does — a fragment
+  reaching the next one when that one carries the same colour and baseline
+  shift. `Computed::inherit` resets `background`, so the only way a run can
+  carry the colour of the block around it is by being that block's own text;
+  `view::words` drops it there rather than painting the block's box a second
+  time behind every word. `<mark>` is the one element with a UA background
+  (yellow behind black), applied only where the page set neither, since a
+  highlight under an inherited page colour is unreadable exactly where it is
+  meant to stand out.
 - **`@layer` bodies are parsed**, since a modern stylesheet puts nearly all of
   itself inside one and skipping them drops the sheet. Layer *order* is not
   honoured — rules keep their document order — which differs from a real

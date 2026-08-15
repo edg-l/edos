@@ -22,6 +22,10 @@ use crate::css::{
     Vars, Viewport, WhiteSpace,
 };
 
+/// The highlight `<mark>` is set in, as every UA sets it: yellow behind black.
+const MARK_BACKGROUND: u32 = 0xffff_ff00;
+const MARK_COLOR: u32 = 0xff00_0000;
+
 /// What a block is, which decides its font size and its leading marker.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockKind {
@@ -524,6 +528,7 @@ impl Builder<'_> {
                     local_name!("code") | local_name!("kbd") | local_name!("samp") => {
                         self.style.code = true
                     }
+                    local_name!("mark") => self.ua_background(&saved_computed),
                     local_name!("sup") => self.style.script = Script::Super,
                     local_name!("sub") => self.style.script = Script::Sub,
                     // A break is a newline no collapsing may swallow, so it is
@@ -588,6 +593,23 @@ impl Builder<'_> {
             return;
         }
         self.computed.decoration = Some(inherited.unwrap_or_default().merged(add));
+    }
+
+    /// The highlight a `<mark>` wears, painted only where the page has not
+    /// said what the box looks like itself.
+    ///
+    /// The text is darkened with it, and only when it was inherited: a
+    /// highlight sitting under whatever colour the surrounding page set is
+    /// unreadable exactly where it is meant to stand out, and a page that
+    /// coloured this element chose the pair itself.
+    fn ua_background(&mut self, inherited: &Computed) {
+        if self.computed.background.is_some() {
+            return;
+        }
+        self.computed.background = Some(MARK_BACKGROUND);
+        if self.computed.color == inherited.color {
+            self.computed.color = Some(MARK_COLOR);
+        }
     }
 
     /// An `img`: fetch and decode it, or leave behind what a reader with
