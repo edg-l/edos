@@ -423,35 +423,77 @@ impl Layout {
                 line_height = base_height;
                 pen = 0;
             }
-            let width = text::width(&word.text, word.style);
             // A space at the head of a line is dropped where spaces collapse
             // and kept where they do not, since an indented `pre` line is
             // nothing but its leading spaces.
-            let gap = if word.glued || (items.is_empty() && !plan.ws.keeps_spaces()) {
+            let mut gap = if word.glued || (items.is_empty() && !plan.ws.keeps_spaces()) {
                 0
             } else {
                 word.spaces * text::width(" ", word.style)
             };
-            // A word wider than the column gets its own line rather than being
-            // cut: a URL broken across lines is worse than a ragged edge.
-            if plan.ws.wraps() && !items.is_empty() && pen + gap + width > avail {
-                let line = std::mem::take(&mut items);
-                self.push_aligned(line, line_height, plan, avail, pen, y);
-                line_height = base_height;
-                pen = 0;
-            } else {
+            // The word is placed whole unless it does not fit, and what happens
+            // then is either a cut inside it or a fresh line to try again on.
+            // Each pass either shortens the text or empties the line, so the
+            // loop cannot run twice without making progress.
+            let mut text = word.text;
+            loop {
+                let width = text::width(&text, word.style);
+                if plan.ws.wraps() && pen + gap + width > avail {
+                    let room = avail.saturating_sub(pen + gap);
+                    // Without a break property a word wider than the column
+                    // gets its own line rather than being cut, since a URL
+                    // broken across lines is worse than a ragged edge.
+                    let cut = plan
+                        .wrap
+                        .breaks(width > avail)
+                        .then(|| fit_prefix(&text, word.style, room))
+                        .flatten();
+                    if let Some(cut) = cut {
+                        pen += gap;
+                        let head = text[..cut].to_string();
+                        let head_width = text::width(&head, word.style);
+                        line_height = line_height.max(word.height);
+                        items.push(Fragment {
+                            x: (plan.indent + PAGE_PAD + pen) as i32,
+                            width: head_width,
+                            text: head,
+                            style: word.style,
+                            link: word.link,
+                            underline: word.underline,
+                        });
+                        pen += head_width;
+                        let line = std::mem::take(&mut items);
+                        self.push_aligned(line, line_height, plan, avail, pen, y);
+                        line_height = base_height;
+                        pen = 0;
+                        // The tail continues the same word, so no gap precedes
+                        // it however the source spaced the word itself.
+                        gap = 0;
+                        text = text[cut..].to_string();
+                        continue;
+                    }
+                    if !items.is_empty() {
+                        let line = std::mem::take(&mut items);
+                        self.push_aligned(line, line_height, plan, avail, pen, y);
+                        line_height = base_height;
+                        pen = 0;
+                        gap = 0;
+                        continue;
+                    }
+                }
                 pen += gap;
+                line_height = line_height.max(word.height);
+                items.push(Fragment {
+                    x: (plan.indent + PAGE_PAD + pen) as i32,
+                    width,
+                    text,
+                    style: word.style,
+                    link: word.link,
+                    underline: word.underline,
+                });
+                pen += width;
+                break;
             }
-            line_height = line_height.max(word.height);
-            items.push(Fragment {
-                x: (plan.indent + PAGE_PAD + pen) as i32,
-                width,
-                text: word.text,
-                style: word.style,
-                link: word.link,
-                underline: word.underline,
-            });
-            pen += width;
         }
         if !items.is_empty() {
             self.push_aligned(items, line_height, plan, avail, pen, y);
@@ -512,6 +554,9 @@ struct Plan {
     /// `white-space`: whether the source's spaces and newlines are the layout,
     /// and whether a line may be broken to fit the column.
     ws: css::WhiteSpace,
+    /// `word-break`/`overflow-wrap`: whether a word too wide for the space left
+    /// may be cut there rather than pushed whole onto the next line.
+    wrap: css::Wrap,
     /// The measure `width`/`max-width` asked for, already resolved to pixels
     /// by the cascade. `None` is the whole column.
     measure: Option<u32>,
@@ -527,6 +572,22 @@ struct Plan {
 fn leading(line: css::LineHeight, style: Style) -> u32 {
     line.px(style.px)
         .unwrap_or_else(|| text::line_height(style))
+}
+
+/// The longest proper prefix of `text` that fits in `room` pixels, or `None`
+/// when not even its first character does.
+///
+/// The scan stops at the first overflow rather than measuring every prefix: a
+/// longer prefix of the same string is never narrower, whatever the face.
+fn fit_prefix(text: &str, style: Style, room: u32) -> Option<usize> {
+    let mut fits = None;
+    for (index, _) in text.char_indices().skip(1) {
+        if text::width(&text[..index], style) > room {
+            break;
+        }
+        fits = Some(index);
+    }
+    fits
 }
 
 /// How far into a box of `avail` pixels a line of `used` pixels starts.
@@ -572,6 +633,7 @@ fn plan(block: &Block) -> Plan {
     // `<pre>` reaches here with the UA default already on it, so the block's
     // own value is the whole answer.
     plan.ws = css.white_space.unwrap_or_default();
+    plan.wrap = css.wrap();
     plan.background = css.background;
     plan.pad = Sides {
         top: css.padding.top.unwrap_or(0),
@@ -605,6 +667,7 @@ fn default_plan(block: &Block) -> Plan {
         gap_after: space(2),
         marker: None,
         ws: css::WhiteSpace::Normal,
+        wrap: css::Wrap::Word,
         measure: None,
         center: false,
         align: Align::Left,

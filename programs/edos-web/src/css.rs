@@ -125,6 +125,35 @@ impl WhiteSpace {
     }
 }
 
+/// What a line breaker may do with a word too wide for the space left on the
+/// line, which is `word-break` and `overflow-wrap` resolved into one answer.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Wrap {
+    /// A word is never cut: one wider than the column overflows it, on the
+    /// grounds that a URL broken across lines reads worse than a ragged edge.
+    #[default]
+    Word,
+    /// `overflow-wrap: break-word`: a word is cut only as a last resort, when
+    /// a line of its own would not hold it either.
+    Overflow,
+    /// `word-break: break-all`: the line is filled to the column edge and the
+    /// word cut wherever that falls.
+    Anywhere,
+}
+
+impl Wrap {
+    /// Whether a word that does not fit the space left may be cut where it
+    /// stands. `alone` says the word would not fit an empty line either, which
+    /// is the only case `overflow-wrap: break-word` cuts in.
+    pub fn breaks(self, alone: bool) -> bool {
+        match self {
+            Wrap::Word => false,
+            Wrap::Overflow => alone,
+            Wrap::Anywhere => true,
+        }
+    }
+}
+
 /// `text-transform`, the case a box sets for the text inside it.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Transform {
@@ -199,6 +228,12 @@ pub struct Computed {
     /// what lets `<pre>` carry the UA default without the cascade knowing about
     /// element names: an author rule anywhere on the box overrides it.
     pub white_space: Option<WhiteSpace>,
+    /// `word-break: break-all`, inherited. Kept apart from `break_word` because
+    /// the two properties are independent: one asks for a cut wherever the line
+    /// ends, the other only for one the column could not otherwise hold.
+    pub break_all: bool,
+    /// `overflow-wrap: break-word` (or `anywhere`), inherited.
+    pub break_word: bool,
     /// `text-indent`: how far into the box the block's first line starts. It
     /// inherits, so a wrapper that sets it indents the paragraphs inside it.
     pub indent: u32,
@@ -225,6 +260,17 @@ impl Computed {
             padding: Sides::default(),
             borders: Sides::default(),
             ..*self
+        }
+    }
+
+    /// The two break properties as the one answer the line breaker needs.
+    /// `word-break` wins where both were set, since it asks for the cut in
+    /// strictly more cases than `overflow-wrap` does.
+    pub fn wrap(&self) -> Wrap {
+        match (self.break_all, self.break_word) {
+            (true, _) => Wrap::Anywhere,
+            (false, true) => Wrap::Overflow,
+            (false, false) => Wrap::Word,
         }
     }
 
@@ -286,6 +332,20 @@ impl Computed {
                 "pre" => self.white_space = Some(WhiteSpace::Pre),
                 "pre-wrap" | "break-spaces" => self.white_space = Some(WhiteSpace::PreWrap),
                 "pre-line" => self.white_space = Some(WhiteSpace::PreLine),
+                _ => {}
+            },
+            // `keep-all` forbids the breaks it has, which are the CJK ones the
+            // breaker does not take anyway, so it lands on `normal`.
+            "word-break" => match value {
+                "break-all" => self.break_all = true,
+                "normal" | "keep-all" => self.break_all = false,
+                _ => {}
+            },
+            // `anywhere` differs from `break-word` only in what it does to a
+            // box's intrinsic width, which nothing here measures.
+            "overflow-wrap" | "word-wrap" => match value {
+                "break-word" | "anywhere" => self.break_word = true,
+                "normal" => self.break_word = false,
                 _ => {}
             },
             "text-transform" => match value {
@@ -1905,6 +1965,51 @@ mod tests {
         assert!(!WhiteSpace::NoWrap.keeps_newlines() && !WhiteSpace::NoWrap.wraps());
         assert!(WhiteSpace::Pre.keeps_spaces() && !WhiteSpace::Pre.wraps());
         assert!(WhiteSpace::Normal.wraps() && !WhiteSpace::Normal.keeps_newlines());
+    }
+
+    #[test]
+    fn break_properties_are_read_and_inherited() {
+        let sheet = sheet(
+            "div { overflow-wrap: break-word } p { word-break: break-all } \
+             li { word-wrap: anywhere } pre { word-break: keep-all } \
+             blockquote { overflow-wrap: elsewhere }",
+        );
+        let wrap = |tag| cascade(&sheet, &[element(tag, &[])], None).wrap();
+        assert_eq!(wrap("div"), Wrap::Overflow);
+        assert_eq!(wrap("p"), Wrap::Anywhere);
+        // The legacy alias is the same property, and `anywhere` differs only in
+        // intrinsic sizing, which nothing here measures.
+        assert_eq!(wrap("li"), Wrap::Overflow);
+        // `keep-all` forbids breaks the breaker never took, and a keyword it
+        // cannot read leaves the property alone.
+        assert_eq!(wrap("pre"), Wrap::Word);
+        assert_eq!(wrap("blockquote"), Wrap::Word);
+
+        let stack = vec![element("div", &[]), element("span", &[])];
+        let inner = sheet
+            .cascade(
+                &stack,
+                None,
+                &cascade(&sheet, &stack[..1], None),
+                &Vars::root(),
+                14,
+            )
+            .0;
+        assert_eq!(inner.wrap(), Wrap::Overflow);
+    }
+
+    #[test]
+    fn word_break_wins_over_overflow_wrap() {
+        // The properties are independent, and `word-break: break-all` asks for
+        // the cut in strictly more cases, so setting both is not a conflict.
+        let sheet = sheet("p { overflow-wrap: break-word; word-break: break-all }");
+        let computed = cascade(&sheet, &[element("p", &[])], None);
+        assert_eq!(computed.wrap(), Wrap::Anywhere);
+        // A last-resort cut happens only where a line of its own would not
+        // hold the word; an anywhere cut happens wherever the line ends.
+        assert!(!Wrap::Overflow.breaks(false) && Wrap::Overflow.breaks(true));
+        assert!(Wrap::Anywhere.breaks(false));
+        assert!(!Wrap::Word.breaks(true));
     }
 
     #[test]

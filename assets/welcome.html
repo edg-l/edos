@@ -23,6 +23,10 @@
       /* What the source's own spaces and newlines mean. */
       .as-written { white-space: pre-wrap; font-family: monospace }
       .lines-kept { white-space: pre-line }
+      /* What may happen to a word wider than the column: nothing by default,
+         a last-resort cut, or a cut wherever the line happens to end. */
+      .breaks-word { overflow-wrap: break-word }
+      .breaks-all { word-break: break-all }
       code, .mono { font-family: monospace; color: #b48ead }
       .hidden { display: none }
       nav a { text-decoration: none; font-weight: bold }
@@ -96,6 +100,10 @@ while the newline above them is kept.</p>
 
     and a line this long is set past the edge of the column rather than wrapped
 </pre>
+
+    <p>A word wider than the column runs past it: https://edos.edgl.dev/introduction/an-unreasonably-long-path-that-no-column-anywhere-in-this-window-could-ever-hope-to-hold-in-one-piece</p>
+    <p class="breaks-word">The same word cut only because nothing else would hold it: https://edos.edgl.dev/introduction/an-unreasonably-long-path-that-no-column-anywhere-in-this-window-could-ever-hope-to-hold-in-one-piece</p>
+    <p class="breaks-all">And a paragraph broken wherever the line ends, so every line but the last reaches the same right edge.</p>
 
     <p class="quiet">
       This column is 38em wide and centred in the window rather than filling

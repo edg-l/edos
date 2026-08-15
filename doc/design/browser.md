@@ -66,7 +66,8 @@ attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration`, `text-align` (with `justify` set flush
 left, since the blitter cannot stretch a line), `line-height` (a factor, a
-length or `normal`), `text-transform`, `text-indent`, `white-space`, the vertical and left margins,
+length or `normal`), `text-transform`, `text-indent`, `white-space`,
+`word-break`/`overflow-wrap`, the vertical and left margins,
 the measure a box asks for with `width`/`max-width`, the box it paints for
 itself with `background-color`, `padding` and `border` (both shorthands and the
 per-edge longhands), and `display: none`. `doc.rs` carries the computed style onto every `Run` and every
@@ -142,6 +143,15 @@ turns its own newlines into spaces while parsing, so any newline still standing
 when the breaker runs came either from `<br>` or from a box that keeps them —
 and a block whose whitespace is kept is trimmed only where HTML itself ignores
 it, the newline after the start tag and the closing tag's own indentation.
+
+**A word is unbreakable unless the page says otherwise.** By default a word too
+wide for the column is set on a line of its own and allowed to run past the
+edge, because a URL cut across two lines reads worse than a ragged right. Two
+properties change that and `css::Wrap` is the pair resolved into the one answer
+`flow` needs: `overflow-wrap: break-word` cuts only as a last resort, when even
+an empty line would not hold the word, and `word-break: break-all` fills the
+line to the column edge and cuts wherever that falls. `word-break` wins where a
+page sets both, since it asks for the cut in strictly more cases.
 
 **A page's own measure is honoured.** `width` and `max-width` resolve to
 `Computed::measure`, and `margin: 0 auto` sets `Computed::center`, which

@@ -7578,3 +7578,34 @@ Two things fall out of that and are worth knowing before touching it:
 
 A tab is set as a fixed four spaces. A real tab stop is measured from the start
 of the line, and a word that carries its own leading gap has no way to see one.
+
+## `word-break`/`overflow-wrap`: one loop, three answers (2026-08-15)
+
+The line breaker in `view.rs::flow` places a word whole unless it does not fit,
+and what happens then is the whole of these two properties. `css::Wrap` is the
+pair resolved into one value — `Word` (never cut), `Overflow`
+(`overflow-wrap: break-word`, cut only when an empty line would not hold the
+word either), `Anywhere` (`word-break: break-all`, cut wherever the line ends).
+`Wrap::breaks(alone)` is the whole decision, and `alone` is `width > avail`.
+
+They are kept as two independent booleans on `Computed` rather than one enum
+the parser writes, because the properties really are independent: a page may set
+`overflow-wrap: break-word` on `body` and `word-break: normal` on one element,
+and a single field would make the second declaration silently undo the first.
+`Computed::wrap()` resolves them at the point of use, `word-break` winning.
+
+The placement is a loop over the word rather than a single decision, and each
+pass either shortens the text or empties the line, so it always terminates.
+`fit_prefix` finds the longest proper prefix that fits by scanning one character
+at a time and stopping at the first overflow — a longer prefix of the same
+string is never narrower, whatever the face, so there is nothing to bisect.
+
+**A tail carries no gap.** The remainder of a cut word starts the next line with
+`gap = 0` however the source spaced the word itself, which also matches what the
+existing wrap did: a word pushed to a fresh line drops the space before it.
+
+The fixture needs a word that genuinely exceeds the column or the item cannot be
+verified at all. The first attempt used a 79-character URL, which measures about
+526px against the fixture's 38em (~608px) column, so the `break-word` paragraph
+rendered identically to the default one and looked like a bug in the cut. Check
+the measure before reading anything into a fixture that does not break.
