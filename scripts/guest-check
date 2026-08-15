@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Run the guest's own regression suites and report one verdict.
+
+`programs/` carries twenty-one test programs. Before this, three of them were
+run by anything: `fstest` by `fs-regression` and `recovery-check`, `orphantest`
+by `orphan-check`, `inflighttest` by a make target. The rest -- `iotest`'s 23
+syscall cases, `socktest`'s 16, `mmaptest`'s 13, and nine more -- ran only when
+somebody typed the name into the guest, which means a regression in any of them
+waited for somebody to think of it. They all pass; nothing was watching.
+
+Each suite reports through its EXIT CODE, so this reads `$?` rather than
+matching per-suite wording. That is the honest verdict: every suite below has
+at least one non-zero exit path, and a suite that starts printing something
+different does not silently start passing.
+
+    make guest-check
+
+Exits 0 only when every suite exited 0.
+
+Not here, and why:
+
+  * `alloctest` never returns -- it is an allocator stress loop by design.
+  * `orphantest` never returns either: it holds descriptors open and waits for
+    the harness to cut power. `make orphan-check` is its gate.
+  * `fstest` needs a reboot between its halves; `fs-regression` is its gate.
+  * `evicttest` does not pass on any filesystem and did not on v0.6.2 either;
+    see the todo. Putting a suite nobody has watched fail into a gate is how
+    this situation arose in the first place.
+  * `syscallfuzz` is a fuzzer, not a fixed suite, and wants its own budget.
+  * `tcptest` and `wintest` need the network and a window respectively; both
+    belong here once they are made to report an exit code under automation.
+"""
+
+import os
+import re
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vmdrive import BOOT_SECONDS, VM, serial_mark, serial_tail, type_line, vm  # noqa: E402
+
+# (name, argument string, seconds to allow). The budgets are generous: a suite
+# that overruns one is reported as a timeout rather than silently skipped.
+SUITES = [
+    ("iotest", "", 120),
+    ("iotest", "/var", 180),
+    ("mmaptest", "", 120),
+    ("socktest", "", 120),
+    ("sigtest", "", 90),
+    ("killtest", "", 90),
+    ("threadtest", "", 90),
+    ("fputest", "", 120),
+    ("vectest", "", 90),
+    ("stdtest", "", 90),
+    ("exectest", "", 120),
+    ("auxvtest", "", 90),
+    ("lockordertest", "", 120),
+    ("inflighttest", "", 120),
+]
+
+MARKER = "GUESTCHECK"
+
+
+def stop():
+    """Stop the guest, tolerating one that is already gone.
+
+    `edos-vm stop` exits non-zero when there is nothing to stop, and a suite
+    that took the machine down with it must still leave a verdict rather than
+    a traceback.
+    """
+    try:
+        vm("stop")
+    except Exception:
+        pass
+
+
+def boot():
+    """Boot the guest and give the terminal keyboard focus.
+
+    Not `vmdrive.boot`: that one takes an optional disk this script has no use
+    for, and waiting for the panel to publish itself is steadier than a fixed
+    sleep on a loaded host.
+    """
+    vm("start")
+    deadline = time.time() + BOOT_SECONDS * 3
+    mark = 0
+    while time.time() < deadline:
+        if "panel|" in serial_tail(mark):
+            break
+        time.sleep(2)
+    else:
+        sys.exit("guest-check: the desktop never came up")
+    time.sleep(2)
+    vm("click", "400", "300")
+    time.sleep(1)
+
+
+def run_suite(name, args, budget):
+    """Run one suite and return its exit code, or None on timeout.
+
+    The command is echoed to `/dev/klog` rather than read off the terminal:
+    stdout goes to the GUI terminal, which the serial log never sees.
+    """
+    label = f"{name}{(' ' + args) if args else ''}"
+    mark = serial_mark()
+    type_line(f'{name} {args}; echo "{MARKER} {name} rc=$?" > /dev/klog', settle=1)
+
+    deadline = time.time() + budget
+    pattern = re.compile(rf"{MARKER} {re.escape(name)} rc=(\d+)")
+    while time.time() < deadline:
+        found = pattern.search(serial_tail(mark))
+        if found:
+            code = int(found.group(1))
+            print(f"    {label:<22} {'ok' if code == 0 else f'FAILED (exit {code})'}")
+            return code
+        time.sleep(2)
+
+    print(f"    {label:<22} TIMED OUT after {budget}s")
+    return None
+
+
+def main():
+    iso = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "edos-x86_64.iso")
+    if not os.path.exists(iso):
+        sys.exit("missing edos-x86_64.iso; run `make guest-check` rather than this "
+                 "script directly, so the image is built first")
+
+    stop()
+
+    print(f"[1/2] booting, then running {len(SUITES)} suites...")
+    boot()
+
+    print("[2/2] suites:")
+    failures = []
+    for name, args, budget in SUITES:
+        code = run_suite(name, args, budget)
+        if code != 0:
+            failures.append(name if not args else f"{name} {args}")
+
+    stop()
+
+    if failures:
+        print(f"guest-check: FAILED, {len(failures)} suite(s): {', '.join(failures)}")
+        return 1
+    print(f"guest-check: OK, {len(SUITES)} suites passed in the guest")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -263,6 +263,14 @@ test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 test-headless:
 	$(MAKE) test AUDIODEV=none
 
+# The guest's own regression suites, in one boot. `programs/` carries
+# twenty-one test programs and only three were reached by any gate, so
+# `iotest`'s 23 syscall cases and `socktest`'s 16 ran whenever somebody
+# remembered them and never otherwise. Each suite is judged by its exit code.
+.PHONY: guest-check
+guest-check: $(IMAGE_NAME).iso
+	scripts/guest-check
+
 # Storage regressions, both halves. `fs-regression` reboots between writing and
 # verifying, so it catches data that never reached the disk; `fsbench-run`
 # verifies every pattern it writes and reports throughput. Both drive a real
