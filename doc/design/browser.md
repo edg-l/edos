@@ -492,3 +492,32 @@ real selector engine, specificity and `:nth-*` and combinators, most of what
 pulled in by `usvg`. `lightningcss` does not build: it wants a `getrandom`
 handler registered the way `edos_http::tls` does, which was not taken far enough
 to call either way.
+
+### It is done, and what it took
+
+`taffy` arranges the boxes now. Three things had to be true, and each was a
+separate bug found by looking at a screenshot rather than at a compiler:
+
+1. **The measure function must report the content's width, not the width it was
+   offered.** A flex item sized at whatever space happened to be available
+   claims the whole line, so its siblings are pushed onto rows of their own --
+   a column wearing the name of a row. `measure_block` lays the block into a
+   scratch `Layout` and takes the furthest right edge any fragment, rule, image
+   or box reached.
+2. **The inline engine had to place words against the box, not the page.**
+   Three sites in the line breaker put fragments at `PAGE_PAD + indent`. With
+   the boxes moving, the backgrounds travelled and the words stayed behind.
+   They read `origin_x` now.
+3. **Both axes come from the engine.** The first emit walk threaded a running
+   `y` down the tree and used taffy's `x` only, which stacks every box in
+   document order however its container asked them to be arranged.
+
+Verified in the guest: `welcome.html`'s flex section puts three items on one row
+under `space-between`, and its grid section fills `1fr 2fr 120px` and wraps the
+next three onto a second row on the same tracks. The rest of the page is
+**pixel-identical** to the v0.5.0 ISO over the whole content region.
+
+`display: inline-block` is still laid out as plain inline, and that is not a
+taffy limitation: the inline model here has no concept of a box inside a line,
+so an inline-level box would need the line breaker to embed and measure one.
+That is the next piece, and it is independent of the box engine.

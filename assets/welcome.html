@@ -122,6 +122,12 @@
       .capped { max-height: 30px; background: #4c566a }
       /* A floor under the width wins over the ceiling above it. */
       .widened { min-width: 500px; max-width: 200px; background: #434c5e }
+      .row { display: flex; gap: 12px; justify-content: space-between; }
+      .grid { display: grid; grid-template-columns: 1fr 2fr 120px; gap: 8px; }
+      .cell { padding: 6px; color: #fff; }
+      .cell.a { background-color: #2b6cb0; }
+      .cell.b { background-color: #2f855a; }
+      .cell.c { background-color: #975a16; }
     </style>
   </head>
   <body>
@@ -348,6 +354,21 @@ while the newline above them is kept.</p>
     <ul class="plain">
       <li>A list with no marker at all, kept at its indent.</li>
     </ul>
+    <h2>What a flex container arranges</h2>
+    <div class="row">
+      <p class="cell a">first</p>
+      <p class="cell b">second</p>
+      <p class="cell c">third</p>
+    </div>
+    <h2>What a grid container arranges</h2>
+    <div class="grid">
+      <p class="cell a">1fr</p>
+      <p class="cell b">2fr</p>
+      <p class="cell c">120px</p>
+      <p class="cell a">wraps</p>
+      <p class="cell b">to the</p>
+      <p class="cell c">next row</p>
+    </div>
     <hr>
     <p class="mono flush-right">/share/web/welcome.html</p>
   </body>

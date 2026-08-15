@@ -682,7 +682,7 @@ impl Builder<'_> {
                 // nothing about is the element's own.
                 let block = match self.computed.display {
                     Some(Display::Inline) => None,
-                    Some(Display::Block | Display::ListItem) => {
+                    Some(Display::Block | Display::ListItem | Display::Flex | Display::Grid) => {
                         Some(block_kind(&tag).unwrap_or(BlockKind::Paragraph))
                     }
                     None => block_kind(&tag),

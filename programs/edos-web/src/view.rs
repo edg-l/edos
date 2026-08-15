@@ -14,8 +14,11 @@ use edos_render::theme::Theme;
 
 use crate::css::{self, Align, Sides};
 use crate::doc::{Block, BlockKind, Document, Node, Picture, Run};
+use taffy::prelude::{auto, fr, length};
 use taffy::{
-    AvailableSpace, NodeId, Size as TaffySize, Style as TaffyStyle, TaffyError, TaffyTree,
+    AlignContent as TaffyAlignContent, AlignItems as TaffyAlignItems, AvailableSpace,
+    Display as TaffyDisplay, FlexDirection as TaffyFlexDirection, NodeId, Size as TaffySize,
+    Style as TaffyStyle, TaffyError, TaffyTree,
 };
 
 /// Margin between the page and the window edge.
@@ -221,50 +224,57 @@ impl Layout {
                         height: h,
                     };
                 }
-                let w = match avail.width {
+                // The width offered for the trial layout. `MinContent` asks
+                // how narrow the block can be, so it is laid out in the
+                // narrowest column that can hold anything at all.
+                let offer = match avail.width {
                     AvailableSpace::Definite(w) if w > 0.0 => w as u32,
+                    AvailableSpace::MinContent => 1,
                     _ => column,
                 };
-                let mut scratch = Layout {
-                    lines: Vec::new(),
-                    decor: Vec::new(),
-                    links: Vec::new(),
-                    height: 0,
-                    width: w,
-                    origin_x: 0,
-                    column: w,
-                };
-                let end = scratch.lay_block(block, 0);
+                let (content, height) = measure_block(block, offer);
+                // **The width reported is the content's own, not the width it
+                // was offered.** A flex item sized at whatever space happened
+                // to be available claims the whole line and its siblings are
+                // pushed onto rows of their own, which is a column wearing the
+                // name of a row.
                 TaffySize {
-                    width: w as f32,
-                    height: end.max(0) as f32,
+                    width: content as f32,
+                    height: height as f32,
                 }
             });
         if arranged.is_err() {
             return out;
         }
 
-        let mut y = PAGE_PAD as i32;
-        out.emit(&tree, root, PAGE_PAD as i32, &mut y);
-        out.height = (y + PAGE_PAD as i32).max(0) as u32;
+        out.emit(&tree, root, PAGE_PAD as i32, PAGE_PAD as i32);
+        // The page is as tall as the engine made the tree, plus the padding
+        // below it. Taking it from the last leaf emitted would miss a box that
+        // a container placed beside a taller sibling rather than after it.
+        let arranged_h = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
+        out.height = (arranged_h as u32).saturating_add(PAGE_PAD * 2);
         out
     }
 
-    /// Walk the arranged tree in document order and lay each leaf out where
-    /// taffy put it.
+    /// Walk the arranged tree and lay each leaf out where taffy put it.
     ///
-    /// `y` trails the bottom of the last leaf emitted, which is what the page
-    /// height is taken from. Taffy reports a location relative to the parent,
-    /// so the horizontal offset accumulates down the walk.
-    fn emit(&mut self, tree: &TaffyTree<&Block>, node: NodeId, x: i32, y: &mut i32) {
+    /// Both axes come from the engine. Threading a running `y` down the walk
+    /// instead would stack every box in document order, which is a block
+    /// layout wearing the name of whatever the container asked for -- three
+    /// flex items each on a row of their own.
+    ///
+    /// Taffy reports a location relative to the parent, so the walk carries the
+    /// parent's absolute corner and adds to it.
+    fn emit(&mut self, tree: &TaffyTree<&Block>, node: NodeId, x: i32, y: i32) {
         let Ok(layout) = tree.layout(node) else {
             return;
         };
         let x = x + layout.location.x as i32;
+        let y = y + layout.location.y as i32;
         if let Some(block) = tree.get_node_context(node) {
             self.origin_x = x.max(0) as u32;
             self.column = (layout.size.width as u32).max(1);
-            *y = self.lay_block(block, *y);
+            self.lay_block(block, y);
             return;
         }
         let Ok(children) = tree.children(node) else {
@@ -317,7 +327,7 @@ impl Layout {
         let left = plan.border.left.px + plan.pad.left;
         let right = plan.border.right.px + plan.pad.right;
         let avail = box_w.saturating_sub(left + right).max(1);
-        // Everything below places content at `PAGE_PAD + indent`, so the
+        // Everything below places content at `origin_x + indent`, so the
         // inset the box wears is folded into the indent once here.
         plan.indent += left;
         y += (plan.border.top.px + plan.pad.top) as i32;
@@ -456,7 +466,7 @@ impl Layout {
         // places a line of text: a centred figure is written that way far more
         // often than with margins.
         let items = vec![Fragment {
-            x: (PAGE_PAD + plan.indent + align_offset(plan.align, avail, width)) as i32,
+            x: (self.origin_x + plan.indent + align_offset(plan.align, avail, width)) as i32,
             width,
             text: String::new(),
             style: plan.style,
@@ -643,7 +653,7 @@ impl Layout {
                         let head_width = text::width_tracked(&head, word.style, word.letter);
                         line_height = line_height.max(word.height);
                         items.push(Fragment {
-                            x: (plan.indent + PAGE_PAD + pen) as i32,
+                            x: (plan.indent + self.origin_x + pen) as i32,
                             width: head_width,
                             text: head,
                             style: word.style,
@@ -677,7 +687,7 @@ impl Layout {
                 pen += gap;
                 line_height = line_height.max(word.height);
                 items.push(Fragment {
-                    x: (plan.indent + PAGE_PAD + pen) as i32,
+                    x: (plan.indent + self.origin_x + pen) as i32,
                     width,
                     text,
                     style: word.style,
@@ -745,6 +755,50 @@ impl Layout {
     }
 }
 
+/// Lay `block` out in a column `offer` wide and report what it actually took.
+///
+/// The width is the content's own extent -- the furthest right edge any
+/// fragment or box reached -- rather than the column it was offered, because
+/// that is what intrinsic sizing means and what a flex or grid track is sized
+/// from. Reporting the offer instead makes every item as wide as the space it
+/// was shown, which is how a row collapses into a column.
+fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
+    let mut scratch = Layout {
+        lines: Vec::new(),
+        decor: Vec::new(),
+        links: Vec::new(),
+        height: 0,
+        width: offer,
+        origin_x: 0,
+        column: offer,
+    };
+    let height = scratch.lay_block(block, 0).max(0) as u32;
+    let text = scratch
+        .lines
+        .iter()
+        .flat_map(|line| line.items.iter())
+        .map(|item| item.x.max(0) as u32 + item.width)
+        .max()
+        .unwrap_or(0);
+    let rules = scratch
+        .lines
+        .iter()
+        .filter_map(|line| match line.kind {
+            LineKind::Rule { x, width } => Some(x.max(0) as u32 + width),
+            LineKind::Image { width, .. } => Some(width),
+            LineKind::Text => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let boxes = scratch
+        .decor
+        .iter()
+        .map(|d| d.x.max(0) as u32 + d.width)
+        .max()
+        .unwrap_or(0);
+    (text.max(rules).max(boxes), height)
+}
+
 /// Mirror the document's box tree into taffy's.
 ///
 /// A leaf carries its [`Block`] as taffy's node context, which is how the
@@ -753,12 +807,73 @@ impl Layout {
 fn add_node<'a>(tree: &mut TaffyTree<&'a Block>, node: &'a Node) -> Result<NodeId, TaffyError> {
     match node {
         Node::Leaf(block) => tree.new_leaf_with_context(TaffyStyle::DEFAULT, block),
-        Node::Container { children, .. } => {
+        Node::Container { css, children } => {
             let kids: Result<Vec<NodeId>, TaffyError> =
                 children.iter().map(|child| add_node(tree, child)).collect();
-            tree.new_with_children(TaffyStyle::DEFAULT, &kids?)
+            tree.new_with_children(container_style(css), &kids?)
         }
     }
+}
+
+/// The box properties of a container, as taffy takes them.
+///
+/// Only what arranges children is read here. Everything a *leaf* wears -- its
+/// margins, padding, border and measure -- stays with `lay_block`, which drew
+/// them before there was a box engine and still does; setting them here as well
+/// would count them twice.
+fn container_style(css: &css::Computed) -> TaffyStyle {
+    let mut style = TaffyStyle {
+        display: match css.display {
+            Some(css::Display::Flex) => TaffyDisplay::Flex,
+            Some(css::Display::Grid) => TaffyDisplay::Grid,
+            _ => TaffyDisplay::Block,
+        },
+        ..TaffyStyle::DEFAULT
+    };
+    if let Some(dir) = css.flex_direction {
+        style.flex_direction = match dir {
+            css::FlexDirection::Row => TaffyFlexDirection::Row,
+            css::FlexDirection::RowReverse => TaffyFlexDirection::RowReverse,
+            css::FlexDirection::Column => TaffyFlexDirection::Column,
+            css::FlexDirection::ColumnReverse => TaffyFlexDirection::ColumnReverse,
+        };
+    }
+    if let Some(justify) = css.justify {
+        style.justify_content = Some(match justify {
+            css::Justify::Start => TaffyAlignContent::Start,
+            css::Justify::End => TaffyAlignContent::End,
+            css::Justify::Center => TaffyAlignContent::Center,
+            css::Justify::SpaceBetween => TaffyAlignContent::SpaceBetween,
+            css::Justify::SpaceAround => TaffyAlignContent::SpaceAround,
+            css::Justify::SpaceEvenly => TaffyAlignContent::SpaceEvenly,
+        });
+    }
+    if let Some(align) = css.align_items {
+        style.align_items = Some(match align {
+            css::AlignItems::Start => TaffyAlignItems::Start,
+            css::AlignItems::End => TaffyAlignItems::End,
+            css::AlignItems::Center => TaffyAlignItems::Center,
+            css::AlignItems::Stretch => TaffyAlignItems::Stretch,
+        });
+    }
+    if let Some(gap) = css.gap {
+        style.gap = TaffySize {
+            width: length(gap as f32),
+            height: length(gap as f32),
+        };
+    }
+    if let Some(tracks) = &css.grid_columns {
+        style.grid_template_columns = tracks
+            .as_slice()
+            .iter()
+            .map(|track| match track {
+                css::Track::Px(px) => length(*px as f32),
+                css::Track::Fr(f) => fr(*f),
+                css::Track::Auto => auto(),
+            })
+            .collect();
+    }
+    style
 }
 
 /// How one block is set: its base style, where it sits, and what it wears.

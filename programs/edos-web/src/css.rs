@@ -281,12 +281,89 @@ pub enum Display {
     /// flat, so an inline-level box of any kind is a run of text.
     Inline,
     /// A block-level box, which breaks the line and starts one of its own.
-    /// Every layout mode this cannot lay out — `flex`, `grid`, `table` — is a
-    /// block, because that is the part of them a block model can honour.
+    /// A layout mode the box engine does not implement — `table` and its
+    /// parts — is a block, because that is the part of it a block can honour.
     Block,
     /// A block-level box that also draws a marker. `<li>` gets this from the
     /// UA stylesheet, which is why `li { display: block }` loses its bullet.
     ListItem,
+    /// A block-level box that arranges its children along an axis.
+    Flex,
+    /// A block-level box that arranges its children on a track grid.
+    Grid,
+}
+
+/// `flex-direction`: the axis a flex container lays its children along.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FlexDirection {
+    Row,
+    RowReverse,
+    Column,
+    ColumnReverse,
+}
+
+/// `justify-content`: how leftover space along the main axis is distributed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Justify {
+    Start,
+    End,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// `align-items`: where a child sits across the axis.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AlignItems {
+    Start,
+    End,
+    Center,
+    Stretch,
+}
+
+/// The column tracks of a `grid-template-columns`, bounded so that [`Computed`]
+/// stays `Copy` -- it is passed by value on every element, and a heap list here
+/// would put an allocation on that path.
+///
+/// A template naming more than [`Tracks::MAX`] columns is refused rather than
+/// truncated: a grid laid out on some of its tracks is not the page's grid, and
+/// silently dropping the rest reads as a layout bug.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Tracks {
+    items: [Track; Tracks::MAX],
+    len: u8,
+}
+
+impl Tracks {
+    pub const MAX: usize = 16;
+
+    fn from_slice(list: &[Track]) -> Option<Tracks> {
+        if list.is_empty() || list.len() > Tracks::MAX {
+            return None;
+        }
+        let mut items = [Track::Auto; Tracks::MAX];
+        items[..list.len()].copy_from_slice(list);
+        Some(Tracks {
+            items,
+            len: list.len() as u8,
+        })
+    }
+
+    pub fn as_slice(&self) -> &[Track] {
+        &self.items[..self.len as usize]
+    }
+}
+
+/// One column track of `grid-template-columns`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Track {
+    /// A fixed length in pixels.
+    Px(u32),
+    /// A share of the leftover space: the `fr` unit.
+    Fr(f32),
+    /// `auto`, which takes what its content asks for.
+    Auto,
 }
 
 /// `display`, as a keyword the box model can act on. A two-keyword value
@@ -301,7 +378,9 @@ fn parse_display(value: &str) -> Option<Option<Display>> {
             // inline model is what an inline box that opens nothing does.
             "inline" | "inline-block" | "inline-flex" | "inline-grid" | "inline-table"
             | "contents" | "table-cell" | "ruby" => Some(Display::Inline),
-            "block" | "flow-root" | "flex" | "grid" | "table" | "table-row" | "table-row-group"
+            "flex" => Some(Display::Flex),
+            "grid" => Some(Display::Grid),
+            "block" | "flow-root" | "table" | "table-row" | "table-row-group"
             | "table-header-group" | "table-footer-group" | "table-caption" => Some(Display::Block),
             "list-item" => Some(Display::ListItem),
             _ => return None,
@@ -398,6 +477,15 @@ pub struct Computed {
     /// `height`: the border box's own size, which content taller than it
     /// overflows rather than being cut, since `overflow` is visible.
     pub height: Option<u32>,
+    /// How this box arranges its children, when it has any: the flex axis and
+    /// the alignment along and across it, the grid's column tracks, and the
+    /// gutter between items. Read by the box engine off a container and by
+    /// nothing else, which is why none of it inherits.
+    pub flex_direction: Option<FlexDirection>,
+    pub justify: Option<Justify>,
+    pub align_items: Option<AlignItems>,
+    pub gap: Option<u32>,
+    pub grid_columns: Option<Tracks>,
     /// `min-height` and `max-height`, the floor and ceiling that box size is
     /// clamped between. css-sizing-3 §5.
     pub min_height: Option<u32>,
@@ -560,6 +648,52 @@ impl Computed {
             // `justify` is set flush left here: the last line of a justified
             // paragraph is left aligned anyway, and stretching the others needs
             // per-space positioning the blitter does not offer.
+            "flex-direction" => {
+                self.flex_direction = match value {
+                    "row" => Some(FlexDirection::Row),
+                    "row-reverse" => Some(FlexDirection::RowReverse),
+                    "column" => Some(FlexDirection::Column),
+                    "column-reverse" => Some(FlexDirection::ColumnReverse),
+                    _ => return,
+                }
+            }
+            "justify-content" => {
+                self.justify = match value {
+                    "flex-start" | "start" | "left" | "normal" => Some(Justify::Start),
+                    "flex-end" | "end" | "right" => Some(Justify::End),
+                    "center" => Some(Justify::Center),
+                    "space-between" => Some(Justify::SpaceBetween),
+                    "space-around" => Some(Justify::SpaceAround),
+                    "space-evenly" => Some(Justify::SpaceEvenly),
+                    _ => return,
+                }
+            }
+            "align-items" => {
+                self.align_items = match value {
+                    "flex-start" | "start" | "self-start" => Some(AlignItems::Start),
+                    "flex-end" | "end" | "self-end" => Some(AlignItems::End),
+                    "center" => Some(AlignItems::Center),
+                    "stretch" | "normal" => Some(AlignItems::Stretch),
+                    _ => return,
+                }
+            }
+            // `gap` takes a row and a column value; one gutter is what this
+            // engine offers, so the first is taken and a differing second is
+            // ignored rather than silently applied to both axes.
+            "gap" | "grid-gap" | "row-gap" | "column-gap" => {
+                if let Some(px) = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| parse_length(v, root_px, self.em(parent_px)))
+                {
+                    self.gap = Some(px);
+                }
+            }
+            "grid-template-columns" => {
+                if let Some(tracks) = parse_tracks(value, root_px, self.em(parent_px)) {
+                    self.grid_columns = Some(tracks);
+                }
+            }
             "text-align" => match value {
                 "left" | "start" | "justify" => self.align = Align::Left,
                 "center" => self.align = Align::Center,
@@ -2364,6 +2498,48 @@ fn parse_signed_length(value: &str, root_px: u32, em_px: u32) -> Option<i32> {
         _ => return None,
     };
     Some(px.round() as i32)
+}
+
+/// `grid-template-columns`, as the track list the box engine takes.
+///
+/// `repeat(N, <track>)` is expanded here rather than carried, since the engine
+/// wants the tracks themselves. An unreadable track makes the whole
+/// declaration invalid, the way a bad component value does in CSS.
+fn parse_tracks(value: &str, root_px: u32, em_px: u32) -> Option<Tracks> {
+    let mut out = Vec::new();
+    let mut rest = value.trim();
+    while !rest.is_empty() {
+        if let Some(open) = rest.strip_prefix("repeat(") {
+            let close = open.find(')')?;
+            let (args, tail) = open.split_at(close);
+            let (count, track) = args.split_once(',')?;
+            let count: usize = count.trim().parse().ok()?;
+            if count > Tracks::MAX {
+                return None;
+            }
+            let track = parse_track(track.trim(), root_px, em_px)?;
+            out.extend(core::iter::repeat_n(track, count));
+            rest = tail[1..].trim_start();
+            continue;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(end);
+        out.push(parse_track(word, root_px, em_px)?);
+        rest = tail.trim_start();
+    }
+    Tracks::from_slice(&out)
+}
+
+/// One track of a template: a fraction, a length, or `auto`.
+fn parse_track(word: &str, root_px: u32, em_px: u32) -> Option<Track> {
+    if let Some(fr) = word.strip_suffix("fr") {
+        let fr: f32 = fr.trim().parse().ok()?;
+        return (fr.is_finite() && fr >= 0.0).then_some(Track::Fr(fr));
+    }
+    if word == "auto" || word == "min-content" || word == "max-content" {
+        return Some(Track::Auto);
+    }
+    parse_length(word, root_px, em_px).map(Track::Px)
 }
 
 fn parse_length(value: &str, root_px: u32, em_px: u32) -> Option<u32> {
