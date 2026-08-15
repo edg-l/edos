@@ -43,6 +43,33 @@ itself was suspected.
 
 ---
 
+## `rwlock-writer` is a flake, and the rendezvous budget is why
+
+Seen once in two consecutive `make test AUDIODEV=none` runs at `1722b65`: the
+suite reported `TIMEOUT: 55/56` with a panic from `test_rwlock_writer`,
+`rwlock: readers never overlapped (max 1), so the lock is serialising them like
+a mutex`. The immediate next run was `ALL 56 TESTS PASSED`. Nothing in the
+`BlockingRwLock` is wrong; the test's own synchronisation is.
+
+`test_rwlock_reader` (`kernel/src/thread/sched_test.rs`) takes its read guard,
+bumps `rwlock_concurrent`, then waits for the other readers by spinning
+`thread_yield()` **at most 2000 times**. That bound is deliberate — an rwlock
+that really did serialise readers must fail the assert rather than deadlock the
+suite — but it makes the rendezvous a budget, not a barrier. On the 4-CPU boot
+`make test` uses, the other 55 tests are competing for the same CPUs, so a
+reader can exhaust 2000 yields before its peers are ever scheduled inside the
+lock. It then drops its guard and completes, `rwlock_max_concurrent` never rises
+above 1, and the writer's `observed > 1` assert panics a thread that was
+otherwise correct.
+
+So the failure is a statement about scheduler placement under load, not about
+the lock. Do not chase it into `thread/rwlock.rs`. The fix, when it is taken, is
+to make the readers meet on a real barrier and give the anti-deadlock escape a
+wall-clock deadline instead of a yield count, so a loaded CPU buys more waiting
+rather than a false negative.
+
+---
+
 ## `fork` under memory pressure panicked the kernel, and the unwind is the work
 
 `clone_user_page_tables_cow` (`kernel/src/memory/cow.rs`) allocated four levels
@@ -1622,9 +1649,9 @@ does not have to invent them.
 | userspace programs | 123 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 124 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 109,394 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 109,414 code lines across 445 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 50,771 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,401 | `git rev-list --count HEAD` |
+| commits | 1,404 | `git rev-list --count HEAD` |
 | in-kernel test suite | 56 | `make test AUDIODEV=none` |
 | host unit tests | 106 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are seven test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
