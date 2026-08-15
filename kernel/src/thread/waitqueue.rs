@@ -162,6 +162,34 @@ impl WaitQueue {
         n
     }
 
+    /// [`WaitQueue::wake_all`], from an interrupt handler.
+    ///
+    /// Differs only in reaching the scheduler through `wake_thread_irq`, whose
+    /// wake protocol is documented safe from any context. The queue's own lock
+    /// is taken under `without_interrupts` by every waiter, so a handler cannot
+    /// arrive while a CPU holds it and deadlock against itself.
+    pub fn wake_all_irq(&self) -> usize {
+        if !self.has_waiters() {
+            return 0;
+        }
+        let handles: heapless::Vec<Weak<Thread>, WAITQUEUE_CAP> = without_interrupts(|| {
+            let mut q = self.inner.lock();
+            let mut v = heapless::Vec::new();
+            while let Some(h) = q.pop_front() {
+                let _ = v.push(h);
+            }
+            self.publish(&q);
+            v
+        });
+        let mut n = 0usize;
+        for handle in &handles {
+            if sched().wake_thread_irq(handle, WakePriority::Interrupt) {
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Check whether the queue currently has any waiters, without taking the
     /// lock. A producer calls this before doing anything that only a waiter
     /// would care about.

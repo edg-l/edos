@@ -6,6 +6,51 @@ session.
 
 ---
 
+## The flip parks instead of spinning, and sends the regions rather than their box
+
+Two follow-ons to the asynchronous flip, and the first one corrects a claim made
+when it landed.
+
+**"You cannot park under a preempt spinlock, so the drain must spin" was only
+half true.** The lock is needed for the *look*, not for the *wait*. The ioctl
+takes `DISPLAY`, polls, and drops it; only then does it park. The condition it
+parks on is the interrupt count rather than the queue's own state, because a
+parked thread holds no lock and so cannot read the queue -- a changed count
+means a completion landed and the poll is worth repeating.
+`WaitQueue::wake_all_irq` is the handler's half, reaching the scheduler through
+`wake_thread_irq`, whose wake protocol is documented safe from any context.
+
+A display with no vector bound still spins, because there is nothing to park on:
+no interrupt is coming. And the park is bounded, eight rounds of 4 ms, after
+which the frame is let through. A torn frame is better than a compositor that
+never returns.
+
+**One flush, several transfers.** `edos-wm` was computing disjoint regions with
+`coalesced()` -- which deliberately refuses to merge a pair whose union costs
+more than the two apart -- and then unioning them anyway and transferring the
+bounding box. That was free under `blob=on`, where nothing is copied, and is a
+real per-frame copy of the gap between the regions under `blob=off`.
+
+`FB_IOCTL_FLIP_RECTS` takes the list. Only `RESOURCE_FLUSH` makes the host
+present, so one flush over the bounding box after N transfers keeps the frame
+arriving whole -- which is the property the union was protecting -- while the
+copy is charged for the pixels that actually changed.
+
+Two things worth knowing if this is revisited:
+
+- **`publish` still copies the bounding box** into VRAM, not the regions. That
+  is deliberate: it is a guest-local memcpy of pixels that are already correct,
+  and splitting it would save nothing the host cares about.
+- **A page-flipping display takes the bounding box anyway.** The pages
+  alternate, so the region the *other* page is missing has to go out with this
+  frame; splitting it would leave that page stale. Only the single-buffered
+  virtio path takes the region list.
+
+Verified by dragging a window away and back and diffing the framebuffer against
+its starting state: the only difference was 159 pixels of the terminal's
+blinking cursor, caught mid-blink.
+
+
 ## The display flip waited on the host, and the wait was in the wrong place
 
 `transfer_and_flush` submitted its commands and then **spun until the host had

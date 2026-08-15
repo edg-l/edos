@@ -1,8 +1,10 @@
 use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
 
 use crate::{
     fs::{DevFsDevice, DevFsError, register_device_str},
     graphics::DISPLAY,
+    interrupts::io::{VIRTIO_GPU_IRQS_FIRED, VIRTIO_GPU_WAITERS},
 };
 
 pub const FB_IOCTL_DRAW_RECT: u64 = 0x4642_0001;
@@ -23,6 +25,14 @@ pub const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
 /// [`Display::flip_wait`]: crate::graphics::Display::flip_wait
 pub const FB_IOCTL_FLIP_WAIT: u64 = 0x4642_000A;
 
+/// How many times [`FB_IOCTL_FLIP_WAIT`] parks before giving up on the display,
+/// and how long each park lasts. Sized so the total is far longer than any
+/// frame and far shorter than a user waiting on a wedged desktop.
+pub const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
+
+const FLIP_WAIT_ROUNDS: u32 = 8;
+const FLIP_WAIT_SLICE: core::time::Duration = core::time::Duration::from_millis(4);
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FramebufferFlipRect {
@@ -30,6 +40,19 @@ pub struct FramebufferFlipRect {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// The regions of one frame, and the box that covers them.
+///
+/// Several transfers behind one flush: the host copies only what changed, and
+/// still presents the frame in one piece. `bounds` is what gets flushed and so
+/// must cover every rect in `rects`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferFlipRects {
+    pub count: u32,
+    pub bounds: FramebufferFlipRect,
+    pub rects: [FramebufferFlipRect; crate::graphics::MAX_FLIP_RECTS],
 }
 
 #[repr(C)]
@@ -195,8 +218,64 @@ impl DevFsDevice for FramebufferDevice {
             }
             FB_IOCTL_FLIP_WAIT => {
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
-                display.lock().flip_wait();
+                // **The lock is held for the look, never for the wait.** The
+                // queue lives behind `DISPLAY`, a preempt-disabling spinlock,
+                // and parking under one is forbidden -- but only the poll needs
+                // the lock. Dropping it before parking is what turns this from
+                // a spin into a sleep.
+                //
+                // The interrupt count is the condition rather than the queue's
+                // own state, because the queue cannot be read without the lock
+                // and a parked thread holds none. A changed count means a
+                // completion landed and the poll is worth repeating.
+                for _ in 0..FLIP_WAIT_ROUNDS {
+                    let seq = {
+                        let mut d = display.lock();
+                        if d.flip_poll() {
+                            return Ok(0);
+                        }
+                        if !d.flip_has_irq() {
+                            // Nothing will announce the completion, so there is
+                            // nothing to park on. The driver's own bounded look
+                            // is all that is left.
+                            d.flip_wait();
+                            return Ok(0);
+                        }
+                        VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed)
+                    };
+                    VIRTIO_GPU_WAITERS.wait_until_timeout(
+                        || VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed) != seq,
+                        Some(FLIP_WAIT_SLICE),
+                    );
+                }
+                // A display that has not answered in this long is not going to
+                // be waited into working. Let the frame through: the pixels may
+                // tear, which is better than a compositor that never returns.
                 Ok(0)
+            }
+            FB_IOCTL_FLIP_RECTS => {
+                if arg == 0 {
+                    return Err(DevFsError::IoError);
+                }
+                let list = unsafe { &*(arg as *const FramebufferFlipRects) };
+                let n = (list.count as usize).min(crate::graphics::MAX_FLIP_RECTS);
+                if n == 0 {
+                    return Ok(0);
+                }
+                let mut rects = [(0u32, 0u32, 0u32, 0u32); crate::graphics::MAX_FLIP_RECTS];
+                for (slot, r) in rects.iter_mut().zip(&list.rects[..n]) {
+                    *slot = (r.x, r.y, r.width, r.height);
+                }
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                Ok(display.lock().flip_rects(
+                    &rects[..n],
+                    (
+                        list.bounds.x,
+                        list.bounds.y,
+                        list.bounds.width,
+                        list.bounds.height,
+                    ),
+                ))
             }
             FB_IOCTL_FLIP_RECT => {
                 if arg == 0 {

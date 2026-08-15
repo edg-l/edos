@@ -48,6 +48,11 @@ const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
 const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
 const FB_IOCTL_FLIP_WAIT: u64 = 0x4642_000A;
+const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
+
+/// The most regions one frame may be split into. Mirrors the kernel's
+/// `graphics::MAX_FLIP_RECTS`; the two are one ABI and change together.
+pub const MAX_FLIP_RECTS: usize = 16;
 const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 
@@ -163,6 +168,61 @@ impl Framebuffer {
     /// submitted, so in the ordinary case there is nothing left to wait for.
     pub fn flip_wait(&self) {
         let _ = self.fd.ioctl(FB_IOCTL_FLIP_WAIT, 0, 0, IOCTL_ARG_IN);
+    }
+
+    /// Publish several disjoint regions as one frame.
+    ///
+    /// One flush behind several transfers, so the display copies only the
+    /// pixels that changed while the frame still arrives whole. `bounds` must
+    /// cover every rect.
+    pub fn flip_rects(&self, rects: &[(u32, u32, u32, u32)], bounds: (u32, u32, u32, u32)) -> u64 {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct FlipRect {
+            x: u32,
+            y: u32,
+            width: u32,
+            height: u32,
+        }
+        #[repr(C)]
+        struct FlipRects {
+            count: u32,
+            bounds: FlipRect,
+            rects: [FlipRect; MAX_FLIP_RECTS],
+        }
+        let zero = FlipRect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        let n = rects.len().min(MAX_FLIP_RECTS);
+        let mut list = FlipRects {
+            count: n as u32,
+            bounds: FlipRect {
+                x: bounds.0,
+                y: bounds.1,
+                width: bounds.2,
+                height: bounds.3,
+            },
+            rects: [zero; MAX_FLIP_RECTS],
+        };
+        for (slot, &(x, y, w, h)) in list.rects.iter_mut().zip(&rects[..n]) {
+            *slot = FlipRect {
+                x,
+                y,
+                width: w,
+                height: h,
+            };
+        }
+        self.fd
+            .ioctl(
+                FB_IOCTL_FLIP_RECTS,
+                (&mut list as *mut FlipRects) as u64,
+                core::mem::size_of::<FlipRects>(),
+                IOCTL_ARG_IN,
+            )
+            .unwrap_or(0)
     }
 
     pub fn flip_rect(&self, x: u32, y: u32, w: u32, h: u32) -> u64 {
@@ -1860,6 +1920,27 @@ impl Screen {
         // published, whatever it had before.
         self.pending_for_back_page = (0, 0, w, h);
         let offset = self.framebuffer.flip();
+        if let Some(ref mut vram) = self.vram {
+            vram.update_back_offset(offset);
+        }
+    }
+
+    /// Publish several disjoint regions as one frame.
+    ///
+    /// `bounds` must cover every rect. On a page-flipping display the pages
+    /// alternate, so the region the *other* page is missing has to go out with
+    /// this frame too, and the bounding box is the honest answer there --
+    /// splitting it would leave the other page stale.
+    pub fn flip_rects(&mut self, rects: &[(u32, u32, u32, u32)], bounds: (u32, u32, u32, u32)) {
+        if self.double_buffered() {
+            let (x, y, w, h) = union_rect(self.pending_for_back_page, bounds);
+            self.flip_rect(x, y, w, h);
+            return;
+        }
+        let (bx, by, bw, bh) = bounds;
+        self.publish(bx, by, bw, bh);
+        self.pending_for_back_page = bounds;
+        let offset = self.framebuffer.flip_rects(rects, bounds);
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
         }

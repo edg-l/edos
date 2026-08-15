@@ -9,6 +9,9 @@ use crate::{log, println};
 /// Entry 0, matching the vector `graphics::init` programs for this device.
 const VIRTIO_GPU_MSIX_VECTOR: u16 = 0;
 
+/// Size of the DMA scratch buffer the control queue's commands are written in.
+const SCRATCH_BYTES: usize = 4096;
+
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
 const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
@@ -278,7 +281,7 @@ impl VirtioGpu {
         transport.set_driver_ok();
 
         let scratch = dma()
-            .allocate_sized(4096)
+            .allocate_sized(SCRATCH_BYTES)
             .map_err(|_| "virtio-gpu: failed to allocate scratch buffer")?;
 
         let cursor_scratch = dma()
@@ -629,6 +632,26 @@ impl VirtioGpu {
     /// spinlock and parking under one is forbidden, so the bound is short and
     /// the frame is dropped rather than held. A dropped frame is one the
     /// compositor draws again a moment later; a held one stalls every window.
+    /// Reclaim whatever has already completed, without waiting.
+    ///
+    /// Returns true when nothing is outstanding. This is the whole of what the
+    /// `DISPLAY` lock needs to be held for: the waiting happens outside it.
+    pub fn flip_poll(&mut self) -> bool {
+        while self.pending > 0 {
+            let Some((head, _)) = self.control_queue.poll_used() else {
+                return false;
+            };
+            self.control_queue.reclaim(head);
+            self.pending -= 1;
+        }
+        true
+    }
+
+    /// Whether the control queue announces its completions.
+    pub fn has_irq(&self) -> bool {
+        self.irq
+    }
+
     pub fn flip_wait(&mut self) {
         self.reclaim_pending();
     }
@@ -668,6 +691,112 @@ impl VirtioGpu {
     /// the pixels on screen, not a receipt -- so the only thing the completions
     /// are needed for is knowing when the scratch buffer is free again, and
     /// that is asked at the start of the next frame.
+    /// Transfer several rectangles and publish them as one frame.
+    ///
+    /// **One flush, several transfers.** Only `RESOURCE_FLUSH` makes the host
+    /// present, so the frame still arrives whole -- which is the property that
+    /// stopped the regions being sent separately in the first place -- while
+    /// the copy is charged only for the pixels that changed. The compositor
+    /// already decides which regions are worth keeping apart; sending their
+    /// bounding box instead spends the gap between them on every frame, and
+    /// under `blob=off` that gap is a real host-side copy.
+    ///
+    /// `flush` must cover every rect in `rects`.
+    pub fn transfer_rects_and_flush(
+        &mut self,
+        resource_id: u32,
+        rects: &[VirtioGpuRect],
+        flush_rect: VirtioGpuRect,
+        stride: u32,
+    ) {
+        if !self.reclaim_pending() {
+            return;
+        }
+
+        let hdr_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
+        let xfer_size = core::mem::size_of::<VirtioGpuTransferToHost2d>();
+        let flush_size = core::mem::size_of::<VirtioGpuResourceFlush>();
+        let scratch_phys = self.scratch.phys_addr().as_u64();
+
+        // One command and one response per transfer, then the flush, all in the
+        // scratch buffer. A frame with more regions than fit is not worth a
+        // second buffer: the flush rect covers them all, so falling back to the
+        // single-transfer path draws the same pixels.
+        let slot = (xfer_size + 7) & !7;
+        let slot = slot + ((hdr_size + 7) & !7);
+        let needed = slot * rects.len() + ((flush_size + 7) & !7) + ((hdr_size + 7) & !7);
+        if self.use_blob || rects.len() < 2 || needed > SCRATCH_BYTES {
+            self.transfer_and_flush(resource_id, flush_rect, stride);
+            return;
+        }
+
+        let mut pushed = 0u32;
+        for (i, rect) in rects.iter().enumerate() {
+            let cmd_off = i * slot;
+            let resp_off = cmd_off + ((xfer_size + 7) & !7);
+            let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
+            xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+            xfer.rect = *rect;
+            xfer.offset = (rect.y as u64) * (stride as u64) + (rect.x as u64) * 4;
+            xfer.resource_id = resource_id;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &xfer as *const _ as *const u8,
+                    self.scratch.as_ptr().add(cmd_off),
+                    xfer_size,
+                );
+                core::ptr::write_bytes(self.scratch.as_ptr().add(resp_off), 0, hdr_size);
+            }
+            let bufs = [
+                (scratch_phys + cmd_off as u64, xfer_size as u32, 0u16),
+                (
+                    scratch_phys + resp_off as u64,
+                    hdr_size as u32,
+                    VIRTQ_DESC_F_WRITE,
+                ),
+            ];
+            if self.control_queue.push(&bufs).is_none() {
+                break;
+            }
+            pushed += 1;
+        }
+
+        // Nothing was transferred, so there is nothing to publish.
+        if pushed == 0 {
+            return;
+        }
+        self.pending += pushed;
+
+        let flush_cmd_off = slot * rects.len();
+        let flush_resp_off = flush_cmd_off + ((flush_size + 7) & !7);
+        let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
+        flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+        flush.rect = flush_rect;
+        flush.resource_id = resource_id;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &flush as *const _ as *const u8,
+                self.scratch.as_ptr().add(flush_cmd_off),
+                flush_size,
+            );
+            core::ptr::write_bytes(self.scratch.as_ptr().add(flush_resp_off), 0, hdr_size);
+        }
+        let flush_bufs = [
+            (scratch_phys + flush_cmd_off as u64, flush_size as u32, 0u16),
+            (
+                scratch_phys + flush_resp_off as u64,
+                hdr_size as u32,
+                VIRTQ_DESC_F_WRITE,
+            ),
+        ];
+        if self.control_queue.push(&flush_bufs).is_some() {
+            self.pending += 1;
+        }
+
+        let notify_off = self.control_queue.notify_off;
+        self.transport.notify_queue(0, notify_off);
+    }
+
     pub fn transfer_and_flush(&mut self, resource_id: u32, rect: VirtioGpuRect, stride: u32) {
         // The previous frame's commands are still in the scratch buffer if this
         // fails, so writing this frame's over them would hand the host a

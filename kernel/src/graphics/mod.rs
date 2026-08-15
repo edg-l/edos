@@ -124,6 +124,15 @@ fn try_init_virtio_gpu() -> Option<Display> {
 // Exactly one `Display` exists for the life of the system, so the size of the
 // unused variant costs nothing.
 #[allow(clippy::large_enum_variant)]
+/// The most regions one frame may be split into, matching the compositor's own
+/// dirty-region cap.
+pub const MAX_FLIP_RECTS: usize = 16;
+
+// There is exactly one `Display` in the system, held in a static behind a lock.
+// The variants differ by about 3 KB, so boxing the larger would trade one
+// one-time allocation for an indirection on the flip path, which every frame
+// pays.
+#[allow(clippy::large_enum_variant)]
 pub enum Display {
     Vbe(DirectFramebuffer),
     VirtioGpu(VirtioGpuDisplay),
@@ -172,6 +181,18 @@ impl Display {
         }
     }
 
+    /// Publish several disjoint regions as one frame. `bounds` must cover them.
+    pub fn flip_rects(
+        &mut self,
+        rects: &[(u32, u32, u32, u32)],
+        bounds: (u32, u32, u32, u32),
+    ) -> u64 {
+        match self {
+            Display::Vbe(fb) => fb.flip(),
+            Display::VirtioGpu(vg) => vg.flip_rects(rects, bounds),
+        }
+    }
+
     /// Wait until the previous frame's pixels have been read.
     ///
     /// **Called before the compositor writes the framebuffer, not after.** The
@@ -185,6 +206,22 @@ impl Display {
             // Nothing asynchronous to wait for: a VBE flip is a register write.
             Display::Vbe(_) => {}
             Display::VirtioGpu(vg) => vg.flip_wait(),
+        }
+    }
+
+    /// Reclaim what has completed without waiting; true when nothing is left.
+    pub fn flip_poll(&mut self) -> bool {
+        match self {
+            Display::Vbe(_) => true,
+            Display::VirtioGpu(vg) => vg.flip_poll(),
+        }
+    }
+
+    /// Whether completions are announced, or have to be discovered by looking.
+    pub fn flip_has_irq(&self) -> bool {
+        match self {
+            Display::Vbe(_) => false,
+            Display::VirtioGpu(vg) => vg.flip_has_irq(),
         }
     }
 
@@ -367,6 +404,51 @@ impl VirtioGpuDisplay {
     /// [`Display::flip_wait`].
     pub fn flip_wait(&mut self) {
         self.gpu.flip_wait();
+    }
+
+    pub fn flip_poll(&mut self) -> bool {
+        self.gpu.flip_poll()
+    }
+
+    pub fn flip_has_irq(&self) -> bool {
+        self.gpu.has_irq()
+    }
+
+    /// Publish several disjoint regions as one frame. See
+    /// [`VirtioGpu::transfer_rects_and_flush`].
+    pub fn flip_rects(
+        &mut self,
+        rects: &[(u32, u32, u32, u32)],
+        bounds: (u32, u32, u32, u32),
+    ) -> u64 {
+        use crate::drivers::virtio::gpu::VirtioGpuRect;
+        let mut list: [VirtioGpuRect; MAX_FLIP_RECTS] = [VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }; MAX_FLIP_RECTS];
+        let n = rects.len().min(MAX_FLIP_RECTS);
+        for (slot, &(x, y, w, h)) in list.iter_mut().zip(&rects[..n]) {
+            *slot = VirtioGpuRect {
+                x,
+                y,
+                width: w,
+                height: h,
+            };
+        }
+        self.gpu.transfer_rects_and_flush(
+            1,
+            &list[..n],
+            VirtioGpuRect {
+                x: bounds.0,
+                y: bounds.1,
+                width: bounds.2,
+                height: bounds.3,
+            },
+            self.width * 4,
+        );
+        0
     }
 
     pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) -> u64 {

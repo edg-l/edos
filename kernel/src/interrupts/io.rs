@@ -10,6 +10,7 @@ use crate::{
     thread::{
         scheduler::{WakePriority, sched},
         thread::Thread,
+        waitqueue::WaitQueue,
     },
 };
 
@@ -33,6 +34,13 @@ pub static AHCI_IRQS_FIRED: AtomicU64 = AtomicU64::new(0);
 /// lost.
 pub static VIRTIO_GPU_IRQS_FIRED: AtomicU64 = AtomicU64::new(0);
 
+/// Where a thread waiting for the display to finish reading a frame parks.
+///
+/// The handler cannot touch the queue itself -- that is behind `DISPLAY`, which
+/// a flip holds with preemption disabled -- so it publishes the count above and
+/// wakes whoever is here. The waiter re-takes `DISPLAY` and looks.
+pub static VIRTIO_GPU_WAITERS: WaitQueue = WaitQueue::new();
+
 pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::ps2_drain_buffer();
     unsafe { get_lapic().end_of_interrupt() };
@@ -42,6 +50,7 @@ pub(super) extern "x86-interrupt" fn virtio_gpu_interrupt_handler(
     _stack_frame: InterruptStackFrame,
 ) {
     VIRTIO_GPU_IRQS_FIRED.fetch_add(1, Ordering::Relaxed);
+    VIRTIO_GPU_WAITERS.wake_all_irq();
     unsafe { get_lapic().end_of_interrupt() };
 }
 

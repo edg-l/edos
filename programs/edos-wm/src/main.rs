@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use edos_lib::config;
 use edos_lib::io::klog_dump;
-use edos_render::graphics::Screen;
+use edos_render::graphics::{MAX_FLIP_RECTS, Screen};
 use edos_render::window::{
     WINDOW_LIST_CONSUME_DAMAGE, WindowEvent, WindowEventType, WindowListEntry, flags, focused_id,
     property, set_frame, window_list, window_list_flags, window_minimize, window_send_event,
@@ -989,8 +989,29 @@ fn main() {
                     .copied()
                     .reduce(|acc, rect| acc.union(rect));
                 if let Some(c) = union.and_then(|u| u.clipped(screen_w, screen_h)) {
-                    sent_pixels += c.area();
-                    screen.flip_rect(c.x as u32, c.y as u32, c.w, c.h);
+                    // The regions go out as themselves, behind one flush over
+                    // the box that covers them. `coalesced` has already decided
+                    // which are worth keeping apart -- it refuses to merge a
+                    // pair whose union costs more than the two -- and sending
+                    // the box instead spent the gap between them on every
+                    // frame. Free where the display reads guest memory, a real
+                    // copy where it does not.
+                    let mut list = [(0u32, 0u32, 0u32, 0u32); MAX_FLIP_RECTS];
+                    let mut n = 0;
+                    for rect in rects[..count].iter() {
+                        if let Some(r) = rect.clipped(screen_w, screen_h) {
+                            list[n] = (r.x as u32, r.y as u32, r.w, r.h);
+                            sent_pixels += r.area();
+                            n += 1;
+                            if n == MAX_FLIP_RECTS {
+                                break;
+                            }
+                        }
+                    }
+                    if n == 0 {
+                        sent_pixels += c.area();
+                    }
+                    screen.flip_rects(&list[..n], (c.x as u32, c.y as u32, c.w, c.h));
                 }
                 // Past the whole screen there is nothing left to save, and one
                 // ioctl beats several.
