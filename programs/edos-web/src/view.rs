@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use edos_render::font::{Family, Weight, size};
 use edos_render::metrics::space;
-use edos_render::text::{self, Style, Surface};
+use edos_render::text::{self, Style, Surface, fit_prefix};
 use edos_render::theme::Theme;
 
 use crate::css::{self, Align, Sides};
@@ -1098,22 +1098,6 @@ struct Plan {
 fn leading(line: css::LineHeight, style: Style) -> u32 {
     line.px(style.px)
         .unwrap_or_else(|| text::line_height(style))
-}
-
-/// The longest proper prefix of `text` that fits in `room` pixels, or `None`
-/// when not even its first character does.
-///
-/// The scan stops at the first overflow rather than measuring every prefix: a
-/// longer prefix of the same string is never narrower, whatever the face.
-fn fit_prefix(text: &str, style: Style, room: u32, letter: i32) -> Option<usize> {
-    let mut fits = None;
-    for (index, _) in text.char_indices().skip(1) {
-        if text::width_tracked(&text[..index], style, letter) > room {
-            break;
-        }
-        fits = Some(index);
-    }
-    fits
 }
 
 /// The border box's height: what the page declared, clamped, or the `content`

@@ -93,22 +93,7 @@ impl TextInput {
     /// Rounds to the nearer edge of the character it lands in, so clicking the
     /// right half of a glyph puts the cursor after it.
     fn char_at_offset(&self, offset: u32) -> usize {
-        let mut previous = 0;
-        for (index, (at, _)) in self.text.char_indices().enumerate() {
-            let advance = text_width(&self.text[..at]);
-            if advance > offset {
-                let midpoint = previous + (advance - previous) / 2;
-                return if offset < midpoint { index - 1 } else { index };
-            }
-            previous = advance;
-        }
-        let full = text_width(&self.text);
-        let midpoint = previous + (full - previous) / 2;
-        if self.char_len() > 0 && offset < midpoint {
-            self.char_len() - 1
-        } else {
-            self.char_len()
-        }
+        crate::text::char_at_width(&self.text, crate::text::Style::new(0), offset)
     }
 
     /// Get the placeholder text.

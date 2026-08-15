@@ -216,11 +216,24 @@ fn advance(ch: char, style: Style) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// `text` cut to `available` pixels, with an [`ELLIPSIS`] where it was cut.
+/// Each character's byte offset and the pen position it starts at — which is
+/// the width of everything before it, and so [`width_tracked`] of that prefix
+/// once rounded.
 ///
-/// One pass, accumulating advances. Measuring each candidate prefix from the
-/// start instead is quadratic in both the metric lookups and the allocations,
-/// which a path bar redrawing on every pointer move pays for every frame.
+/// This is the one pass every "how much of this fits" question wants. Asking
+/// [`width`] about each candidate prefix instead re-measures the whole prefix
+/// per character, which is quadratic in metric lookups on strings a text field
+/// remeasures per keystroke and a line breaker per relayout.
+fn pens(text: &str, style: Style, letter: i32) -> impl Iterator<Item = (usize, f32)> + '_ {
+    let mut pen = 0.0f32;
+    text.char_indices().map(move |(at, ch)| {
+        let before = pen;
+        pen += advance(ch, style) + letter as f32;
+        (at, before)
+    })
+}
+
+/// `text` cut to `available` pixels, with an [`ELLIPSIS`] where it was cut.
 pub fn elide(text: &str, available: u32, style: Style) -> String {
     if width(text, style) <= available {
         return text.to_string();
@@ -237,6 +250,47 @@ pub fn elide(text: &str, available: u32, style: Style) -> String {
     }
     kept.push_str(ELLIPSIS);
     kept
+}
+
+/// The longest *proper* prefix of `text` that fits in `room` pixels when set
+/// in `style` with `letter` pixels of tracking, as a byte offset, or `None`
+/// when not even its first character does.
+pub fn fit_prefix(text: &str, style: Style, room: u32, letter: i32) -> Option<usize> {
+    let mut fits = None;
+    for (at, pen) in pens(text, style, letter).skip(1) {
+        if pen.ceil() as u32 > room {
+            break;
+        }
+        fits = Some(at);
+    }
+    fits
+}
+
+/// The character position closest to `offset` pixels from the first glyph.
+///
+/// Rounds to the nearer edge of the character it lands in, so clicking the
+/// right half of a glyph puts the caret after it. The count of characters is
+/// returned for an `offset` past the end.
+pub fn char_at_width(text: &str, style: Style, offset: u32) -> usize {
+    // The pen before the first character is zero, so the `index - 1` below is
+    // never reached at index 0.
+    let mut previous = 0;
+    for (index, (_, pen)) in pens(text, style, 0).enumerate() {
+        let advance = pen.ceil() as u32;
+        if advance > offset {
+            let midpoint = previous + (advance - previous) / 2;
+            return if offset < midpoint { index - 1 } else { index };
+        }
+        previous = advance;
+    }
+    let count = text.chars().count();
+    let full = width(text, style);
+    let midpoint = previous + (full - previous) / 2;
+    if count > 0 && offset < midpoint {
+        count - 1
+    } else {
+        count
+    }
 }
 
 /// Height of one line set in `style`, in pixels.
