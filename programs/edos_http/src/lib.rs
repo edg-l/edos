@@ -9,6 +9,7 @@ use std::{
     fmt,
     io::{self, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -78,6 +79,13 @@ pub struct Options {
     /// Correct an unset clock over SNTP before a TLS handshake. See
     /// [`tls::ensure_clock_usable`].
     pub fix_clock: bool,
+    /// Keep a connection open after a response and use it for the next request
+    /// to the same host.
+    ///
+    /// A page is a document plus its stylesheets and its images, and without
+    /// this each of those pays a TCP handshake, a TLS handshake and a
+    /// certificate verification of its own, all of it in software here.
+    pub keep_alive: bool,
     /// Ask for the body gzipped, and inflate what comes back.
     ///
     /// Worth it for anything the server does not already store compressed: a
@@ -98,6 +106,7 @@ impl Default for Options {
             connect_timeout: Duration::from_secs(5),
             user_agent: concat!("grab/", env!("CARGO_PKG_VERSION"), " (EDOS)").to_string(),
             fix_clock: true,
+            keep_alive: true,
             accept_gzip: true,
             extra_headers: Vec::new(),
         }
@@ -158,25 +167,22 @@ pub fn fetch(
     let mut target = Url::parse(url)?;
 
     for _ in 0..=opts.max_redirects {
-        let (mut reader, sent) = send_request(&target, opts)?;
-        let (status, reason) = read_status_line(&mut reader)?;
-        let (headers, raw_headers) = read_headers(&mut reader)?;
+        let (mut reader, head, http11) = request_once(&target, opts)?;
 
-        let head = Head {
-            status,
-            reason,
-            headers,
-            final_url: target.to_string(),
-            sent,
-            raw_headers,
-        };
-
-        if is_redirect(status) {
+        if is_redirect(head.status) {
             if let Some(location) = head.header("Location") {
-                // The body of a redirect is of no interest, and the connection
-                // is closed rather than drained: `Connection: close` means
-                // there is nothing to reuse it for.
-                target = target.join(location)?;
+                let next = target.join(location)?;
+                // The body of a redirect is of no interest, but reading it is
+                // what leaves the connection at the start of the next response
+                // rather than in the middle of this one. A body that does not
+                // frame its own end is not worth draining, since draining it
+                // *is* reading to the close.
+                let drained = read_body(&mut reader, &head, opts, &mut io::sink(), &mut |_, _| {})
+                    .unwrap_or(false);
+                if opts.keep_alive && reusable(&head, http11, drained) {
+                    put_idle(pool_key(&target), reader);
+                }
+                target = next;
                 continue;
             }
         }
@@ -185,21 +191,59 @@ pub fn fetch(
         // buffered and inflated after: the caller asked for a stream, and a
         // response that is 100 KB on the wire and a megabyte after it should
         // not exist twice in memory to make that true.
-        if opts.accept_gzip && head.header("Content-Encoding").is_some_and(is_gzip) {
+        let definite = if opts.accept_gzip && head.header("Content-Encoding").is_some_and(is_gzip) {
             let mut decoder = GzDecoder::new(Limited {
                 sink,
                 written: 0,
                 limit: opts.max_body,
             });
-            read_body(&mut reader, &head, opts, &mut decoder, progress)?;
+            let definite = read_body(&mut reader, &head, opts, &mut decoder, progress)?;
             decoder.finish()?;
+            definite
         } else {
-            read_body(&mut reader, &head, opts, sink, progress)?;
+            read_body(&mut reader, &head, opts, sink, progress)?
+        };
+        if opts.keep_alive && reusable(&head, http11, definite) {
+            put_idle(pool_key(&target), reader);
         }
         return Ok(head);
     }
 
     Err(Error::TooManyRedirects(opts.max_redirects))
+}
+
+/// Send one request and read its head, retrying once when a pooled connection
+/// turns out to have been closed by the far end.
+///
+/// A server may close an idle connection at any time and the client cannot be
+/// told, so a reused connection failing before the status line is ordinary
+/// rather than an error. A *fresh* connection failing the same way is the
+/// error it looks like, which is why only the reused case retries.
+fn request_once(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, Head, bool), Error> {
+    let mut last = None;
+    for attempt in 0..2 {
+        let (mut reader, sent, reused) = send_request(target, opts)?;
+        let read = read_status_line(&mut reader).and_then(|status| {
+            let (headers, raw_headers) = read_headers(&mut reader)?;
+            Ok((status, headers, raw_headers))
+        });
+        match read {
+            Ok(((status, reason, http11), headers, raw_headers)) => {
+                let head = Head {
+                    status,
+                    reason,
+                    headers,
+                    final_url: target.to_string(),
+                    sent,
+                    raw_headers,
+                };
+                return Ok((reader, head, http11));
+            }
+            Err(err) if reused && attempt == 0 => last = Some(err),
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| Error::Protocol("no response".to_string())))
 }
 
 /// Whether a `Content-Encoding` names gzip. `x-gzip` is the older spelling and
@@ -237,6 +281,71 @@ impl Write for Limited<'_> {
     }
 }
 
+/// Idle connections, by scheme and authority, waiting to carry another
+/// request.
+///
+/// HTTP/1.1 leaves a connection open unless someone says otherwise, and this
+/// client was saying otherwise on every request: a page is a document plus its
+/// stylesheets and its images, and each of those was a TCP handshake, a TLS
+/// handshake and a certificate verification of its own, all of it in software
+/// on this machine.
+///
+/// One pool for the process rather than one per thread, and the difference is
+/// not academic: `edos-web` loads each page on a thread of its own, so a
+/// thread-local pool would be empty on every navigation and would hold a
+/// connection only for the subresources of the page that opened it. A
+/// connection is only ever in the pool *between* responses, never during one,
+/// so a lock around the list is the whole of what sharing it costs.
+///
+/// A pooled connection may have been closed by the server since it was put
+/// back, and there is no way to ask. That is what the retry in
+/// [`request_once`] is for, and it is why a request is only ever retried when
+/// it went out on a reused connection: a fresh one failing is a real failure.
+struct Idle {
+    key: String,
+    reader: BufReader<Conn>,
+}
+
+static POOL: Mutex<Vec<Idle>> = Mutex::new(Vec::new());
+
+/// How many idle connections to keep. A page reaches one or two hosts, and a
+/// connection nobody claims is a socket the server is holding open too.
+const MAX_IDLE: usize = 4;
+
+fn pool_key(target: &Url) -> String {
+    format!("{}//{}", target.scheme().as_str(), target.authority())
+}
+
+fn take_idle(key: &str) -> Option<BufReader<Conn>> {
+    let mut pool = POOL.lock().ok()?;
+    let at = pool.iter().position(|idle| idle.key == key)?;
+    Some(pool.remove(at).reader)
+}
+
+fn put_idle(key: String, reader: BufReader<Conn>) {
+    let Ok(mut pool) = POOL.lock() else {
+        return;
+    };
+    if pool.len() >= MAX_IDLE {
+        pool.remove(0);
+    }
+    pool.push(Idle { key, reader });
+}
+
+/// Whether the connection a response arrived on can carry another request.
+///
+/// Three things have to hold: the response framed its body definitely, so the
+/// reader is positioned at the end of it and not somewhere inside it; neither
+/// side asked to close; and the response is HTTP/1.1, since 1.0 closes by
+/// default and a 1.0 server that means otherwise says so.
+fn reusable(head: &Head, http11: bool, definite: bool) -> bool {
+    let connection = head
+        .header("Connection")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    definite && http11 && !connection.contains("close")
+}
+
 fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
@@ -265,30 +374,36 @@ fn connect(authority: &str, timeout: Duration) -> io::Result<TcpStream> {
     }))
 }
 
-/// Open a connection and write the request, returning a reader positioned at
-/// the response.
-fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String), Error> {
+/// Write the request on a connection, opening one if the pool has none for
+/// this host.
+///
+/// The third part of the answer is whether the connection was reused, which is
+/// what decides if a failure reading the response is worth retrying.
+fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String, bool), Error> {
+    let request = request_text(target, opts);
+    let key = pool_key(target);
+
+    if opts.keep_alive {
+        if let Some(mut reader) = take_idle(&key) {
+            // A write to a connection the far end has since closed may well
+            // succeed -- the failure arrives as a reset or an empty read on
+            // the way back -- so this is not where a stale connection is
+            // caught. The retry is.
+            let sent = reader
+                .get_mut()
+                .write_all(request.as_bytes())
+                .and_then(|()| reader.get_mut().flush());
+            if sent.is_ok() {
+                return Ok((reader, request, true));
+            }
+        }
+    }
+
     let addr = target.authority();
     let tcp = connect(&addr, opts.connect_timeout).map_err(|source| Error::Connect {
         addr: addr.clone(),
         source,
     })?;
-
-    let mut request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n",
-        target.path(),
-        target.host_header(),
-        opts.user_agent
-    );
-    let encoding = if opts.accept_gzip { "gzip" } else { "identity" };
-    request.push_str(&format!(
-        "Accept: */*\r\nAccept-Encoding: {}\r\nConnection: close\r\n",
-        encoding
-    ));
-    for (name, value) in &opts.extra_headers {
-        request.push_str(&format!("{}: {}\r\n", name, value));
-    }
-    request.push_str("\r\n");
 
     let mut conn = match target.scheme() {
         Scheme::Http => Conn::Plain(tcp),
@@ -304,10 +419,38 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
     conn.write_all(request.as_bytes())?;
     conn.flush()?;
 
-    Ok((BufReader::new(conn), request))
+    Ok((BufReader::new(conn), request, false))
 }
 
-fn read_status_line(reader: &mut BufReader<Conn>) -> Result<(u16, String), Error> {
+/// The request as it goes on the wire.
+fn request_text(target: &Url, opts: &Options) -> String {
+    let mut request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n",
+        target.path(),
+        target.host_header(),
+        opts.user_agent
+    );
+    let encoding = if opts.accept_gzip { "gzip" } else { "identity" };
+    let connection = if opts.keep_alive {
+        "keep-alive"
+    } else {
+        "close"
+    };
+    request.push_str(&format!(
+        "Accept: */*\r\nAccept-Encoding: {}\r\nConnection: {}\r\n",
+        encoding, connection
+    ));
+    for (name, value) in &opts.extra_headers {
+        request.push_str(&format!("{}: {}\r\n", name, value));
+    }
+    request.push_str("\r\n");
+    request
+}
+
+/// The status line, as the status, the reason, and whether the responder
+/// speaks HTTP/1.1 -- which is what decides whether its connection stays open
+/// without being asked.
+fn read_status_line(reader: &mut BufReader<Conn>) -> Result<(u16, String, bool), Error> {
     let line = read_line(reader)?;
     let line = line.trim_end();
     let mut parts = line.splitn(3, ' ');
@@ -318,13 +461,14 @@ fn read_status_line(reader: &mut BufReader<Conn>) -> Result<(u16, String), Error
     if !version.starts_with("HTTP/") {
         return Err(Error::Protocol(format!("not an HTTP response: {:?}", line)));
     }
+    let http11 = version == "HTTP/1.1";
     let status: u16 = parts
         .next()
         .and_then(|code| code.parse().ok())
         .ok_or_else(|| Error::Protocol(format!("no status code in {:?}", line)))?;
     let reason = parts.next().unwrap_or("").to_string();
 
-    Ok((status, reason))
+    Ok((status, reason, http11))
 }
 
 fn read_headers(reader: &mut BufReader<Conn>) -> Result<(Vec<(String, String)>, String), Error> {
@@ -383,13 +527,18 @@ fn read_line(reader: &mut BufReader<Conn>) -> Result<String, Error> {
     String::from_utf8(out).map_err(|_| Error::Protocol("a header line is not UTF-8".to_string()))
 }
 
+/// Read the body, and say whether its end was framed rather than found.
+///
+/// A body that runs to end of stream leaves the connection at end of stream,
+/// which is the one case that cannot be pooled: there is nothing left to read
+/// a second response from.
 fn read_body(
     reader: &mut BufReader<Conn>,
     head: &Head,
     opts: &Options,
     sink: &mut dyn Write,
     progress: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let chunked = head
         .header("Transfer-Encoding")
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
@@ -406,14 +555,14 @@ fn read_body(
     }
 
     if chunked {
-        read_chunked(reader, opts, sink, progress)
-    } else {
-        // Without a length the body runs to end of stream, which is what
-        // `Connection: close` promises.
-        let limit = declared.unwrap_or(u64::MAX);
-        copy_limited(reader, sink, limit, opts.max_body, declared, progress)?;
-        Ok(())
+        read_chunked(reader, opts, sink, progress)?;
+        return Ok(true);
     }
+    // Without a length the body runs to end of stream, which is what
+    // `Connection: close` promises.
+    let limit = declared.unwrap_or(u64::MAX);
+    copy_limited(reader, sink, limit, opts.max_body, declared, progress)?;
+    Ok(declared.is_some())
 }
 
 /// RFC 9112 §7.1 chunked transfer coding. A CDN will use it whether or not the
