@@ -6,6 +6,73 @@ session.
 
 ---
 
+## Every `File` leaks its descriptor, and `strace` says so in one line
+
+**Nothing closes a file descriptor on this system unless the process exits.**
+`std::sys::fd::edos::FileDesc` wraps `edos_rt::fd::FileDesc`, and neither has a
+`Drop` impl. `edos_rt` offers `pub fn close(self)` and nothing in `std` calls
+it, so a `File` that goes out of scope leaves its kernel descriptor allocated
+for the life of the process.
+
+Found 2026-08-15 while chasing why `evicttest` never finishes. Two independent
+confirmations:
+
+```
+/ $ strace -e openat,close,read wc -l /share/web/welcome.html
+openat(AT_FDCWD, "/share/web/welcome.html", 23, 0x0) = 4
+read(4, "<!doctype html>\n<html>\n  <head>\n"..., 18779) = 18779
+read(4, 0x6ffffffffc10, 32) = 0
+```
+
+No `close`. And with a program that opens in a loop, the returned numbers say
+it outright — `evicttest` calling `read_to_string("/proc/evict_stats")` reached
+
+```
+openat(AT_FDCWD, "/proc/evict_stats", 17, 0x0) = 31801
+openat(AT_FDCWD, "/proc/evict_stats", 17, 0x0) = 31802
+```
+
+one higher every call, 31,854 opens in twenty seconds, not one close among
+them. That is also most of why that test looks hung: the fd table is a
+`BTreeMap`, so every read and write in the process pays a lookup against a map
+that only grows.
+
+**Who this actually costs.** A short-lived program does not care; the reaper
+frees the table. It is the long-lived ones: `edos-taskbar` reads `/proc/net`
+each time its network popup opens, and `edos_lib::procinfo` reads
+`/proc/processes` and `/proc/meminfo`, which is what `top` and `edos-procview`
+refresh through — one or two descriptors per refresh, for as long as the
+session lasts.
+
+**The fix is one `Drop`, and it is not a drive-by.** It lives in `edos_rt` plus
+the Rust fork, so it needs the whole publish loop, and it changes lifetime
+semantics everywhere at once. Test it against a `[patch.crates-io]` path
+override before publishing anything — a published version cannot be withdrawn.
+Four things it has to get right:
+
+- **`into_raw_fd` must `mem::forget`.** It returns `self.inner.raw_fd()` and
+  drops `self` on the way out, which would hand the caller a descriptor that
+  was closed a line earlier. Same for `IntoInner<OwnedFd>` and
+  `From<FileDesc> for OwnedFd`.
+- **`edos_rt::fd::FileDesc::close(self)` becomes a double close.** Either drop
+  the method or have it forget after closing.
+- **Pipes and spawned children change behaviour, and that is the risky part.**
+  `sys/pipe/edos.rs` has `pub type Pipe = FileDesc`, and `sys/process/edos.rs`
+  wraps both ends of every spawn's pipes in one. Today the parent never closes
+  the end it handed to the child, so that pipe never reports EOF; with `Drop`
+  it will. That is correct, and it is a system-wide change to when a read
+  returns zero — `edos-sh` pipelines, `sshd` sessions and `edos-init` all sit
+  on it.
+- **Stdio is safe.** `sys/stdio/edos.rs` writes to fd 0/1/2 by number and holds
+  no `FileDesc`, so nothing here can close the terminal out from under a
+  program.
+
+Verify with the same instrument that found it: `strace -e openat,close` over
+`wc`, then `make guest-check`, then a desktop session left running while
+`lsof -p <taskbar>` is sampled twice.
+
+---
+
 ## `min-width` verified in the guest, and how to check a box's width from a screenshot
 
 The overnight run shipped `min-width` on gates alone and left a todo saying so.
