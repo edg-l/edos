@@ -31,6 +31,23 @@ pub const PROT_READ: u32 = 0x1;
 pub const PROT_WRITE: u32 = 0x2;
 pub const PROT_EXEC: u32 = 0x4;
 
+/// The calling thread's address space, or `EINVAL` recorded on it.
+///
+/// Every syscall that reaches into an address space starts here and refuses a
+/// caller that has none the same way. A kernel thread is the only caller that
+/// can lack one, and it has no business in any of them.
+pub(super) fn current_user_thread(
+    info: &Arc<IrqSpinlock<UserThreadInfo>>,
+) -> Option<Arc<RwLock<UserThread>>> {
+    match current_thread().and_then(|thread| thread.user.clone()) {
+        Some(user) => Some(user),
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            None
+        }
+    }
+}
+
 /// The `PROT_*` bits of an `mmap`/`mprotect`/`shmat` call as a [`VmaProt`].
 pub fn vma_prot_from(prot: u32) -> VmaProt {
     let mut vma_prot = VmaProt::empty();
@@ -176,20 +193,8 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 
     let is_physical = (flags & MAP_PHYSICAL) != 0;
 
-    // Access VmaSet from UserThread
-    let thread = match current_thread() {
-        Some(t) => t,
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-    };
-    let user_arc = match &thread.user {
-        Some(u) => u.clone(),
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
+    let Some(user_arc) = current_user_thread(&info) else {
+        return !0u64;
     };
 
     if is_physical {
@@ -503,19 +508,8 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
         return -1;
     }
 
-    let thread = match current_thread() {
-        Some(t) => t,
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-    };
-    let user_arc = match &thread.user {
-        Some(u) => u.clone(),
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
+    let Some(user_arc) = current_user_thread(&info) else {
+        return -1;
     };
 
     let range_start = VirtAddr::new(addr);
@@ -657,12 +651,7 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i32 {
         return -1;
     }
 
-    let Some(thread) = current_thread() else {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    };
-    let Some(user_arc) = thread.user.as_ref().cloned() else {
-        info.lock().errno = Errno::EINVAL;
+    let Some(user_arc) = current_user_thread(&info) else {
         return -1;
     };
 
@@ -766,19 +755,8 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
 
     let map_addr = VirtAddr::new(addr);
 
-    let thread = match current_thread() {
-        Some(t) => t,
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-    };
-    let user_arc = match &thread.user {
-        Some(u) => u.clone(),
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
+    let Some(user_arc) = current_user_thread(&info) else {
+        return -1;
     };
 
     // A partial page cannot be unmapped, so the range covers every page it

@@ -451,7 +451,7 @@ pub enum FileKind {
     Fifo,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FileAttrs {
     pub readonly: bool,
     pub hidden: bool,
@@ -475,6 +475,26 @@ pub struct File {
     pub created: Option<FileTime>,
     pub accessed: Option<FileTime>,
     pub modified: Option<FileTime>,
+}
+
+impl File {
+    /// A directory that no filesystem owns: a mount point seen from the
+    /// filesystem it is mounted *over*, and devfs's synthetic parents.
+    ///
+    /// It has no size, no attributes and no timestamps because there is
+    /// nothing on disk to read them from — the directory exists because the
+    /// mount table says so.
+    pub fn synthetic_dir(name: String) -> Self {
+        File {
+            name,
+            kind: FileKind::Directory,
+            size: 0,
+            attrs: FileAttrs::default(),
+            created: None,
+            accessed: None,
+            modified: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

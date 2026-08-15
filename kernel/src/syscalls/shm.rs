@@ -7,7 +7,9 @@ use x86_64::{
     structures::paging::{Mapper, Page, PageTableFlags, Size4KiB},
 };
 
-use crate::syscalls::memory::{PROT_EXEC, PROT_WRITE, claim_range, vma_prot_from};
+use crate::syscalls::memory::{
+    PROT_EXEC, PROT_WRITE, claim_range, current_user_thread, vma_prot_from,
+};
 use crate::thread::scheduler::{current_thread, current_thread_info};
 use crate::{
     debug::lock_order::{RANK_USER_MM, RANK_VMAS},
@@ -195,19 +197,8 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 
     let map_addr = VirtAddr::new(addr);
 
-    let thread = match current_thread() {
-        Some(t) => t,
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-    };
-    let user_arc = match &thread.user {
-        Some(u) => u.clone(),
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
+    let Some(user_arc) = current_user_thread(&info) else {
+        return -1;
     };
 
     // Find and remove the VMA

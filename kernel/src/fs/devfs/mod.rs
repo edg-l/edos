@@ -224,20 +224,7 @@ impl FileSystem for DevFsHandle {
                     if name.is_empty() {
                         name = "/".to_string();
                     }
-                    entries.push(File {
-                        name,
-                        kind: FileKind::Directory,
-                        size: 0,
-                        attrs: FileAttrs {
-                            readonly: false,
-                            hidden: false,
-                            system: false,
-                            archive: false,
-                        },
-                        created: None,
-                        accessed: None,
-                        modified: None,
-                    });
+                    entries.push(File::synthetic_dir(name));
                 }
             }
 
@@ -334,20 +321,7 @@ impl FileSystem for DevFsHandle {
             if name.is_empty() {
                 name = "/".to_string();
             }
-            Ok(File {
-                name,
-                kind: FileKind::Directory,
-                size: 0,
-                attrs: FileAttrs {
-                    readonly: false,
-                    hidden: false,
-                    system: false,
-                    archive: false,
-                },
-                created: None,
-                accessed: None,
-                modified: None,
-            })
+            Ok(File::synthetic_dir(name))
         } else {
             Err(fs::Error::FileNotFound)
         }

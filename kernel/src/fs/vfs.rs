@@ -16,8 +16,8 @@ use crate::{
 };
 
 use super::{
-    Error, File, FileAttrs, FileKind, FileSystem, LinkEscape, LinkMode, MmapRegion, MountInfo,
-    StatFs, dentry, fifo, handle::Pollable, icache, inode::VfsInode, page_fill, path::Path,
+    Error, File, FileKind, FileSystem, LinkEscape, LinkMode, MmapRegion, MountInfo, StatFs, dentry,
+    fifo, handle::Pollable, icache, inode::VfsInode, page_fill, path::Path,
     readahead::ReadaheadState,
 };
 use x86_64::{
@@ -658,20 +658,7 @@ pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
     // Append synthetic directory entries for child mount points.
     for (name, _mount_path) in child_mount_points(full_path) {
         if !files.iter().any(|f| f.name == name) {
-            files.push(File {
-                name,
-                kind: FileKind::Directory,
-                size: 0,
-                attrs: FileAttrs {
-                    readonly: false,
-                    hidden: false,
-                    system: false,
-                    archive: false,
-                },
-                created: None,
-                accessed: None,
-                modified: None,
-            });
+            files.push(File::synthetic_dir(name));
         }
     }
 

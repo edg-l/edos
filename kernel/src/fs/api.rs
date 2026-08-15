@@ -10,8 +10,8 @@ use alloc::{
 
 use crate::{
     fs::{
-        Error, FS_REQUESTS, File, FileAttrs, FileKind, FsRequest, FsResponse, LinkMode,
-        MAX_SYMLINK_HOPS, MmapRegion, MountInfo,
+        Error, FS_REQUESTS, File, FsRequest, FsResponse, LinkMode, MAX_SYMLINK_HOPS, MmapRegion,
+        MountInfo,
         gpt::{FilesystemType, Partition},
         handle::Pollable,
         inode::VfsInode,
@@ -288,20 +288,7 @@ pub fn file_info_nofollow(path: &Path) -> Result<File, Error> {
 pub fn file_info_resolved(path: &Path) -> Result<(File, Path), Error> {
     if vfs::is_mount_point(path) {
         let name = path.last_component().unwrap_or("/").to_string();
-        let info = File {
-            name,
-            kind: FileKind::Directory,
-            size: 0,
-            attrs: FileAttrs {
-                readonly: false,
-                hidden: false,
-                system: false,
-                archive: false,
-            },
-            created: None,
-            accessed: None,
-            modified: None,
-        };
+        let info = File::synthetic_dir(name);
         return Ok((info, path.clone()));
     }
     with_links(path, Resolver::Info, LinkMode::Follow, |op, _| {
