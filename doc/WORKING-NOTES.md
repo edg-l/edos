@@ -7761,7 +7761,7 @@ baseline is better than putting it somewhere arbitrary.
 ## `make host-tests` is the userspace suite (2026-08-15)
 
 `make test` boots a guest and runs the in-kernel suite; nothing ran the unit
-tests in `programs/` at all. There are 91 of them across four crates — URL
+tests in `programs/` at all. There are 94 of them across four crates — URL
 resolution (`edos_http/src/url.rs`), the CSS cascade
 (`edos-web/src/css.rs`), the SSH wire format, key exchange and auth
 (`sshd/src/*.rs`), and `grab`'s merge — and every one is decidable without a
@@ -7853,3 +7853,37 @@ split into three tokens and the rule was dropped. `(`/`)` now raise and lower
 the same depth counter `[`/`]` do. An unknown pseudo-class still drops the whole
 selector rather than matching without it, and `::before` is refused at the
 second colon, since a pseudo-element is not a test on the element at all.
+
+## Sibling combinators: two axes, and only one of them moves (2026-08-15)
+
+`+` and `~` are the first combinators that do not walk *up*. `Selector::matches`
+now carries two cursors instead of one: the ancestors still open above the
+subject, and the siblings standing before it. A sibling combinator advances the
+second and leaves the first alone, because siblings share every ancestor, so
+`div > h2 ~ p` searches the *parent's* row once the `>` step has landed on the
+parent. Landing on an ancestor resets the sibling cursor to that ancestor's own
+row; nothing else touches it.
+
+**The row is shared, not accumulated per child.** `Element` carries
+`siblings: Rc<Vec<Element>>` — every element sibling, itself included, in
+document order — and finds its own preceding ones with `position.index`, which
+`:nth-child` already needed. `doc::walk_children` builds that row once per
+parent and hands the same `Rc` to each child, so a list of 500 items costs one
+row rather than 500 growing prefixes. The entries inside a row carry an empty
+row of their own: a chain like `p + p + p` keeps walking the subject's row and
+never asks a sibling for its siblings, so there is no reason to pay for the
+recursion.
+
+**A `~` inside `[...]` is not a combinator.** The tokenizer already tracked
+bracket depth for attribute selectors, so `[data-note~="second"] + p` splits
+correctly; it is only the top-level `+`/`~`/`>` that become tokens. A dangling
+or doubled one still drops the whole selector.
+
+**The trap that cost twenty minutes: this fixture cannot show `font-style`.**
+`welcome.html` sets `body { color: var(--ink) }`, and `view.rs` substitutes the
+theme's accent colour for italic *only* where the run has no colour of its own —
+the theme has no italic face. Every element in that page inherits a colour, so
+italic renders identically to upright and a screenshot proves nothing about it.
+The same is true of the `:nth-last-child(2)` rule already in the fixture. Use a
+weight, a colour or a box to demonstrate a selector there; check the cascade
+itself with a host test.

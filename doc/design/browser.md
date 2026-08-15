@@ -62,7 +62,7 @@ Where it stands: `css.rs` is the cascade. It reads every `<style>` element,
 every `<link rel=stylesheet>` the document fetches, and every `style=`
 attribute; matches selectors that are comma-separated chains of
 tag/`.class`/`#id`/`*`/`[attr]`/`:nth-child()` compounds joined by the
-descendant or child (`>`) combinator; orders them by real specificity with the inline
+descendant, child (`>`) or sibling (`+`, `~`) combinators; orders them by real specificity with the inline
 attribute winning; and computes `color`, `font-size` (px, pt, em, rem, `%` and
 the absolute keywords), `font-weight`, `font-style`, `font-family`'s
 monospace-or-not, `text-decoration` (`underline`, `line-through`, `overline`
@@ -107,6 +107,15 @@ without them, and each is small:
   about the document rather than about what was rendered. They count at the
   class level of specificity, and a `(...)` is opaque to the selector
   tokenizer so `:nth-child(2n + 1)` stays one compound.
+- **Sibling combinators.** `+` and `~`. A selector is matched right to left
+  along two axes at once: the ancestors still open above the subject, and the
+  siblings standing before it. A sibling combinator moves along the second and
+  leaves the first alone, since siblings share every ancestor, so `div > h2 ~ p`
+  searches the *parent's* row once the `>` step has landed on it. `doc.rs`
+  hands every element the whole row of its element siblings in one `Rc`, which
+  costs one copy per parent rather than a growing prefix per child; the entries
+  in that row carry an empty row of their own, since a chain like `p + p + p`
+  keeps walking the subject's row and never asks a sibling for its siblings.
 - **`@layer` bodies are parsed**, since a modern stylesheet puts nearly all of
   itself inside one and skipping them drops the sheet. Layer *order* is not
   honoured — rules keep their document order — which differs from a real
@@ -234,11 +243,11 @@ Three deliberate limits:
   about is not one this can answer for, and a rule set applied on a guess is
   worse than one lost.
 - **A selector using anything not implemented is dropped, not approximated.**
-  `a:hover` and the sibling combinators refuse to parse, because a
-  selector matched loosely applies far too widely; the failure mode of dropping
-  one is a style that does not appear, which is what an unimplemented property
-  does anyway. A dangling `>` -- leading, trailing or doubled -- is dropped by
-  the same rule, as is an unclosed `[`.
+  `a:hover` refuses to parse, because a selector matched loosely applies far
+  too widely; the failure mode of dropping one is a style that does not appear,
+  which is what an unimplemented property does anyway. A dangling combinator --
+  leading, trailing or doubled -- is dropped by the same rule, as is an
+  unclosed `[`.
 - **At most `doc::MAX_SHEETS` external sheets are fetched, and each one
   serially**, on the thread that is about to lay the page out. A page linking
   more than six is linking print and font sheets; a browser that fetched all of

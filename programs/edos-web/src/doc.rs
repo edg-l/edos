@@ -327,7 +327,7 @@ fn build(mut source: Source, fetch: &dyn Fn(&str) -> Option<Vec<u8>>) -> Documen
         vars: Vars::root(),
         block_css: Computed::default(),
     };
-    builder.walk(&dom.document, Siblings::default());
+    builder.walk(&dom.document, Siblings::default(), &Rc::new(Vec::new()));
     builder.flush();
 
     Document {
@@ -409,7 +409,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn walk(&mut self, node: &Handle, position: Siblings) {
+    fn walk(&mut self, node: &Handle, position: Siblings, row: &Rc<Vec<Element>>) {
         match &node.data {
             NodeData::Text { contents } => {
                 let text = contents.borrow();
@@ -434,7 +434,9 @@ impl Builder<'_> {
                     return;
                 }
 
-                self.stack.push(element_context(node, &tag, position));
+                let mut context = element_context(node, &tag, position);
+                context.siblings = Rc::clone(row);
+                self.stack.push(context);
                 let saved_computed = self.computed;
                 let saved_vars = Rc::clone(&self.vars);
                 (self.computed, self.vars) = self.sheet.cascade(
@@ -537,11 +539,27 @@ impl Builder<'_> {
     }
 
     /// Walk an element's children, each with its position among its element
-    /// siblings.
+    /// siblings and the row they all share, which is what `+` and `~` search.
+    /// The row holds every element child, including the ones the walk itself
+    /// skips: a sibling combinator asks about the document, not about what was
+    /// rendered.
     fn walk_children(&mut self, node: &Handle) {
         let children = node.children.borrow();
-        for (child, position) in children.iter().zip(sibling_positions(&children)) {
-            self.walk(child, position);
+        let positions = sibling_positions(&children);
+        let row = Rc::new(
+            children
+                .iter()
+                .zip(&positions)
+                .filter_map(|(child, position)| match &child.data {
+                    NodeData::Element { name, .. } => {
+                        Some(element_context(child, &name.local, *position))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        );
+        for (child, position) in children.iter().zip(positions) {
+            self.walk(child, position, &row);
         }
     }
 
@@ -853,6 +871,7 @@ fn element_context(node: &Handle, tag: &html5ever::LocalName, position: Siblings
             .collect(),
         attrs: attrs(node),
         position,
+        siblings: Rc::new(Vec::new()),
     }
 }
 

@@ -984,13 +984,24 @@ impl Compound {
     }
 }
 
+/// What joins a compound to the compound on its left, per CSS Selectors 4 §15.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Combinator {
+    /// A space: the compound on the left matches any ancestor.
+    Descendant,
+    /// `>`: it must match the parent.
+    Child,
+    /// `+`: it must match the element immediately before this one.
+    NextSibling,
+    /// `~`: it must match any earlier sibling.
+    LaterSibling,
+}
+
 /// One compound and how it is joined to the compound on its left.
 #[derive(Clone, Debug)]
 struct Step {
     compound: Compound,
-    /// `true` when a `>` separates this compound from the one before it, so
-    /// that one must be its parent rather than any ancestor.
-    child: bool,
+    combinator: Combinator,
 }
 
 /// A chain, the subject last: `nav ul li` and `nav > ul li` are both three
@@ -1002,36 +1013,60 @@ struct Selector {
 
 impl Selector {
     /// Match right to left against the open element stack, whose last entry is
-    /// the element being matched. A descendant combinator searches ancestors
-    /// greedily from the nearest; a child combinator takes the parent or fails.
+    /// the element being matched. Two axes are walked at once: the ancestors
+    /// still open above the match, and the siblings standing before it. A
+    /// sibling combinator moves along the second and leaves the first alone,
+    /// since siblings share every ancestor.
     fn matches(&self, stack: &[Element]) -> bool {
-        let Some((subject, ancestors)) = self.parts.split_last() else {
+        let Some((subject, rest)) = self.parts.split_last() else {
             return false;
         };
-        let Some((element, rest)) = stack.split_last() else {
+        let Some((element, above)) = stack.split_last() else {
             return false;
         };
         if !subject.compound.matches(element) {
             return false;
         }
-        let mut remaining = rest;
-        let mut parent_only = subject.child;
-        for step in ancestors.iter().rev() {
-            if parent_only {
-                let Some((parent, before)) = remaining.split_last() else {
-                    return false;
-                };
-                if !step.compound.matches(parent) {
-                    return false;
+        let mut ancestors = above;
+        let mut before = element.preceding();
+        let mut combinator = subject.combinator;
+        for step in rest.iter().rev() {
+            match combinator {
+                Combinator::Descendant => {
+                    let Some(index) = ancestors.iter().rposition(|e| step.compound.matches(e))
+                    else {
+                        return false;
+                    };
+                    before = ancestors[index].preceding();
+                    ancestors = &ancestors[..index];
                 }
-                remaining = before;
-            } else {
-                match remaining.iter().rposition(|e| step.compound.matches(e)) {
-                    Some(index) => remaining = &remaining[..index],
-                    None => return false,
+                Combinator::Child => {
+                    let Some((parent, rest)) = ancestors.split_last() else {
+                        return false;
+                    };
+                    if !step.compound.matches(parent) {
+                        return false;
+                    }
+                    before = parent.preceding();
+                    ancestors = rest;
+                }
+                Combinator::NextSibling => {
+                    let Some((previous, rest)) = before.split_last() else {
+                        return false;
+                    };
+                    if !step.compound.matches(previous) {
+                        return false;
+                    }
+                    before = rest;
+                }
+                Combinator::LaterSibling => {
+                    let Some(index) = before.iter().rposition(|e| step.compound.matches(e)) else {
+                        return false;
+                    };
+                    before = &before[..index];
                 }
             }
-            parent_only = step.child;
+            combinator = step.combinator;
         }
         true
     }
@@ -1082,9 +1117,22 @@ pub struct Element {
     /// Every attribute, names lower-cased, in document order.
     pub attrs: Vec<(String, String)>,
     pub position: Siblings,
+    /// Every element sibling this one has, itself included, in document order,
+    /// shared by the whole row so a wide list costs one copy rather than one
+    /// per child. The entries carry an empty list of their own: a sibling
+    /// combinator walks this slice and never asks a sibling for its siblings.
+    pub siblings: Rc<Vec<Element>>,
 }
 
 impl Element {
+    /// The siblings standing before this element, which is what `+` and `~`
+    /// search. Empty for anything built without a sibling row.
+    fn preceding(&self) -> &[Element] {
+        self.siblings
+            .get(..self.position.index.saturating_sub(1))
+            .unwrap_or(&[])
+    }
+
     /// The value of `name`, which the caller has already lower-cased.
     fn attr(&self, name: &str) -> Option<&str> {
         self.attrs
@@ -1444,31 +1492,36 @@ fn parse_selector(text: &str) -> Option<Selector> {
     // declares the custom properties the rest of it reads.
     let text = text.replace(":root", "html");
     let mut parts: Vec<Step> = Vec::new();
-    let mut child = false;
+    let mut pending: Option<Combinator> = None;
     for word in tokenize_selector(&text)? {
-        if word == ">" {
+        let combinator = match word.as_str() {
+            ">" => Some(Combinator::Child),
+            "+" => Some(Combinator::NextSibling),
+            "~" => Some(Combinator::LaterSibling),
+            _ => None,
+        };
+        if let Some(combinator) = combinator {
             // A chain cannot start with a combinator, and two in a row is not
             // a selector either.
-            if parts.is_empty() || child {
+            if parts.is_empty() || pending.is_some() {
                 return None;
             }
-            child = true;
+            pending = Some(combinator);
             continue;
         }
         parts.push(Step {
             compound: parse_compound(&word)?,
-            child,
+            combinator: pending.take().unwrap_or(Combinator::Descendant),
         });
-        child = false;
     }
-    (!parts.is_empty() && !child).then_some(Selector { parts })
+    (!parts.is_empty() && pending.is_none()).then_some(Selector { parts })
 }
 
-/// Split a selector into compounds and `>` tokens, with `[...]` and `(...)`
-/// opaque so a quoted attribute value may hold a space, a `>` or anything
-/// else, and `:nth-child(2n + 1)` stays one compound. `None` for a bracket,
-/// paren or quote left open, since a selector read past its end would apply
-/// somewhere the page never asked for.
+/// Split a selector into compounds and combinator tokens, with `[...]` and
+/// `(...)` opaque so a quoted attribute value may hold a space, a `>` or
+/// anything else, and `:nth-child(2n + 1)` stays one compound. `None` for a
+/// bracket, paren or quote left open, since a selector read past its end would
+/// apply somewhere the page never asked for.
 fn tokenize_selector(text: &str) -> Option<Vec<String>> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -1496,11 +1549,11 @@ fn tokenize_selector(text: &str) -> Option<Vec<String>> {
                 current.push(ch);
             }
             _ if depth > 0 => current.push(ch),
-            '>' => {
+            '>' | '+' | '~' => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
-                tokens.push(">".to_string());
+                tokens.push(ch.to_string());
             }
             _ if ch.is_whitespace() => {
                 if !current.is_empty() {
@@ -1601,9 +1654,10 @@ fn parse_compound(word: &str) -> Option<Compound> {
                 }
                 compound.pseudos.push(parse_pseudo(&name, arg.as_deref())?);
             }
-            // A sibling combinator or an unopened functional notation: both
-            // unsupported, and a compound matched without one of them would
-            // apply far too widely.
+            // A combinator is the tokenizer's business and never reaches a
+            // compound; anything here is a stray, or an unopened functional
+            // notation, and a compound matched without it would apply far too
+            // widely.
             '+' | '~' | '(' | ')' | ']' => return None,
             _ => current.push(ch),
         }
@@ -2405,6 +2459,108 @@ mod tests {
         let sheet = sheet("> p { color: red } div > { color: red } p > > b { color: red }");
         let stack = vec![element("div", &[]), element("p", &[]), element("b", &[])];
         assert_eq!(cascade(&sheet, &stack, None).color, None);
+    }
+
+    /// A row of siblings, each carrying the whole row and its own place in it,
+    /// which is what a sibling combinator walks. `"p.lead"` names a class.
+    fn siblings(spec: &[&str]) -> Vec<Element> {
+        let mut row: Vec<Element> = spec
+            .iter()
+            .enumerate()
+            .map(|(at, item)| {
+                let (tag, classes) = match item.split_once('.') {
+                    Some((tag, class)) => (tag, vec![class]),
+                    None => (*item, Vec::new()),
+                };
+                let same = |other: &&&str| other.split('.').next() == Some(tag);
+                let mut element = element(tag, &classes);
+                element.position = Siblings {
+                    index: at + 1,
+                    count: spec.len(),
+                    type_index: spec[..=at].iter().filter(same).count(),
+                    type_count: spec.iter().filter(same).count(),
+                };
+                element
+            })
+            .collect();
+        let shared = Rc::new(row.clone());
+        for element in &mut row {
+            element.siblings = Rc::clone(&shared);
+        }
+        row
+    }
+
+    #[test]
+    fn the_next_sibling_combinator_takes_only_the_element_before() {
+        let sheet = sheet("h2 + p { color: red } h2 ~ p { font-weight: bold }");
+        let row = siblings(&["h2", "p", "p"]);
+        let at = |n: usize| vec![element("div", &[]), row[n].clone()];
+        // `+` reaches the paragraph after the heading and no further; `~`
+        // reaches both, and neither reaches something that is not a `p`.
+        assert_eq!(cascade(&sheet, &at(1), None).color, Some(rgb(255, 0, 0)));
+        assert_eq!(cascade(&sheet, &at(2), None).color, None);
+        assert_eq!(cascade(&sheet, &at(1), None).bold, Some(true));
+        assert_eq!(cascade(&sheet, &at(2), None).bold, Some(true));
+        assert_eq!(cascade(&sheet, &at(0), None).color, None);
+        assert_eq!(cascade(&sheet, &at(0), None).bold, None);
+    }
+
+    #[test]
+    fn sibling_combinators_chain_and_mix_with_the_other_axes() {
+        let sheet = sheet(
+            "li + li + li { color: red }
+             div > h2 ~ p.lead { font-weight: bold }
+             h2 + div b { font-style: italic }",
+        );
+        let items = siblings(&["li", "li", "li"]);
+        let at = |n: usize| vec![element("ul", &[]), items[n].clone()];
+        assert_eq!(cascade(&sheet, &at(2), None).color, Some(rgb(255, 0, 0)));
+        assert_eq!(cascade(&sheet, &at(1), None).color, None);
+
+        // The `>` step lands on the parent and the `~` then searches the
+        // parent's own row, not the subject's.
+        let row = siblings(&["h2", "p.lead"]);
+        let stack = vec![element("div", &[]), row[1].clone()];
+        assert_eq!(cascade(&sheet, &stack, None).bold, Some(true));
+
+        // A sibling combinator above a descendant one: `b` is inside the
+        // `div`, and the `div` follows the heading.
+        let above = siblings(&["h2", "div"]);
+        let stack = vec![element("body", &[]), above[1].clone(), element("b", &[])];
+        assert_eq!(cascade(&sheet, &stack, None).italic, Some(true));
+        let alone = siblings(&["div"]);
+        let stack = vec![element("body", &[]), alone[0].clone(), element("b", &[])];
+        assert_eq!(cascade(&sheet, &stack, None).italic, None);
+    }
+
+    #[test]
+    fn a_dangling_sibling_combinator_is_not_a_selector() {
+        let sheet = sheet(
+            "+ p { color: red } p + { color: red } h2 + ~ p { color: red }
+             p[title~=note] + p { font-weight: bold }",
+        );
+        let row = siblings(&["h2", "p"]);
+        let stack = vec![element("div", &[]), row[1].clone()];
+        assert_eq!(cascade(&sheet, &stack, None).color, None);
+        // A `~` inside an attribute test is not a combinator, so that rule
+        // survives the ones around it.
+        let mut before = element_with("p", &[("title", "a note")]);
+        before.position = Siblings {
+            index: 1,
+            count: 2,
+            type_index: 1,
+            type_count: 2,
+        };
+        let mut subject = element("p", &[]);
+        subject.position = Siblings {
+            index: 2,
+            count: 2,
+            type_index: 2,
+            type_count: 2,
+        };
+        subject.siblings = Rc::new(vec![before, subject.clone()]);
+        let stack = vec![element("div", &[]), subject];
+        assert_eq!(cascade(&sheet, &stack, None).bold, Some(true));
     }
 
     #[test]

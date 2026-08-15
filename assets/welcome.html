@@ -87,6 +87,11 @@
       .rows li:last-child { color: #bf616a }
       .rows li:nth-last-child(2) { font-style: italic }
       .types p:first-of-type { font-weight: bold }
+      /* Sibling combinators: `+` reaches the element directly after, `~` every
+         later one, and a chain of them counts along the row. */
+      .kin h3 + p { color: #a3be8c }
+      .kin h3 ~ p { border-left: 4px solid #b48ead; padding-left: 8px }
+      .kin p + p + p { font-weight: bold }
     </style>
   </head>
   <body>
@@ -231,6 +236,17 @@ while the newline above them is kept.</p>
       <p>The first paragraph among them, so <code>:first-of-type</code> reaches
         it and sets it bold.</p>
       <p>The second paragraph, which it leaves alone.</p>
+    </div>
+
+    <h2>Which sibling a combinator reaches</h2>
+    <div class="kin">
+      <h3>A heading with three paragraphs standing after it.</h3>
+      <p>The one directly after it, which <code>h3 + p</code> reaches and
+        colours green.</p>
+      <p>The second, which only <code>h3 ~ p</code> reaches, so it keeps the
+        bar and the page's own colour.</p>
+      <p>The third, which <code>p + p + p</code> reaches as well, so it is
+        bold.</p>
     </div>
 
     <h2>What a list may be numbered in</h2>
