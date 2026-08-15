@@ -134,6 +134,11 @@ pub struct Layout {
     pub height: u32,
     /// The width this was laid out for, so a redraw knows when it is stale.
     pub width: u32,
+    /// The left edge of the box being laid out, and the width available inside
+    /// it. The box engine sets these per block; for a page laid out as one
+    /// column they are the page padding and the column it leaves.
+    origin_x: u32,
+    column: u32,
 }
 
 /// A word to place, carrying the appearance it was written in.
@@ -178,132 +183,143 @@ impl Layout {
             links: Vec::new(),
             height: 0,
             width,
+            origin_x: PAGE_PAD,
+            column: width.saturating_sub(PAGE_PAD * 2).max(1),
         };
-        let column = width.saturating_sub(PAGE_PAD * 2).max(1);
         let mut y = PAGE_PAD as i32;
 
         for block in &document.blocks {
-            let mut plan = plan(block);
-            y += plan.gap_before as i32;
-
-            // The measure the page asked for, never wider than the column it
-            // sits in: there is no horizontal scroll, so the window is the
-            // outer bound whatever the document says.
-            // The measure and `margin: 0 auto` settle the container this block
-            // sits in; `margin-right` then takes from the right of it, which is
-            // what keeps a block with one from moving off the left edge its
-            // centred neighbours share.
-            let mut container = column.saturating_sub(plan.indent).max(1);
-            if let Some(measure) = plan.measure {
-                container = container.min(measure).max(1);
-            }
-            // css-sizing-3 §5.1: the floor wins over the ceiling, so it is
-            // applied last and only the column bounds it.
-            if let Some(min) = plan.min_width {
-                container = container
-                    .max(min)
-                    .min(column.saturating_sub(plan.indent).max(1));
-            }
-            if plan.center {
-                plan.indent += column.saturating_sub(plan.indent + container) / 2;
-            }
-            let box_w = container.saturating_sub(plan.trail).max(1);
-
-            // The measure bounds the border box, the way `box-sizing:
-            // border-box` behaves: a padded box sized to the column would
-            // otherwise run past the edge it was told to stop at.
-            let box_x = (PAGE_PAD + plan.indent) as i32;
-            let box_top = y;
-            let left = plan.border.left.px + plan.pad.left;
-            let right = plan.border.right.px + plan.pad.right;
-            let avail = box_w.saturating_sub(left + right).max(1);
-            // Everything below places content at `PAGE_PAD + indent`, so the
-            // inset the box wears is folded into the indent once here.
-            plan.indent += left;
-            y += (plan.border.top.px + plan.pad.top) as i32;
-
-            let picture_drawn = match &block.picture {
-                // A picture that rasterises is the block; one that does not
-                // falls through to the alt text it carries, which is what the
-                // block would have been had the fetch failed.
-                Some(picture) => out.picture(picture, block, &plan, avail, &mut y),
-                None => false,
-            };
-            if block.kind == BlockKind::Rule {
-                let height = space(1);
-                out.lines.push(Line {
-                    y,
-                    height,
-                    lead: 0,
-                    natural: height,
-                    items: Vec::new(),
-                    kind: LineKind::Rule {
-                        x: box_x + left as i32,
-                        width: avail,
-                    },
-                    hidden: plan.invisible,
-                });
-                y += height as i32;
-            } else if !picture_drawn {
-                let marker = plan.marker.as_ref().map(|text| Fragment {
-                    x: 0,
-                    width: text::width_tracked(text, plan.style, plan.letter),
-                    text: text.clone(),
-                    style: plan.style,
-                    link: None,
-                    decoration: css::Decorations::default(),
-                    letter: plan.letter,
-                    shift: 0,
-                    background: None,
-                    hidden: plan.invisible,
-                });
-
-                let start = out.lines.len();
-                let words = out.words(&block.runs, &plan);
-                out.flow(words, &plan, avail, &mut y);
-
-                // The marker hangs in the left margin of the first line, which
-                // is what makes a wrapped list item's continuation align under
-                // its text rather than under its bullet.
-                if let (Some(marker), Some(line)) = (marker, out.lines.get_mut(start)) {
-                    let x = (PAGE_PAD + plan.indent).saturating_sub(marker.width) as i32;
-                    line.items.insert(0, Fragment { x, ..marker });
-                }
-            }
-
-            y += (plan.pad.bottom + plan.border.bottom.px) as i32;
-
-            // The declared height sizes the border box, the way the measure
-            // sizes its width, and the clamps apply in the order css-sizing-3
-            // §5.4 gives: the maximum first, then the minimum over it, so a
-            // box asked for both keeps the floor. Taller content is left
-            // overflowing rather than cut, since nothing here clips.
-            let box_h = block_height(&plan, (y - box_top).max(0) as u32);
-            y = box_top + box_h as i32;
-
-            let edges = [
-                plan.border.top,
-                plan.border.right,
-                plan.border.bottom,
-                plan.border.left,
-            ];
-            if !plan.invisible
-                && (plan.background.is_some() || edges.iter().any(|edge| edge.px > 0))
-            {
-                out.decor.push(Decor {
-                    x: box_x,
-                    y: box_top,
-                    width: box_w,
-                    height: (y - box_top).max(0) as u32,
-                    background: plan.background,
-                    border: plan.border,
-                });
-            }
-            y += plan.gap_after as i32;
+            y = out.lay_block(block, y);
         }
 
         out.height = (y + PAGE_PAD as i32).max(0) as u32;
         out
+    }
+
+    /// Lay one block out at the origin and column the caller set, returning the
+    /// `y` it ends at.
+    ///
+    /// The box engine calls this twice per block: once to learn how tall the
+    /// block is at a given width, and once to emit it where that engine decided
+    /// it goes. Measuring by laying out into a scratch [`Layout`] is what keeps
+    /// one line breaker rather than a measuring copy of it that can drift.
+    fn lay_block(&mut self, block: &Block, mut y: i32) -> i32 {
+        let mut plan = plan(block);
+        y += plan.gap_before as i32;
+
+        // The measure the page asked for, never wider than the column it
+        // sits in: there is no horizontal scroll, so the window is the
+        // outer bound whatever the document says.
+        // The measure and `margin: 0 auto` settle the container this block
+        // sits in; `margin-right` then takes from the right of it, which is
+        // what keeps a block with one from moving off the left edge its
+        // centred neighbours share.
+        let mut container = self.column.saturating_sub(plan.indent).max(1);
+        if let Some(measure) = plan.measure {
+            container = container.min(measure).max(1);
+        }
+        // css-sizing-3 §5.1: the floor wins over the ceiling, so it is
+        // applied last and only the column bounds it.
+        if let Some(min) = plan.min_width {
+            container = container
+                .max(min)
+                .min(self.column.saturating_sub(plan.indent).max(1));
+        }
+        if plan.center {
+            plan.indent += self.column.saturating_sub(plan.indent + container) / 2;
+        }
+        let box_w = container.saturating_sub(plan.trail).max(1);
+
+        // The measure bounds the border box, the way `box-sizing:
+        // border-box` behaves: a padded box sized to the column would
+        // otherwise run past the edge it was told to stop at.
+        let box_x = (self.origin_x + plan.indent) as i32;
+        let box_top = y;
+        let left = plan.border.left.px + plan.pad.left;
+        let right = plan.border.right.px + plan.pad.right;
+        let avail = box_w.saturating_sub(left + right).max(1);
+        // Everything below places content at `PAGE_PAD + indent`, so the
+        // inset the box wears is folded into the indent once here.
+        plan.indent += left;
+        y += (plan.border.top.px + plan.pad.top) as i32;
+
+        let picture_drawn = match &block.picture {
+            // A picture that rasterises is the block; one that does not
+            // falls through to the alt text it carries, which is what the
+            // block would have been had the fetch failed.
+            Some(picture) => self.picture(picture, block, &plan, avail, &mut y),
+            None => false,
+        };
+        if block.kind == BlockKind::Rule {
+            let height = space(1);
+            self.lines.push(Line {
+                y,
+                height,
+                lead: 0,
+                natural: height,
+                items: Vec::new(),
+                kind: LineKind::Rule {
+                    x: box_x + left as i32,
+                    width: avail,
+                },
+                hidden: plan.invisible,
+            });
+            y += height as i32;
+        } else if !picture_drawn {
+            let marker = plan.marker.as_ref().map(|text| Fragment {
+                x: 0,
+                width: text::width_tracked(text, plan.style, plan.letter),
+                text: text.clone(),
+                style: plan.style,
+                link: None,
+                decoration: css::Decorations::default(),
+                letter: plan.letter,
+                shift: 0,
+                background: None,
+                hidden: plan.invisible,
+            });
+
+            let start = self.lines.len();
+            let words = self.words(&block.runs, &plan);
+            self.flow(words, &plan, avail, &mut y);
+
+            // The marker hangs in the left margin of the first line, which
+            // is what makes a wrapped list item's continuation align under
+            // its text rather than under its bullet.
+            if let (Some(marker), Some(line)) = (marker, self.lines.get_mut(start)) {
+                let x = (self.origin_x + plan.indent).saturating_sub(marker.width) as i32;
+                line.items.insert(0, Fragment { x, ..marker });
+            }
+        }
+
+        y += (plan.pad.bottom + plan.border.bottom.px) as i32;
+
+        // The declared height sizes the border box, the way the measure
+        // sizes its width, and the clamps apply in the order css-sizing-3
+        // §5.4 gives: the maximum first, then the minimum over it, so a
+        // box asked for both keeps the floor. Taller content is left
+        // overflowing rather than cut, since nothing here clips.
+        let box_h = block_height(&plan, (y - box_top).max(0) as u32);
+        y = box_top + box_h as i32;
+
+        let edges = [
+            plan.border.top,
+            plan.border.right,
+            plan.border.bottom,
+            plan.border.left,
+        ];
+        if !plan.invisible && (plan.background.is_some() || edges.iter().any(|edge| edge.px > 0)) {
+            self.decor.push(Decor {
+                x: box_x,
+                y: box_top,
+                width: box_w,
+                height: (y - box_top).max(0) as u32,
+                background: plan.background,
+                border: plan.border,
+            });
+        }
+        y += plan.gap_after as i32;
+        y
     }
 
     /// The link target at page coordinates, if a link's text is under them.
