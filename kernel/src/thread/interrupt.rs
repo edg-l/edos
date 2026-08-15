@@ -1,5 +1,7 @@
 use core::arch::naked_asm;
 
+use crate::thread::context::restore_context_and_iretq;
+
 use crate::{
     apic::get_lapic,
     thread::{
@@ -74,29 +76,9 @@ pub unsafe extern "C" fn timer_interrupt_handler() {
         "cld",
         "call {tick_finish}",
 
-        // RAX now contains pointer to context to restore (might be different task)
-        // Move stack pointer to point to the context we want to restore
-        "mov rsp, rax",
-
-        // Restore all general purpose registers
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdi",
-        "pop rsi",
-        "pop rbp",
-        "pop rbx",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
-
-        // Return from interrupt - will pop RIP, CS, RFLAGS, RSP, SS
-        "iretq",
+        // RAX now contains the context to restore, which may be a different
+        // thread's.
+        restore_context_and_iretq!(),
 
         tick_prepare = sym timer_tick_prepare,
         tick_finish = sym timer_tick_finish,

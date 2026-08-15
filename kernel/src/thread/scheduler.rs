@@ -1,3 +1,4 @@
+use crate::thread::context::restore_context_and_iretq;
 use core::{
     cmp,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -1812,23 +1813,7 @@ pub unsafe extern "C" fn switch_away() {
         "and rsp, -16",
         "cld",
         "call {reap_and_sched}",
-        "mov rsp, rax",
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdi",
-        "pop rsi",
-        "pop rbp",
-        "pop rbx",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
-        "iretq",
+        restore_context_and_iretq!(),
         sched_stack = sym scheduler_stack_top,
         reap_and_sched = sym reap_and_schedule,
     );
@@ -2126,23 +2111,7 @@ pub unsafe extern "C" fn save_transition_switch(
         "call {schedule_vol}",
 
         // schedule_voluntary returns context pointer in rax. Restore from it.
-        "mov rsp, rax",
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdi",
-        "pop rsi",
-        "pop rbp",
-        "pop rbx",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
-        "iretq",
+        restore_context_and_iretq!(),
 
         // Transition returned false: state never changed from Running.
         // The old thread stack is exclusively owned by this CPU; safe to

@@ -28,6 +28,44 @@ pub struct CpuContext {
     pub interrupt_stack_frame: InterruptStackFrameValue,
 }
 
+/// Resume the thread whose [`CpuContext`] `rax` points at, and never return.
+///
+/// This is the tail of every naked trampoline that hands control to another
+/// thread: the timer tick, the voluntary switch, and the dying thread's last
+/// switch. It reads the struct above field by field, in order, so a register
+/// added there without a matching `pop` here resumes the next thread with
+/// garbage in it — and there is nothing at compile time to say so. The three
+/// copies this replaces were the same list written out three times, which is
+/// three chances for one of them to lose a register silently.
+///
+/// `rax` must already hold the context pointer, and the pops must stay in
+/// declaration order so `rsp` ends on the interrupt frame `iretq` consumes.
+macro_rules! restore_context_and_iretq {
+    () => {
+        "
+        mov rsp, rax
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rdi
+        pop rsi
+        pop rbp
+        pop rbx
+        pop rdx
+        pop rcx
+        pop rax
+        iretq
+        "
+    };
+}
+
+pub(crate) use restore_context_and_iretq;
+
 impl CpuContext {
     pub const fn new(interrupt_stack_frame: InterruptStackFrameValue) -> Self {
         CpuContext {
