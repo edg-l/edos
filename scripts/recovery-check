@@ -37,7 +37,8 @@ EXTRA_DISK = os.path.join(REPO, "journal-test.img")
 # device 2 is this script's extra disk on ide.3. Verified against a real
 # boot log's "devfs: /dev/sdN -> block device N" lines; a run that also
 # attaches a USB disk would shift this, which is why this script never does.
-MOUNT_CMD = "mount 2 0 /mnt efs"
+SCRATCH_DEV = 2
+MOUNT_CMD = f"mount {SCRATCH_DEV} 0 /mnt efs"
 FILES = ["rec_a", "rec_b", "rec_c"]
 
 
@@ -87,26 +88,58 @@ def main():
         sys.exit("recovery-check: /dev/journal-ctl did not accept pause; "
                  "is the ISO built with --features fault-inject?")
 
-    type_line("touch " + " ".join(f"/mnt/{f}" for f in FILES), settle=1)
+    # Retried, because a keystroke that does not land is indistinguishable
+    # afterwards from a file the cut lost: `touch` never runs, the ring stays
+    # empty, and the check below finds the files missing for a reason that has
+    # nothing to do with recovery.
+    for attempt in range(3):
+        type_line("touch " + " ".join(f"/mnt/{f}" for f in FILES), settle=1)
+        probe = serial_mark()
+        type_line(
+            "; ".join(
+                f"test -f /mnt/{f} || echo SETUP_MISSING_{f} > /dev/klog" for f in FILES
+            )
+            + "; echo SETUP_PROBED > /dev/klog",
+            settle=1,
+        )
+        probed = wait_for(probe, "SETUP_PROBED", 10) or ""
+        if not any(f"SETUP_MISSING_{f}" in probed for f in FILES):
+            break
+        print(f"    touch did not land (attempt {attempt + 1}), retrying")
+    else:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("recovery-check: could not create the workload files; the test's "
+                 "own setup failed, not a verdict on recovery")
+
     type_line("sync", settle=2)
 
     # The precondition the whole test depends on: transactions committed to
-    # the ring but not yet checkpointed to their home blocks. If sync
-    # converged anyway, checkpointing was not actually paused and nothing
-    # below says anything about recovery.
+    # SCRATCH_DEV's ring but not yet checkpointed to their home blocks. If sync
+    # converged anyway, checkpointing was not actually paused and nothing below
+    # says anything about recovery.
+    #
+    # Read from that journal's own cursors, never from the file's `pending:`
+    # line. That line sums every mounted journal, so the root filesystem's
+    # backlog satisfies it while the scratch ring is empty -- and the run then
+    # cuts power over a scratch journal with nothing in it, finds the files
+    # gone because their home writes never reached the platter, and reports
+    # lost data. Measured: that is one run in six, and it is what a red from
+    # this script used to mean about a third of the time it appeared.
     type_line("cat /proc/journal_stats > /dev/klog", settle=1)
-    out = wait_for(mark, "pending:", 10)
-    pending = 0
-    if out:
-        m = re.search(r"pending: (\d+)", out)
-        if m:
-            pending = int(m.group(1))
-    if pending == 0:
+    out = wait_for(mark, f"journal dev {SCRATCH_DEV}:", 10) or ""
+    live = re.search(
+        rf"journal dev {SCRATCH_DEV}: head_seq (\d+) tail_seq (\d+)", out
+    )
+    if not live or int(live.group(1)) <= int(live.group(2)):
         print(serial_tail(mark)[-2000:])
         vm("stop")
-        sys.exit("recovery-check: nothing committed-but-uncheckpointed after sync; "
-                 "the test's own setup failed, not a verdict on recovery")
-    print(f"    {pending} block(s) committed and pending checkpoint, as intended")
+        sys.exit(
+            "recovery-check: the scratch journal holds no live transaction after "
+            "sync; the test's own setup failed, not a verdict on recovery"
+        )
+    head_seq, tail_seq = live.group(1), live.group(2)
+    print(f"    scratch journal live: tail_seq {tail_seq} -> head_seq {head_seq}, as intended")
 
     print("[2/3] cutting power...")
     vm("stop")

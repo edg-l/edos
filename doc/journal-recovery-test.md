@@ -29,6 +29,33 @@ both:
   hand per the procedure below has the same trap — reformat between attempts,
   or use file names the last attempt did not.
 
+## What `make recovery-check` is worth
+
+It has been watched fail, which is the only thing that makes a gate worth
+reading. Reintroducing the wrong-LBA bug the post-mortem describes — dropping
+`partition_start_lba` from the ring read in `kernel/src/fs/journal/replay.rs` —
+turns it red, with `scanned, nothing to replay` and all three files gone. Put
+it back and it is green again. That is the whole of what it proves.
+
+**It does not cover the sequence-continuity break.** Deleting the `hdr.seq !=
+expected_seq` stop from `libs/efs-common/src/journal_scan.rs` leaves the check
+green, because that stop only fires on a *wrapped* ring: with one live
+transaction in a fresh ring, the scan ends at a block that is not a journal
+block at all and never reaches the sequence test. Covering it needs the wrapped
+case below, driven by hand.
+
+**Its precondition is about the scratch journal, not the machine.** The check
+used to read `pending:` from `/proc/journal_stats`, which sums every mounted
+journal — so the root filesystem's own backlog satisfied it while the scratch
+ring was empty. The run then cut power over a journal holding nothing, found
+the files missing because their home writes had not reached the platter, and
+reported lost data. That was one run in six, on correct code, and it is the
+shape of red that makes a gate worse than useless: it looks exactly like the
+defect it exists to catch. It now reads the `journal dev N:` row for the
+scratch device and requires `head_seq > tail_seq`, and it retries the `touch`
+whose dropped keystroke was the underlying cause. Eleven consecutive runs
+green afterwards.
+
 ## Procedure
 
 ```bash
