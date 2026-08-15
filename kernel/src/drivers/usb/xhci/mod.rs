@@ -912,13 +912,30 @@ impl XhciController {
         // Formula: ep_index = ep_num * 2 + (if IN then 1 else 0)
         let ep_dci = ep_num * 2 + if ep_dir_in { 1 } else { 0 };
 
-        let interval_val = device.speed.interrupt_interval(interval);
+        // **Serviced at least this often, whatever the descriptor asks.**
+        // `bInterval` is the longest a device is willing to wait between polls,
+        // not the shortest it may be asked: an interrupt IN endpoint with
+        // nothing to say answers NAK, which costs a transaction and no more.
+        //
+        // It matters because an interrupt endpoint carries one report per
+        // service interval, so the descriptor's period is a hard ceiling on how
+        // fast anything queued behind it drains. QEMU's `usb-mouse` asks for
+        // 8 ms and then emits a few hundred relative deltas to walk the pointer
+        // across the screen, which at 125 a second is seconds of backlog and a
+        // pointer that arrives late and in bursts. Polling every millisecond
+        // drains the same queue eight times faster.
+        //
+        // 1 ms is also what a modern pointing device asks for unprompted, and
+        // the floor xHCI allows at full and low speed (6.2.3.6).
+        const FASTEST_INTERVAL: u8 = 3; // 2^3 * 125us
+        let asked = device.speed.interrupt_interval(interval);
+        let interval_val = asked.min(FASTEST_INTERVAL);
         println!(
-            "xhci: ep {:#04x} {:?} bInterval={} -> interval {} ({} us)",
+            "xhci: ep {:#04x} {:?} bInterval={} asks {} us, serviced every {} us",
             ep_addr,
             device.speed,
             interval,
-            interval_val,
+            125u32 << asked,
             125u32 << interval_val
         );
 

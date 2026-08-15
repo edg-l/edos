@@ -431,12 +431,15 @@ waits for the next service interval. That is a missed interval per wake, and it
 halves an endpoint's usable rate. A physical mouse is a relative device, so this
 is the path real hardware takes.
 
-**What that does not fix, and why `usb-tablet` is the right configuration
-rather than a workaround.** An interrupt endpoint carries one packet per service
-interval, so `usb-mouse`'s 8 ms `bInterval` is a hard ceiling of 125 reports per
-second however many buffers are queued. QEMU emits 325 deltas to walk a pointer
-across the screen, so that is ~2.6 s of backlog, measured at ~2 s here. The
-guest cannot poll its way out of it.
+**And the guest can poll its way out of it after all**, which was worth checking
+rather than assuming. `bInterval` is the longest a device is willing to wait
+between polls, not the shortest it may be asked: an interrupt IN endpoint with
+nothing to say answers NAK and costs a transaction. The driver picks the
+interval, so HID endpoints are serviced every 1 ms whatever the descriptor
+requests. QEMU's `usb-mouse` asks for 8 ms, which capped the drain at 125
+reports a second and made those 325 deltas ~2.6 s of backlog; at 1 ms the same
+325 clear in under one second, measured. 1 ms is also what a modern pointing
+device asks for unprompted, and the floor xHCI allows at full and low speed.
 
 A real mouse does not behave this way. It produces reports at its own rate and
 its `bInterval` is chosen to match, so supply and drain are balanced and no
