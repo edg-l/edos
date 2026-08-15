@@ -325,6 +325,26 @@ pub enum AlignItems {
     Stretch,
 }
 
+/// A `border-radius`, in the form the page wrote it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Radius {
+    Px(u32),
+    /// Of the shorter side of the box, which is what makes 50% a circle.
+    Percent(u32),
+}
+
+impl Radius {
+    /// The radius in pixels for a box of this size, never more than half of
+    /// the shorter side: a larger one is the same shape drawn wrong.
+    pub fn px(self, width: u32, height: u32) -> u32 {
+        let half = width.min(height) / 2;
+        match self {
+            Radius::Px(px) => px.min(half),
+            Radius::Percent(percent) => (width.min(height) * percent / 100).min(half),
+        }
+    }
+}
+
 /// The column tracks of a `grid-template-columns`, bounded so that [`Computed`]
 /// stays `Copy` -- it is passed by value on every element, and a heap list here
 /// would put an allocation on that path.
@@ -516,6 +536,18 @@ pub struct Computed {
     /// [`Computed::measure`] neither inherits nor folds in `max-width`. It
     /// answers one question: whether the box is the visually-hidden idiom.
     own_width: Option<u32>,
+    /// `border-radius`, as a length or as a percentage of the box.
+    ///
+    /// One radius for all four corners: a page writing four different ones is
+    /// drawing a shape, and a page writing one -- which is nearly all of them
+    /// -- is rounding a button, a card or a code block. The first value is the
+    /// one taken, which is the top-left corner and in practice the whole
+    /// intent.
+    ///
+    /// A percentage is kept as one because it resolves against the box, and
+    /// the box is not known until layout: `border-radius: 50%` is the circle
+    /// every status dot on a page is drawn with.
+    pub radius: Option<Radius>,
     /// `list-style-type`, inherited so a rule on the list reaches its items.
     /// `None` is "the page said nothing", which leaves the marker to the kind
     /// of list the element opened and how deeply it is nested.
@@ -582,10 +614,34 @@ impl Computed {
             margin_right: None,
             background: None,
             own_width: None,
+            radius: None,
             padding: Sides::default(),
             borders: Sides::default(),
             ..*self
         }
+    }
+
+    /// The `width` this element declared for itself, which is a size rather
+    /// than the ceiling [`Computed::measure`] is: a box asked for one is that
+    /// wide even with nothing in it.
+    pub fn own_width(&self) -> Option<u32> {
+        self.own_width
+    }
+
+    /// Whether this element draws a box of its own: a background, a border, or
+    /// a size it was given rather than one its contents decided.
+    ///
+    /// It is what makes an empty element worth laying out. A `<span>` holding
+    /// nothing, sized 12 by 12 with a radius of half of it, is how every page
+    /// draws a status dot.
+    pub fn paints(&self) -> bool {
+        let borders = &self.borders;
+        self.background.is_some()
+            || [borders.top, borders.right, borders.bottom, borders.left]
+                .iter()
+                .any(|edge| edge.px() > 0)
+            || self.height.is_some()
+            || self.own_width.is_some()
     }
 
     /// The two break properties as the one answer the line breaker needs.
@@ -856,6 +912,13 @@ impl Computed {
             "padding-right" => self.padding.right = self.length(value, root_px, parent_px),
             "padding-bottom" => self.padding.bottom = self.length(value, root_px, parent_px),
             "padding-left" => self.padding.left = self.length(value, root_px, parent_px),
+            "border-radius" => {
+                self.radius = value
+                    .split('/')
+                    .next()
+                    .and_then(|corners| corners.split_whitespace().next())
+                    .and_then(|first| parse_radius(first, root_px, self.em(parent_px)));
+            }
             "background" | "background-color" => {
                 // A `background` shorthand is mostly things this cannot paint
                 // -- images, gradients, positions -- so its colour is taken
@@ -2730,6 +2793,15 @@ impl Math<'_> {
             self.at += 1;
         }
     }
+}
+
+/// One corner radius: a length, or a percentage of the box kept as one.
+fn parse_radius(value: &str, root_px: u32, em_px: u32) -> Option<Radius> {
+    if let Some(number) = value.trim().strip_suffix('%') {
+        let percent: f32 = number.trim().parse().ok()?;
+        return Some(Radius::Percent(percent.clamp(0.0, 100.0).round() as u32));
+    }
+    parse_length(value, root_px, em_px).map(Radius::Px)
 }
 
 /// `grid-template-columns`, as the track list the box engine takes.

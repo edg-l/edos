@@ -158,6 +158,8 @@ pub struct Decor {
     pub height: u32,
     pub background: Option<u32>,
     pub border: Sides<Edge>,
+    /// `border-radius`, already resolved against this box's own size.
+    pub radius: u32,
 }
 
 /// A document laid out for one column width.
@@ -465,13 +467,15 @@ impl Layout {
             plan.border.left,
         ];
         if !plan.invisible && (plan.background.is_some() || edges.iter().any(|edge| edge.px > 0)) {
+            let height = (y - box_top).max(0) as u32;
             self.decor.push(Decor {
                 x: box_x,
                 y: box_top,
                 width: box_w,
-                height: (y - box_top).max(0) as u32,
+                height,
                 background: plan.background,
                 border: plan.border,
+                radius: plan.radius.map_or(0, |r| r.px(box_w, height)),
             });
         }
         y += plan.gap_after as i32;
@@ -990,7 +994,13 @@ fn measure_block(block: &Block, offer: u32) -> (u32, u32) {
     // the width the box was *given*, so taking them as evidence of intrinsic
     // width answers "as wide as you offered" to every question, and a box that
     // should shrink to fit fills the line instead.
-    (text.max(rules) + trailing, height)
+    //
+    // A declared `width` is the exception, and it is not evidence of anything:
+    // it is the width. Without it an element with a size and no content -- the
+    // 12 by 12 span every page draws a status dot with -- measures as its
+    // insets and comes out a sliver.
+    let content = (text.max(rules) + trailing).max(block.css.own_width().unwrap_or(0));
+    (content, height)
 }
 
 /// Mirror the document's box tree into taffy's.
@@ -1109,6 +1119,9 @@ struct Plan {
     center: bool,
     align: Align,
     background: Option<u32>,
+    /// `border-radius`, still in the form the page wrote it: a percentage is
+    /// of the box, and the box is not settled until it has been laid out.
+    radius: Option<css::Radius>,
     pad: Sides<u32>,
     border: Sides<Edge>,
     /// `visibility: hidden` on the element that opened the block: it is laid
@@ -1187,6 +1200,7 @@ fn plan(block: &Block) -> Plan {
     plan.ws = css.white_space.unwrap_or_default();
     plan.wrap = css.wrap();
     plan.background = css.background;
+    plan.radius = css.radius;
     plan.invisible = css.invisible;
     plan.pad = Sides {
         top: css.padding.top.unwrap_or(0),
@@ -1231,6 +1245,7 @@ fn default_plan(block: &Block) -> Plan {
         center: false,
         align: Align::Left,
         background: None,
+        radius: None,
         pad: Sides::default(),
         border: Sides::default(),
         invisible: false,
@@ -1350,11 +1365,42 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         }
         let (w, h) = (decor.width, decor.height);
         if let Some(color) = decor.background {
-            fill(surface.pixels, width, height, top, decor.x, y, w, h, color);
+            fill_rounded(
+                surface.pixels,
+                width,
+                height,
+                top,
+                decor.x,
+                y,
+                w,
+                h,
+                decor.radius,
+                color,
+            );
         }
         // Borders sit inside the box, so a background and a border of the same
         // colour are one shape rather than two.
         let border = &decor.border;
+        // A rounded box wants its border to follow the corner, and the four
+        // rectangles below cannot: they would square off the very corners the
+        // radius rounded. Only a border that is the same on all four sides is
+        // one shape to stroke, which is what a rounded box is written with.
+        if decor.radius > 0 && border.top.px > 0 && uniform(border) {
+            stroke_rounded(
+                surface.pixels,
+                width,
+                height,
+                top,
+                decor.x,
+                y,
+                w,
+                h,
+                decor.radius,
+                border.top.px,
+                border.top.color,
+            );
+            continue;
+        }
         let sides = [
             (decor.x, y, w, border.top.px, border.top.color),
             (
@@ -1588,6 +1634,122 @@ fn blit(
 /// Fill a rectangle, clipped to the buffer and to the page area: a background
 /// scrolled under the chrome is cut at `top` rather than painted over it.
 #[allow(clippy::too_many_arguments)]
+/// Whether all four borders are the same width and colour, and so are one
+/// shape rather than four.
+fn uniform(border: &Sides<Edge>) -> bool {
+    let first = border.top;
+    [border.right, border.bottom, border.left]
+        .iter()
+        .all(|edge| edge.px == first.px && edge.color == first.color)
+}
+
+/// How far in from the edge a rounded corner is at `row`, for a box `h` tall
+/// with corners of `radius`.
+///
+/// Both corners of a side are the same, so one row's inset answers for the
+/// left and the right of it.
+fn corner_inset(row: i32, h: u32, radius: u32) -> u32 {
+    if radius == 0 {
+        return 0;
+    }
+    let r = radius as f32;
+    // Distance from the row to the centre of the nearer corner's arc, which is
+    // `radius` in from that end of the box.
+    let from_top = r - 1.0 - row as f32;
+    let from_bottom = r - (h as f32 - 1.0 - row as f32);
+    let dy = from_top.max(from_bottom);
+    if dy <= 0.0 {
+        return 0;
+    }
+    (r - (r * r - dy * dy).max(0.0).sqrt()).round() as u32
+}
+
+/// Fill a rectangle whose corners are rounded to `radius`.
+fn fill_rounded(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    top: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    color: u32,
+) {
+    if radius == 0 {
+        fill(buffer, width, height, top, x, y, w, h, color);
+        return;
+    }
+    for row in 0..h as i32 {
+        let inset = corner_inset(row, h, radius);
+        let span = w.saturating_sub(inset * 2);
+        if span > 0 {
+            fill(
+                buffer,
+                width,
+                height,
+                top,
+                x + inset as i32,
+                y + row,
+                span,
+                1,
+                color,
+            );
+        }
+    }
+}
+
+/// Draw a rounded rectangle's outline, `thickness` pixels thick and inside the
+/// box, the way a CSS border sits inside the border box.
+#[allow(clippy::too_many_arguments)]
+fn stroke_rounded(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    top: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    thickness: u32,
+    color: u32,
+) {
+    let inner_h = h.saturating_sub(thickness * 2);
+    let inner_radius = radius.saturating_sub(thickness);
+    for row in 0..h as i32 {
+        let outer = corner_inset(row, h, radius);
+        let left = x + outer as i32;
+        let span = w.saturating_sub(outer * 2);
+        if span == 0 {
+            continue;
+        }
+        let inner_row = row - thickness as i32;
+        if inner_row < 0 || inner_row >= inner_h as i32 {
+            // A row through the top or bottom edge is solid across.
+            fill(buffer, width, height, top, left, y + row, span, 1, color);
+            continue;
+        }
+        // Elsewhere the row is two segments, one down each side, with the
+        // inner shape's own corner deciding where each of them ends.
+        let inner = corner_inset(inner_row, inner_h, inner_radius) + thickness;
+        let side = inner.saturating_sub(outer).max(1);
+        fill(buffer, width, height, top, left, y + row, side, 1, color);
+        fill(
+            buffer,
+            width,
+            height,
+            top,
+            x + w.saturating_sub(inner) as i32,
+            y + row,
+            side,
+            1,
+            color,
+        );
+    }
+}
+
 fn fill(
     buffer: &mut [u32],
     width: u32,

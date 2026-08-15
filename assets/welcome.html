@@ -130,6 +130,12 @@
       .cell.c { background-color: #975a16; }
       .badge { display: inline-block; background-color: #5e81ac; color: #fff; padding: 4px 8px; }
       th, td { padding: 4px 10px; border: 1px solid #4c566a; }
+      .pill { display: inline-block; padding: 4px 12px; border-radius: 10px;
+              background-color: #5e81ac; color: #fff; }
+      .ring { display: inline-block; padding: 4px 12px; border-radius: 8px;
+              border: 2px solid #88c0d0; }
+      .dot { display: inline-block; width: 12px; height: 12px;
+             border-radius: 50%; background-color: #bf616a; }
       th { font-weight: bold; }
     </style>
   </head>
@@ -377,6 +383,11 @@ while the newline above them is kept.</p>
       <p class="cell b">to the</p>
       <p class="cell c">next row</p>
     </div>
+    <hr>
+    <h2>What a corner radius rounds</h2>
+    <p><span class="pill">a filled pill</span> <span class="ring">a ring</span>
+      <span class="dot"></span> a dot, which is a radius of half the box.</p>
+
     <hr>
     <h2>What a table arranges</h2>
     <table>

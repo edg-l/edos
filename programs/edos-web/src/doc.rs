@@ -1328,7 +1328,19 @@ impl Builder<'_> {
         let frame = self.frames.pop()?;
         let mut children = frame.children;
         match children.len() {
-            0 => None,
+            // An element holding nothing still draws whatever box it was given
+            // one for: a `<span>` sized 12 by 12 with a background and a radius
+            // of half of it is how a page draws a status dot, and dropping it
+            // for having no text loses the only thing it was there for.
+            0 => frame.css.paints().then(|| {
+                Node::Leaf(Block {
+                    kind: BlockKind::Paragraph,
+                    runs: Vec::new(),
+                    css: frame.css,
+                    picture: None,
+                    anchor: None,
+                })
+            }),
             1 if matches!(children[0], Node::Leaf(_)) => children.pop(),
             _ => Some(Node::Container {
                 css: frame.css,
