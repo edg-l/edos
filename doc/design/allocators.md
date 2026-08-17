@@ -119,34 +119,34 @@ corrupts its own heap, ahead of guessing.
 
 ## Numbers
 
-Guest, four-core KVM, `allocbench`. "before" is the address-ordered list; both
-columns are medians of four runs.
+Guest, four-core KVM, `allocbench`. "before" is the address-ordered list, "after"
+is the current allocator including the per-thread cache below. The after column
+is the cheapest of five rounds; the before column could only ever be a median of
+whole-program runs, since that allocator is gone and its numbers predate the
+instrument being fixed. Read the shape, not the third digit.
 
 | | before | after |
 |---|---|---|
-| alloc+free, nothing live | 15 ns | 22 ns |
-| 500 live blocks | 1686 | 46 |
-| 1000 live blocks | 1599 | 65 |
-| 2000 live blocks | 1787 | 76 |
-| 4000 live blocks | 1764 | 74 |
-| 8000 live blocks | 4978 | 100 |
-| after freeing 8000 | 86 | 92 |
-| growth chain, 8 B to 32 KiB | not measured | 152 ns/step |
+| alloc+free, nothing live | 15 ns | 11 ns |
+| 500 live blocks | 1686 | 34 |
+| 1000 live blocks | 1599 | 42 |
+| 2000 live blocks | 1787 | 57 |
+| 4000 live blocks | 1764 | 67 |
+| 8000 live blocks | 4978 | 66 |
+| after freeing 8000 | 86 | 43 |
+| growth chain, 8 B to 32 KiB | not measured | 93 ns/step |
 
 Boot-to-panel, from `Spawned bin/edos-init` to the taskbar's first `panel|` line
-in `run_log.txt`, went from about 2.7 s to **150 ms**.
+in `run_log.txt`, went from about 2.7 s to **104 ms**.
 
-The point is not the ratio, it is that the column no longer has a slope.
+The point is not the ratio, it is that the column no longer has a slope: 34 ns
+at 500 live blocks and 66 at 8000 is a 1.9x spread over a 16x population, where
+the first-fit walk was 19x.
 
-**The floor regressed, 15 ns to 22.** `churn` cycles 24, 64, 256 and 1024 bytes,
-and the last two span more than `FAST_MAX`, so half its allocations pay a merge
-and a split that the old allocator did not. `FAST_MAX` is the lever if it ever
-matters; it was left at 256 because covering 1 KiB means 63 exact-size bins and a
-program holding one of each, to buy back 7 ns.
-
-**One spike per run, of about 1.1 us per allocation, lands on a different
-population every time.** It is a single ~2.3 ms event inside one round, not a
-property of the population; read the median across runs rather than one run.
+The floor regressed to 22 ns at the segregated-fit stage, because `churn` cycles
+24, 64, 256 and 1024 bytes and the last two span more than `FAST_MAX`, so half
+its allocations paid a merge and a split the first-fit allocator did not. The
+per-thread cache covers all four and took it to 11.
 
 Host, running the same algorithm outside the guest, where node counts rather than
 times are the point:
@@ -209,47 +209,87 @@ and a different instrument.
 
 ## What is still open
 
-- **One lock for the whole userspace heap, and it costs most of the machine's
-  allocation throughput the moment a second thread allocates.** `allocbench`'s
-  `contention` phase on a four-CPU guest, medians of four runs:
-
-  | threads | ns/op | aggregate |
-  |---|---|---|
-  | 1 | 65 | 15.4 M ops/s |
-  | 2 | 294 | 3.4 M ops/s |
-  | 4 | 182 | 5.5 M ops/s |
-  | 8 | 279 | 3.6 M ops/s |
-
-  Read the aggregate column: total throughput falls 4.5x between one thread and
-  two, recovers slightly at four as real parallelism offsets it, and falls back
-  at eight. The cliff is at **two**, which is an ordinary configuration --
-  `httpd` and `sshd` spawn a thread per connection, and `edos-web` has a network
-  thread beside its main one. Per-operation cost hides this: 294 ns still reads
-  as respectable while the machine does a third of the work it did with one
-  thread. The old allocator, for scale, went 118 k ops/s to 9.2 k on the host.
-
-  Two mechanisms are mixed in that number and this phase cannot separate them:
-  the lock itself, and two threads' allocations interleaving in one heap so
-  neither gets its own blocks back cache-hot. A per-thread cache fixes both.
-
-  **The obstacle that was written here before does not exist on this target.**
-  It claimed a thread-local front-end wants `#[thread_local]` inside the
-  allocator that std's own TLS setup allocates through. That is a *dynamic* TLS
-  problem, glibc's and musl's, where `__tls_get_addr` can allocate. This target
-  is `tls_model: LocalExec` with `has_thread_local: true`, so a thread-local is
-  a `%fs:constant` access with no call and no allocation; the kernel maps and
-  zeroes a TLS region per thread from the ELF `PT_TLS` template and writes the
-  FS base before the first user instruction, at both exec and clone
-  (`kernel/src/thread/thread.rs::allocate_tls_region`); and std already uses the
-  native `#[thread_local]` path on edos. A `#[thread_local]` static in `edos_rt`
-  was compiled against `x86_64-unknown-edos` to confirm it rather than infer it.
-
-  **mimalloc is also the wrong model to copy.** It needs per-page ownership and
-  a thread-safe foreign-free list because one of its blocks does not record
-  where it came from. Ours does: the size is in the header and every block comes
-  from the one global heap, so blocks are interchangeable and a thread can free
-  any block into its own cache. The shape to build is the one already in this
-  tree -- `kernel/src/allocator.rs`'s per-CPU cache -- applied per thread, with
-  a flush on thread exit through the fork's `thread_start` and a closed flag so
-  a free after the flush bypasses the cache rather than refilling it.
 - **Kernel allocator contention is unmeasured.** See above.
+
+## A thread keeps its own blocks
+
+The heap is behind one lock, and `allocbench`'s `contention` phase said what
+that cost on a four-CPU guest. Aggregate throughput fell from 15.4 M ops/s with
+one thread to 3.4 with **two** -- an ordinary configuration, since `httpd` and
+`sshd` spawn a thread per connection and `edos-web` has a network thread beside
+its main one. Per-operation cost hid it: 294 ns still reads as respectable while
+the machine does a third of the work it did with one thread. That is the column
+to read, and it is why the phase reports it.
+
+Small blocks are now parked per thread, so the common allocate-and-free pair
+takes no lock and touches nothing another thread can see. Two decisions make
+that true and both are load-bearing:
+
+- **The lists thread through the user pointer, not the block.** A cached block
+  is still an allocation as far as the heap is concerned, so its payload is
+  ours to write a link into.
+- **A block's class comes from the layout, never from its header.** A header
+  carries a flag that the block physically before it writes when *that* block
+  is freed, so reading one outside the heap lock would be a race on the flag
+  bits. The layout gives the span the block was allocated for, which is never
+  larger than the block, so handing it back for the same span is sound.
+
+Cross-thread frees therefore need no ownership tracking, which is what most of
+mimalloc's machinery is for: its blocks do not record where they came from, so
+it needs per-page ownership and a thread-safe list for foreign frees. Ours
+record their own size and all come from one heap, so they are interchangeable.
+The shape to copy was already in this tree -- `kernel/src/allocator.rs`'s
+per-CPU cache -- applied per thread.
+
+The cache belongs to whichever heap claims it first, **by identity rather than
+by address**. An allocator can be a temporary, and a later one at the same
+address would otherwise inherit blocks carved out of chunks it does not own;
+`bench/allocstress` builds its allocators on the stack and went from green to an
+arithmetic overflow deep in the bins when this was a pointer comparison.
+
+One dial: 32 KiB parked per thread, whatever mix of sizes.
+`flush_thread_cache` hands it all back and gives up the claim, and std calls it
+last on the way out of a thread, after the destructors that can still free.
+
+### What it bought
+
+Four-CPU guest, `allocbench`, cheapest of five rounds:
+
+| threads | before | after |
+|---|---|---|
+| 1 | 16.9 M ops/s | 30.3 M ops/s |
+| 2 | 3.9 M ops/s | 55.6 M ops/s |
+| 4 | 6.7 M ops/s | 111.1 M ops/s |
+| 8 | 3.7 M ops/s | 111.1 M ops/s |
+
+Throughput now rises with thread count and saturates at the core count instead
+of collapsing. The two columns were taken with different versions of the
+instrument -- see below -- but the distributions do not overlap: the best of
+four pre-cache samples at two threads was 3.9 M ops/s and every post-cache
+sample is 55.6.
+
+Single-threaded work improved too, since the fast path stopped taking the lock
+at all: `churn` 22 -> 11 ns, which is better than the 15 ns the first-fit
+allocator managed and closes the one regression the segregated-fit rewrite had
+introduced; `reuse` 92 -> 43; `growth` 152 -> 93; and boot-to-panel 157 -> 104 ms.
+
+### The instrument was wrong twice, in the same direction
+
+Both times a benchmark artefact read as a fact about the allocator, and both are
+worth carrying because the fix is the same shape:
+
+1. **The first round of `scaling` measured page faults, not allocation.** It is
+   the only round allocating from memory the process has never touched. That
+   produced the flat top which made the original mechanism look unproven.
+   Fixed by building and dropping the largest population before timing.
+2. **The later rounds are long enough to be preempted.** A round taking a few
+   milliseconds on a guest that is also running a desktop measured 333 ns/alloc
+   and 1417 in consecutive runs of the same binary, and four samples of that
+   were enough for a 2.8x regression at 8000 live blocks to be reported here
+   that does not exist -- with the fix it is 66 ns, and the sweep is flat from
+   34 at 500 live to 66 at 8000. Fixed by repeating every timed round five
+   times and reporting the cheapest, since interference only ever makes a round
+   look slower.
+
+The general rule: **on a machine doing anything else, a microbenchmark's mean is
+a measure of interference and its minimum is a measure of the code.**

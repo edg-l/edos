@@ -18,6 +18,25 @@ use std::time::Instant;
 /// Sizes a real program asks for: a few words for a node, a string, a buffer.
 const SIZES: [usize; 4] = [24, 64, 256, 1024];
 
+/// How many times a timed round is repeated before its cost is believed.
+///
+/// The guest runs a desktop while this runs, and a round that takes a few
+/// milliseconds is long enough to be preempted: the same round, same binary,
+/// measured 333 ns/alloc and 1417 in consecutive runs, which is enough to
+/// invent a regression that is not there. Interference only ever makes a round
+/// look slower, so the cheapest of several is the one to report.
+const REPEATS: usize = 5;
+
+/// Runs `round` [`REPEATS`] times and returns the cheapest nanoseconds-per-op.
+fn best<F: FnMut() -> u64>(ops: u64, mut round: F) -> u64 {
+    let mut best = u64::MAX;
+    for _ in 0..REPEATS {
+        let elapsed = round();
+        best = best.min(elapsed / ops);
+    }
+    best
+}
+
 fn main() {
     println!("allocbench: allocation cost against live-block count");
 
@@ -32,12 +51,14 @@ fn main() {
 /// the allocator's floor.
 fn churn() {
     const ROUNDS: usize = 20_000;
-    let start = Instant::now();
-    for i in 0..ROUNDS {
-        let v: Vec<u8> = Vec::with_capacity(SIZES[i % SIZES.len()]);
-        black_box(&v);
-    }
-    let each = start.elapsed().as_nanos() as u64 / ROUNDS as u64;
+    let each = best(ROUNDS as u64, || {
+        let start = Instant::now();
+        for i in 0..ROUNDS {
+            let v: Vec<u8> = Vec::with_capacity(SIZES[i % SIZES.len()]);
+            black_box(&v);
+        }
+        start.elapsed().as_nanos() as u64
+    });
     println!("churn      alloc+free, nothing live: {each} ns/op");
 }
 
@@ -53,7 +74,9 @@ fn scaling() {
     // worse than the rounds above it. The rest of the sweep inherits a warm
     // heap from the round before, so only the first was ever wrong.
     {
-        let warm: Vec<Vec<u8>> = (0..8_000).map(|i| vec![0u8; SIZES[i % SIZES.len()]]).collect();
+        let warm: Vec<Vec<u8>> = (0..8_000)
+            .map(|i| vec![0u8; SIZES[i % SIZES.len()]])
+            .collect();
         black_box(&warm);
     }
 
@@ -68,13 +91,16 @@ fn scaling() {
         }
 
         const SAMPLES: usize = 2_000;
-        let start = Instant::now();
-        let mut sink: Vec<Vec<u8>> = Vec::with_capacity(SAMPLES);
-        for i in 0..SAMPLES {
-            sink.push(vec![0u8; SIZES[i % SIZES.len()]]);
-        }
-        let each = start.elapsed().as_nanos() as u64 / SAMPLES as u64;
-        black_box(&sink);
+        let each = best(SAMPLES as u64, || {
+            let mut sink: Vec<Vec<u8>> = Vec::with_capacity(SAMPLES);
+            let start = Instant::now();
+            for i in 0..SAMPLES {
+                sink.push(vec![0u8; SIZES[i % SIZES.len()]]);
+            }
+            let elapsed = start.elapsed().as_nanos() as u64;
+            black_box(&sink);
+            elapsed
+        });
         black_box(&held);
         println!("scaling    {live:>5} live blocks: {each} ns/alloc");
     }
@@ -88,10 +114,13 @@ fn reuse() {
     let held: Vec<Vec<u8>> = (0..N).map(|i| vec![0u8; SIZES[i % SIZES.len()]]).collect();
     drop(held);
 
-    let start = Instant::now();
-    let again: Vec<Vec<u8>> = (0..N).map(|i| vec![0u8; SIZES[i % SIZES.len()]]).collect();
-    let each = start.elapsed().as_nanos() as u64 / N as u64;
-    black_box(&again);
+    let each = best(N as u64, || {
+        let start = Instant::now();
+        let again: Vec<Vec<u8>> = (0..N).map(|i| vec![0u8; SIZES[i % SIZES.len()]]).collect();
+        let elapsed = start.elapsed().as_nanos() as u64;
+        black_box(&again);
+        elapsed
+    });
     println!("reuse      after freeing {N}: {each} ns/alloc");
 }
 
@@ -113,33 +142,33 @@ fn contention() {
     const LIVE: usize = 64;
 
     for threads in [1usize, 2, 4, 8] {
-        let start = Instant::now();
-        let workers: Vec<_> = (0..threads)
-            .map(|id| {
-                std::thread::spawn(move || {
-                    let mut held: Vec<Vec<u8>> = Vec::with_capacity(LIVE);
-                    let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (id as u64 + 1);
-                    for _ in 0..OPS {
-                        seed ^= seed << 13;
-                        seed ^= seed >> 7;
-                        seed ^= seed << 17;
-                        if held.len() == LIVE {
-                            held.swap_remove((seed >> 8) as usize % LIVE);
-                        }
-                        held.push(vec![0u8; SIZES[(seed as usize) % SIZES.len()]]);
-                    }
-                    black_box(&held);
-                })
-            })
-            .collect();
-        for worker in workers {
-            worker.join().expect("worker panicked");
-        }
-
-        let elapsed = start.elapsed();
         let ops = (threads * OPS) as u64;
-        let each = elapsed.as_nanos() as u64 / ops;
-        let rate = ops as f64 / elapsed.as_secs_f64() / 1.0e6;
+        let each = best(ops, || {
+            let start = Instant::now();
+            let workers: Vec<_> = (0..threads)
+                .map(|id| {
+                    std::thread::spawn(move || {
+                        let mut held: Vec<Vec<u8>> = Vec::with_capacity(LIVE);
+                        let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (id as u64 + 1);
+                        for _ in 0..OPS {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 7;
+                            seed ^= seed << 17;
+                            if held.len() == LIVE {
+                                held.swap_remove((seed >> 8) as usize % LIVE);
+                            }
+                            held.push(vec![0u8; SIZES[(seed as usize) % SIZES.len()]]);
+                        }
+                        black_box(&held);
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().expect("worker panicked");
+            }
+            start.elapsed().as_nanos() as u64
+        });
+        let rate = 1000.0 / each.max(1) as f64;
         println!("contention {threads:>2} threads: {each:>6} ns/op, {rate:.2} M ops/s aggregate");
     }
 }
@@ -156,17 +185,21 @@ fn growth() {
     const RUNS: usize = 2_000;
     const CAP: usize = 32 * 1024;
 
-    let start = Instant::now();
-    let mut steps = 0u64;
-    for _ in 0..RUNS {
-        let mut v: Vec<u8> = Vec::with_capacity(8);
-        while v.capacity() < CAP {
-            let target = v.capacity() * 2;
-            v.resize(target, 0);
-            steps += 1;
+    let steps = (CAP as u64).ilog2() as u64 - 2;
+    let each = best(RUNS as u64 * steps, || {
+        let start = Instant::now();
+        for _ in 0..RUNS {
+            let mut v: Vec<u8> = Vec::with_capacity(8);
+            while v.capacity() < CAP {
+                let target = v.capacity() * 2;
+                v.resize(target, 0);
+            }
+            black_box(&v);
         }
-        black_box(&v);
-    }
-    let each = start.elapsed().as_nanos() as u64 / steps.max(1);
-    println!("growth     8 B -> {} KiB doubling: {each} ns/step", CAP / 1024);
+        start.elapsed().as_nanos() as u64
+    });
+    println!(
+        "growth     8 B -> {} KiB doubling: {each} ns/step",
+        CAP / 1024
+    );
 }
