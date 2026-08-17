@@ -96,6 +96,27 @@ impl<T> PreemptSpinlock<T> {
             _preempt: preempt,
         }
     }
+
+    /// Take the lock if it is free, rather than waiting for it.
+    ///
+    /// For a caller whose work is safe to skip and which must not be charged
+    /// the holder's critical section — a display cursor move on the input
+    /// path, where the same lock is also held across a full-screen blit and
+    /// the position is superseded by the next report either way.
+    pub fn try_lock(&self) -> Option<PreemptMutexGuard<'_, T>> {
+        let preempt = preempt_disable();
+        match self.inner.try_lock() {
+            Some(guard) => Some(PreemptMutexGuard {
+                guard: Some(guard),
+                _preempt: preempt,
+            }),
+            // Re-enable preemption rather than holding it over a failed try.
+            None => {
+                drop(preempt);
+                None
+            }
+        }
+    }
 }
 
 pub struct PreemptMutexGuard<'a, T> {

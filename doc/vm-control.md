@@ -248,6 +248,16 @@ scanout and not that plane, so a screenshot shows the desktop with no pointer
 in it. Do not read that as "the pointer did not move"; ask the guest or click
 and observe the result instead.
 
+**A relative mouse is also what makes the pointer's own latency visible.** With
+an absolute device QEMU does not grab, so the host keeps drawing its own arrow
+at native latency exactly where the guest believes the pointer is; you are
+watching the host's cursor and it cannot lag. With a relative device QEMU grabs
+and hides it, and the only cursor on screen is the one the guest places. Nothing
+about the guest changed between the two -- the absolute case simply covers the
+guest's cursor with a zero-latency one. So judge pointer latency with
+`--pointer mouse`, and do not read a smooth tablet as evidence that the guest is
+keeping up.
+
 **With a relative mouse, reaching an exact pixel means homing first**: the
 guest clamps the cursor to the screen rectangle and applies no acceleration,
 so driving it hard into the top-left corner is a reliable origin to count from,

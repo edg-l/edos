@@ -538,6 +538,17 @@ fn main() {
     // False when the display has no cursor plane, and the software cursor is
     // composited as before.
     let mut hw_cursor = upload_cursor(&screen, &cursor);
+    // With a plane the display can hold, the pointer does not have to be
+    // resampled to the frame rate: the kernel places it from the input path as
+    // each report lands, which is up to a frame earlier than this loop can
+    // manage and is what a relative mouse makes visible — an absolute one hides
+    // the lag behind the host's own cursor, a physical mouse has nothing to
+    // hide it with.
+    let cursor_tracked = hw_cursor && screen.track_pointer(true);
+    eprintln!("[wm] cursor: hardware={hw_cursor} tracked={cursor_tracked}");
+    // The last position handed to the plane, so a move is sent on a change
+    // rather than every frame.
+    let mut sent_cursor = (i32::MIN, i32::MIN);
     let mut frame_log = frametime::FrameLog::new(frame_time_ms);
     // The cadence is measured between the starts of consecutive frames, which
     // is what a viewer perceives; the phases below only explain a bad one.
@@ -597,8 +608,19 @@ fn main() {
         cursor.set_position(mx, my);
 
         // Update hardware cursor position (very cheap, no frame redraw).
-        if hw_cursor {
+        //
+        // Kept even while the display tracks the pointer, as the backstop that
+        // guarantees convergence: a tracked move is dropped rather than waited
+        // for when the display is busy, and the one that matters is the last of
+        // a motion — skip that and the cursor rests a few pixels from where the
+        // pointer stopped, with no later report to correct it.
+        //
+        // Sending only on a change is what keeps that cheap: while the pointer
+        // moves this is one redundant move per frame behind the tracked ones,
+        // and while it rests it is nothing at all.
+        if hw_cursor && (mx, my) != sent_cursor {
             screen.move_cursor(mx.max(0) as u32, my.max(0) as u32);
+            sent_cursor = (mx, my);
         }
 
         // Get current window list from kernel. This read is for routing input
@@ -874,6 +896,13 @@ fn main() {
         if hw_cursor && cursor.shape() != uploaded_shape {
             hw_cursor = upload_cursor(&screen, &cursor);
             uploaded_shape = cursor.shape();
+            // An upload re-places the plane at the origin, and a shape change
+            // is reachable with the pointer perfectly still (see below), so
+            // waiting for the next report to correct it would park the cursor
+            // in the corner until the mouse moved.
+            if hw_cursor {
+                screen.move_cursor(cursor.x.max(0) as u32, cursor.y.max(0) as u32);
+            }
         }
         // A software cursor is composited instead, so the shape is part of the
         // picture and a change to it is damage the pointer's own motion does

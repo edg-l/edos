@@ -333,8 +333,36 @@ fn mouse_poll_state(subscriber: &Subscriber<MouseEvent>) -> PollState {
 /// forever. Every producer — PS/2 here, USB HID boot reports in
 /// `drivers::usb::hid` — goes through this.
 pub(crate) fn dispatch_mouse_event(event: MouseEvent) {
+    // Before the broadcast, which takes locks and wakes threads: the plane is
+    // what the eye sees, and nothing below needs to run first for it to be
+    // correct.
+    move_tracked_cursor(event.x, event.y);
     MOUSE_BROADCAST.broadcast(event);
     notify_mouse_pollers();
+}
+
+/// Put the display's cursor plane where the pointer now is, when the window
+/// manager has asked the display to track it.
+///
+/// This is why a pointer can be current rather than one compositor frame old:
+/// the position reaches the plane on the report that produced it. A consumer
+/// that samples `/dev/mouse` per frame still sees whatever the last report
+/// left, so this changes when the *screen* learns, not what anything reads.
+///
+/// Never waits. `DISPLAY` is also held across a full-screen blit, and a cursor
+/// position is superseded by the next report rather than owed to anyone — so a
+/// skipped move costs a millisecond of staleness, while a blocked input thread
+/// would delay every report queued behind it and cost exactly the latency this
+/// exists to remove.
+fn move_tracked_cursor(x: i32, y: i32) {
+    if !crate::graphics::CURSOR_TRACKS_POINTER.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(display) = DISPLAY.get()
+        && let Some(mut display) = display.try_lock()
+    {
+        display.move_cursor(x.max(0) as u32, y.max(0) as u32);
+    }
 }
 
 fn notify_mouse_pollers() {

@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     fs::{DevFsDevice, DevFsError, register_device_str},
-    graphics::DISPLAY,
+    graphics::{CURSOR_TRACKS_POINTER, DISPLAY},
     interrupts::io::{VIRTIO_GPU_IRQS_FIRED, VIRTIO_GPU_WAITERS},
 };
 
@@ -29,6 +29,17 @@ pub const FB_IOCTL_FLIP_WAIT: u64 = 0x4642_000A;
 /// and how long each park lasts. Sized so the total is far longer than any
 /// frame and far shorter than a user waiting on a wedged desktop.
 pub const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
+
+/// Ask the display to keep its cursor plane on the pointer by itself.
+///
+/// `arg` points at a `u32`: non-zero enables, zero disables. A caller that
+/// enables this stops needing a move per frame, and the plane is placed from
+/// the input path as each report lands instead — which is the whole latency
+/// difference between a pointer that lags the compositor and one that does
+/// not. Uploading a new image with [`FB_IOCTL_SET_CURSOR`] re-places the plane
+/// at the origin, so a caller that changes the shape still owes one
+/// [`FB_IOCTL_MOVE_CURSOR`] afterwards.
+pub const FB_IOCTL_TRACK_POINTER: u64 = 0x4642_000C;
 
 const FLIP_WAIT_ROUNDS: u32 = 8;
 const FLIP_WAIT_SLICE: core::time::Duration = core::time::Duration::from_millis(4);
@@ -319,6 +330,18 @@ impl DevFsDevice for FramebufferDevice {
                 if !display.lock().move_cursor(pos.x, pos.y) {
                     return Err(DevFsError::Unsupported);
                 }
+                Ok(0)
+            }
+            FB_IOCTL_TRACK_POINTER => {
+                if arg == 0 {
+                    return Err(DevFsError::IoError);
+                }
+                let enable = unsafe { *(arg as *const u32) } != 0;
+                // Not validated against the display having a plane: a display
+                // without one answers `false` from `move_cursor` and the
+                // tracking store is inert, and the caller learned which it has
+                // from `FB_IOCTL_SET_CURSOR` before asking.
+                CURSOR_TRACKS_POINTER.store(enable, Ordering::Relaxed);
                 Ok(0)
             }
             _ => Err(DevFsError::Unsupported),

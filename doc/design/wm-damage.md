@@ -222,6 +222,43 @@ Audited, with what each one turned out to be:
 - **The desktop ground.** A wallpaper change sets `full_screen` where the change
   is made, which is this rule applied.
 
+## Who moves the cursor plane
+
+A cursor the display holds costs no damage, so the compositor does not have to
+redraw anything to move the pointer. That is the point of the plane, and the
+compositor threw most of it away by only ever placing it once per frame: the
+position was fresh in the kernel's `MOUSE_POSITION` the instant a HID report
+landed, and then waited up to a frame to reach the display. Reports arrive at up
+to 1 kHz and were being resampled down to the compositor's ~77 Hz.
+
+The plane is now placed from the input path. `FB_IOCTL_TRACK_POINTER` asks the
+display to follow the pointer itself, and `drivers::mouse::dispatch_mouse_event`
+— the one point every producer goes through, PS/2 and USB HID alike — puts the
+plane on the new position before it broadcasts. Whether the desktop wants a
+plane at all stays the window manager's decision: it uploads an image, learns
+from `FB_IOCTL_SET_CURSOR` whether the display has one, and only then asks for
+tracking. A compositor drawing its own pointer must not find the display drawing
+a second one.
+
+Two properties make this safe, and both are load-bearing:
+
+- **A tracked move never waits.** `DISPLAY` is also held across a full-screen
+  blit, so the input path takes it with `try_lock` and drops the move if it is
+  busy. A cursor position is superseded by the next report rather than owed to
+  anyone, so a skipped move costs a millisecond of staleness, whereas blocking
+  the input thread would delay every report behind it — the exact latency this
+  exists to remove.
+- **The compositor still sends one on a change,** as the backstop that
+  guarantees convergence. The move that matters is the last of a motion, and if
+  that one is dropped there is no later report to correct it, leaving the cursor
+  resting a few pixels from where the pointer stopped. Sending only on a change
+  keeps that to one redundant move per frame while moving and none at rest.
+
+Note that `set_cursor` re-places the plane at the origin, so a shape change owes
+a move afterwards even while tracking — otherwise a shape change under a still
+pointer parks the cursor in the corner until the mouse moves, and the audit
+above records that a shape change under a still pointer is reachable.
+
 ## Traps
 
 - **`WindowListEntry` is `libs/window-abi`**, which the kernel and

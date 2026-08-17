@@ -1,5 +1,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicBool;
 
 pub mod framebuffer;
 
@@ -24,6 +25,19 @@ use crate::{
 /// No render thread or Mailbox -- callers write to the framebuffer in their own
 /// thread context, serialized by this Mutex.
 pub static DISPLAY: Once<Mutex<Display>> = Once::new();
+
+/// Whether the cursor plane follows the pointer without a call per move.
+///
+/// A plane that holds the pointer is display *mechanism*, but whether the
+/// desktop wants one at all is the window manager's decision — a compositor
+/// that draws its own pointer must not find the display drawing a second one.
+/// So the kernel tracks only while asked, through
+/// [`framebuffer::FB_IOCTL_TRACK_POINTER`].
+///
+/// The point of tracking is latency: a pointer moved from the input path
+/// reaches the plane as each report lands, instead of being resampled to
+/// whatever rate the compositor happens to run at.
+pub static CURSOR_TRACKS_POINTER: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
     DISPLAY.call_once(|| {

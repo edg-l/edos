@@ -55,6 +55,7 @@ const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
 pub const MAX_FLIP_RECTS: usize = 16;
 const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
+const FB_IOCTL_TRACK_POINTER: u64 = 0x4642_000C;
 
 const PROT_READ: u32 = 0x1;
 const PROT_WRITE: u32 = 0x2;
@@ -382,6 +383,27 @@ impl Framebuffer {
                 FB_IOCTL_SET_CURSOR,
                 buf.as_ptr() as u64,
                 total,
+                IOCTL_ARG_IN,
+            )
+            .is_ok()
+    }
+
+    /// Ask the display to keep its cursor plane on the pointer by itself.
+    ///
+    /// Returns whether the display took it. A caller told `true` no longer
+    /// needs a `move_cursor` per frame: the kernel places the plane as each
+    /// input report lands, so the pointer stops being resampled down to the
+    /// compositor's frame rate. One told `false` must keep moving it.
+    ///
+    /// `set_cursor` re-places the plane at the origin, so a shape change still
+    /// owes one `move_cursor` afterwards even while tracking.
+    pub fn track_pointer(&self, enabled: bool) -> bool {
+        let mut enable: u32 = enabled as u32;
+        self.fd
+            .ioctl(
+                FB_IOCTL_TRACK_POINTER,
+                (&mut enable as *mut u32) as u64,
+                core::mem::size_of::<u32>(),
                 IOCTL_ARG_IN,
             )
             .is_ok()
@@ -1986,6 +2008,12 @@ impl Screen {
     /// Move hardware cursor position.
     pub fn move_cursor(&self, x: u32, y: u32) {
         self.framebuffer.move_cursor(x, y);
+    }
+
+    /// Ask the display to keep its cursor plane on the pointer by itself,
+    /// reporting whether it took it. See [`Framebuffer::track_pointer`].
+    pub fn track_pointer(&self, enabled: bool) -> bool {
+        self.framebuffer.track_pointer(enabled)
     }
 
     /// Create a new DrawRequest that fits entirely on screen
