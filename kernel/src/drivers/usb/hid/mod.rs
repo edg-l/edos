@@ -238,6 +238,25 @@ pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> KeyEve
 /// are arriving and something above is dropping them.
 pub static MOUSE_REPORTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Pointer transfers the controller completed with fewer bytes than the
+/// endpoint's report.
+///
+/// The bytes past a short transfer belong to whatever landed in that slot
+/// before, so reading them as this report's is how a device that reported
+/// nothing moves the pointer. Non-zero here and a pointer that drifts on its
+/// own are the same fact.
+pub static MOUSE_SHORT_REPORTS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Transfer events that completed a TRB other than the one expected next.
+///
+/// The report slots are handed to the controller in order and taken back in
+/// order, so this is zero on a controller that answers one event per queued
+/// transfer. Non-zero means the events and the queue disagree about which
+/// buffer holds the new report, which is what reading the event's own TRB
+/// address instead of a running count is here to survive.
+pub static MOUSE_SLOT_SLIPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn process_boot_mouse_report(report: &[u8], report_len: usize) -> Option<MouseEvent> {
     MOUSE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if report_len < 3 {

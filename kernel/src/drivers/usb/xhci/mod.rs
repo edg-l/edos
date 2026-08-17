@@ -1598,9 +1598,15 @@ pub extern "C" fn xhci_driver_main() -> ! {
             .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
+    // Which report slot each queued TRB will fill. A transfer event carries the
+    // address of the TRB it completed, so the buffer to read is the one that
+    // TRB pointed at — asked of the event rather than counted, because a count
+    // that ever slips reads a slot the controller has not refilled and the last
+    // report in it is applied a second time.
+    let mut mouse_trb = [0u64; HID_QUEUE_DEPTH];
     if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
-        for i in 0..HID_QUEUE_DEPTH {
-            ring.push(Trb {
+        for (i, trb_phys) in mouse_trb.iter_mut().enumerate() {
+            *trb_phys = ring.push(Trb {
                 parameter: mouse_report_phys + (i * mouse_report_len) as u64,
                 status: mouse_report_len as u32,
                 control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
@@ -1665,14 +1671,19 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             .is_some_and(|(dev, _, _)| dev.slot_id == event_slot_id);
 
                         if is_keyboard {
-                            // Read the 8-byte keyboard report out of the slot
-                            // this completion refers to.
+                            // Read the keyboard report out of the slot this
+                            // completion refers to, as far as the controller
+                            // wrote it. The rest of the slot is the last report
+                            // that landed there, and keycodes read out of it are
+                            // keys nobody pressed.
                             let mut report = [0u8; 8];
+                            let residual = (event.status & 0x00FF_FFFF) as usize;
+                            let kbd_len = report.len().saturating_sub(residual);
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     kbd_report_buf.as_ptr().add(kbd_slot * 8),
                                     report.as_mut_ptr(),
-                                    8,
+                                    kbd_len,
                                 );
                             }
 
@@ -1720,8 +1731,38 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             // Read the report from the DMA buffer. Its length is
                             // the endpoint's, not the boot layout's: an absolute
                             // device reports six bytes and a boot mouse four.
+                            //
+                            // How much of it the controller actually wrote is
+                            // the event's to say. A slot holds the last report
+                            // that landed in it, so bytes past this transfer's
+                            // are the previous report's, and a displacement read
+                            // out of them is motion the device never reported --
+                            // applied again on every short completion, which is
+                            // a pointer that drifts on its own.
+                            // Which slot to read is the event's to say too: it
+                            // carries the address of the TRB it completed, and
+                            // that TRB pointed at the slot the controller wrote.
+                            // Counting events instead assumes they arrive one
+                            // per queued TRB in order, and a count that slips
+                            // reads a slot nothing refilled — applying the last
+                            // report to land there for a second time.
+                            if let Some(slot) =
+                                mouse_trb.iter().position(|&trb| trb == event.parameter)
+                            {
+                                if slot != mouse_slot {
+                                    hid::MOUSE_SLOT_SLIPS
+                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                }
+                                mouse_slot = slot;
+                            }
+
                             let mut report = [0u8; 64];
-                            let len = mouse_report_len.min(report.len());
+                            let residual = (event.status & 0x00FF_FFFF) as usize;
+                            if residual != 0 {
+                                hid::MOUSE_SHORT_REPORTS
+                                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            }
+                            let len = mouse_report_len.saturating_sub(residual).min(report.len());
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     mouse_report_buf.as_ptr().add(mouse_slot * mouse_report_len),
@@ -1739,9 +1780,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 }
                             }
 
-                            // Hand the slot back and take the next one.
+                            // Hand the slot back and take the next one, keeping
+                            // the address of the TRB that now carries it.
                             if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
-                                ring.push(Trb {
+                                mouse_trb[mouse_slot] = ring.push(Trb {
                                     parameter: mouse_report_phys
                                         + (mouse_slot * mouse_report_len) as u64,
                                     status: mouse_report_len as u32,

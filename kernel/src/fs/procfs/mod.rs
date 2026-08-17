@@ -470,16 +470,18 @@ impl Procfs {
     /// `ps2_with_usb` means two devices are driving one pointer.
     fn render_gpu_stats() -> String {
         use crate::drivers::mouse::{PS2_PACKETS_WITH_USB, TRACKED_MOVES, TRACKED_SKIPS};
-        use crate::drivers::usb::hid::MOUSE_REPORTS;
+        use crate::drivers::usb::hid::{MOUSE_REPORTS, MOUSE_SHORT_REPORTS, MOUSE_SLOT_SLIPS};
         use crate::drivers::virtio::gpu::{CURSOR_CMDS, CURSOR_CMDS_DROPPED, CURSOR_MAX_INFLIGHT};
         use crate::graphics::{CURSOR_REDUNDANT, CURSOR_STALE_MOVES};
         use crate::interrupts::io::VIRTIO_GPU_IRQS_FIRED;
         alloc::format!(
-            "virtio_gpu_irqs {}\nmouse_reports {}\ntracked_moves {}\ntracked_skips {}\n\
+            "virtio_gpu_irqs {}\nmouse_reports {}\nmouse_short_reports {}\nmouse_slot_slips {}\ntracked_moves {}\ntracked_skips {}\n\
              ps2_with_usb {}\ncursor_cmds {}\ncursor_dropped {}\ncursor_max_inflight {}\n\
              cursor_stale_moves {}\ncursor_redundant {}\n",
             VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed),
             MOUSE_REPORTS.load(Ordering::Relaxed),
+            MOUSE_SHORT_REPORTS.load(Ordering::Relaxed),
+            MOUSE_SLOT_SLIPS.load(Ordering::Relaxed),
             TRACKED_MOVES.load(Ordering::Relaxed),
             TRACKED_SKIPS.load(Ordering::Relaxed),
             PS2_PACKETS_WITH_USB.load(Ordering::Relaxed),
