@@ -535,8 +535,6 @@ fn main() {
     // itself. It needed an absolute pointing device, which the guest has now
     // that the HID driver reads report descriptors.
     //
-    // False when the display has no cursor plane, and the software cursor is
-    // composited as before.
     // A plane is the default because it costs no damage and reaches the screen
     // without waiting for a frame. It is overridable because whether the plane
     // is ever shown is not the guest's to know: the display accepts the image
@@ -547,10 +545,9 @@ fn main() {
     let want_hw_cursor = config::read(config::CURSOR)
         .map(|value| !value.eq_ignore_ascii_case("software"))
         .unwrap_or(true);
+    // False when the display has no cursor plane, and the software cursor is
+    // composited instead.
     let mut hw_cursor = want_hw_cursor && upload_cursor(&screen, &cursor);
-    if !want_hw_cursor {
-        eprintln!("[wm] cursor: software, by /etc/cursor");
-    }
     // With a plane the display can hold, the pointer does not have to be
     // resampled to the frame rate: the kernel places it from the input path as
     // each report lands, which is up to a frame earlier than this loop can
@@ -558,7 +555,17 @@ fn main() {
     // the lag behind the host's own cursor, a physical mouse has nothing to
     // hide it with.
     let cursor_tracked = hw_cursor && screen.track_pointer(true);
-    eprintln!("[wm] cursor: hardware={hw_cursor} tracked={cursor_tracked}");
+    // One line, formatted before it is written. The serial console interleaves
+    // whatever arrives, and a line written a format fragment at a time comes
+    // back with kernel logging spliced through the middle of it.
+    let cursor_mode = match (want_hw_cursor, hw_cursor, cursor_tracked) {
+        (_, true, true) => "plane, placed from the input path",
+        (_, true, false) => "plane, placed per frame",
+        (true, false, _) => "composited: the display has no plane",
+        (false, false, _) => "composited, by /etc/cursor",
+    };
+    let cursor_line = format!("[wm] cursor: {cursor_mode}");
+    eprintln!("{cursor_line}");
     // The last position handed to the plane, so a move is sent on a change
     // rather than every frame.
     let mut sent_cursor = (i32::MIN, i32::MIN);
