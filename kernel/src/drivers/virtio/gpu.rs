@@ -1,7 +1,22 @@
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::drivers::dma::{DmaBuffer, dma};
 use crate::drivers::virtio::pci::VirtioTransport;
 use crate::drivers::virtio::queue::{VIRTQ_DESC_F_WRITE, Virtqueue};
 use crate::{log, println};
+
+/// Cursor commands handed to the device.
+pub static CURSOR_CMDS: AtomicU64 = AtomicU64::new(0);
+/// Cursor commands dropped because the queue had no free descriptor.
+///
+/// A dropped move leaves the plane where it was until the next report, which is
+/// the same trade the input path makes when the display is busy.
+pub static CURSOR_CMDS_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// The most cursor commands ever outstanding at once.
+///
+/// This is what says whether one command's buffer can still be unread when the
+/// next is written: anything above 1 means two descriptors are live together.
+pub static CURSOR_MAX_INFLIGHT: AtomicU64 = AtomicU64::new(0);
 
 // -------- Virtio GPU command types --------
 
@@ -11,6 +26,10 @@ const VIRTIO_GPU_MSIX_VECTOR: u16 = 0;
 
 /// Size of the DMA scratch buffer the control queue's commands are written in.
 const SCRATCH_BYTES: usize = 4096;
+
+/// Size of the DMA buffer the cursor queue's commands are written in, one slot
+/// per descriptor. A 16-descriptor queue of 56-byte commands needs 896 bytes.
+const CURSOR_SCRATCH_BYTES: usize = 4096;
 
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
@@ -204,7 +223,9 @@ pub struct VirtioGpu {
     cursor_queue: Virtqueue,
     /// Scratch DMA buffer for command/response pairs (4096 bytes).
     scratch: DmaBuffer,
-    /// Separate DMA buffer for cursor commands (no response needed, fire-and-forget).
+    /// Buffer for cursor commands, one slot per cursor-queue descriptor. No
+    /// response is asked for, so a command's slot is owned by its descriptor
+    /// until the device reports having read it.
     cursor_scratch: DmaBuffer,
     /// True if RESOURCE_BLOB is available (zero-copy display path).
     use_blob: bool,
@@ -212,6 +233,9 @@ pub struct VirtioGpu {
     /// are announced. False means the device never interrupts and the only way
     /// to learn a command finished is to look.
     irq: bool,
+    /// Where the plane was last placed, so an image change can say "here"
+    /// rather than carrying a position it does not mean.
+    cursor_pos: (u32, u32),
     /// The cursor's pixel buffer, allocated on the first upload and reused.
     ///
     /// A shape change is a new image in the same resource, not a new resource.
@@ -291,8 +315,15 @@ impl VirtioGpu {
             .allocate_sized(SCRATCH_BYTES)
             .map_err(|_| "virtio-gpu: failed to allocate scratch buffer")?;
 
+        // One command slot per descriptor, so a queued command's bytes are
+        // never rewritten while the device may still be reading them.
+        if cursor_size as usize * core::mem::size_of::<VirtioGpuUpdateCursor>()
+            > CURSOR_SCRATCH_BYTES
+        {
+            return Err("virtio-gpu: cursor queue too deep for the scratch buffer");
+        }
         let cursor_scratch = dma()
-            .allocate_sized(4096)
+            .allocate_sized(CURSOR_SCRATCH_BYTES)
             .map_err(|_| "virtio-gpu: failed to allocate cursor scratch buffer")?;
 
         println!(
@@ -307,6 +338,7 @@ impl VirtioGpu {
             scratch,
             cursor_scratch,
             use_blob,
+            cursor_pos: (0, 0),
             cursor_buf: None,
             irq: irq_ok,
             pending: 0,
@@ -1123,13 +1155,19 @@ impl VirtioGpu {
         xfer.resource_id = cursor_res_id;
         self.send_command(&xfer, core::mem::size_of::<VirtioGpuCtrlHdr>());
 
-        // Send UPDATE_CURSOR on cursor queue
+        // Send UPDATE_CURSOR on cursor queue.
+        //
+        // The position is the one the plane already holds, because
+        // UPDATE_CURSOR carries a position whether or not the caller means to
+        // move anything: a zero here parks the pointer in the top-left corner
+        // on every shape change, and the pointer does not move when its picture
+        // does.
         let mut cmd: VirtioGpuUpdateCursor = unsafe { core::mem::zeroed() };
         cmd.hdr.type_ = VIRTIO_GPU_CMD_UPDATE_CURSOR;
         cmd.pos = VirtioGpuCursorPos {
             scanout_id: 0,
-            x: 0,
-            y: 0,
+            x: self.cursor_pos.0,
+            y: self.cursor_pos.1,
             padding: 0,
         };
         cmd.resource_id = cursor_res_id;
@@ -1148,11 +1186,7 @@ impl VirtioGpu {
 
     /// Move the hardware cursor to (x, y). Fire-and-forget on the cursor queue.
     pub fn move_cursor(&mut self, x: u32, y: u32) {
-        // Drain any completed cursor commands first
-        while let Some((head, _)) = self.cursor_queue.poll_used() {
-            self.cursor_queue.reclaim(head);
-        }
-
+        self.cursor_pos = (x, y);
         let mut cmd: VirtioGpuUpdateCursor = unsafe { core::mem::zeroed() };
         cmd.hdr.type_ = VIRTIO_GPU_CMD_MOVE_CURSOR;
         cmd.pos = VirtioGpuCursorPos {
@@ -1168,21 +1202,47 @@ impl VirtioGpu {
     }
 
     /// Send a command on the cursor queue (fire-and-forget, no response).
+    ///
+    /// The queue is asynchronous and nothing here waits, so a command must keep
+    /// its bytes until the device has read them. It is written into the slot
+    /// belonging to the descriptor that will carry it, and a descriptor is free
+    /// only once its command has been consumed, so nothing queued is ever
+    /// rewritten in place. A single shared slot would be rewritten under the
+    /// device's read whenever two commands are live at once, which is ordinary
+    /// here: the input path places the plane per report and the compositor
+    /// places it per frame.
     fn send_cursor_command(&mut self, cmd: &VirtioGpuUpdateCursor) {
+        // Reclaim first, so a slot is released as soon as its command has been
+        // read rather than one call later.
+        while let Some((head, _)) = self.cursor_queue.poll_used() {
+            self.cursor_queue.reclaim(head);
+        }
+
         let cmd_size = core::mem::size_of::<VirtioGpuUpdateCursor>();
+        let slot = self.cursor_queue.next_head() as usize;
+        let offset = slot * cmd_size;
+        debug_assert!(
+            offset + cmd_size <= CURSOR_SCRATCH_BYTES,
+            "cursor scratch too small for a slot per descriptor"
+        );
         unsafe {
             core::ptr::copy_nonoverlapping(
                 cmd as *const _ as *const u8,
-                self.cursor_scratch.as_ptr(),
+                self.cursor_scratch.as_ptr().add(offset),
                 cmd_size,
             );
         }
-        let phys = self.cursor_scratch.phys_addr().as_u64();
+        let phys = self.cursor_scratch.phys_addr().as_u64() + offset as u64;
         // Cursor queue: single device-readable descriptor, no response descriptor.
         let bufs = [(phys, cmd_size as u32, 0u16)];
         if self.cursor_queue.push(&bufs).is_some() {
             let notify_off = self.cursor_queue.notify_off;
             self.transport.notify_queue(1, notify_off);
+            CURSOR_CMDS.fetch_add(1, Ordering::Relaxed);
+            let inflight = self.cursor_queue.in_flight() as u64;
+            CURSOR_MAX_INFLIGHT.fetch_max(inflight, Ordering::Relaxed);
+        } else {
+            CURSOR_CMDS_DROPPED.fetch_add(1, Ordering::Relaxed);
         }
     }
 

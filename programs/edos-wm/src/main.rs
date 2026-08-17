@@ -609,16 +609,19 @@ fn main() {
 
         // Update hardware cursor position (very cheap, no frame redraw).
         //
-        // Kept even while the display tracks the pointer, as the backstop that
-        // guarantees convergence: a tracked move is dropped rather than waited
-        // for when the display is busy, and the one that matters is the last of
-        // a motion — skip that and the cursor rests a few pixels from where the
-        // pointer stopped, with no later report to correct it.
+        // While the display tracks the pointer this is the backstop for the one
+        // move that has no later report to correct it: a tracked move is
+        // dropped rather than waited for when the display is busy, and if the
+        // dropped one is the last of a motion the cursor rests a few pixels
+        // from where the pointer stopped.
         //
-        // Sending only on a change is what keeps that cheap: while the pointer
-        // moves this is one redundant move per frame behind the tracked ones,
-        // and while it rests it is nothing at all.
-        if hw_cursor && (mx, my) != sent_cursor {
+        // It fires only once the pointer is at rest, which is the whole of when
+        // it is needed. A position read at the top of a frame is older than
+        // whatever the input path has placed since, so sending it during motion
+        // walks the plane backwards a report at a time — the compositor
+        // undoing, once per frame, the freshness this exists to preserve.
+        let pointer_at_rest = (mx, my) == previous_cursor;
+        if hw_cursor && (mx, my) != sent_cursor && (!cursor_tracked || pointer_at_rest) {
             screen.move_cursor(mx.max(0) as u32, my.max(0) as u32);
             sent_cursor = (mx, my);
         }
@@ -896,13 +899,6 @@ fn main() {
         if hw_cursor && cursor.shape() != uploaded_shape {
             hw_cursor = upload_cursor(&screen, &cursor);
             uploaded_shape = cursor.shape();
-            // An upload re-places the plane at the origin, and a shape change
-            // is reachable with the pointer perfectly still (see below), so
-            // waiting for the next report to correct it would park the cursor
-            // in the corner until the mouse moved.
-            if hw_cursor {
-                screen.move_cursor(cursor.x.max(0) as u32, cursor.y.max(0) as u32);
-            }
         }
         // A software cursor is composited instead, so the shape is part of the
         // picture and a change to it is damage the pointer's own motion does

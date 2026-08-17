@@ -72,8 +72,23 @@ impl MouseEvent {
 
 /// Broadcaster for mouse events
 pub static MOUSE_BROADCAST: Broadcaster<MouseEvent> = Broadcaster::new();
-/// Set to true when a USB HID mouse is active; suppresses PS/2 mouse broadcasting.
+/// Set to true when xHCI has configured a USB HID pointing device.
 pub static USB_MOUSE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// PS/2 packets that arrived while a USB pointing device was also configured.
+///
+/// Non-zero means two devices are driving one pointer, which is a laptop with a
+/// touchpad and a plugged-in mouse, and also a QEMU guest with an absolute USB
+/// device: relative motion cannot go to an absolute device, so the host hands
+/// it to the PS/2 mouse instead.
+pub static PS2_PACKETS_WITH_USB: AtomicU64 = AtomicU64::new(0);
+
+/// Plane placements issued from the input path, and those a busy display made
+/// this drop. A skipped move is superseded by the next report; a large share of
+/// them means the plane is being placed by the compositor's backstop instead,
+/// and the latency this path exists to remove is back.
+pub static TRACKED_MOVES: AtomicU64 = AtomicU64::new(0);
+pub static TRACKED_SKIPS: AtomicU64 = AtomicU64::new(0);
 
 // Current mouse state
 static MOUSE_POSITION: (AtomicI32, AtomicI32) = (AtomicI32::new(0), AtomicI32::new(0));
@@ -259,6 +274,20 @@ pub extern "C" fn driver_main() -> ! {
 }
 
 fn process_packet(packet: &[u8]) {
+    // Every producer both moves the pointer and announces the move. The
+    // pointer is shared state, and a device allowed to do one but not the other
+    // makes the position disagree with the event stream: readers of
+    // `/dev/mouse` follow one pointer while everything routed from a broadcast
+    // follows another, and the cursor plane sits at whichever the last
+    // announced report left.
+    //
+    // Which device a host feeds is not fixed. QEMU routes by event kind, so a
+    // guest carrying an absolute USB device takes absolute motion there and
+    // relative motion arrives here instead.
+    if USB_MOUSE_ACTIVE.load(Ordering::Relaxed) {
+        PS2_PACKETS_WITH_USB.fetch_add(1, Ordering::Relaxed);
+    }
+
     let buttons = packet[0] & 0x07;
 
     // Extract signed deltas
@@ -301,7 +330,7 @@ fn process_packet(packet: &[u8]) {
         0
     };
 
-    let event = MouseEvent {
+    dispatch_mouse_event(MouseEvent {
         x: new_x,
         y: new_y,
         dx,
@@ -309,11 +338,7 @@ fn process_packet(packet: &[u8]) {
         buttons,
         scroll,
         _padding: [0; 2],
-    };
-
-    if !USB_MOUSE_ACTIVE.load(Ordering::Relaxed) {
-        dispatch_mouse_event(event);
-    }
+    });
 }
 
 fn mouse_poll_state(subscriber: &Subscriber<MouseEvent>) -> PollState {
@@ -358,10 +383,13 @@ fn move_tracked_cursor(x: i32, y: i32) {
     if !crate::graphics::CURSOR_TRACKS_POINTER.load(Ordering::Relaxed) {
         return;
     }
-    if let Some(display) = DISPLAY.get()
-        && let Some(mut display) = display.try_lock()
-    {
-        display.move_cursor(x.max(0) as u32, y.max(0) as u32);
+    if let Some(display) = DISPLAY.get() {
+        if let Some(mut display) = display.try_lock() {
+            display.move_cursor(x.max(0) as u32, y.max(0) as u32);
+            TRACKED_MOVES.fetch_add(1, Ordering::Relaxed);
+        } else {
+            TRACKED_SKIPS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 

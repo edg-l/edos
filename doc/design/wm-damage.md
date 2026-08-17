@@ -248,16 +248,41 @@ Two properties make this safe, and both are load-bearing:
   anyone, so a skipped move costs a millisecond of staleness, whereas blocking
   the input thread would delay every report behind it — the exact latency this
   exists to remove.
-- **The compositor still sends one on a change,** as the backstop that
-  guarantees convergence. The move that matters is the last of a motion, and if
-  that one is dropped there is no later report to correct it, leaving the cursor
-  resting a few pixels from where the pointer stopped. Sending only on a change
-  keeps that to one redundant move per frame while moving and none at rest.
+- **The compositor sends one once the pointer is at rest,** as the backstop
+  that guarantees convergence. The move that matters is the last of a motion,
+  and if that one is dropped there is no later report to correct it, leaving the
+  cursor resting a few pixels from where the pointer stopped.
 
-Note that `set_cursor` re-places the plane at the origin, so a shape change owes
-a move afterwards even while tracking — otherwise a shape change under a still
-pointer parks the cursor in the corner until the mouse moves, and the audit
-above records that a shape change under a still pointer is reachable.
+  At rest and not during motion, and that is not a saving. A position read at
+  the top of a frame is older than whatever the input path has placed in the
+  meantime, so a compositor move issued during motion walks the plane backwards
+  by a report — once per frame, on exactly the drags this was built to make
+  smooth. The compositor cannot tell how fresh the plane is, so the rule is that
+  it does not compete: while the pointer is moving the input path owns the
+  plane, and the frame after it stops is the compositor's.
+
+A shape change owes no move. `UPDATE_CURSOR` carries a position whether or not
+the caller means to move anything, so the driver fills in the one the plane
+already holds; sending a zero there parks the pointer in the top-left corner on
+every shape change, and a shape change under a perfectly still pointer is
+reachable — the audit above records how. Correcting it from the compositor
+afterwards is a race rather than a fix, since the correcting move can be
+reordered behind the upload that caused it.
+
+## One command, one buffer
+
+The cursor queue is asynchronous and nothing waits on it, so a command's bytes
+must survive until the device has read them. Each command is written into the
+slot belonging to the descriptor that carries it, and a descriptor is free only
+once its command has been consumed, so a queued command is never rewritten in
+place.
+
+One shared buffer was enough while moves came once per frame from the
+compositor alone: the device had a whole frame to read 56 bytes. It stopped
+being enough when the input path started placing the plane per report from
+another thread. `/proc/gpu_stats` reports `cursor_max_inflight`, and it reaches
+2 under an ordinary drag — two descriptors live at once, which with one buffer
+is two descriptors pointing at bytes being rewritten under the device's read.
 
 ## Traps
 

@@ -463,13 +463,27 @@ impl Procfs {
     /// `irqs` staying at zero while frames are being drawn means the vector was
     /// accepted but nothing is delivering it, and every flip is finding its own
     /// completions by looking.
+    /// The display's interrupts and the pointer's path to its plane.
+    ///
+    /// `cursor_max_inflight` above 1 means cursor commands overlap, so a
+    /// command's buffer can still be unread when the next is written;
+    /// `ps2_with_usb` means two devices are driving one pointer.
     fn render_gpu_stats() -> String {
+        use crate::drivers::mouse::{PS2_PACKETS_WITH_USB, TRACKED_MOVES, TRACKED_SKIPS};
         use crate::drivers::usb::hid::MOUSE_REPORTS;
+        use crate::drivers::virtio::gpu::{CURSOR_CMDS, CURSOR_CMDS_DROPPED, CURSOR_MAX_INFLIGHT};
         use crate::interrupts::io::VIRTIO_GPU_IRQS_FIRED;
         alloc::format!(
-            "virtio_gpu_irqs {}\nmouse_reports {}\n",
+            "virtio_gpu_irqs {}\nmouse_reports {}\ntracked_moves {}\ntracked_skips {}\n\
+             ps2_with_usb {}\ncursor_cmds {}\ncursor_dropped {}\ncursor_max_inflight {}\n",
             VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed),
             MOUSE_REPORTS.load(Ordering::Relaxed),
+            TRACKED_MOVES.load(Ordering::Relaxed),
+            TRACKED_SKIPS.load(Ordering::Relaxed),
+            PS2_PACKETS_WITH_USB.load(Ordering::Relaxed),
+            CURSOR_CMDS.load(Ordering::Relaxed),
+            CURSOR_CMDS_DROPPED.load(Ordering::Relaxed),
+            CURSOR_MAX_INFLIGHT.load(Ordering::Relaxed),
         )
     }
 

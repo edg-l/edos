@@ -197,6 +197,21 @@ impl Virtqueue {
         Some(head)
     }
 
+    /// The descriptor `push` will use as the head of the next chain.
+    ///
+    /// A caller that keeps one buffer per descriptor needs this before it
+    /// writes: a descriptor is free exactly while the device is not reading the
+    /// buffer it points at, so the descriptor index is also the index of a
+    /// buffer that is safe to overwrite.
+    pub fn next_head(&self) -> u16 {
+        self.free_head
+    }
+
+    /// Chains submitted and not yet reclaimed.
+    pub fn in_flight(&self) -> u16 {
+        self.size - self.num_free
+    }
+
     // ---- Completion polling ----
 
     /// Poll the used ring for a completed descriptor chain.
