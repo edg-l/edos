@@ -88,13 +88,17 @@ was launched from, where a screenshot is the only way to read it. And
 `scripts/edos-vm focus <title>` rather than clicking a taskbar button, which
 minimises the window and leaves every keystroke on the wallpaper.
 
-## Every `File` leaks its descriptor, and `strace` says so in one line
+## Every `File` leaked its descriptor, and `strace` said so in one line — FIXED
 
-**Nothing closes a file descriptor on this system unless the process exits.**
-`std::sys::fd::edos::FileDesc` wraps `edos_rt::fd::FileDesc`, and neither has a
-`Drop` impl. `edos_rt` offers `pub fn close(self)` and nothing in `std` calls
-it, so a `File` that goes out of scope leaves its kernel descriptor allocated
-for the life of the process.
+**Nothing closed a file descriptor on this system unless the process exited.**
+`std::sys::fd::edos::FileDesc` wraps `edos_rt::fd::FileDesc`, and neither had a
+`Drop` impl. `edos_rt` offered `pub fn close(self)` and nothing in `std` called
+it, so a `File` that went out of scope left its kernel descriptor allocated for
+the life of the process.
+
+Fixed 2026-08-17 in `edos_rt` 0.0.52 plus the fork's `IntoRawFd`; the mechanism
+and the four traps below are kept because they are what a second descriptor-
+owning type would have to get right.
 
 Found 2026-08-15 while chasing why `evicttest` never finishes. Two independent
 confirmations:
@@ -126,11 +130,12 @@ each time its network popup opens, and `edos_lib::procinfo` reads
 refresh through — one or two descriptors per refresh, for as long as the
 session lasts.
 
-**The fix is one `Drop`, and it is not a drive-by.** It lives in `edos_rt` plus
-the Rust fork, so it needs the whole publish loop, and it changes lifetime
-semantics everywhere at once. Test it against a `[patch.crates-io]` path
-override before publishing anything — a published version cannot be withdrawn.
-Four things it has to get right:
+**The fix was one `Drop`, and it was not a drive-by.** It lives in `edos_rt`
+plus the Rust fork, so it needed the whole publish loop, and it changed lifetime
+semantics everywhere at once. It was tested against a `[patch.crates-io]` path
+override before anything was published — a published version cannot be
+withdrawn. Four things it had to get right, and the reason to keep them written
+down is that any second type owning a descriptor faces the same four:
 
 - **`into_raw_fd` must `mem::forget`.** It returns `self.inner.raw_fd()` and
   drops `self` on the way out, which would hand the caller a descriptor that
@@ -149,15 +154,19 @@ Four things it has to get right:
   no `FileDesc`, so nothing here can close the terminal out from under a
   program.
 
-Verify with the same instrument that found it: `strace -e openat,close` over
-`wc`, then `make guest-check` — `stdtest` is the only program in the tree that
-uses `std::process::Command`, and its `Command::new("/bin/echo").output()` is
-exactly the pipe-EOF path this can break — then `ssh-check` and
-`storage-check`.
+Verified with the same instrument that found it. The strace above now ends in
+`close(3) = 0`, and the descriptor is 3 rather than 4 because nothing earlier in
+the process is stranded. `guest-check` (15 suites), `ssh-check` and
+`storage-check` all pass; `stdtest` is the only program in the tree that uses
+`std::process::Command`, and its `Command::new("/bin/echo").output()` is exactly
+the pipe-EOF path this could have broken.
 
-The `edos_rt` half is written and committed there (`closing a descriptor is the
-drop`) and **is not published**, so nothing in this repo has changed: programs
-build against the installed toolchain, which still pins 0.0.50.
+**It really was most of why `evicttest` looked hung.** That test used to spin
+past fifteen minutes without reaching its own 200,000-iteration bound, because
+it reads `/proc/evict_stats` every iteration and each read stranded a
+descriptor in a `BTreeMap` that only grew. It now finishes in about a second —
+and fails honestly, `drain_count` 2 against an expected 34, which is the
+eviction defect it was written to catch and which the hang was hiding.
 
 **The fork could not be checked at all, and now can.** `./x check library/std
 --target x86_64-unknown-edos` failed on a *pristine* `~/dev/rust` with 266
@@ -3279,10 +3288,15 @@ reverted file-backed `mmap`, `msync` and the `OpenFlags` access-mode constants.
 Diff the clone against the published crate before editing:
 
 ```bash
-curl -sL -o /tmp/rt.crate https://crates.io/api/v1/crates/edos_rt/<max_version>/download
+curl -sL -o /tmp/rt.crate https://static.crates.io/crates/edos_rt/edos_rt-<version>.crate
 mkdir -p /tmp/rt && tar xzf /tmp/rt.crate -C /tmp/rt --strip-components=1
 diff -ru /tmp/rt/src ~/dev/edos_rt/src
 ```
+
+The `crates.io/api/v1/.../download` form this used to give is answered with a
+data-access-policy refusal rather than a crate, and the refusal is a 200 with a
+JSON body, so the failure surfaces as `gzip: stdin: not in gzip format` two
+commands later. `static.crates.io` is the CDN and serves it plainly.
 
 **The std fork's pin is the version that actually runs.** `library/std/Cargo.toml`
 sat at `edos_rt = "0.0.26"` for ten releases while the crate moved on, and a
