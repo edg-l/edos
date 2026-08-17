@@ -146,10 +146,12 @@ impl Procfs {
                 "MemFree: {} KiB\n",
                 "MemUsed: {} KiB\n",
                 "PageSize: 4096 B\n",
+                "PageFaults: {}\n",
                 "FramesTotal: {}\n",
                 "FramesFree: {}\n",
                 "FramesUsed: {}\n"
             ),
+            crate::interrupts::idt::PAGE_FAULTS.load(Ordering::Relaxed),
             total_bytes / 1024,
             free_bytes / 1024,
             used_bytes / 1024,

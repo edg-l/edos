@@ -188,11 +188,19 @@ extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStac
 }
 
 #[unsafe(no_mangle)]
+/// Page faults taken since boot, of every kind.
+pub static PAGE_FAULTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 extern "x86-interrupt" fn page_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     // Note: do not add complex calls or memory read or scheduler reads, otherwise recursive faults can happen.
+
+    // Faults are the one cost a userspace trace cannot see: demand paging does
+    // its work without a syscall, so a program that maps and touches a great
+    // deal of memory looks idle from outside while the kernel does the work.
+    PAGE_FAULTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     let error_desc = decode_page_fault_error(error_code);
     let address = Cr2::read().unwrap();
