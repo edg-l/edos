@@ -52,37 +52,74 @@ impl PciManager {
         Some(*bytemuck::from_bytes(&header_bytes))
     }
 
-    // Step 4: Scan all possible addresses
+    // Step 4: Scan the buses that exist
+    //
+    // Every probe is a pair of port writes and a read, and every one of those
+    // traps to the hypervisor on a virtualised machine. Walking all 256 buses
+    // by all 32 devices by all 8 functions is 65536 probes to find the eight
+    // devices on bus 0, and it is the single longest thing this kernel does
+    // before mounting a filesystem.
+    //
+    // Two rules remove almost all of it. A device whose function 0 is absent
+    // has no other functions, so an empty slot costs one probe rather than
+    // eight. And a bus exists only if something bridges to it, so the buses
+    // worth visiting are bus 0 plus whatever the bridges found there point at.
     pub fn scan_devices(&mut self) {
         println!("Scanning PCI devices...");
 
-        for bus in 0..256 {
-            for device in 0..32 {
-                for function in 0..8 {
-                    let address = PciAddress {
-                        bus: bus as u8,
-                        device: device as u8,
-                        function: function as u8,
-                    };
-
-                    if let Some(header) = self.read_device_header(address) {
-                        println!(
-                            "Found device {:02x}:{:02x}.{}: {:04x}:{:04x}",
-                            bus, device, function, header.vendor_id, header.device_id
-                        );
-
-                        self.devices.push(PciDevice { address, header });
-
-                        // If not multi-function device, skip other functions
-                        if function == 0 && (header.header_type & 0x80) == 0 {
-                            break;
-                        }
-                    }
-                }
+        let mut visited = [false; 256];
+        let mut pending = alloc::vec![0u8];
+        while let Some(bus) = pending.pop() {
+            if visited[bus as usize] {
+                continue;
             }
+            visited[bus as usize] = true;
+            self.scan_bus(bus, &mut pending);
         }
 
         println!("Found {} PCI devices", self.devices.len());
+    }
+
+    /// Record every function on `bus`, queueing the far side of any bridge.
+    fn scan_bus(&mut self, bus: u8, pending: &mut alloc::vec::Vec<u8>) {
+        for device in 0..32 {
+            let zero = PciAddress {
+                bus,
+                device,
+                function: 0,
+            };
+            let Some(first) = self.read_device_header(zero) else {
+                continue;
+            };
+            // Bit 7 of the header type is the only thing that says whether
+            // functions 1..7 are worth asking about.
+            let functions = if first.header_type & 0x80 != 0 { 8 } else { 1 };
+
+            for function in 0..functions {
+                let address = PciAddress {
+                    bus,
+                    device,
+                    function,
+                };
+                let header = if function == 0 {
+                    first
+                } else {
+                    match self.read_device_header(address) {
+                        Some(header) => header,
+                        None => continue,
+                    }
+                };
+
+                // A PCI-to-PCI bridge names its far side in the secondary bus
+                // number, and that bus is where anything behind it lives.
+                if header.header_type & 0x7F == 0x01 {
+                    let buses = self.read_config_u32(address, 0x18);
+                    pending.push(((buses >> 8) & 0xFF) as u8);
+                }
+
+                self.devices.push(PciDevice { address, header });
+            }
+        }
     }
 
     pub fn get_devices(&self) -> &[PciDevice] {
