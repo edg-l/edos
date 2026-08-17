@@ -564,6 +564,20 @@ impl VramMapping {
     pub fn update_back_offset(&mut self, byte_offset: u64) {
         self.back_offset = byte_offset as usize / core::mem::size_of::<u32>();
     }
+
+    /// The pixels of one page, for a reader that wants a page it names rather
+    /// than whichever one is currently being drawn into.
+    ///
+    /// A single-buffered display has only page 0 and answers with it whatever
+    /// is asked for.
+    pub fn page(&self, index: usize) -> &[u32] {
+        let (len, offset) = if self.double_buffered {
+            (self.page_pixels, index.min(1) * self.page_pixels)
+        } else {
+            (self.width * self.height, 0)
+        };
+        unsafe { core::slice::from_raw_parts(self.base.add(offset), len) }
+    }
 }
 
 unsafe impl Send for VramMapping {}
