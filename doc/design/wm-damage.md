@@ -261,6 +261,16 @@ Two properties make this safe, and both are load-bearing:
   it does not compete: while the pointer is moving the input path owns the
   plane, and the frame after it stops is the compositor's.
 
+  Measured over 40 hand-shaped strokes (1441 reports at 119/s, each stroke
+  easing in and out and ending in a pause), against a build differing only in
+  that condition: 1849 plane placements became 1514, so about 390 compositor
+  placements during motion became about 55 at rest, one per pause.
+  `cursor_stale_moves` — placements naming a position the pointer had already
+  left — went from 1 to 0. That rate scales with how fast reports arrive: the
+  window is between the compositor's read of `/dev/mouse` and the ioctl reading
+  the pointer, so a 1 kHz mouse is roughly eight times likelier to land a report
+  inside it than this stimulus was.
+
 A shape change owes no move. `UPDATE_CURSOR` carries a position whether or not
 the caller means to move anything, so the driver fills in the one the plane
 already holds; sending a zero there parks the pointer in the top-left corner on

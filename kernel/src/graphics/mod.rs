@@ -1,6 +1,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU64};
 
 pub mod framebuffer;
 
@@ -38,6 +38,15 @@ pub static DISPLAY: Once<Mutex<Display>> = Once::new();
 /// reaches the plane as each report lands, instead of being resampled to
 /// whatever rate the compositor happens to run at.
 pub static CURSOR_TRACKS_POINTER: AtomicBool = AtomicBool::new(false);
+
+/// Plane placements asked for through the ioctl that named a position the
+/// pointer was not at, while the display was tracking the pointer.
+///
+/// Each one moves the plane off the pointer until a report arrives to correct
+/// it. Zero is the healthy reading: while tracking, the only placement the
+/// compositor owes is the one that repairs a dropped final move, and by then
+/// the pointer is at rest and the two agree.
+pub static CURSOR_STALE_MOVES: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
     DISPLAY.call_once(|| {

@@ -472,10 +472,12 @@ impl Procfs {
         use crate::drivers::mouse::{PS2_PACKETS_WITH_USB, TRACKED_MOVES, TRACKED_SKIPS};
         use crate::drivers::usb::hid::MOUSE_REPORTS;
         use crate::drivers::virtio::gpu::{CURSOR_CMDS, CURSOR_CMDS_DROPPED, CURSOR_MAX_INFLIGHT};
+        use crate::graphics::CURSOR_STALE_MOVES;
         use crate::interrupts::io::VIRTIO_GPU_IRQS_FIRED;
         alloc::format!(
             "virtio_gpu_irqs {}\nmouse_reports {}\ntracked_moves {}\ntracked_skips {}\n\
-             ps2_with_usb {}\ncursor_cmds {}\ncursor_dropped {}\ncursor_max_inflight {}\n",
+             ps2_with_usb {}\ncursor_cmds {}\ncursor_dropped {}\ncursor_max_inflight {}\n\
+             cursor_stale_moves {}\n",
             VIRTIO_GPU_IRQS_FIRED.load(Ordering::Relaxed),
             MOUSE_REPORTS.load(Ordering::Relaxed),
             TRACKED_MOVES.load(Ordering::Relaxed),
@@ -484,6 +486,7 @@ impl Procfs {
             CURSOR_CMDS.load(Ordering::Relaxed),
             CURSOR_CMDS_DROPPED.load(Ordering::Relaxed),
             CURSOR_MAX_INFLIGHT.load(Ordering::Relaxed),
+            CURSOR_STALE_MOVES.load(Ordering::Relaxed),
         )
     }
 

@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     fs::{DevFsDevice, DevFsError, register_device_str},
-    graphics::{CURSOR_TRACKS_POINTER, DISPLAY},
+    graphics::{CURSOR_STALE_MOVES, CURSOR_TRACKS_POINTER, DISPLAY},
     interrupts::io::{VIRTIO_GPU_IRQS_FIRED, VIRTIO_GPU_WAITERS},
 };
 
@@ -36,9 +36,13 @@ pub const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
 /// enables this stops needing a move per frame, and the plane is placed from
 /// the input path as each report lands instead — which is the whole latency
 /// difference between a pointer that lags the compositor and one that does
-/// not. Uploading a new image with [`FB_IOCTL_SET_CURSOR`] re-places the plane
-/// at the origin, so a caller that changes the shape still owes one
-/// [`FB_IOCTL_MOVE_CURSOR`] afterwards.
+/// not. Uploading a new image with [`FB_IOCTL_SET_CURSOR`] leaves the plane
+/// where it is, so a shape change owes no move.
+///
+/// A caller that keeps placing the plane while this is on is competing with the
+/// input path rather than helping it: its position is a frame old by
+/// construction, and placing it walks the plane back off the pointer.
+/// `cursor_stale_moves` in `/proc/gpu_stats` counts that happening.
 pub const FB_IOCTL_TRACK_POINTER: u64 = 0x4642_000C;
 
 const FLIP_WAIT_ROUNDS: u32 = 8;
@@ -326,6 +330,18 @@ impl DevFsDevice for FramebufferDevice {
                     return Err(DevFsError::IoError);
                 }
                 let pos = unsafe { *(arg as *const FramebufferMoveCursor) };
+                // A placement that disagrees with where the pointer is, while
+                // the display is following the pointer itself, moves the plane
+                // off the pointer until the next report arrives to correct it.
+                // The caller is a frame behind the input path by construction,
+                // so this counts how often it is competing rather than
+                // repairing.
+                if CURSOR_TRACKS_POINTER.load(Ordering::Relaxed) {
+                    let (px, py) = crate::drivers::mouse::get_position();
+                    if pos.x as i32 != px || pos.y as i32 != py {
+                        CURSOR_STALE_MOVES.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 if !display.lock().move_cursor(pos.x, pos.y) {
                     return Err(DevFsError::Unsupported);
