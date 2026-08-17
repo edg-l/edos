@@ -35,6 +35,35 @@ static CPU_LAPIC_IDS: [AtomicU32; 64] = {
 /// Number of online CPUs (populated alongside CPU_LAPIC_IDS).
 static CPU_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// Timer ticks taken, per CPU index.
+///
+/// One CPU asking whether another is executing at all. A CPU that owes an
+/// answer and is not giving one has two very different explanations — it is not
+/// running (descheduled by a hypervisor, or wedged with interrupts off), or it
+/// is running and not taking the interrupt it was sent — and only the second is
+/// a fault in this kernel. Nothing else here distinguishes them.
+static CPU_HEARTBEAT: [AtomicU64; 64] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 64]
+};
+
+/// Record that this CPU is still taking timer interrupts.
+pub fn note_cpu_alive() {
+    let idx = current_cpu_index();
+    if idx < CPU_HEARTBEAT.len() {
+        CPU_HEARTBEAT[idx].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Timer ticks CPU `idx` has taken, for comparison against a later reading.
+pub fn cpu_heartbeat(idx: usize) -> u64 {
+    CPU_HEARTBEAT
+        .get(idx)
+        .map(|beat| beat.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
 /// Returns the sequential index of the calling CPU.
 ///
 /// Searches `CPU_LAPIC_IDS` for a LAPIC ID matching the current CPU's.

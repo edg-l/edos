@@ -1697,6 +1697,8 @@ pub fn stop_if_signalled() {
 /// First half of a timer tick. See `Scheduler::tick_prepare`.
 pub fn tick_prepare(context: *mut CpuContext) -> u64 {
     check_context(context, "tick_prepare");
+    // Proof of life for anyone waiting on this CPU to answer something.
+    crate::smp::note_cpu_alive();
     // A thread spinning in user code reaches no syscall boundary, so the tick
     // is the only place it can observe a kill. Ring 3 in the interrupted frame
     // proves it holds no kernel lock guard, which is what makes exiting here

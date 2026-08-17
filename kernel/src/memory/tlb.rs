@@ -41,9 +41,9 @@ pub static FLUSH_REQUEST: TlbFlushRequest = TlbFlushRequest {
 /// interrupts disabled is the normal reason to wait: the longest such region is
 /// a serial write, hundreds of microseconds, which this is comfortably beyond.
 const ACK_SPIN_LIMIT: u64 = 10_000_000;
-/// Attempts, counting the original send. Covers an IPI that was never
-/// delivered; it does not cover a CPU that has stopped taking interrupts, and
-/// nothing can.
+/// Re-sends before the laggards are asked whether they are running at all.
+/// Covers an IPI that was never delivered; past this the question stops being
+/// "was it delivered" and becomes "is anyone there".
 const ACK_ATTEMPTS: u32 = 3;
 
 /// Send a TLB shootdown IPI to all other online CPUs, flush locally, and wait
@@ -117,8 +117,10 @@ pub fn tlb_shootdown(start: VirtAddr, page_count: u64) {
     // translation any more, and the caller is entitled to free or reuse the
     // page on the strength of it. A CPU that never acknowledged is still
     // reading through a stale entry, so abandoning the wait trades a stall for
-    // silent memory corruption. Re-send and, failing that, say so loudly.
-    let mut resends = 0u32;
+    // silent memory corruption. Re-send, and then ask whether the CPU that owes
+    // an answer is executing at all — a stall is survivable and only the CPU
+    // that is running and ignoring the vector is this kernel's fault.
+    let mut round = 0u32;
     'wait: loop {
         for _ in 0..ACK_SPIN_LIMIT {
             if FLUSH_REQUEST.pending_mask.load(Ordering::Acquire) == 0 {
@@ -130,19 +132,89 @@ pub fn tlb_shootdown(start: VirtAddr, page_count: u64) {
         if remaining == 0 {
             break;
         }
-        assert!(
-            resends < ACK_ATTEMPTS - 1,
-            "tlb_shootdown: CPUs {remaining:#x} never acknowledged a flush of \
-             {page_count} page(s) at {start:?} across {ACK_ATTEMPTS} attempts; \
-             continuing would leave them on a stale translation"
-        );
-        resends += 1;
+        round += 1;
+
+        // Past the re-sends, a CPU that has not answered is either not
+        // executing — descheduled by a hypervisor, or wedged with interrupts
+        // off — or executing and not taking this interrupt. Only the second is
+        // a fault here, and waiting is the only correct response to the first:
+        // the frame cannot be reused while anyone still holds a translation to
+        // it, and a CPU that resumes later resumes with its TLB as it left it.
+        if round >= ACK_ATTEMPTS {
+            let alive = laggards_taking_interrupts(remaining);
+            assert!(
+                alive == 0,
+                "tlb_shootdown: CPUs {alive:#x} are taking timer interrupts and not this \
+                 shootdown of {page_count} page(s) at {start:?}; the IPI is being delivered \
+                 to a CPU that will not act on it"
+            );
+            if round == ACK_ATTEMPTS {
+                crate::log!(
+                    "tlb_shootdown: CPUs {remaining:#x} are not executing; waiting rather \
+                     than freeing a page they may still translate"
+                );
+            }
+        }
+
         crate::log!("tlb_shootdown: re-sending IPI to CPUs {remaining:#x}");
         send_shootdown_ipis(remaining);
     }
 
     // Release the serialization lock.
     FLUSH_REQUEST.active.store(false, Ordering::Release);
+}
+
+/// Which of `mask` are taking timer interrupts while owing an acknowledgement.
+///
+/// Sampled twice around a wait long enough to cover several ticks, because a
+/// heartbeat is only evidence when it is seen to advance. A CPU that ticks
+/// while ignoring the shootdown vector is a fault in this kernel; one whose
+/// heartbeat is frozen is not running at all, and nothing here can hurry it.
+fn laggards_taking_interrupts(mask: u64) -> u64 {
+    let mut before = [0u64; 64];
+    for idx in bits(mask) {
+        before[idx] = crate::smp::cpu_heartbeat(idx);
+    }
+
+    spin_for_ms(LIVENESS_SAMPLE_MS);
+
+    let mut alive = 0u64;
+    for idx in bits(mask) {
+        if crate::smp::cpu_heartbeat(idx) != before[idx] {
+            alive |= 1 << idx;
+        }
+    }
+    alive
+}
+
+/// The set bits of `mask`, as indices.
+fn bits(mask: u64) -> impl Iterator<Item = usize> {
+    (0..64).filter(move |idx| mask & (1 << idx) != 0)
+}
+
+/// Long enough for an idle CPU to have ticked several times: `run_idle` arms
+/// its timer at most 100 ms out before halting, so a CPU that is executing at
+/// all advances its heartbeat well inside this.
+const LIVENESS_SAMPLE_MS: u64 = 300;
+
+/// Spin for a wall-clock interval.
+///
+/// The HPET rather than a spin count, because this is a claim about elapsed
+/// time and a count is a claim about instructions retired — which is the thing
+/// a hypervisor descheduling the CPU changes. Falls back to a count where there
+/// is no HPET, since a rough wait beats no answer.
+fn spin_for_ms(ms: u64) {
+    let Some(hpet) = crate::drivers::hpet::driver::get_hpet_timer() else {
+        for _ in 0..ACK_SPIN_LIMIT {
+            core::hint::spin_loop();
+        }
+        return;
+    };
+    let start = hpet.get_counter();
+    let target_ns = ms * 1_000_000;
+    while hpet.ticks_to_nanos(hpet.get_counter().wrapping_sub(start)) < target_ns {
+        core::hint::spin_loop();
+    }
 }
 
 /// Send the shootdown IPI to every CPU in `mask`. x2APIC `send_ipi` is an MSR
