@@ -3287,21 +3287,29 @@ diff -ru /tmp/rt/src ~/dev/edos_rt/src
 **The std fork's pin is the version that actually runs.** `library/std/Cargo.toml`
 sat at `edos_rt = "0.0.26"` for ten releases while the crate moved on, and a
 `0.0.z` requirement is exact, so none of that work reached any program. It is now
-0.0.46. The full loop for an allocator or syscall-wrapper change is: patch
+0.0.51. The full loop for an allocator or syscall-wrapper change is: patch
 `edos_rt`, bump, `cargo publish`, bump the pin, `cargo +nightly update
 --manifest-path library/Cargo.toml -p edos_rt`, `./x install` in `~/dev/rust`
 (prefix `~/dev/edos-toolchain`, linked as the `edos` toolchain), then
-`make programs`.
+`rm -rf programs/target && SCCACHE_RECACHE=1 make programs`.
 
-`PoolAllocator` fragmentation is fixed in 0.0.36: the free list is
-address-ordered and coalescing, and the header records the whole reserved span
-rather than the requested size. 0.0.37 then released idle chunks back to the
-system, gave large allocations a header so alignment above a page is honoured,
-and added a bounded cache of freed large mappings. `bench/allocstress` in the
-`edos_rt` repo is the regression check; it compiles the allocator against a
-shimmed `mmap` on the host and fails if the pool does not plateau, if freeing
-everything does not hand the memory back, or if an over-aligned large request
-comes back misaligned.
+`PoolAllocator` is a segregated-fit heap over boundary tags as of 0.0.51, and
+`doc/design/allocators.md` is the account of why and what it measures. The
+short version: it used to be one address-ordered free list, which made both
+allocating and freeing linear in what the program already held, and freeing was
+the worse of the two because keeping the list in address order was how blocks
+got coalesced. An allocation cost 4978 ns against 8000 live blocks and costs
+100 now, and boot-to-panel went from about 2.7 s to 150 ms.
+
+`bench/allocstress` in the `edos_rt` repo is the regression check; it compiles
+the allocator against a shimmed `mmap` on the host and fails if the pool does
+not plateau, if freeing everything does not hand the memory back, if an
+over-aligned large request comes back misaligned, if the heap's own tags and
+bins stop agreeing, or if allocation cost starts tracking the live population
+again. **Run it before publishing.** It had stopped compiling at all -- its
+`sys` shim never grew `PROT_READ` when the allocator started asking for it --
+and nothing noticed, so a check that is never run is what let the free-list
+walk stand for as long as it did.
 
 0.0.37 also carries the runtime fixes that came out of reading the rest of the
 crate: the syscall wrappers are inlinable Rust-ABI functions instead of

@@ -1,6 +1,6 @@
 //! Kernel allocator with per-CPU freelists.
 //!
-//! Small allocations (up to 1024 bytes) are served from per-CPU caches,
+//! Small allocations (up to 4096 bytes) are served from per-CPU caches,
 //! avoiding the global heap lock entirely in the common case. Larger
 //! allocations and cache misses fall through to the buddy allocator.
 
@@ -26,12 +26,43 @@ use crate::{
 
 /// Size classes served by per-CPU caches. Each is a power of two so objects
 /// are naturally aligned to their size class.
-const SIZE_CLASSES: [usize; 6] = [32, 64, 128, 256, 512, 1024];
+///
+/// The top of the range is where the class list earns its keep rather than
+/// where allocations are most frequent: everything above it takes the one
+/// global heap lock, so a request a page long serialises against every other
+/// CPU. Measured through `/proc/alloc_bench` before 2048 and 4096 were added,
+/// a 1024-byte allocation cost 17 ns and a 4096-byte one 63.
+const SIZE_CLASSES: [usize; 8] = [32, 64, 128, 256, 512, 1024, 2048, 4096];
 
-/// Maximum cached objects per size class per CPU.
+/// Deepest a size class's stack can be. The array costs one pointer per slot
+/// whatever the class, so this only bounds the bookkeeping.
 const CACHE_SLOTS: usize = 16;
 
-/// How many objects to batch-refill or batch-drain at a time.
+/// Memory one size class may park per CPU. This is the dial: the slot counts
+/// below are derived from it, so adding a class cannot quietly multiply what
+/// the caches hold. Eight CPUs across eight classes hold at most 1 MiB.
+const CACHE_BYTES: usize = 16 * 1024;
+
+/// Objects `class` may hold per CPU, which is [`CACHE_SLOTS`] until the class
+/// is large enough for [`CACHE_BYTES`] to bind: 16 of the 1024-byte class, 8 of
+/// the 2048 and 4 of the 4096.
+const fn cache_limit(class: usize) -> usize {
+    let by_bytes = CACHE_BYTES / SIZE_CLASSES[class];
+    if by_bytes < CACHE_SLOTS {
+        by_bytes
+    } else {
+        CACHE_SLOTS
+    }
+}
+
+/// How many objects to batch-refill or batch-drain at a time, capped by what
+/// the class may hold so a refill cannot overshoot its own limit.
+const fn batch_for(class: usize) -> usize {
+    let limit = cache_limit(class);
+    if limit < BATCH { limit } else { BATCH }
+}
+
+/// Largest batch any class uses, and so the size of the drain buffer.
 const BATCH: usize = 8;
 
 /// Return the size-class index for a (size, align) pair, or `None` if the
@@ -46,6 +77,7 @@ fn size_class_index(size: usize, align: usize) -> Option<usize> {
 }
 
 /// Fixed-size pointer stack for one size class.
+#[derive(Clone, Copy)]
 struct SizeClassCache {
     stack: [*mut u8; CACHE_SLOTS],
     count: usize,
@@ -67,8 +99,8 @@ impl SizeClassCache {
         Some(self.stack[self.count])
     }
 
-    fn try_push(&mut self, ptr: *mut u8) -> bool {
-        if self.count >= CACHE_SLOTS {
+    fn try_push(&mut self, ptr: *mut u8, limit: usize) -> bool {
+        if self.count >= limit {
             return false;
         }
         self.stack[self.count] = ptr;
@@ -76,9 +108,9 @@ impl SizeClassCache {
         true
     }
 
-    /// Drain up to `BATCH` entries, returning (array, count).
-    fn drain_batch(&mut self) -> ([*mut u8; BATCH], usize) {
-        let n = self.count.min(BATCH);
+    /// Drain up to `batch` entries, returning (array, count).
+    fn drain_batch(&mut self, batch: usize) -> ([*mut u8; BATCH], usize) {
+        let n = self.count.min(batch);
         let mut out = [core::ptr::null_mut(); BATCH];
         for slot in out.iter_mut().take(n) {
             self.count -= 1;
@@ -91,7 +123,7 @@ impl SizeClassCache {
 /// Per-CPU allocation cache. Lives inside `PerCpuData`, accessed only by the
 /// owning CPU with interrupts disabled.
 pub struct PerCpuCache {
-    caches: [SizeClassCache; 6],
+    caches: [SizeClassCache; SIZE_CLASSES.len()],
     ready: bool,
 }
 
@@ -102,14 +134,7 @@ unsafe impl Sync for PerCpuCache {}
 impl PerCpuCache {
     pub const fn new() -> Self {
         Self {
-            caches: [
-                SizeClassCache::new(),
-                SizeClassCache::new(),
-                SizeClassCache::new(),
-                SizeClassCache::new(),
-                SizeClassCache::new(),
-                SizeClassCache::new(),
-            ],
+            caches: [SizeClassCache::new(); SIZE_CLASSES.len()],
             ready: false,
         }
     }
@@ -219,13 +244,14 @@ impl Allocator {
 
             // Slow path: batch refill from global heap (lock taken here).
             let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
+            let limit = cache_limit(idx);
             let mut heap = self.inner.lock();
             let mut last = None;
-            for _ in 0..BATCH {
+            for _ in 0..batch_for(idx) {
                 if let Ok(block) = heap.alloc(sc_layout) {
                     if let Some(prev) = last {
                         // Push previous into cache.
-                        let _ = cache.caches[idx].try_push(prev);
+                        let _ = cache.caches[idx].try_push(prev, limit);
                     }
                     last = Some(block.as_ptr());
                 } else {
@@ -251,13 +277,14 @@ impl Allocator {
             }
 
             // Fast path: cache has room.
-            if cache.caches[idx].try_push(ptr) {
+            let limit = cache_limit(idx);
+            if cache.caches[idx].try_push(ptr, limit) {
                 return true;
             }
 
             // Slow path: cache full. Drain half, then push this one.
-            let (drained, n) = cache.caches[idx].drain_batch();
-            let _ = cache.caches[idx].try_push(ptr); // guaranteed to succeed
+            let (drained, n) = cache.caches[idx].drain_batch(batch_for(idx));
+            let _ = cache.caches[idx].try_push(ptr, limit); // guaranteed to succeed
 
             // Return drained objects to global heap.
             let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
@@ -386,6 +413,177 @@ pub fn enable_percpu_cache() {
             .get_mut()
             .enable();
     });
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark
+// ---------------------------------------------------------------------------
+
+/// What a kernel allocation costs, and whether that cost depends on how much
+/// the heap already holds.
+///
+/// The userspace answer to the same question is `programs/allocbench`, and this
+/// asks it in the same shape so the two can be read side by side: the floor at
+/// each size, the cost against a live population, and what reuse costs after a
+/// population is freed.
+///
+/// Read `/proc/alloc_bench` to run it. Three things bound how the numbers
+/// should be read:
+///
+/// - **The first read is not like the ones after it.** The heap only ever
+///   grows, so the first run pays for the expansions its population forces and
+///   later runs find the memory already mapped. Read it twice.
+/// - **Sizes up to 4096 bytes are answered by the running CPU's own cache**
+///   and everything above them takes the one global heap lock, so the step
+///   between 4096 and 16384 is the interesting part of the table.
+/// - **It measures one CPU.** The per-CPU caches make contention invisible
+///   here; what several CPUs allocating at once costs is a different question
+///   and wants a different instrument.
+pub mod bench {
+    use alloc::{format, string::String, vec::Vec};
+    use core::{alloc::Layout, hint::black_box, ptr::NonNull};
+
+    use crate::timer::Instant;
+
+    /// Sizes spanning the per-CPU classes and the global heap above them.
+    const SIZES: [usize; 10] = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 16384];
+
+    /// Sizes a population is built from: a few words for a node, a string, a
+    /// buffer. The same four `allocbench` uses.
+    const MIX: [usize; 4] = [24, 64, 256, 1024];
+
+    fn layout(size: usize) -> Layout {
+        // Every request in this benchmark is a plain byte buffer, so the
+        // alignment is the one a `Vec<u8>` would ask for.
+        unsafe { Layout::from_size_align_unchecked(size, 1) }
+    }
+
+    /// Allocates and touches one block, so a mapping that is never written
+    /// cannot make the number look better than the allocation was.
+    fn take(size: usize) -> Option<NonNull<u8>> {
+        let ptr = unsafe { alloc::alloc::alloc(layout(size)) };
+        let ptr = NonNull::new(ptr)?;
+        unsafe { ptr.write(1) };
+        Some(ptr)
+    }
+
+    fn give(ptr: NonNull<u8>, size: usize) {
+        unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout(size)) };
+    }
+
+    /// Allocate and free the same size in a loop. Nothing accumulates, so this
+    /// is the floor: a cache hit and a cache push.
+    fn churn(out: &mut String) {
+        out.push_str("churn      alloc+free, nothing live\n");
+        for size in SIZES {
+            let rounds = if size <= 4096 { 20_000 } else { 4_000 };
+            let start = Instant::now();
+            for _ in 0..rounds {
+                match take(size) {
+                    Some(ptr) => {
+                        black_box(ptr);
+                        give(ptr, size);
+                    }
+                    None => {
+                        out.push_str(&format!("  {size:>6} bytes: out of memory\n"));
+                        return;
+                    }
+                }
+            }
+            let each = start.elapsed().as_nanos() as u64 / rounds as u64;
+            let path = if super::size_class_index(size, 1).is_some() {
+                "percpu"
+            } else {
+                "global"
+            };
+            out.push_str(&format!("  {size:>6} bytes: {each:>6} ns/op  ({path})\n"));
+        }
+    }
+
+    /// Hold `live` blocks, then time allocations made against that population.
+    ///
+    /// Every other block is freed first, so the heap holds a run of holes
+    /// rather than one clean tail to carve from.
+    fn scaling(out: &mut String) {
+        out.push_str("scaling    cost against a live population\n");
+        for live in [500usize, 2_000, 8_000] {
+            let mut held: Vec<Option<NonNull<u8>>> = Vec::with_capacity(live);
+            for i in 0..live {
+                held.push(take(MIX[i % MIX.len()]));
+            }
+            for i in (0..held.len()).step_by(2) {
+                if let Some(ptr) = held[i].take() {
+                    give(ptr, MIX[i % MIX.len()]);
+                }
+            }
+
+            const SAMPLES: usize = 2_000;
+            let mut sink: Vec<Option<NonNull<u8>>> = Vec::with_capacity(SAMPLES);
+            let start = Instant::now();
+            for i in 0..SAMPLES {
+                sink.push(take(MIX[i % MIX.len()]));
+            }
+            let each = start.elapsed().as_nanos() as u64 / SAMPLES as u64;
+            out.push_str(&format!("  {live:>6} live : {each:>6} ns/alloc\n"));
+
+            for (i, slot) in sink.into_iter().enumerate() {
+                if let Some(ptr) = slot {
+                    give(ptr, MIX[i % MIX.len()]);
+                }
+            }
+            for (i, slot) in held.into_iter().enumerate() {
+                if let Some(ptr) = slot {
+                    give(ptr, MIX[i % MIX.len()]);
+                }
+            }
+        }
+    }
+
+    /// Free a large population and allocate again at the same sizes. An
+    /// allocator that reuses what it just freed answers from its own lists.
+    fn reuse(out: &mut String) {
+        const N: usize = 8_000;
+        let mut held: Vec<Option<NonNull<u8>>> = Vec::with_capacity(N);
+        for i in 0..N {
+            held.push(take(MIX[i % MIX.len()]));
+        }
+        for (i, slot) in held.iter_mut().enumerate() {
+            if let Some(ptr) = slot.take() {
+                give(ptr, MIX[i % MIX.len()]);
+            }
+        }
+
+        let start = Instant::now();
+        for i in 0..N {
+            held[i] = take(MIX[i % MIX.len()]);
+        }
+        let each = start.elapsed().as_nanos() as u64 / N as u64;
+        out.push_str(&format!("reuse      after freeing {N}: {each} ns/alloc\n"));
+
+        for (i, slot) in held.into_iter().enumerate() {
+            if let Some(ptr) = slot {
+                give(ptr, MIX[i % MIX.len()]);
+            }
+        }
+    }
+
+    /// Runs the benchmark and renders its table.
+    pub fn render() -> String {
+        let mut out = String::new();
+        churn(&mut out);
+        scaling(&mut out);
+        reuse(&mut out);
+
+        let heap = super::ALLOCATOR.inner.lock();
+        let (used, total) = (heap.stats_alloc_actual(), heap.stats_total_bytes());
+        drop(heap);
+        out.push_str(&format!(
+            "heap       {} KiB used of {} KiB mapped\n",
+            used / 1024,
+            total / 1024
+        ));
+        out
+    }
 }
 
 pub fn print_alloc_stats() {
