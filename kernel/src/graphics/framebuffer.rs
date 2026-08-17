@@ -342,10 +342,14 @@ impl DevFsDevice for FramebufferDevice {
                         CURSOR_STALE_MOVES.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+                if !crate::graphics::cursor_plane_elsewhere(pos.x, pos.y) {
+                    return Ok(0);
+                }
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 if !display.lock().move_cursor(pos.x, pos.y) {
                     return Err(DevFsError::Unsupported);
                 }
+                crate::graphics::cursor_plane_placed(pos.x, pos.y);
                 Ok(0)
             }
             FB_IOCTL_TRACK_POINTER => {

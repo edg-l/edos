@@ -383,9 +383,17 @@ fn move_tracked_cursor(x: i32, y: i32) {
     if !crate::graphics::CURSOR_TRACKS_POINTER.load(Ordering::Relaxed) {
         return;
     }
+    let (x, y) = (x.max(0) as u32, y.max(0) as u32);
+    // A report carries where the pointer is, not that it moved: one that leaves
+    // the position alone has nothing for the plane, and re-placing it there
+    // costs a command for a picture that does not change.
+    if !crate::graphics::cursor_plane_elsewhere(x, y) {
+        return;
+    }
     if let Some(display) = DISPLAY.get() {
         if let Some(mut display) = display.try_lock() {
-            display.move_cursor(x.max(0) as u32, y.max(0) as u32);
+            display.move_cursor(x, y);
+            crate::graphics::cursor_plane_placed(x, y);
             TRACKED_MOVES.fetch_add(1, Ordering::Relaxed);
         } else {
             TRACKED_SKIPS.fetch_add(1, Ordering::Relaxed);

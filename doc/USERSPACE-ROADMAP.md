@@ -301,8 +301,19 @@ died with the boot.
 `edos_lib::config` is the mechanism, and it is deliberately smaller than an ini
 parser: one setting per file, one value in it, `#` comments allowed above.
 That is what the shell can already write with `echo` and read with `cat` when
-the graphical program owning a setting will not start. `/etc/keymap` and
-`/etc/wallpaper` are the two settings; history moved to `/root/.sh_history`.
+the graphical program owning a setting will not start. `/etc/keymap`,
+`/etc/wallpaper` and `/etc/cursor` are the settings; history moved to
+`/root/.sh_history`.
+
+`/etc/cursor` is `hardware` (the default) or `software`, and it exists because
+the capability question cannot be asked. A display with a cursor plane accepts
+the image and reports success, and nothing tells the guest whether what the
+plane holds is ever put in front of a human: under QEMU's SDL display the plane
+is drawn and mirrored onto the host's own pointer, under GTK it is not drawn at
+all and the desktop has no pointer. Only the person looking at the screen
+knows, so the setting is theirs. `svc restart edos-wm` picks it up; on a live
+session it lives in the ramdisk and is forgotten at reboot, like every other
+setting there.
 
 A wallpaper is recorded by name rather than by index, `lit:N` for a generated
 ground and the path for an image, so the choice survives a file being added to

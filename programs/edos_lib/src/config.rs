@@ -20,6 +20,17 @@ pub const KEYMAP: &str = "/etc/keymap";
 /// Path of the desktop background, or the name of a generated one.
 pub const WALLPAPER: &str = "/etc/wallpaper";
 
+/// Who draws the pointer: `hardware` for the display's own cursor plane,
+/// `software` for one the compositor paints into the picture.
+///
+/// A setting rather than a capability question, because the capability question
+/// cannot be asked. A display that has a plane accepts the image and reports
+/// success, and nothing tells the guest whether what it holds is ever put in
+/// front of a human: under one VM display backend the plane is drawn, under
+/// another it is dropped and the desktop has no pointer at all. Only the person
+/// looking at the screen knows.
+pub const CURSOR: &str = "/etc/cursor";
+
 /// Command history, kept out of `/etc` because it is a record rather than a
 /// setting, and on the root filesystem rather than in `/tmp`, which is memfs
 /// and forgets at every boot.

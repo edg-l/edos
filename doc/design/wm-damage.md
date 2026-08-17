@@ -279,6 +279,29 @@ reachable — the audit above records how. Correcting it from the compositor
 afterwards is a race rather than a fix, since the correcting move can be
 reordered behind the upload that caused it.
 
+## Whether the plane is worth having
+
+The compositor asks for a plane and is told yes, and that answer means the
+display has one — not that anybody can see it. Under QEMU's SDL display the
+plane is drawn, and drawn *as the host's own pointer*, which is then warped to
+follow it; under GTK it is not drawn at all and the desktop appears to have no
+cursor. Both answer the upload with success. There is no question the guest can
+ask that separates them.
+
+So `/etc/cursor` decides: `hardware` by default, `software` to composite the
+pointer into the picture and leave the plane alone entirely. The software path
+costs the latency the plane exists to remove, and it is the right trade for
+anyone whose display does not show what the plane holds.
+
+The kernel also stops re-placing a plane that has not moved. A report carries
+where the pointer *is*, not that it moved, so a device at rest against a screen
+edge and a button press both produce one; on this machine's own measurement,
+over half of a short session's reports asked for a position the plane already
+held. Skipping them costs nothing on a display that would have ignored the
+command, and on a host that mirrors the plane onto its pointer it is the
+difference between one update and hundreds. `/proc/gpu_stats` counts them as
+`cursor_redundant`.
+
 ## One command, one buffer
 
 The cursor queue is asynchronous and nothing waits on it, so a command's bytes

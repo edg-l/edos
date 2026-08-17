@@ -537,7 +537,20 @@ fn main() {
     //
     // False when the display has no cursor plane, and the software cursor is
     // composited as before.
-    let mut hw_cursor = upload_cursor(&screen, &cursor);
+    // A plane is the default because it costs no damage and reaches the screen
+    // without waiting for a frame. It is overridable because whether the plane
+    // is ever shown is not the guest's to know: the display accepts the image
+    // and says yes, and a host that does not draw what it holds leaves the
+    // desktop with no pointer at all. `software` in /etc/cursor is the way out
+    // of that, and the way out of a host that mirrors the plane onto its own
+    // pointer.
+    let want_hw_cursor = config::read(config::CURSOR)
+        .map(|value| !value.eq_ignore_ascii_case("software"))
+        .unwrap_or(true);
+    let mut hw_cursor = want_hw_cursor && upload_cursor(&screen, &cursor);
+    if !want_hw_cursor {
+        eprintln!("[wm] cursor: software, by /etc/cursor");
+    }
     // With a plane the display can hold, the pointer does not have to be
     // resampled to the frame rate: the kernel places it from the input path as
     // each report lands, which is up to a frame earlier than this loop can

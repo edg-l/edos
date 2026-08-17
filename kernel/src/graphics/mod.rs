@@ -1,6 +1,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub mod framebuffer;
 
@@ -38,6 +38,39 @@ pub static DISPLAY: Once<Mutex<Display>> = Once::new();
 /// reaches the plane as each report lands, instead of being resampled to
 /// whatever rate the compositor happens to run at.
 pub static CURSOR_TRACKS_POINTER: AtomicBool = AtomicBool::new(false);
+
+/// Where the plane was last put, packed `x << 32 | y`, or `u64::MAX` before
+/// anything has placed it.
+static CURSOR_PLANE_POS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Placements skipped because the plane was already there.
+///
+/// A report carries a position, not a movement, so a device at rest against a
+/// screen edge, a button press, or a host that puts the pointer back where it
+/// already was all produce one. Re-placing a plane that has not moved changes
+/// nothing on screen and still costs a command the display must process — and a
+/// host that mirrors the guest's cursor onto its own pointer acts on every one
+/// of them.
+pub static CURSOR_REDUNDANT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the plane has to be moved to reach `(x, y)`.
+///
+/// Asked before the placement rather than recorded after it, so that a
+/// placement which is then dropped — the input path does not wait for a busy
+/// display — leaves the record saying where the plane really is.
+pub fn cursor_plane_elsewhere(x: u32, y: u32) -> bool {
+    let packed = (x as u64) << 32 | y as u64;
+    if CURSOR_PLANE_POS.load(Ordering::Relaxed) == packed {
+        CURSOR_REDUNDANT.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+/// Record that the plane now holds `(x, y)`.
+pub fn cursor_plane_placed(x: u32, y: u32) {
+    CURSOR_PLANE_POS.store((x as u64) << 32 | y as u64, Ordering::Relaxed);
+}
 
 /// Plane placements asked for through the ioctl that named a position the
 /// pointer was not at, while the display was tracking the pointer.
