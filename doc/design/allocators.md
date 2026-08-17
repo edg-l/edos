@@ -209,11 +209,47 @@ and a different instrument.
 
 ## What is still open
 
-- **One lock for the whole userspace heap.** Eight threads on the same heap cost
-  699 ns per operation against 172 for one, which is the spin lock and nothing
-  else. The answer is a thread-local front-end in the shape of mimalloc's or
-  tcmalloc's; the obstacle is that it wants `#[thread_local]` inside the allocator
-  that std's own TLS setup allocates through, which is a bootstrap problem worth
-  its own change. Worth doing once something in the tree is thread-bound. Nothing
-  is today.
+- **One lock for the whole userspace heap, and it costs most of the machine's
+  allocation throughput the moment a second thread allocates.** `allocbench`'s
+  `contention` phase on a four-CPU guest, medians of four runs:
+
+  | threads | ns/op | aggregate |
+  |---|---|---|
+  | 1 | 65 | 15.4 M ops/s |
+  | 2 | 294 | 3.4 M ops/s |
+  | 4 | 182 | 5.5 M ops/s |
+  | 8 | 279 | 3.6 M ops/s |
+
+  Read the aggregate column: total throughput falls 4.5x between one thread and
+  two, recovers slightly at four as real parallelism offsets it, and falls back
+  at eight. The cliff is at **two**, which is an ordinary configuration --
+  `httpd` and `sshd` spawn a thread per connection, and `edos-web` has a network
+  thread beside its main one. Per-operation cost hides this: 294 ns still reads
+  as respectable while the machine does a third of the work it did with one
+  thread. The old allocator, for scale, went 118 k ops/s to 9.2 k on the host.
+
+  Two mechanisms are mixed in that number and this phase cannot separate them:
+  the lock itself, and two threads' allocations interleaving in one heap so
+  neither gets its own blocks back cache-hot. A per-thread cache fixes both.
+
+  **The obstacle that was written here before does not exist on this target.**
+  It claimed a thread-local front-end wants `#[thread_local]` inside the
+  allocator that std's own TLS setup allocates through. That is a *dynamic* TLS
+  problem, glibc's and musl's, where `__tls_get_addr` can allocate. This target
+  is `tls_model: LocalExec` with `has_thread_local: true`, so a thread-local is
+  a `%fs:constant` access with no call and no allocation; the kernel maps and
+  zeroes a TLS region per thread from the ELF `PT_TLS` template and writes the
+  FS base before the first user instruction, at both exec and clone
+  (`kernel/src/thread/thread.rs::allocate_tls_region`); and std already uses the
+  native `#[thread_local]` path on edos. A `#[thread_local]` static in `edos_rt`
+  was compiled against `x86_64-unknown-edos` to confirm it rather than infer it.
+
+  **mimalloc is also the wrong model to copy.** It needs per-page ownership and
+  a thread-safe foreign-free list because one of its blocks does not record
+  where it came from. Ours does: the size is in the header and every block comes
+  from the one global heap, so blocks are interchangeable and a thread can free
+  any block into its own cache. The shape to build is the one already in this
+  tree -- `kernel/src/allocator.rs`'s per-CPU cache -- applied per thread, with
+  a flush on thread exit through the fork's `thread_start` and a closed flag so
+  a free after the flush bypasses the cache rather than refilling it.
 - **Kernel allocator contention is unmeasured.** See above.

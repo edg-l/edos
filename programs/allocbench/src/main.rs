@@ -25,6 +25,7 @@ fn main() {
     scaling();
     reuse();
     growth();
+    contention();
 }
 
 /// Allocate and free the same size in a loop. Nothing accumulates, so this is
@@ -92,6 +93,55 @@ fn reuse() {
     let each = start.elapsed().as_nanos() as u64 / N as u64;
     black_box(&again);
     println!("reuse      after freeing {N}: {each} ns/alloc");
+}
+
+/// The same allocation workload from several threads at once.
+///
+/// The heap is behind one lock, so this is the phase that measures it, and the
+/// guest is the place to ask rather than a host for a reason the host cannot
+/// reproduce: the lock **spins** rather than parks, deliberately, so a holder
+/// that is preempted leaves every other thread spinning until it runs again.
+/// That only happens with more runnable threads than CPUs, which is why the
+/// sweep goes past the four this machine boots with.
+///
+/// **Read the aggregate rate, not ns/op.** An allocator that does not scale
+/// still reports a respectable per-operation figure while the machine as a
+/// whole does less work than it did with one thread, and the per-operation
+/// figure is the one that hides it.
+fn contention() {
+    const OPS: usize = 25_000;
+    const LIVE: usize = 64;
+
+    for threads in [1usize, 2, 4, 8] {
+        let start = Instant::now();
+        let workers: Vec<_> = (0..threads)
+            .map(|id| {
+                std::thread::spawn(move || {
+                    let mut held: Vec<Vec<u8>> = Vec::with_capacity(LIVE);
+                    let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (id as u64 + 1);
+                    for _ in 0..OPS {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        if held.len() == LIVE {
+                            held.swap_remove((seed >> 8) as usize % LIVE);
+                        }
+                        held.push(vec![0u8; SIZES[(seed as usize) % SIZES.len()]]);
+                    }
+                    black_box(&held);
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker panicked");
+        }
+
+        let elapsed = start.elapsed();
+        let ops = (threads * OPS) as u64;
+        let each = elapsed.as_nanos() as u64 / ops;
+        let rate = ops as f64 / elapsed.as_secs_f64() / 1.0e6;
+        println!("contention {threads:>2} threads: {each:>6} ns/op, {rate:.2} M ops/s aggregate");
+    }
 }
 
 /// Grow one buffer by doubling, which is what every parser, every string built
