@@ -64,6 +64,7 @@ Every `Drop` impl in the kernel, and why it conforms:
 | `SharedMemory` | `memory/shared.rs` | frame dealloc under `IrqSpinlock` |
 | `TxHandle` | `fs/journal/tx.rs` | merges into the active tx under a spin lock, no I/O |
 | `UAccessGuard` | `util/uaccess.rs` | clears a per-CPU flag |
+| `BlockBuffer` | `drivers/block_io.rs` | one `Weak::upgrade` and one atomic decrement |
 
 Types with no `Drop` at all, freed explicitly in `Thread::free`: `MemoryManager`,
 `FpuState`, `SignalState`, `Vma`, and the `FileDescriptor` variants (closed via

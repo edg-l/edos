@@ -16,14 +16,10 @@ fn read_sectors_vec(
     let byte_count = sectors as usize * 512;
     let mut buf = alloc::vec![0u8; byte_count];
     let dev = block_io::lookup(device_id).ok_or(ahci::AhciError::InvalidDevice)?;
-    let handle = dev.submit_read(
-        lba,
-        sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_mut_ptr(),
-            len: byte_count,
-        },
-    )?;
+    // SAFETY: `handle.wait()?` below reaps this op before returning.
+    let handle = dev.submit_read(lba, sectors as u32, unsafe {
+        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), byte_count)
+    })?;
     handle.wait()?;
     Ok(buf)
 }

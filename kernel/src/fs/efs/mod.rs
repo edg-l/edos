@@ -35,27 +35,21 @@ const MAX_RUN_BLOCKS: usize = 248;
 
 fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let handle = dev.submit_read(
-        lba,
-        sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_mut_ptr(),
-            len: buf.len(),
-        },
-    )?;
+    // SAFETY: `handle.wait()?` below reaps this op before returning.
+    let handle = dev.submit_read(lba, sectors as u32, unsafe {
+        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), buf.len())
+    })?;
     handle.wait()?;
     Ok(())
 }
 
 fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    // SAFETY: `handle.wait()?` below reaps this op before returning.
     let handle = dev.submit_write(
         lba,
         sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_ptr() as *mut u8,
-            len: buf.len(),
-        },
+        unsafe { BlockBuffer::reaped_by_submitter(buf.as_ptr() as *mut u8, buf.len()) },
         WriteFlags::NONE,
     )?;
     handle.wait()?;
@@ -63,22 +57,19 @@ fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(),
 }
 
 /// Issue a sector-level write and return its handle without waiting, so the
-/// caller can keep further commands outstanding behind it. `buf` is the DMA
-/// source on the direct path and must outlive the handle.
+/// caller can keep further commands outstanding behind it. The op co-owns
+/// `buf` via the `Arc` clone inside `BlockBuffer::owned_vec`.
 fn submit_block_write(
     device_id: u64,
     lba: u64,
     sectors: u16,
-    buf: &[u8],
+    buf: Arc<Vec<u8>>,
 ) -> Result<Arc<BlockIoHandle>, AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
     let handle = dev.submit_write(
         lba,
         sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_ptr() as *mut u8,
-            len: buf.len(),
-        },
+        BlockBuffer::owned_vec(buf),
         WriteFlags::NONE,
     )?;
     Ok(handle)
@@ -87,7 +78,7 @@ fn submit_block_write(
 /// One `submit_block_write` that has not been waited on yet.
 struct InflightWrite {
     handle: Arc<BlockIoHandle>,
-    staging: Vec<u8>,
+    staging: Arc<Vec<u8>>,
     first_page: u64,
     pages: u64,
 }
@@ -107,13 +98,11 @@ fn reap_write(device_id: u64, write: InflightWrite) -> Result<(), AhciError> {
 
 fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    // SAFETY: `handle.wait()?` below reaps this op before returning.
     let handle = dev.submit_write(
         lba,
         sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_ptr() as *mut u8,
-            len: buf.len(),
-        },
+        unsafe { BlockBuffer::reaped_by_submitter(buf.as_ptr() as *mut u8, buf.len()) },
         WriteFlags::FUA,
     )?;
     handle.wait()?;
@@ -649,23 +638,14 @@ impl EfsDriver {
             }
             let batch = &runs[idx..end];
 
-            let mut staging: Vec<Vec<u8>> = batch
+            let staging: Vec<Arc<Vec<u8>>> = batch
                 .iter()
-                .map(|r| vec![0u8; r.sectors as usize * 512])
+                .map(|r| Arc::new(vec![0u8; r.sectors as usize * 512]))
                 .collect();
             let reqs = batch
                 .iter()
-                .zip(staging.iter_mut())
-                .map(|(r, buf)| {
-                    (
-                        r.lba,
-                        r.sectors as u32,
-                        BlockBuffer::Slice {
-                            ptr: buf.as_mut_ptr(),
-                            len: buf.len(),
-                        },
-                    )
-                })
+                .zip(staging.iter())
+                .map(|(r, buf)| (r.lba, r.sectors as u32, BlockBuffer::owned_vec(buf.clone())))
                 .collect();
 
             // Every request comes back with a handle, a failed submission
@@ -3186,7 +3166,7 @@ impl PageCacheOps for EfsDriver {
                 (
                     r.lba,
                     r.sectors,
-                    crate::drivers::block_io::BlockBuffer::Shared { vec: buf.clone() },
+                    crate::drivers::block_io::BlockBuffer::owned_vec(buf.clone()),
                 )
             })
             .collect();
@@ -3405,6 +3385,7 @@ impl PageCacheOps for EfsDriver {
                     staging[i * needed_bytes..(i + 1) * needed_bytes]
                         .copy_from_slice(&buf[..needed_bytes]);
                 }
+                let staging = Arc::new(staging);
 
                 while inflight.len() >= MAX_INFLIGHT_WRITES {
                     let Some(done) = inflight.pop_front() else {
@@ -3417,7 +3398,12 @@ impl PageCacheOps for EfsDriver {
 
                 let lba = self.block_to_lba(phys_blocks[run_start]);
                 let sectors = spb as usize * run_len;
-                match submit_block_write(self.device.device_id, lba, sectors as u16, &staging) {
+                match submit_block_write(
+                    self.device.device_id,
+                    lba,
+                    sectors as u16,
+                    staging.clone(),
+                ) {
                     Ok(handle) => inflight.push_back(InflightWrite {
                         handle,
                         staging,

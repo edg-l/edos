@@ -21,7 +21,8 @@ use crate::{
         ahci::{
             AhciError, DeviceType,
             cancel_op::{
-                AhciNcqOp, AhciSlotOp, SLOT_CANCELLED, SLOT_COMPLETED, SLOT_PENDING, SlotCompletion,
+                AhciNcqOp, AhciSlotOp, SLOT_CANCELLED, SLOT_COMPLETED, SLOT_PENDING,
+                SLOT_RECLAIMED, SlotCompletion,
             },
             fis::FisRegH2D,
             structures::{
@@ -1178,10 +1179,9 @@ impl AhciPort {
         start_gen: u32,
     ) -> (usize, Arc<AhciNcqOp>) {
         let slot = self.allocate_slot_blocking();
-        let weak_port = self.weak_self.clone();
         let submitter = current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciNcqOp::new(
-            weak_port, slot, submitter, start_gen, handle, buffer, completion,
+            slot, submitter, start_gen, handle, buffer, completion,
         ));
         **ranked_lock!(
             RANK_AHCI_SLOT,
@@ -1303,7 +1303,7 @@ impl AhciPort {
             // this slot before `issued` was stored and left nothing to
             // complete it. The CAS inside `complete_ncq_slot` settles the
             // case where the pass did reach it.
-            self.complete_ncq_slot(slot, &op);
+            self.complete_ncq_slot(slot, op);
         }
         Ok(handle)
     }
@@ -1409,7 +1409,7 @@ impl AhciPort {
             // this slot before `issued` was stored and left nothing to
             // complete it. The CAS inside `complete_ncq_slot` settles the
             // case where the pass did reach it.
-            self.complete_ncq_slot(slot, &op);
+            self.complete_ncq_slot(slot, op);
         }
         Ok(handle)
     }
@@ -1417,7 +1417,7 @@ impl AhciPort {
     /// IRQ-side completion for a single slot. Called by `on_port_irq` when
     /// `SACT[slot]` has cleared. CAS Pending→Completed gates the cleanup; the
     /// reset-generation check guards against COMRESET clearing SACT.
-    fn complete_ncq_slot(&self, slot: usize, op: &Arc<AhciNcqOp>) {
+    fn complete_ncq_slot(&self, slot: usize, op: Arc<AhciNcqOp>) {
         // If the submitter hasn't issued the command yet, `SACT[slot] == 0`
         // is a false positive — the op was just installed in `ncq_waiters`
         // by `install_ncq_op` and the hardware write to SACT/CI is still
@@ -1442,52 +1442,81 @@ impl AhciPort {
                 return;
             }
         }
-        if op
-            .state
-            .compare_exchange(
-                SLOT_PENDING,
-                SLOT_COMPLETED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return; // already terminal (cancel raced and won)
-        }
-        crate::drivers::ahci::watchdog::ncq_inflight_dec();
-        // Re-read rather than reusing the value above: a restart round may
-        // have opened between the SACT check and winning the CAS, and its
-        // fail-all pass would then have skipped this already-terminal op.
-        let cur_gen = self.reset_generation.load(Ordering::Acquire);
-        let result = if cur_gen != op.start_gen {
-            Err(BlockError::Io)
-        } else {
-            if let SlotCompletion::PoolRead {
-                num_pages,
-                expected_size,
-            } = op.completion
-            {
-                let pool = self.slot_pool(slot);
-                let dest = op.buffer.as_mut_ptr();
-                let mut offset = 0;
-                for i in 0..num_pages {
-                    let copy_len = (expected_size - offset).min(4096);
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            pool.pages[i].as_ptr(),
-                            dest.add(offset),
-                            copy_len,
-                        );
+        // Completed only after the op -- and with it the `BlockBuffer` -- has
+        // been dropped, so a submitter that wakes and exits promptly cannot
+        // observe its own buffer as still borrowed.
+        let handle = Arc::clone(&op.handle);
+        let mut pending_result = None;
+        match op.state.compare_exchange(
+            SLOT_PENDING,
+            SLOT_COMPLETED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                crate::drivers::ahci::watchdog::ncq_inflight_dec();
+                // Re-read rather than reusing the value above: a restart round
+                // may have opened between the SACT check and winning the CAS,
+                // and its fail-all pass would then have skipped this
+                // already-terminal op.
+                let cur_gen = self.reset_generation.load(Ordering::Acquire);
+                let result = if cur_gen != op.start_gen {
+                    Err(BlockError::Io)
+                } else {
+                    if let SlotCompletion::PoolRead {
+                        num_pages,
+                        expected_size,
+                    } = op.completion
+                    {
+                        let pool = self.slot_pool(slot);
+                        let dest = op.buffer.as_mut_ptr();
+                        let mut offset = 0;
+                        for i in 0..num_pages {
+                            let copy_len = (expected_size - offset).min(4096);
+                            unsafe {
+                                ptr::copy_nonoverlapping(
+                                    pool.pages[i].as_ptr(),
+                                    dest.add(offset),
+                                    copy_len,
+                                );
+                            }
+                            offset += copy_len;
+                        }
                     }
-                    offset += copy_len;
+                    Ok(())
+                };
+
+                pending_result = Some(result);
+                if let Some(t) = op.submitter.upgrade() {
+                    t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
                 }
             }
-            Ok(())
-        };
-
-        op.handle.complete(result);
-        if let Some(t) = op.submitter.upgrade() {
-            t.owned_ops_remove(Arc::as_ptr(op) as *const ());
+            Err(SLOT_CANCELLED) => {
+                // The submitter cancelled while this command was still issued
+                // to the device; its handle is already completed with
+                // `Cancelled`. The drive has now actually finished, so this is
+                // where the slot and the op's `BlockBuffer` are reclaimed --
+                // not at cancel time, when the drive still considered the
+                // command outstanding.
+                //
+                // Losing the CAS below means another completion path is
+                // already reclaiming this slot: `SLOT_CANCELLED` is a resting
+                // state every loser of the transition above observes, so
+                // without this the tail could run twice.
+                if op
+                    .state
+                    .compare_exchange(
+                        SLOT_CANCELLED,
+                        SLOT_RECLAIMED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(_) => return, // already terminal via another completion path
         }
         **ranked_lock!(
             RANK_AHCI_SLOT,
@@ -1496,6 +1525,10 @@ impl AhciPort {
         ) = None;
         self.free_slot(slot);
         self.exit_ncq_mode();
+        drop(op);
+        if let Some(result) = pending_result {
+            handle.complete(result);
+        }
     }
 
     /// IRQ-side failure for every in-flight NCQ op. Used by the TFES path.
@@ -1536,21 +1569,38 @@ impl AhciPort {
             if !op.issued.load(Ordering::Acquire) {
                 continue;
             }
-            if op
-                .state
-                .compare_exchange(
-                    SLOT_PENDING,
-                    SLOT_COMPLETED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                continue;
-            }
-            op.handle.complete(Err(err));
-            if let Some(t) = op.submitter.upgrade() {
-                t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
+            let handle = Arc::clone(&op.handle);
+            let mut fail_handle = false;
+            match op.state.compare_exchange(
+                SLOT_PENDING,
+                SLOT_COMPLETED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    fail_handle = true;
+                    if let Some(t) = op.submitter.upgrade() {
+                        t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
+                    }
+                }
+                Err(SLOT_CANCELLED) => {
+                    // Same as `complete_ncq_slot`: the handle is already
+                    // completed by cancel, so only the hardware slot needs
+                    // reclaiming here, and the transition picks one reclaimer.
+                    if op
+                        .state
+                        .compare_exchange(
+                            SLOT_CANCELLED,
+                            SLOT_RECLAIMED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                }
+                Err(_) => continue, // already terminal via another completion path
             }
             **ranked_lock!(
                 RANK_AHCI_SLOT,
@@ -1559,21 +1609,11 @@ impl AhciPort {
             ) = None;
             self.free_slot(slot);
             self.exit_ncq_mode();
+            drop(op);
+            if fail_handle {
+                handle.complete(Err(err));
+            }
         }
-    }
-
-    /// Drop a stranded NCQ op from `ncq_waiters` when the cancel path wins
-    /// the CAS. Called only from `AhciNcqOp::cancel`. The state machine has
-    /// already transitioned Pending→Cancelled and the handle has been
-    /// completed; here we just reclaim the hardware slot.
-    pub fn release_orphaned_ncq_slot(&self, slot: usize) {
-        **ranked_lock!(
-            RANK_AHCI_SLOT,
-            "AhciPort.ncq_waiters",
-            self.ncq_waiters[slot]
-        ) = None;
-        self.free_slot(slot);
-        self.exit_ncq_mode();
     }
 
     /// Watchdog sweep for this port. Finds NCQ slots in-flight longer than
@@ -1719,7 +1759,7 @@ impl AhciPort {
                 .clone()
             };
             if let Some(op) = op {
-                self.complete_ncq_slot(slot, &op);
+                self.complete_ncq_slot(slot, op);
             }
         }
 

@@ -1652,6 +1652,9 @@ pub fn thread_exit(code: i32) -> ! {
     // Every path that ends a thread funnels through here, so this is the one
     // place the "no guard live where a thread can die" rule can be checked.
     crate::debug::lock_order::assert_no_guards_held("thread_exit");
+    if let Some(t) = current_thread() {
+        t.assert_no_borrowed_dma("thread_exit");
+    }
 
     // Log lifetime stats before the without_interrupts fast path (log! allocates).
     if let Some(t) = get_thread_by_id(tid) {

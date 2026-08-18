@@ -238,8 +238,13 @@ pair in the NVMe band is 172 -> 186: `admin_command_polled` submits under
 
 **180, `slot_waiters[i]` and `ncq_waiters[i]`.** Brief per-slot state. Taken by
 submit, the IRQ dispatcher, TFES `fail_all_ncq_slots` and the watchdog kthread.
-Holders only do `Arc::clone` or `take`: they never park, never allocate, never take
-an inner lock. Same rank, and never co-held with each other.
+`AhciNcqOp::cancel` does not take it: cancel only completes the handle, and the
+hardware slot -- still live in `SACT` while the drive may be mid-DMA against it
+-- is reclaimed later by whichever completion path (`complete_ncq_slot` or
+`fail_all_ncq_slots`) observes the command actually finish, in the arm that
+handles a CAS landing on `SLOT_CANCELLED`. Holders only do `Arc::clone` or
+`take`: they never park, never allocate, never take an inner lock. Same rank,
+and never co-held with each other.
 
 **182, `NvmeQueue.cmd_slots[i]`.** Per-command-id op handoff between submit,
 the IRQ dispatcher, the watchdog and cancel. Same shape as `slot_waiters`

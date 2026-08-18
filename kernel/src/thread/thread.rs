@@ -310,6 +310,16 @@ pub struct Thread {
     pub lock_ranks: core::cell::UnsafeCell<
         heapless::Vec<(u16, &'static str), { crate::debug::lock_order::LOCK_RANK_DEPTH }>,
     >,
+
+    /// Count of `BlockBuffer::reaped_by_submitter` buffers this thread has
+    /// submitted and not yet reaped. Incremented by that constructor,
+    /// decremented by `BlockBuffer::drop`. `thread_exit` asserts it is zero:
+    /// a nonzero count there means a driver may still be DMAing into memory
+    /// this thread's stack is about to give back to the reuse queue.
+    ///
+    /// Absent in release builds; carries zero size and zero runtime overhead.
+    #[cfg(debug_assertions)]
+    pub borrowed_dma: AtomicU32,
 }
 
 intrusive_list::impl_linked!(Thread, rq_link);
@@ -1100,6 +1110,8 @@ impl Thread {
             owned_ops: IrqSpinlock::new(heapless::Vec::new()),
             #[cfg(debug_assertions)]
             lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
+            #[cfg(debug_assertions)]
+            borrowed_dma: AtomicU32::new(0),
         });
 
         THREADS.insert(thread.clone());
@@ -1241,6 +1253,8 @@ impl Thread {
             owned_ops: IrqSpinlock::new(heapless::Vec::new()),
             #[cfg(debug_assertions)]
             lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
+            #[cfg(debug_assertions)]
+            borrowed_dma: AtomicU32::new(0),
         });
 
         THREADS.insert(thread.clone());
@@ -1461,6 +1475,32 @@ impl Thread {
             op.cancel();
         }
     }
+
+    /// Assert this thread holds no `BlockBuffer::reaped_by_submitter` buffer
+    /// at a point where it is about to stop running for good.
+    ///
+    /// Nothing can rescue memory a dying thread's stack owned: `cancel()`
+    /// completes the handle but a cancelled command's buffer stays reserved
+    /// until the device itself is done with it, so a nonzero count here
+    /// names an unconverted call site rather than something recoverable at
+    /// runtime.
+    #[cfg(debug_assertions)]
+    pub fn assert_no_borrowed_dma(&self, site: &str) {
+        let n = self.borrowed_dma.load(Ordering::Acquire);
+        if n != 0 {
+            panic!(
+                "thread {} died with {} borrowed DMA buffer{} in flight at {}",
+                self.id.0,
+                n,
+                if n == 1 { "" } else { "s" },
+                site
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline(always)]
+    pub fn assert_no_borrowed_dma(&self, _site: &str) {}
 }
 
 pub struct ThreadRegistry {

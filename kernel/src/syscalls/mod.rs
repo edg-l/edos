@@ -2991,6 +2991,8 @@ fn sys_clone(
         owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
         #[cfg(debug_assertions)]
         lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
+        #[cfg(debug_assertions)]
+        borrowed_dma: AtomicU32::new(0),
     });
 
     // Clone parent's UserThreadInfo - share fd_table
@@ -3265,6 +3267,8 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
         #[cfg(debug_assertions)]
         lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
+        #[cfg(debug_assertions)]
+        borrowed_dma: AtomicU32::new(0),
     });
 
     insert_thread(child_thread.clone());

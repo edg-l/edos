@@ -380,14 +380,10 @@ fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let h = dev.submit_read(
-        lba,
-        SECTORS_PER_PAGE as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_mut_ptr(),
-            len: PAGE_SIZE,
-        },
-    )?;
+    // SAFETY: `h.wait()?` below reaps this op before returning.
+    let h = dev.submit_read(lba, SECTORS_PER_PAGE as u32, unsafe {
+        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), PAGE_SIZE)
+    })?;
     h.wait()?;
     Ok(())
 }
@@ -398,13 +394,11 @@ fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), Ahci
     debug_assert!(!data.is_empty() && data.len().is_multiple_of(PAGE_SIZE));
     let lba = first_page * SECTORS_PER_PAGE as u64;
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    // SAFETY: `h.wait()?` below reaps this op before returning.
     let h = dev.submit_write(
         lba,
         (data.len() / 512) as u32,
-        BlockBuffer::Slice {
-            ptr: data.as_ptr() as *mut u8,
-            len: data.len(),
-        },
+        unsafe { BlockBuffer::reaped_by_submitter(data.as_ptr() as *mut u8, data.len()) },
         WriteFlags::NONE,
     )?;
     h.wait()?;
@@ -429,26 +423,20 @@ struct PendingFlush {
 const MAX_INFLIGHT_PAGES: usize = LOCK_RANK_DEPTH / 2;
 
 /// Issue a single-page write and return its handle without waiting, so the
-/// caller can keep further commands outstanding behind it. The frame is the
-/// DMA source, so it must not be written to until the handle completes.
-fn submit_write_frame(
-    device_id: u64,
-    page_block_idx: u64,
-    frame: PhysFrame,
-) -> Result<Arc<BlockIoHandle>, AhciError> {
+/// caller can keep further commands outstanding behind it. The op co-owns
+/// `page` via the `Arc` clone inside `BlockBuffer::owned`, which is what
+/// keeps the frame valid if the caller's own reap is cut short.
+fn submit_write_frame(page: &Arc<CachedBlockPage>) -> Result<Arc<BlockIoHandle>, AhciError> {
+    let (device_id, page_block_idx) = page.key;
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
-    let buf = frame_slice(frame);
+    let buf = frame_slice(page.frame);
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    dev.submit_write(
-        lba,
-        SECTORS_PER_PAGE as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_mut_ptr(),
-            len: PAGE_SIZE,
-        },
-        WriteFlags::NONE,
-    )
-    .map_err(Into::into)
+    // SAFETY: `buf` is the HHDM view of `page.frame`, and `page` is cloned
+    // into the returned buffer's owner, so the frame stays allocated to this
+    // page for as long as the operation holds it.
+    let buffer = unsafe { BlockBuffer::owned(page.clone(), buf.as_mut_ptr(), PAGE_SIZE) };
+    dev.submit_write(lba, SECTORS_PER_PAGE as u32, buffer, WriteFlags::NONE)
+        .map_err(Into::into)
 }
 
 /// Issue a single-page write via the block-io trait.
@@ -456,13 +444,11 @@ fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    // SAFETY: `h.wait()?` below reaps this op before returning.
     let h = dev.submit_write(
         lba,
         SECTORS_PER_PAGE as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_mut_ptr(),
-            len: PAGE_SIZE,
-        },
+        unsafe { BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), PAGE_SIZE) },
         WriteFlags::NONE,
     )?;
     h.wait()?;
@@ -804,18 +790,15 @@ impl BlockPageCache {
             }
         }
 
-        let mut staging: Vec<Vec<u8>> = Vec::with_capacity(runs.len());
+        let mut staging: Vec<Arc<Vec<u8>>> = Vec::with_capacity(runs.len());
         let mut reqs: Vec<(u64, u32, BlockBuffer)> = Vec::with_capacity(runs.len());
         for &(first, len) in &runs {
-            let mut buf = vec![0u8; len * PAGE_SIZE];
+            let buf = Arc::new(vec![0u8; len * PAGE_SIZE]);
             let lba = (start_page + miss_indices[first] as u64) * SECTORS_PER_PAGE as u64;
             reqs.push((
                 lba,
                 (len * SECTORS_PER_PAGE as usize) as u32,
-                BlockBuffer::Slice {
-                    ptr: buf.as_mut_ptr(),
-                    len: buf.len(),
-                },
+                BlockBuffer::owned_vec(buf.clone()),
             ));
             staging.push(buf);
         }
@@ -1268,7 +1251,7 @@ impl BlockPageCache {
             if !page.is_dirty() {
                 continue;
             }
-            match submit_write_frame(page.key.0, page.key.1, page.frame) {
+            match submit_write_frame(page) {
                 Ok(handle) => inflight.push((i, guard, handle)),
                 Err(e) => {
                     failure.get_or_insert(e);

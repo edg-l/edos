@@ -222,15 +222,11 @@ impl PageCacheOps for Fatfs {
 
             let mut scratch = vec![0u8; read_bytes];
             let dev = block_io::lookup(self.partition.device_id).ok_or(Error::IoError)?;
+            // SAFETY: `h.wait()` below reaps this op before returning.
             let h = dev
-                .submit_read(
-                    lba,
-                    sectors_to_read as u32,
-                    BlockBuffer::Slice {
-                        ptr: scratch.as_mut_ptr(),
-                        len: read_bytes,
-                    },
-                )
+                .submit_read(lba, sectors_to_read as u32, unsafe {
+                    BlockBuffer::reaped_by_submitter(scratch.as_mut_ptr(), read_bytes)
+                })
                 .map_err(|_| Error::IoError)?;
             h.wait().map_err(|_| Error::IoError)?;
 
@@ -342,14 +338,13 @@ impl PageCacheOps for Fatfs {
             scratch[src_start..src_end].copy_from_slice(&buf[buf_pos..buf_pos + take]);
 
             let dev = block_io::lookup(self.partition.device_id).ok_or(Error::IoError)?;
+            let scratch_len = scratch.len();
+            // SAFETY: `h.wait()` below reaps this op before returning.
             let h = dev
                 .submit_write(
                     lba,
                     sectors_to_write as u32,
-                    BlockBuffer::Slice {
-                        ptr: scratch.as_mut_ptr(),
-                        len: scratch.len(),
-                    },
+                    unsafe { BlockBuffer::reaped_by_submitter(scratch.as_mut_ptr(), scratch_len) },
                     WriteFlags::NONE,
                 )
                 .map_err(|_| Error::IoError)?;

@@ -33,25 +33,25 @@ use crate::{
 };
 
 /// Issue a sector-level write and return its handle without waiting, so the
-/// caller can keep further commands outstanding behind it. `buf` is the DMA
-/// source and must outlive the handle.
+/// caller can keep further commands outstanding behind it. The op co-owns
+/// `owner` via the `Arc` clone inside `BlockBuffer::owned`, covering
+/// `owner[offset..offset+len]`, so several commands can carry disjoint
+/// ranges of the same buffer without any of them copying it.
 fn submit_block_write(
     device_id: u64,
     lba: u64,
     sectors: u16,
-    buf: &[u8],
+    owner: &Arc<Vec<u8>>,
+    offset: usize,
+    len: usize,
 ) -> Result<Arc<BlockIoHandle>, AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    dev.submit_write(
-        lba,
-        sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_ptr() as *mut u8,
-            len: buf.len(),
-        },
-        WriteFlags::NONE,
-    )
-    .map_err(Into::into)
+    // SAFETY: ptr..ptr+len is within owner's allocation, which the returned
+    // BlockBuffer keeps alive via the cloned Arc for as long as the op lives.
+    let ptr = unsafe { owner.as_ptr().add(offset) as *mut u8 };
+    let buffer = unsafe { BlockBuffer::owned(owner.clone(), ptr, len) };
+    dev.submit_write(lba, sectors as u32, buffer, WriteFlags::NONE)
+        .map_err(Into::into)
 }
 
 /// Ring commands a transaction has issued but not waited on yet.
@@ -85,10 +85,18 @@ impl RingWrites {
         }
     }
 
-    /// Queue one command, first waiting for the oldest if the queue is full.
-    /// Returns false once anything has failed, so a caller mid-run stops
-    /// issuing rather than piling commands behind a broken one.
-    fn submit(&mut self, lba: u64, sectors: u16, buf: &[u8]) -> bool {
+    /// Queue one command covering `owner[offset..offset+len]`, first waiting
+    /// for the oldest if the queue is full. Returns false once anything has
+    /// failed, so a caller mid-run stops issuing rather than piling commands
+    /// behind a broken one.
+    fn submit(
+        &mut self,
+        lba: u64,
+        sectors: u16,
+        owner: &Arc<Vec<u8>>,
+        offset: usize,
+        len: usize,
+    ) -> bool {
         while self.inflight.len() >= Self::MAX_INFLIGHT {
             let Some(done) = self.inflight.pop_front() else {
                 break;
@@ -97,7 +105,7 @@ impl RingWrites {
                 self.failure.get_or_insert(e.into());
             }
         }
-        match submit_block_write(self.device_id, lba, sectors, buf) {
+        match submit_block_write(self.device_id, lba, sectors, owner, offset, len) {
             Ok(handle) => {
                 self.commands += 1;
                 self.inflight.push_back(handle);
@@ -110,9 +118,7 @@ impl RingWrites {
         }
     }
 
-    /// Wait for every outstanding command. This must run before the buffers
-    /// they read from are dropped, on the failure path too: a command that
-    /// reported an error may still have DMA in flight against its source.
+    /// Wait for every outstanding command.
     fn drain(&mut self) -> Result<(), AhciError> {
         while let Some(done) = self.inflight.pop_front() {
             if let Err(e) = done.wait() {
@@ -128,13 +134,11 @@ impl RingWrites {
 
 fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    // SAFETY: `h.wait()?` below reaps this op before returning.
     let h = dev.submit_write(
         lba,
         sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_ptr() as *mut u8,
-            len: buf.len(),
-        },
+        unsafe { BlockBuffer::reaped_by_submitter(buf.as_ptr() as *mut u8, buf.len()) },
         WriteFlags::FUA,
     )?;
     h.wait()?;
@@ -350,9 +354,15 @@ impl Journal {
     // ---- Block I/O ----------------------------------------------------------
 
     /// Queue one 4096-byte journal block at `journal_block_idx` (ring index).
-    fn submit_journal_block(&self, journal_block_idx: u64, data: &[u8], q: &mut RingWrites) {
+    fn submit_journal_block(
+        &self,
+        journal_block_idx: u64,
+        owner: &Arc<Vec<u8>>,
+        q: &mut RingWrites,
+    ) {
         let lba = self.journal_block_lba(journal_block_idx);
-        q.submit(lba, SECTORS_PER_BLOCK, data);
+        let len = owner.len();
+        q.submit(lba, SECTORS_PER_BLOCK, owner, 0, len);
     }
 
     /// Queue consecutive ring blocks, coalescing them into as few commands as
@@ -362,11 +372,13 @@ impl Journal {
     /// a transaction's data blocks are exactly the shape where one large
     /// command beats many small ones: a long run of adjacent blocks owned
     /// exclusively by this caller. Runs are cut where the ring wraps back to
-    /// its first block, and at the most one command can carry.
-    fn submit_journal_blocks(&self, start_idx: u64, data: &[u8], q: &mut RingWrites) {
-        debug_assert!(data.len().is_multiple_of(BLOCK_SIZE));
+    /// its first block, and at the most one command can carry. Every command
+    /// cut from `owner` co-owns it via `submit`'s `Arc` clone, so splitting
+    /// one buffer into several in-flight commands costs no copy.
+    fn submit_journal_blocks(&self, start_idx: u64, owner: &Arc<Vec<u8>>, q: &mut RingWrites) {
+        debug_assert!(owner.len().is_multiple_of(BLOCK_SIZE));
         let ring_size = self.block_count as u64 - 1;
-        let total = (data.len() / BLOCK_SIZE) as u64;
+        let total = (owner.len() / BLOCK_SIZE) as u64;
         let mut done = 0u64;
         while done < total {
             let idx = (start_idx + done) % ring_size;
@@ -377,7 +389,9 @@ impl Journal {
             if !q.submit(
                 self.journal_block_lba(idx),
                 SECTORS_PER_BLOCK * run as u16,
-                &data[off..off + len],
+                owner,
+                off,
+                len,
             ) {
                 return;
             }
@@ -940,24 +954,32 @@ impl Journal {
             let mut q = RingWrites::new(self.device_id);
             let t_ring = crate::timer::Instant::now();
 
-            let desc_block = build_descriptor_block(BLOCK_SIZE, tx.seq, tx.tx_id, &entries);
+            let desc_block = Arc::new(build_descriptor_block(
+                BLOCK_SIZE, tx.seq, tx.tx_id, &entries,
+            ));
             self.submit_journal_block(ring_pos % ring_size, &desc_block, &mut q);
             ring_pos += 1;
 
             // Data blocks (one per enrolled page, possibly escaped). The CRC
             // below needs them contiguous anyway, so the same buffer is what
-            // goes to the device.
+            // goes to the device. Wrapped in an `Arc` so `submit_journal_blocks`
+            // can cut it into several in-flight commands that all co-own it.
             let mut payload_bytes: Vec<u8> = Vec::with_capacity(n_data as usize * BLOCK_SIZE);
             for block_data in &data_blocks {
                 payload_bytes.extend_from_slice(block_data);
             }
+            let payload_bytes = Arc::new(payload_bytes);
             self.submit_journal_blocks(ring_pos, &payload_bytes, &mut q);
             ring_pos += n_data;
 
-            // Held out here rather than inside the branch: the buffer is the
-            // DMA source and must outlive the drain below.
-            let revoke_block = (!revoke_entries.is_empty())
-                .then(|| build_revoke_block(BLOCK_SIZE, tx.seq, tx.tx_id, &revoke_entries));
+            let revoke_block = (!revoke_entries.is_empty()).then(|| {
+                Arc::new(build_revoke_block(
+                    BLOCK_SIZE,
+                    tx.seq,
+                    tx.tx_id,
+                    &revoke_entries,
+                ))
+            });
             if let Some(block) = &revoke_block {
                 self.submit_journal_block(ring_pos % ring_size, block, &mut q);
                 ring_pos += 1;

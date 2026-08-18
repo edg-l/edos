@@ -135,6 +135,15 @@ fn main() -> ! {
         println!("ahci: NCQ watchdog timeout set to {ms} ms");
     }
 
+    // Regression gate for the cancel-time `BlockBuffer` use-after-free: see
+    // `block_orphan_test_thread` below. Parsed here, spawned once a device is
+    // registered to submit against.
+    #[cfg(feature = "fault-inject")]
+    let block_orphan_test = cmdline
+        .other_params
+        .iter()
+        .any(|(k, _)| k == "block_orphan_test");
+
     let madt = acpi_madt();
     println!(
         "Found MADT:\n{:p}",
@@ -181,6 +190,14 @@ fn main() -> ! {
     drivers::init_drivers();
     memory::verify_kernel_no_phys_aliasing();
 
+    #[cfg(feature = "fault-inject")]
+    if block_orphan_test {
+        queue_spawn_kthread_named(
+            "block-orphan-test",
+            block_orphan_test_thread as *const () as u64,
+        );
+    }
+
     queue_spawn_kthread_named(
         "block_writeback",
         fs::writeback::writeback_thread as *const () as u64,
@@ -201,6 +218,36 @@ fn main() -> ! {
     loop {
         hlt();
     }
+}
+
+/// Regression gate for the cancel-time `BlockBuffer` use-after-free: builds
+/// a buffer over this thread's own stack through
+/// `BlockBuffer::reaped_by_submitter`, leaks it so nothing can discharge the
+/// promise, and exits. A debug kernel's per-thread borrowed-DMA counter
+/// catches it at `thread_exit`; a release kernel does not, and the stack goes
+/// back on the reuse queue with the buffer still outstanding.
+///
+/// The leak stands in for a driver op that still holds the buffer, and it is
+/// what makes this deterministic. Submitting a real read and racing the
+/// device is not: the completion path drops the op, and with it the buffer,
+/// so whether the counter is still non-zero at `thread_exit` depends on
+/// whether the disk beat the exit. Measured both ways on the same build.
+///
+/// This demonstrates the detection, not the corruption. Showing the
+/// use-after-free itself would need a poisoned-pattern canary written into
+/// the stack and checked by whichever thread reuses it.
+#[cfg(feature = "fault-inject")]
+pub fn block_orphan_test_thread() -> ! {
+    let mut buf = [0u8; 512];
+    // SAFETY: deliberately not upheld. This buffer's promise is that the
+    // submitting thread reaps before it can die, and this thread exits
+    // holding it, which is the fault being injected.
+    let borrowed = unsafe {
+        crate::drivers::block_io::BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), buf.len())
+    };
+    log!("block-orphan-test: exiting with a borrowed buffer outstanding");
+    core::mem::forget(borrowed);
+    crate::thread::scheduler::thread_exit(0);
 }
 
 pub fn test_new() -> ! {

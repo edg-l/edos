@@ -11,8 +11,11 @@
 //!   carries an [`Arc<BlockIoHandle>`] (so the IRQ dispatcher can publish
 //!   completion), the caller's [`BlockBuffer`] (pinned for the I/O), and
 //!   `SlotCompletion` metadata describing any pool→buffer copy required on
-//!   success. Lives in `slot_waiters[slot]` AND in the submitter's
-//!   `owned_ops`; whichever path wins the state CAS owns hardware cleanup.
+//!   success. Lives in `ncq_waiters[slot]` AND in the submitter's
+//!   `owned_ops`. Cancel only ever completes the handle: the drive may
+//!   still be mid-DMA against the slot when the submitter dies, so hardware
+//!   reclaim (the slot, and with it the `BlockBuffer`) happens only once
+//!   the completion path observes the command actually finish.
 
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -28,6 +31,13 @@ use crate::{
 pub const SLOT_PENDING: u8 = 0;
 pub const SLOT_COMPLETED: u8 = 1;
 pub const SLOT_CANCELLED: u8 = 2;
+/// A cancelled op whose hardware slot has been reclaimed. `SLOT_CANCELLED`
+/// is not itself exclusive -- every later caller that loses the
+/// `PENDING -> COMPLETED` CAS observes it -- so the reclaim transitions into
+/// this state to pick exactly one winner. Reclaiming twice would decrement
+/// the port's NCQ mode counter twice and clear a `ncq_waiters` entry a new
+/// command had already taken.
+pub const SLOT_RECLAIMED: u8 = 3;
 
 // ---------------------------------------------------------------------------
 // Legacy / non-NCQ
@@ -105,7 +115,6 @@ pub enum SlotCompletion {
 
 /// In-flight NCQ command tracker for the async submit/complete path.
 pub struct AhciNcqOp {
-    pub port: Weak<AhciPort>,
     pub slot: usize,
     pub submitter: Weak<Thread>,
     pub state: AtomicU8,
@@ -130,7 +139,6 @@ pub struct AhciNcqOp {
 
 impl AhciNcqOp {
     pub fn new(
-        port: Weak<AhciPort>,
         slot: usize,
         submitter: Weak<Thread>,
         start_gen: u32,
@@ -139,7 +147,6 @@ impl AhciNcqOp {
         completion: SlotCompletion,
     ) -> Self {
         Self {
-            port,
             slot,
             submitter,
             state: AtomicU8::new(SLOT_PENDING),
@@ -156,7 +163,11 @@ impl AhciNcqOp {
 impl CancellableOp for AhciNcqOp {
     fn cancel(&self) {
         // CAS Pending -> Cancelled. If we win, publish Cancelled on the
-        // handle and release the hardware slot.
+        // handle. The hardware slot is not touched here: the drive may
+        // still be mid-DMA against it, and reusing it now would issue a
+        // second command into a slot the drive has not finished. Reclaim
+        // happens on the completion side, in `complete_ncq_slot`'s
+        // `SLOT_CANCELLED` arm, once the device is actually done.
         match self.state.compare_exchange(
             SLOT_PENDING,
             SLOT_CANCELLED,
@@ -165,9 +176,6 @@ impl CancellableOp for AhciNcqOp {
         ) {
             Ok(_) => {
                 self.handle.complete(Err(BlockError::Cancelled));
-                if let Some(port) = self.port.upgrade() {
-                    port.release_orphaned_ncq_slot(self.slot);
-                }
             }
             Err(SLOT_COMPLETED) | Err(SLOT_CANCELLED) => {}
             Err(_) => unreachable!("unexpected AhciNcqOp state"),

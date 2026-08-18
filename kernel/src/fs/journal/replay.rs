@@ -26,28 +26,21 @@ use crate::{
 
 fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let h = dev.submit_read(
-        lba,
-        sectors as u32,
-        BlockBuffer::Slice {
-            ptr: buf.as_mut_ptr(),
-            len: buf.len(),
-        },
-    )?;
+    // SAFETY: `h.wait()?` below reaps this op before returning.
+    let h = dev.submit_read(lba, sectors as u32, unsafe {
+        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), buf.len())
+    })?;
     h.wait()?;
     Ok(())
 }
 
-/// A replay write that has been submitted but not waited on. `data` is the DMA
-/// source and must outlive the handle, so it is carried here rather than being
-/// dropped at the end of the loop iteration that issued it.
-struct InflightReplay {
-    handle: alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>,
-    data: Vec<u8>,
-}
+/// A replay write that has been submitted but not waited on.
+type InflightReplay = alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>;
 
 /// Issue a home-block write without waiting, so replay can keep several
-/// outstanding instead of paying a round trip per block.
+/// outstanding instead of paying a round trip per block. The op co-owns
+/// `data` via the `Arc`, so it stays valid until the device is done with it
+/// whether or not replay itself is still around to wait on the handle.
 fn submit_block_write(
     device_id: u64,
     lba: u64,
@@ -55,24 +48,18 @@ fn submit_block_write(
     data: Vec<u8>,
 ) -> Result<InflightReplay, AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let handle = dev.submit_write(
+    dev.submit_write(
         lba,
         sectors as u32,
-        BlockBuffer::Slice {
-            ptr: data.as_ptr() as *mut u8,
-            len: data.len(),
-        },
+        BlockBuffer::owned_vec(alloc::sync::Arc::new(data)),
         WriteFlags::NONE,
-    )?;
-    Ok(InflightReplay { handle, data })
+    )
+    .map_err(Into::into)
 }
 
-/// Wait for one outstanding replay write. The buffer is only free once the
-/// device has finished reading it.
+/// Wait for one outstanding replay write.
 fn reap_replay(write: InflightReplay) -> Result<(), AhciError> {
-    let result = write.handle.wait();
-    drop(write.data);
-    result?;
+    write.wait()?;
     Ok(())
 }
 

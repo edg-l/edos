@@ -10,16 +10,32 @@
 //!
 //! ### Buffer lifetime contract
 //!
-//! [`BlockBuffer::Slice`] carries a raw pointer + length. The caller MUST
-//! ensure the underlying allocation outlives the [`BlockIoHandle`] (i.e.
-//! is still valid when `complete()` runs). The driver does not copy the
-//! pointer; DMA may target it directly.
+//! A [`BlockBuffer`] points at memory a driver may DMA into or out of for as
+//! long as the command is outstanding, which does not end when the handle
+//! leaves `Pending`: [`CancellableOp::cancel`] completes the handle while the
+//! command is still issued to the device, and there is no way to retract an
+//! in-flight DMA -- the device either finishes it or the controller is
+//! reset. So the bytes must stay valid until the device is actually done,
+//! not until the caller stops waiting for it. `BlockBuffer` has three
+//! constructors, one per way a caller can honestly make that promise:
+//!
+//! - [`BlockBuffer::owned_vec`] / [`BlockBuffer::owned`]: the operation
+//!   co-owns the backing via an `Arc`, dropped only when the driver's
+//!   in-flight tracker is dropped -- after completion or cancellation's
+//!   hardware reclaim, whichever is later.
+//! - [`BlockBuffer::reaped_by_submitter`]: the submitting thread promises to
+//!   reap (`wait()`) the handle this buffer is submitted with before it can
+//!   reach a point where it could be killed. The promise is counted on the
+//!   thread and checked at `thread_exit`.
+//!
+//! [`CancellableOp::cancel`]: crate::thread::cancel::CancellableOp::cancel
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use crate::thread::preempt::PreemptRwLock as RwLock;
-
+use crate::thread::scheduler::current_thread_weak;
+use crate::thread::thread::Thread;
 use crate::thread::waitqueue::WaitQueue;
 
 // ---------------------------------------------------------------------------
@@ -70,46 +86,112 @@ impl WriteFlags {
 // Buffer
 // ---------------------------------------------------------------------------
 
-/// Kernel buffer reference for block I/O.
-pub enum BlockBuffer {
-    /// Caller-pinned slice of kernel virtual memory.
+/// Kernel buffer reference for block I/O. See the "Buffer lifetime contract"
+/// section above for what each constructor promises.
+pub struct BlockBuffer {
+    ptr: *mut u8,
+    len: usize,
+    owner: BufferOwner,
+}
+
+enum BufferOwner {
+    /// Co-owned for the whole in-flight window. The driver clones this `Arc`
+    /// into its op and drops it only when the device is done, which is
+    /// later than the handle leaving `Pending` whenever the submitter was
+    /// cancelled. Never read back: it exists to be dropped at the right
+    /// time, not to be inspected.
+    #[allow(dead_code)]
+    Owned(Arc<dyn Send + Sync>),
+    /// The submitter promises to reap this handle before it can reach a
+    /// kill point. Counted on the submitting thread and asserted at
+    /// `thread_exit`.
+    ReapedBySubmitter(Weak<Thread>),
+    /// Outlives every thread: a `static`, a Limine module, or memory a
+    /// driver owns for the device's whole lifetime.
     ///
-    /// # Safety
-    /// Caller MUST ensure the pointed-to bytes are valid until the handle
-    /// transitions out of `Pending`.
-    Slice { ptr: *mut u8, len: usize },
-    /// Owned vec shared via `Arc`. The driver writes/reads via a raw
-    /// pointer derived from the Arc; the Arc keeps the backing alive until
-    /// every holder (driver op + any out-of-band finalizer) drops their
-    /// clone. Used by the async-readahead prefetch path so the DMA target
-    /// outlives the I/O even if the prefetch entry is dropped first.
-    Shared {
-        vec: alloc::sync::Arc<alloc::vec::Vec<u8>>,
-    },
+    /// Nothing in this tree constructs this case yet -- every current
+    /// caller either co-owns its backing or reaps inline -- but it is part
+    /// of the type's design space and kept so the variant exists when a
+    /// driver-owned buffer needs it.
+    #[allow(dead_code)]
+    Static,
 }
 
 unsafe impl Send for BlockBuffer {}
 unsafe impl Sync for BlockBuffer {}
 
 impl BlockBuffer {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Slice { len, .. } => *len,
-            Self::Shared { vec } => vec.len(),
+    /// Wrap an owned `Vec`'s backing storage. No copy: the `Vec`'s heap
+    /// allocation moves into the `Arc`, and the operation keeps the `Arc`
+    /// alive until the device is done with it.
+    pub fn owned_vec(vec: Arc<Vec<u8>>) -> Self {
+        let ptr = vec.as_ptr() as *mut u8;
+        let len = vec.len();
+        Self {
+            ptr,
+            len,
+            owner: BufferOwner::Owned(vec),
         }
+    }
+
+    /// Wrap a raw pointer whose backing is kept alive by `owner`.
+    ///
+    /// # Safety
+    /// `ptr..ptr+len` must be valid for reads and writes for as long as
+    /// `owner` (or a clone of it held elsewhere) is alive. The caller
+    /// answers for that; this constructor does not derive `ptr` from
+    /// `owner` the way [`Self::owned_vec`] does, so nothing here checks the
+    /// pointer actually points into what `owner` allocated.
+    pub unsafe fn owned(owner: Arc<dyn Send + Sync>, ptr: *mut u8, len: usize) -> Self {
+        Self {
+            ptr,
+            len,
+            owner: BufferOwner::Owned(owner),
+        }
+    }
+
+    /// Wrap a caller's pointer on the promise that the submitting thread
+    /// reaps (`wait()`s) the handle this buffer is submitted with before it
+    /// can reach a point where it could be killed.
+    ///
+    /// # Safety
+    /// `ptr..ptr+len` must be valid for reads and writes until the
+    /// submitting thread reaps the handle. Breaking that promise is caught
+    /// at `thread_exit` in debug builds via the thread's borrowed-DMA
+    /// counter, not by this constructor.
+    pub unsafe fn reaped_by_submitter(ptr: *mut u8, len: usize) -> Self {
+        let weak = current_thread_weak().unwrap_or_default();
+        #[cfg(debug_assertions)]
+        if let Some(t) = weak.upgrade() {
+            t.borrowed_dma.fetch_add(1, Ordering::Relaxed);
+        }
+        Self {
+            ptr,
+            len,
+            owner: BufferOwner::ReapedBySubmitter(weak),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
     }
 
     pub fn as_ptr(&self) -> *const u8 {
-        match self {
-            Self::Slice { ptr, .. } => *ptr,
-            Self::Shared { vec } => vec.as_ptr(),
-        }
+        self.ptr
     }
 
     pub fn as_mut_ptr(&self) -> *mut u8 {
-        match self {
-            Self::Slice { ptr, .. } => *ptr,
-            Self::Shared { vec } => vec.as_ptr() as *mut u8,
+        self.ptr
+    }
+}
+
+impl Drop for BlockBuffer {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        if let BufferOwner::ReapedBySubmitter(weak) = &self.owner
+            && let Some(t) = weak.upgrade()
+        {
+            t.borrowed_dma.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
