@@ -506,6 +506,17 @@ impl Scheduler {
         })
     }
 
+    /// Enqueue every sleeper whose deadline has passed, and drop the entries of
+    /// threads that are no longer sleeping.
+    ///
+    /// A sleeper goes into the heap of the CPU it was running on and comes back
+    /// out onto that CPU's runqueue, so a thread that sleeps in a loop keeps
+    /// whichever CPU it first slept on for as long as it lives — unlike a park,
+    /// which lands on the waker's CPU and so follows the work. Nothing else
+    /// moves it: work-stealing only reaches threads that are already queued.
+    /// Going through [`Scheduler::enqueue_ready`] is what makes the expiry
+    /// visible to a halted CPU, which is the one thing that can take the
+    /// sleeper somewhere else.
     fn wake_sleepers(&self) {
         let now = Instant::now().as_nanos();
         let mut sl = self.sleepers.lock();
@@ -525,16 +536,8 @@ impl Scheduler {
             }
             let t = sl.pop().unwrap().thread;
             if t.try_wake() {
-                debug_assert!(
-                    !t.rq_link.is_linked(),
-                    "wake_sleepers: thread {} already linked",
-                    t.id.0
-                );
                 t.state.store(State::Ready as u8, Ordering::Release);
-                let request = t.request_ns();
-                self.with_rq(|rq| rq.enqueue_waking(t, request));
-                self.has_work.store(true, Ordering::Release);
-                self.mark_running_thread_need_resched();
+                Self::enqueue_ready(self, &t, WakePriority::Normal);
             }
         }
         if let Some(next_sleep) = sl.peek() {

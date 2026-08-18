@@ -30,6 +30,13 @@
 //! work-stealing's problem alone, and so measures how fast an idle CPU notices
 //! there is something to steal.
 //!
+//! `balancebench sleep` prices the third case, which neither of the others can
+//! reach: a thread that *sleeps* is placed by nobody. The sleepers heap is per
+//! CPU, so a sleeper comes back out onto the CPU it slept on however busy that
+//! CPU has become and however much of the machine is halted. That mode wakes a
+//! burst the way `wake` does, has each worker sleep before it works, and asks
+//! whether the concentration one round created is still there the next.
+//!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
 use std::sync::mpsc;
@@ -77,18 +84,29 @@ fn blocked_thread(idle_read: u64, ack_write: u64) {
     let _ = read(idle_read, &mut byte);
 }
 
+/// Which half of placement this run prices.
+enum Mode {
+    /// Straggler spread over freshly spawned workers.
+    Spawn,
+    /// Fan-out of a burst of wakes from one thread.
+    Wake,
+    /// Whether a thread that sleeps in a loop ever leaves the CPU it slept on.
+    Sleep,
+}
+
 fn main() {
     let mut klog = false;
-    let mut wake_mode = false;
+    let mut mode = Mode::Spawn;
     let mut workers_arg: Option<u64> = None;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "-l" => klog = true,
-            "wake" => wake_mode = true,
+            "wake" => mode = Mode::Wake,
+            "sleep" => mode = Mode::Sleep,
             other => match other.parse::<u64>() {
                 Ok(n) if n > 0 => workers_arg = Some(n),
                 _ => {
-                    eprintln!("usage: balancebench [wake] [workers] [-l]");
+                    eprintln!("usage: balancebench [wake|sleep] [workers] [-l]");
                     std::process::exit(2);
                 }
             },
@@ -96,9 +114,10 @@ fn main() {
     }
     let mut out = Tee::new(klog);
 
-    if wake_mode {
-        wake_burst(&mut out, workers_arg);
-        return;
+    match mode {
+        Mode::Wake => return wake_burst(&mut out, workers_arg),
+        Mode::Sleep => return sleep_burst(&mut out, workers_arg),
+        Mode::Spawn => {}
     }
 
     let cpus = cpus_online();
@@ -329,6 +348,124 @@ fn wake_burst(out: &mut Tee, workers_arg: Option<u64>) {
     out.line(&format!(
         "balancebench wake fanout {:.2} (median burst over solo; 1.00 is every worker at once, \
          {workers}.00 is one at a time)",
+        ms(median) / ms(solo)
+    ));
+    report_sched(out, "after the bursts");
+
+    for req_write in req_writes {
+        let _ = close(req_write);
+    }
+    for ack_read in ack_reads {
+        let _ = close(ack_read);
+    }
+}
+
+/// How long each worker sleeps after the wake that placed it, before it works.
+///
+/// Long enough that every worker has reached the sleepers heap of the CPU the
+/// burst put it on before the earliest deadline expires, and short enough that
+/// a round is still dominated by the arithmetic rather than by the wait.
+const SLEEP_DELAY: Duration = Duration::from_millis(20);
+
+/// A worker that is woken by a byte, sleeps, works for one timeslice, answers.
+///
+/// The sleep is the whole point: it re-enters the sleepers heap of whichever
+/// CPU the wake happened to place this thread on, and a sleeper comes back out
+/// onto that same CPU. So a burst that buried every worker in one runqueue is
+/// not undone by the next round — it is repeated, unless something notices the
+/// expiry and lets an idle CPU take one.
+fn sleep_worker(req_read: u64, ack_write: u64, rounds: u32, seed: u64) {
+    let mut byte = [0u8; 1];
+    // Loop-carried, for the reason spelled out in `wake_worker`.
+    let mut state = seed;
+    for _ in 0..rounds {
+        if read(req_read, &mut byte) != 1 {
+            return;
+        }
+        thread::sleep(SLEEP_DELAY);
+        let t0 = Instant::now();
+        state = work(WAKE_ROUNDS, state);
+        let micros = t0.elapsed().as_micros() as u32;
+        let _ = write(ack_write, &micros.to_le_bytes());
+    }
+}
+
+/// Prices where a *sleeper* runs, which neither other mode can reach.
+///
+/// `wake` measures one burst landing on one runqueue and asks how fast the rest
+/// of the machine comes to take it. This asks the question the round after:
+/// each worker, once woken, sleeps before it works. A park is placed by its
+/// waker and so follows the work; a sleep is placed by nothing at all, since
+/// the sleepers heap is per CPU and hands the thread straight back to the CPU
+/// it slept on. Left alone, one round's concentration becomes permanent.
+///
+/// The report is `(wall - sleep) / solo` on the same scale as `wake fanout`:
+/// 1.00 is every worker working at once, N is the machine serving them one at
+/// a time from a single runqueue while the rest of it is halted.
+fn sleep_burst(out: &mut Tee, workers_arg: Option<u64>) {
+    let cpus = cpus_online();
+    let workers = workers_arg.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
+    out.line(&format!(
+        "balancebench sleep {cpus} cpus online, {workers} workers, {WAKE_BURSTS} bursts"
+    ));
+    if cpus < 2 {
+        out.line("balancebench sleep: NOT a multi-CPU boot, there is nowhere for a sleeper to go");
+    }
+
+    thread::sleep(WAKE_SETTLE);
+    let t0 = Instant::now();
+    let checksum = work(WAKE_ROUNDS, 1);
+    let solo = t0.elapsed();
+    out.line(&format!(
+        "balancebench sleep solo {:.2} ms for one worker alone (checksum {checksum:#x})",
+        solo.as_secs_f64() * 1000.0
+    ));
+
+    let mut req_writes = Vec::new();
+    let mut ack_reads = Vec::new();
+    for i in 0..workers {
+        let (req_read, req_write) = pipe().expect("balancebench: request pipe");
+        let (ack_read, ack_write) = pipe().expect("balancebench: ack pipe");
+        req_writes.push(req_write);
+        ack_reads.push(ack_read);
+        thread::spawn(move || sleep_worker(req_read, ack_write, WAKE_BURSTS, i + 2));
+    }
+
+    let mut walls: Vec<Duration> = Vec::new();
+    for _ in 0..WAKE_BURSTS {
+        thread::sleep(WAKE_SETTLE);
+
+        let burst = Instant::now();
+        for &req_write in &req_writes {
+            let n = write(req_write, &[1u8]);
+            assert!(n == 1, "balancebench sleep: request write returned {n}");
+        }
+        let mut slowest_worker = 0u32;
+        for (worker, &ack_read) in ack_reads.iter().enumerate() {
+            slowest_worker = slowest_worker.max(await_ack(ack_read, worker));
+        }
+        // Every worker waited the same fixed sleep, and it is not placement.
+        let wall = burst.elapsed().saturating_sub(SLEEP_DELAY);
+        out.line(&format!(
+            "balancebench sleep   burst {:.2} ms, slowest worker's own loop {:.2} ms",
+            wall.as_secs_f64() * 1000.0,
+            slowest_worker as f64 / 1000.0
+        ));
+        walls.push(wall);
+    }
+    walls.sort_unstable();
+
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let median = walls[walls.len() / 2];
+    out.line(&format!(
+        "balancebench sleep burst fastest {:.2} ms median {:.2} ms slowest {:.2} ms",
+        ms(walls[0]),
+        ms(median),
+        ms(walls[walls.len() - 1])
+    ));
+    out.line(&format!(
+        "balancebench sleep fanout {:.2} (median burst less the sleep, over solo; 1.00 is every \
+         worker at once, {workers}.00 is one at a time)",
         ms(median) / ms(solo)
     ));
     report_sched(out, "after the bursts");

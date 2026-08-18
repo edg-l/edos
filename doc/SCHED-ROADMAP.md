@@ -559,6 +559,16 @@ Everything that spreads that burst is work-stealing, which makes the mode a
 direct measure of how fast an idle CPU learns there is something to steal.
 `median burst / solo` is its report on the same scale.
 
+`balancebench sleep` prices the third case, and it is the one neither of the
+others can reach: a **sleeper** is placed by nobody at all. A spawn asks
+`pick_sched_for`, a park is placed by its waker and so follows the work, but the
+sleepers heap is per CPU and hands the thread straight back to whichever CPU it
+slept on. The mode wakes a burst the way `wake` does and then has each worker
+sleep before it works, so what it asks is whether the concentration one round
+created is still there the next. Its report is `(median burst − sleep) / solo`,
+the same scale again, which is what makes it readable beside `wake fanout`: the
+two agreeing means the sleep path costs what the park path costs.
+
 **A benchmark whose inner call is pure must break loop invariance itself.**
 `work` is a pure function of `(rounds, seed)` and `#[inline(never)]` does not
 stop LLVM hoisting a pure call whose arguments never change clean out of the
@@ -607,10 +617,9 @@ Watched fail first: 32 threads pinned to one CPU and parked there took **0 of
 sched-test case; `doc/WORKING-NOTES.md` has why its first form was flaky green
 and what replaced it.
 
-Still open in the same area, and now separate defects rather than one: parked
-threads never migrate, so a thread wakes back onto the CPU it parked on; and
-`REBALANCE_THRESHOLD = 2` and `REBALANCE_INTERVAL = 10` are picked numbers that
-nothing has measured against the new quantity.
+Still open in the same area: `REBALANCE_THRESHOLD = 2` and
+`REBALANCE_INTERVAL = 10` are picked numbers that nothing has measured against
+the new quantity.
 
 ### Done: the current thread's info is cached per CPU (2026-08-14)
 
@@ -726,6 +735,46 @@ to spend a wakeup there is a real question and this leaves it conservative.
 `tick_finish` re-enqueues a preempted thread without poking either, and
 `spawn_thread` still only IPIs the CPU it chose. Both are the same one-line
 extension; neither is measured.
+
+### Done: a sleeper's expiry wakes a halted CPU too (2026-08-18)
+
+The section above gave `enqueue_ready` a poke, and every enqueue path went
+through it except one. `wake_sleepers` open-coded its own: pop the expired
+entry, mark it `Ready`, push it on this CPU's runqueue, set `has_work`, ask the
+running thread to reschedule. No poke, so a halted CPU learned about the sleeper
+only when its own backoff poll came round, which is the tail this repository
+already measured in *seconds*.
+
+That path is the one where it matters most, because a sleeper is placed by
+nobody. A spawn asks `pick_sched_for` for the least-loaded CPU. A park is
+enqueued by its waker and so follows the work. But the sleepers heap is per CPU
+and `transition_sleep` pushes onto whichever CPU the thread happened to be
+running on, so a thread that sleeps in a loop keeps that CPU for as long as it
+lives, however busy it becomes and however much of the machine is asleep. Work
+stealing cannot rescue it either: stealing only reaches threads that are already
+queued somewhere, and a sleeper is in no runqueue at all. On an idle desktop
+`edos-wm` and `edos-taskbar`, the two busiest things running, both sit
+`Sleeping` on CPU 0 with six CPUs empty.
+
+`wake_sleepers` calls `enqueue_ready` now, which is the whole change: the
+duplicated body goes, and the poke, the trace event and the assertions come with
+it. `WakePriority::Normal` is what the inline version already asked for.
+
+**What it is worth, measured** — `balancebench sleep`, 8-CPU boot, 7 workers,
+median of 10 bursts, three runs a side, quiet host, same userspace binary either
+side:
+
+| | sleep fanout (median burst − sleep, over solo) |
+|---|---|
+| poll only (before) | 5.34, 3.69, 3.56 |
+| poked (after) | 2.00, 1.99, 2.22 |
+
+The spread on the before side is the mechanism showing through: what it costs
+depends on whether the backoff poll happens to come round during the burst, so
+the same kernel scores 3.56 and 5.34 on consecutive runs. After the change it is
+2.0 every time — and 2.0 is exactly where `wake fanout` sits, so the sleep path
+now costs what the park path costs and the residual has the same explanation as
+the paragraph above.
 
 ### Done: the priority buckets are EEVDF now (2026-08-15)
 
