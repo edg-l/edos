@@ -728,13 +728,9 @@ It costs nothing on the switch path. `switchbench`, single-CPU boot, against the
 run-to-run spread, which is what the threshold buys: a busy machine ends the
 whole thing on one relaxed load of a zero mask.
 
-**Still open in the same area.** The residual 2.0 is one CPU running two lumps
-back to back, not seven CPUs each running one: by the last wake of a burst the
-queue has already drained below the threshold and that wake pokes nobody. Whether
-to spend a wakeup there is a real question and this leaves it conservative.
-`tick_finish` re-enqueues a preempted thread without poking either, and
-`spawn_thread` still only IPIs the CPU it chose. Both are the same one-line
-extension; neither is measured.
+**The residual 2.0 it left** is closed two sections below, and the explanation
+first written here — the last wake of a burst finding a drained queue — was
+wrong.
 
 ### Done: a sleeper's expiry wakes a halted CPU too (2026-08-18)
 
@@ -775,6 +771,62 @@ the same kernel scores 3.56 and 5.34 on consecutive runs. After the change it is
 2.0 every time — and 2.0 is exactly where `wake fanout` sits, so the sleep path
 now costs what the park path costs and the residual has the same explanation as
 the paragraph above.
+
+### Done: the poke and the steal count the thread that is running (2026-08-18)
+
+The two sections above each gave an enqueue path a poke, and both left the same
+2.0 behind. The worker-side number in the report is what says where it went:
+with `solo` at 4.4 ms the slowest worker's own loop read 8.3 ms, so that worker
+was not waiting to be placed. It was *running* the whole time, sharing a CPU
+with another worker for the length of the lump, while two CPUs sat halted.
+
+Two rules kept the pair together, and both counted the same wrong thing:
+
+- `poke_idle_cpu` returned early on `queued() < 2`, so a CPU running one thread
+  with a second queued never poked anybody.
+- `try_steal` skipped a victim whose `total_len() < 2`, so that same CPU was
+  refused as a victim. A CPU that *was* poked found nothing eligible and went
+  back to a halt of up to 100 ms — inside which the whole burst finished.
+
+The quantity both wanted is `load`, the queue plus the thread running now, which
+is the unit of work the scheduler already counts in (§ *load is runnable work,
+not membership*). A CPU running one thread with another queued has a thread to
+spare exactly as much as one with two queued does, and it is the commoner shape,
+because the first thing a CPU does with a queue of two is run one of them.
+`try_steal` still refuses to leave a victim with nothing to run — that rule is
+what stops one thread ping-ponging between idle CPUs — but it counts what the
+victim runs.
+
+`tick_finish` pokes after re-enqueuing a preempted thread. A preemption is an
+enqueue like any other, and two threads taking turns on one CPU are two runnable
+threads that nothing else announces.
+
+**What it is worth, measured** — 8-CPU boot, 7 workers, median of 10 bursts,
+three runs a side, quiet host, same userspace binary throughout:
+
+| | wake fanout | sleep fanout |
+|---|---|---|
+| before | 2.26, 1.95, 2.05 | 2.06, 2.13, 2.18 |
+| poke and steal count `load` | 1.43, 1.45, 1.42 | 1.61, 1.60, 1.52 |
+| plus the `tick_finish` poke | 1.19, 1.12, 1.19 | 1.19, 1.21, 1.20 |
+
+`balancebench` imbalance stays at 1.01, so spawn-time placement is unchanged.
+
+**Refuted in the same session: a poke from `spawn_thread`.** It was the third of
+the three sites the paragraph above named, and it is the one that buys nothing.
+`spawn_thread` already IPIs the CPU it chose and `pick_sched_for` chose the
+least-loaded one, so an extra poke can only fire when every CPU has work — and
+then there is no halted CPU to claim. Measured in and out: wake 1.21/1.21/1.22
+with it against 1.19/1.12/1.19 without, sleep 1.20/1.25/1.22 against
+1.19/1.21/1.20. It is not there.
+
+**Cost.** `switchbench`, single-CPU boot, three runs a side against a stock
+build on the same host and the same hour: pipe echo 436 against 434 ns, bad-fd
+read 143 against 143, `getpid` 81 against 84 — all inside the run-to-run spread.
+The switch path never reaches the poke, because a `pipe echo` that does not
+block never enqueues. On an idle 8-CPU desktop over 41 s the switch count is
+unchanged (6696 against 6721) and steals go from 60 to 184, about three more per
+second, which is the change doing its job rather than an overhead.
 
 ### Done: the priority buckets are EEVDF now (2026-08-15)
 

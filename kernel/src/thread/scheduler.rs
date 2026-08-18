@@ -466,6 +466,10 @@ impl Scheduler {
                     );
                     self.with_rq(|rq| rq.enqueue(cur.clone()));
                     self.has_work.store(true, Ordering::Release);
+                    // A preemption is an enqueue like any other: two threads
+                    // taking turns on one CPU are two runnable threads, and
+                    // nothing else tells a halted CPU that the pair exists.
+                    self.poke_idle_cpu();
                 }
                 self.pick_and_run(context);
                 return;
@@ -1093,13 +1097,20 @@ impl Scheduler {
     /// Wake one halted CPU to come and take some of this runqueue.
     ///
     /// The threshold is [`Scheduler::try_steal`]'s own rule read from the other
-    /// side: it refuses to take a CPU's only queued thread, so a queue of one
-    /// has nothing to offer and poking anybody for it only spends a wakeup.
+    /// side: it refuses to leave a CPU with nothing to run, so a CPU carrying
+    /// one runnable thread has nothing to offer and poking anybody for it only
+    /// spends a wakeup.
     ///
-    /// Costs two atomic loads when the machine is busy, since a queue below the
-    /// threshold or a mask of zero ends it before any lookup.
+    /// The quantity is [`Scheduler::load`] rather than the queue alone, because
+    /// a CPU running one thread with a second queued has a thread to spare
+    /// exactly as much as one with two queued does — and it is the commoner
+    /// shape by far, since the first thing a CPU does with a queue of two is
+    /// run one of them.
+    ///
+    /// Costs three atomic loads when the machine is busy, since a load below
+    /// the threshold or a mask of zero ends it before any lookup.
     fn poke_idle_cpu(&self) {
-        if self.queued() < 2 {
+        if self.load() < 2 {
             return;
         }
         let Some(idx) = claim_idle_cpu() else {
@@ -1191,11 +1202,22 @@ impl Scheduler {
                 continue;
             }
 
+            // A thread running on the victim counts against the rule below,
+            // and is read before the queue so a CPU that goes idle in between
+            // costs a refused steal rather than a stranded thread.
+            let victim_running = victim.current.load(Ordering::Acquire) != 0;
+
             // Give up on a victim whose runqueue is busy rather than waiting
             // for it; there are other CPUs to try.
             let stolen = victim.with_try_rq(|rq| {
-                // Don't steal the victim's only thread.
-                if rq.total_len() < 2 {
+                // Don't leave the victim with nothing to run: taking a CPU's
+                // only runnable thread just moves it, and two idle CPUs would
+                // pass it back and forth. What it *runs* counts, so a CPU
+                // running one thread with another queued gives the queued one
+                // up — otherwise a pair that lands together shares one CPU for
+                // as long as it lives while the rest of the machine halts.
+                let queued = rq.total_len();
+                if queued == 0 || (queued == 1 && !victim_running) {
                     return None;
                 }
 

@@ -404,6 +404,14 @@ Beyond affinity (1.2), things that look like the next real improvements:
   CPUs empty. It goes through `enqueue_ready` now; `balancebench sleep` is the
   instrument, 5.34/3.69/3.56 → 2.00/1.99/2.22.
 
+  The 2.0 both of those left behind closed on 2026-08-18, and it was not the
+  poke's reach: it was the quantity. `poke_idle_cpu` and `try_steal` both
+  thresholded on the runqueue's length, so a CPU running one thread with a
+  second queued neither asked for help nor was eligible to give any, and the
+  pair shared that CPU for as long as it lived. Both count `load` now, and
+  `tick_finish` pokes after re-enqueuing a preempted thread. Wake fanout
+  2.26/1.95/2.05 → 1.19/1.12/1.19, sleep 2.06/2.13/2.18 → 1.19/1.21/1.20.
+
 ---
 
 ## 5. Smells

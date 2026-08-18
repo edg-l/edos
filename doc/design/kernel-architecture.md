@@ -267,14 +267,14 @@ Three things make it concrete rather than aspirational:
   CPU-bound one; the timeslice was a flat 5 ms regardless of priority, on top of
   priority buckets that could starve their bottom level outright; and the idle
   loop polled for steals on a backoff instead of being told by an IPI. What is
-  left is priority inheritance, so a high-priority waiter still queues behind a
-  low-priority lock holder. Parked threads never migrate, either.
+  left is priority inheritance, and only partly: `BlockingMutex` lends now, so a
+  high-priority waiter still queues behind a low-priority holder of a
+  `BlockingRwLock` or a futex.
 - **The instruments exist.** `programs/switchbench` and `/proc/sched_prof`,
   with the single-CPU-boot discipline the roadmap already documents.
 - **EDOS is less constrained than Linux is.** sched_ext has to coexist with
-  EEVDF and live inside the BPF verifier. EDOS has neither obligation and could
-  make the scheduler a replaceable component *by construction* rather than as a
-  bolted-on second class.
+  EEVDF and live inside the BPF verifier. EDOS has neither obligation, and can
+  change the policy itself rather than build a seam to hang another one off.
 
 This is also the natural extension of the principle EDOS already follows in the
 window system and has never written down: the kernel holds mechanism, userspace
@@ -290,13 +290,13 @@ user can feel and a reader can point at.
 
 In order:
 
-1. **Make the scheduler a replaceable component, and then do something with
-   it.** The only subsystem where being different costs no compatibility, with
-   four measured defects already written down and the instruments to judge a fix
-   by. Start by fixing what the roadmap names — load as a real quantity rather
-   than `thread_count` is the one that changes behaviour most — and take the
-   structural step at the same time: a scheduler behind an interface, chosen at
-   boot or at runtime, so a policy is a thing you write rather than a patch.
+1. **Make the scheduler itself better, and keep judging it by measurement.**
+   The only subsystem where being different costs no compatibility, with four
+   measured defects already written down and the instruments to judge a fix by.
+   A pluggable policy interface is *not* the work: an interface designed around
+   one policy bakes that policy's defects into a shape everything after it has
+   to fit. The sections above stay as the record of why this subsystem is the
+   right place to be different, not as a design for a seam.
 2. **Draw a framekernel line.** Not a rewrite: an audit of the 824 `unsafe`
    sites into privileged and incidental, and a rule that new code outside the
    privileged set is safe Rust. Measure the ratio and publish it; Asterinas's

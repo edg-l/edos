@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-15
+# Working notes, sessions of 2026-08-08 to 2026-08-18
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -8560,3 +8560,61 @@ future property whose percentage basis this layout does not have wants it too.
 The clamp order is the other half: css-sizing-3 §5.4 applies `max-height`
 first and `min-height` over it, so a box given both keeps the floor. Writing
 them the other way round reads identically until a page sets both.
+
+## A chained `.lock()` acquires the second lock inside the first (2026-08-18)
+
+`current_thread_info()` returns an `Arc<IrqSpinlock<UserThreadInfo>>`, and the
+fd table inside it is an `Arc<BlockingMutex<FileDescriptorTable>>`. Four call
+sites reached the second through the first in one expression:
+
+```rust
+let read_fd = info.lock().fd_table.lock().allocate_fd(...);
+```
+
+The `IrqSpinlock` guard is a temporary, so it lives to the end of the statement,
+and `BlockingMutex::lock` runs inside it with interrupts disabled. Uncontended
+that is invisible — `try_acquire` succeeds and nothing parks. Contended, the
+thread parks with interrupts off, which is what the interrupt/park discipline
+forbids and what `mutex.rs`'s debug assertion catches:
+`BlockingMutex::lock contended with interrupts disabled`, from `sys_pipe`, on
+the second `balancebench wake` of a boot.
+
+The fix is one `let`, which is where the guard's life ends:
+
+```rust
+let fd_table = info.lock().fd_table.clone();
+let read_fd = fd_table.lock().allocate_fd(...);
+```
+
+`sys_dup` was already written this way and was the model. `sys_pipe`,
+`sys_openpty`, `sys_fstat` and the last-thread fd drain in `Thread::exit` were
+not. Post-mortem in `doc/bugs/2026-08-18-fd-table-locked-with-interrupts-off.md`.
+
+**The general shape:** method chaining hides lock nesting completely, and the
+nesting it hides is invisible to the lock-order tracker as well, because an
+`IrqSpinlock` carries no rank. Take the inner `Arc` out of the guard before
+locking it.
+
+## Placement: the poke and the steal were counting the queue, not the work (2026-08-18)
+
+Both halves of work-stealing thresholded on the runqueue's length and ignored
+the thread running on the CPU. `poke_idle_cpu` returned early on `queued() < 2`
+and `try_steal` skipped a victim with `total_len() < 2`, so a CPU running one
+thread with a second queued neither asked for help nor could be helped: a CPU
+that *was* poked found it ineligible and went back to a halt of up to 100 ms,
+which outlasts the burst being measured.
+
+The tell was in `balancebench`'s own report and had been there all along. With
+`solo` at 4.4 ms the slowest worker's own loop read 8.3 ms — the worker was not
+waiting to be placed, it was running at half speed for the whole lump because it
+shared a CPU while two others sat halted. A placement-latency problem would show
+the opposite: a long wall over a solo-length loop.
+
+Both rules count `load` now (queue plus the thread running), which is the unit
+commit 3128ad1 made the scheduler's own. `tick_finish` also pokes after
+re-enqueuing a preempted thread, since a preemption is an enqueue like any
+other. Wake fanout 2.05 → 1.19 and sleep fanout 2.13 → 1.20 on an 8-CPU quiet
+host, with the switch path and the idle switch count unchanged. A third
+candidate, a poke from `spawn_thread`, was measured in and out and buys nothing:
+it can only fire when every CPU has work, and then there is no halted CPU to
+claim. Full tables in `doc/SCHED-ROADMAP.md`.
