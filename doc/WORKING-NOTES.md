@@ -8928,3 +8928,37 @@ rather than on reaching a desktop.
 `edos-install` needs none of this. It writes its own GPT with a random root GUID
 and its own ESP carrying a `limine.conf` that names it, so the install case
 boots with `--no-cdrom --no-sata` and the disk supplies its own cmdline.
+
+## A three-argument wrapper for a five-argument syscall returns EFAULT (2026-08-19)
+
+`edos-install --yes /dev/nvme0n1` failed with
+
+    /dev/nvme0n1 did not answer BLOCK_IOCTL_DEVICE_ID (-14)
+
+on an otherwise healthy boot where `ls /dev/nvme0n1` worked and the devfs node
+was registered. -14 is `EFAULT`: a failing syscall returns a bare `-1` and the
+dispatcher in `kernel/src/syscalls/mod.rs` rewrites it to the negated errno on
+the way out, so a userspace `-14` names the errno, not the return.
+
+`SYS_IOCTL` takes five arguments -- `fd, request, arg, arg_len, flags` -- but
+`edos_lib::io::ioctl` invoked it through `syscall3`. `r10` and `r8` then carry
+whatever the caller left in them. When those happen to hold a non-zero length
+and a set `IOCTL_FLAG_READ`/`IOCTL_FLAG_WRITE` bit, `sys_ioctl` takes its
+copy-in path, finds `arg == 0` for a request that never wanted a buffer, and
+rejects it with `EFAULT`. It is register-dependent, so the same call site
+succeeds or fails according to what ran before it: `BLOCK_IOCTL_DEVICE_ID` was
+the first caller unlucky enough to be measured.
+
+The fix is `syscall5(SYS_IOCTL, fd, request, arg, 0, 0)`. **A wrapper must pass
+every argument its syscall reads, including the zeros.** The kernel cannot tell
+a garbage `flags` from a deliberate one, so the shorter `syscallN` is not a
+harmless abbreviation for any call that reads more registers than it fills.
+
+## The nvme-check root assertion matched the partition scan, not the mount
+
+`case_coexistence` asserted `"on device 3000" not in log` to prove the SATA
+disk still won root selection. Every boot with an NVMe disk attached logs
+`GPT found on device 3000` from the partition scan, whether or not that disk
+became root, so the assertion reported the case backwards -- failing on a boot
+that was correct. `scripts/nvme-check` reads the id off the `Root partition:`
+line now, through one `root_device()` helper all three root assertions share.

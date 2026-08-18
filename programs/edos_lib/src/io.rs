@@ -529,8 +529,15 @@ pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> isize {
 
 /// Perform an ioctl on a file descriptor.
 /// Returns the ioctl result, or a negative error code.
+/// `ioctl(2)` with no buffer: `arg` is the value itself, not a pointer.
+///
+/// The syscall takes five arguments, so all five are passed. A `syscall3` here
+/// leaves the kernel reading `r10` and `r8` -- its `arg_len` and `flags` --
+/// from whatever the caller happened to leave in them, and a stray
+/// `IOCTL_FLAG_READ` bit with a non-zero length sends a request that carries no
+/// buffer down the copy-in path, which rejects the null `arg` with `EFAULT`.
 pub fn ioctl(fd: u64, request: u64, arg: u64) -> i64 {
-    unsafe { sys::syscall3(sys::SYS_IOCTL, fd, request, arg) as i64 }
+    unsafe { sys::syscall5(sys::SYS_IOCTL, fd, request, arg, 0, 0) as i64 }
 }
 
 pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;

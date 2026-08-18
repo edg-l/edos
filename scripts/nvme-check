@@ -92,6 +92,18 @@ def run_cmd(command, budget, name):
     return None
 
 
+def root_device(log):
+    """The block device id the kernel actually mounted as root, or None.
+
+    Matched against the `Root partition:` line and nothing else. A bare search
+    for "on device 3000" also hits `GPT found on device 3000`, which every boot
+    with an NVMe disk attached prints whether or not that disk became root, so
+    the loose form reports the coexistence case backwards.
+    """
+    found = re.search(r"Root partition: .* on device (\d+)", log)
+    return int(found.group(1)) if found else None
+
+
 def report(label, ok, detail=""):
     print(f"    {label:<34} {'ok' if ok else 'FAILED'}{(' -- ' + detail) if detail and not ok else ''}")
     return ok
@@ -106,8 +118,8 @@ def case_nvme_root():
 
     log = serial_tail(mark)
     ok = report(f"root on device {NVME_DEVICE_ID}",
-                f"on device {NVME_DEVICE_ID}" in log and "Root filesystem mounted" in log,
-                "root selection did not land on the NVMe namespace")
+                root_device(log) == NVME_DEVICE_ID and "Root filesystem mounted" in log,
+                f"root selection landed on device {root_device(log)}")
     ok &= report("/dev/nvme0n1 registered", "/dev/nvme0n1" in log, "no devfs node")
 
     for label, command, budget in (
@@ -138,8 +150,8 @@ def case_coexistence():
 
     log = serial_tail(mark)
     ok = report("SATA still wins root selection",
-                f"on device {NVME_DEVICE_ID}" not in log and "Root filesystem mounted" in log,
-                "the NVMe disk took the root the cmdline named for SATA")
+                root_device(log) == 0 and "Root filesystem mounted" in log,
+                f"root selection landed on device {root_device(log)}")
     ok &= report("nvme0n1 probed alongside AHCI", "/dev/nvme0n1" in log, "no devfs node")
     code = run_cmd("ls /dev/nvme0n1 && ls /dev/sda", 60, "nodes")
     ok &= report("both device nodes exist", code == 0,
@@ -194,9 +206,10 @@ def case_install():
     if mark is None:
         stop()
         return report("boot from the installed disk", False, "the desktop never came up")
+    installed = root_device(serial_tail(mark))
     ok &= report(f"installed root on device {NVME_DEVICE_ID}",
-                 f"on device {NVME_DEVICE_ID}" in serial_tail(mark),
-                 "the installed disk did not become root")
+                 installed == NVME_DEVICE_ID,
+                 f"the installed disk did not become root (device {installed})")
     stop()
     return ok
 
