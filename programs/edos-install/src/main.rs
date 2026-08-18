@@ -9,6 +9,7 @@ mod copy;
 mod fat32;
 mod gpt;
 mod guid;
+mod klog;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -227,6 +228,7 @@ fn main() {
     let started = std::time::Instant::now();
     let mut phase = started;
     let lap = |label: &str, phase: &mut std::time::Instant| {
+        klog::trace(&format!("{label} in {:.1}s", phase.elapsed().as_secs_f32()));
         println!("  {label} in {:.1}s", phase.elapsed().as_secs_f32());
         *phase = std::time::Instant::now();
     };

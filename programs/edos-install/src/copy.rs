@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Copy one file's contents.
 pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
+    crate::klog::trace(&format!("copy {}", from.display()));
     let data = fs::read(from).map_err(|e| at(from, "read", e))?;
     fs::write(to, data).map_err(|e| at(to, "write", e))
 }
@@ -42,6 +43,7 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<usize> {
         return Ok(1);
     }
 
+    crate::klog::trace(&format!("mkdir {}", to.display()));
     if let Err(e) = fs::create_dir(to) {
         if e.kind() != io::ErrorKind::AlreadyExists {
             return Err(at(to, "mkdir", e));

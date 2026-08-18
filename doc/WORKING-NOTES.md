@@ -8994,3 +8994,53 @@ Two rules fall out of this:
 The general form: when a fix demonstrably lands in the source and the symptom
 does not move, disassemble or `strace` the artifact the guest actually ran
 before re-diagnosing the source.
+
+## `edos-install` parks after the copy, and every block queue is empty
+
+`nvme-check`'s install case still fails, one layer past the EFAULT above. The
+guest is not wedged and the driver is not stalled: with the installer sitting
+at `Copying the system...` for four minutes, a second terminal opened from the
+launcher runs `cp /bin/edos-wm /mnt/target/probe` to the same NVMe-backed EFS
+and exits 0.
+
+What the live guest says, all of it read through `cat <file> > /dev/klog` from
+that second terminal while the install is hung:
+
+- `/proc/processes`: `/bin/edos-install` is **Parked**, and `/proc/32/status`
+  reports `Sleep Deadline: 0` with `CPU Time: 333.979 ms` unchanged across
+  three minutes of sampling. It is parked indefinitely, not spinning and not
+  sleeping on a timer.
+- `/proc/nvme_stats`: `inflight=0 command_errors=0 watchdog_firings=0`,
+  1433 commands submitted, 86 split requests. `/proc/ahci_stats`:
+  `ncq_inflight=0 firings=0 stranded=0`. `/proc/inflight_stats`: `current=0`.
+  **No block I/O is outstanding anywhere in the system**, so this is not a lost
+  completion in either driver.
+- `/proc/block_cache`: `dirty_pages: 1`, and memory is not tight
+  (`FramesFree: 428089`).
+- The copy looks finished: `/mnt/target` and `/` agree on every top-level
+  entry, on `bin` (129 each), `share` (5), `share/fonts` (4), `boot`, `etc`,
+  `home`, `root` and `var`. `  {copied} files`, the line `copy_root` returns
+  into, never printed.
+
+So the installer is parked with no I/O to wait for, at or very near the end of
+the copy. Ruled out by the evidence above: an NVMe lost wakeup, an NVMe command
+id leak (a leak would park a *submitter* in `alloc_cid_blocking`, but then
+`inflight` could not be 0 while 64 cids were reserved), AHCI, memory pressure,
+and a wedged target filesystem.
+
+What is not ruled out, and what to check next: the last `fs::write` of the copy,
+`fs::read_dir`'s iterator unwinding out of the recursion, and the `println!`
+that follows it -- stdout is a PTY, and a full PTY buffer parks its writer.
+
+The gate cannot answer this by itself because everything `edos-install` prints
+goes to the GUI terminal, which the serial log never sees. It traces to
+`/dev/klog` now (`programs/edos-install/src/klog.rs`): one line per phase, and
+one line per file and directory *before* it is written. The next run names the
+path it stopped on in `run_log.txt` instead of leaving a blinking cursor under
+`Copying the system...`.
+
+Method note for a hung guest generally: the taskbar launcher opens a second
+terminal, and `cat /proc/... > /dev/klog` from it puts kernel state in the
+serial log where the host can grep it. That works on any hang that has not
+taken the compositor with it, and it is far quicker than a rebuild with print
+statements.
