@@ -63,6 +63,12 @@ USB_INPUT := -device qemu-xhci -device usb-kbd -device usb-mouse
 DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display sdl
 DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display gtk,zoom-to-fit=off
 
+# What a run with nobody watching asks for. `blob=on` wants /dev/udmabuf and
+# `-display sdl` wants a session; neither exists on a machine with no desktop,
+# and QEMU refuses to start rather than doing without them. The guest sees the
+# same virtio-gpu either way, since blob is a host-side zero copy.
+DISPLAY_HEADLESS := -vga none -device virtio-vga,xres=1920,yres=1080 -display none
+
 # Host audio backend for the emulated HDA device. `pipewire` needs a session
 # bus, which a bare SSH login does not have; `AUDIODEV=none` runs the same
 # device against a null backend.
@@ -248,13 +254,13 @@ sched_test_status = ; rc=$$?; \
 test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	rm -f run_log.txt
-	$(call run_qemu_uefi,iso,4,-accel kvm -display none) $(sched_test_status)
+	$(call run_qemu_uefi,iso,4,-accel kvm,$(DISPLAY_HEADLESS)) $(sched_test_status)
 
 .PHONY: test-single
 test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	rm -f run_log.txt
-	$(call run_qemu_uefi,iso,1,-display none) $(sched_test_status)
+	$(call run_qemu_uefi,iso,1,,$(DISPLAY_HEADLESS)) $(sched_test_status)
 
 # The same suite as `test`, against a null audio backend. `test` binds the
 # host's PipeWire session, which a bare SSH login does not have, so this is the
