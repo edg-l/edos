@@ -9028,16 +9028,35 @@ id leak (a leak would park a *submitter* in `alloc_cid_blocking`, but then
 `inflight` could not be 0 while 64 cids were reserved), AHCI, memory pressure,
 and a wedged target filesystem.
 
-What is not ruled out, and what to check next: the last `fs::write` of the copy,
-`fs::read_dir`'s iterator unwinding out of the recursion, and the `println!`
-that follows it -- stdout is a PTY, and a full PTY buffer parks its writer.
+The gate could not answer this by itself, because everything `edos-install`
+prints goes to the GUI terminal and the serial log never sees a word of it. It
+traces to `/dev/klog` now (`programs/edos-install/src/klog.rs`): one line per
+phase, and one line per file and directory *before* it is written. One rerun
+named the culprit on the first try:
 
-The gate cannot answer this by itself because everything `edos-install` prints
-goes to the GUI terminal, which the serial log never sees. It traces to
-`/dev/klog` now (`programs/edos-install/src/klog.rs`): one line per phase, and
-one line per file and directory *before* it is written. The next run names the
-path it stopped on in `run_log.txt` instead of leaving a blinking cursor under
-`Copying the system...`.
+    copy /var/run/svc.status
+    copy /var/run/svc.ctl        <- and nothing after it, ever
+
+`/var/run/svc.ctl` is the **named pipe** `svc` uses to reach `edos-init`
+(`doc/services.md`). `copy_tree` asked only whether the entry was a directory
+and treated everything else as a file, so the copy called `fs::read` on a FIFO
+with no writer, which parks by definition. It is not an NVMe bug, it is not a
+new bug, and it would hang an install onto a SATA disk exactly the same way --
+it has simply never been reached before, because nothing ran `edos-install`
+end to end after named pipes landed and `edos-init` started publishing that
+FIFO.
+
+`copy_tree` copies a regular file, recurses into a directory, and skips
+anything else with a traced line. A FIFO, a socket and a device node are all
+live state of the running system rather than content; the skip list that keeps
+`/dev` and `/proc` out of the copy was already making the same judgement one
+directory at a time.
+
+The general lesson is about the diagnosis, not the fix: five `/proc` files read
+from a second terminal narrowed a system-wide hang to "not block I/O, not
+memory, not the target filesystem" but could not name the file, and one line of
+tracing to a log the host can read did it in a single boot. When a hang is
+inside a loop over data, log the datum before touching it.
 
 Method note for a hung guest generally: the taskbar launcher opens a second
 terminal, and `cat /proc/... > /dev/klog` from it puts kernel state in the

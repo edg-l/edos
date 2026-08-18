@@ -39,6 +39,15 @@ pub fn copy_root(src: &str, dst: &str, skip_top_level: &[&str]) -> io::Result<us
 fn copy_tree(from: &Path, to: &Path) -> io::Result<usize> {
     let meta = fs::metadata(from).map_err(|e| at(from, "stat", e))?;
     if !meta.is_dir() {
+        // Only a regular file has contents to copy. A FIFO, a socket or a
+        // device node is live state belonging to the running system, and
+        // reading one is not merely pointless: opening `/var/run/svc.ctl`,
+        // the services control pipe, parks until a writer appears, which on
+        // the target filesystem is never.
+        if !meta.is_file() {
+            crate::klog::trace(&format!("skip {} (not a regular file)", from.display()));
+            return Ok(0);
+        }
         copy_file(from, to)?;
         return Ok(1);
     }
