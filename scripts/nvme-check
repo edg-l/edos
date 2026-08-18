@@ -118,7 +118,7 @@ def case_nvme_root():
 
     # `irqs` and `dispatcher_passes` are the two counters that prove the
     # completion path ran rather than the driver polling its way through.
-    code = run_cmd("grep -q 'command_errors: 0' /proc/nvme_stats", 60, "stats")
+    code = run_cmd("grep command_errors=0 /proc/nvme_stats", 60, "stats")
     ok &= report("/proc/nvme_stats: no command errors", code == 0,
                  "timed out" if code is None else f"exit {code}")
     stop()
