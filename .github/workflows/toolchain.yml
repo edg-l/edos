@@ -123,10 +123,17 @@ jobs:
           incremental = false
           TOML
 
+      # `--ci=false` against bootstrap's own autodetection, which keys on
+      # GITHUB_ACTIONS and then assumes rust-lang's CI: a depth-2 clone whose
+      # HEAD is a merge commit, so `HEAD^1` is an upstream bors commit and can
+      # name a prebuilt LLVM. On a fork's linear branch `HEAD^1` is the previous
+      # fork commit, and ci-artifacts.rust-lang.org answers 404 for it. Told it
+      # is not CI, bootstrap searches the history for the last upstream commit
+      # that touched the LLVM paths, which is what a developer build does.
       - name: Build and install
         if: steps.existing.outputs.have == 'no'
         working-directory: ${{ runner.temp }}/rust
-        run: ./x install
+        run: ./x install --ci=false
 
       - name: Pack the install prefix
         if: steps.existing.outputs.have == 'no'

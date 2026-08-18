@@ -49,6 +49,15 @@ built once and installed everywhere else:
   edos`. A revision with no asset is an error naming the workflow to run, not a
   two-hour build.
 
+`./x install` runs with `--ci=false`. Bootstrap autodetects CI from
+`GITHUB_ACTIONS` and then assumes it is rust-lang's own CI, where the checkout
+is two commits deep and HEAD is a merge commit, so `HEAD^1` names an upstream
+bors commit that has a prebuilt LLVM. A fork's branch is linear, so `HEAD^1` is
+merely the previous fork commit and `ci-artifacts.rust-lang.org` answers 404.
+Told it is not CI, bootstrap searches back for the last upstream commit that
+touched `src/llvm-project`, `src/bootstrap/download-ci-llvm-stamp` or
+`src/version`, which is the commit that actually has an LLVM to download.
+
 So moving the fork forward is two steps, in this order:
 
 1. Push the fork, then edit `EDOS_RUST_REV` in `toolchain/edos.pin` and push
