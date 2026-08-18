@@ -8640,6 +8640,18 @@ reads a QEMU command line out of `ps`.
 `running()` now falls back to scanning `/proc/*/cmdline` for a
 `qemu-system-x86_64` carrying this RUNDIR's `-pidfile` path, which no other
 process on the machine passes, so an orphan is found and `stop` can kill it.
+**What actually failed `fs-regression --fat32`, twice, was neither of those.**
+`Qmp.__init__` did `json.loads(self.io.readline())`, and a QEMU that is on its
+way out can accept the connect and then send nothing. `readline()` returns
+`""`, `json.loads` raises `JSONDecodeError` — which is *not* an `OSError`, so
+it walked straight through `cmd_stop`'s `except OSError` and out of the
+process, failing the harness with a traceback that named JSON rather than the
+dead guest. `os.kill(pid, 15)` on a pid that exited in the same window is the
+second half of the same shape: `ProcessLookupError`, uncaught. `Qmp` now
+raises `ConnectionResetError` on EOF so every caller's existing "the guest is
+gone" handler sees it, and the `SIGTERM` tolerates an already-dead pid. The
+fat32 phase passes.
+
 **A `SIGKILL` escalation in `cmd_stop` was tried and taken back out.** Every
 harness calls `vm("stop")` under `check=True`, so turning "the guest is taking
 longer than five seconds to die" into a raised `SystemExit` failed

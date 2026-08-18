@@ -73,8 +73,23 @@ class Qmp:
         self.sock.settimeout(10)
         self.sock.connect(path)
         self.io = self.sock.makefile("rw")
-        json.loads(self.io.readline())
+        self._reply()
         self.cmd("qmp_capabilities")
+
+    def _reply(self):
+        """One QMP reply, or an `OSError` if QEMU closed the socket.
+
+        A guest that exits on its own -- a panic under `-no-reboot`, or a
+        `quit` racing this connection -- can accept the connect and then send
+        nothing. `json.loads("")` raises `JSONDecodeError`, which is not an
+        `OSError`, so it escapes every caller's "the guest is gone" handler
+        and takes the whole harness down with a traceback that names JSON
+        rather than the dead guest.
+        """
+        line = self.io.readline()
+        if not line:
+            raise ConnectionResetError("qmp: qemu closed the connection")
+        return json.loads(line)
 
     def cmd(self, name, **args):
         req = {"execute": name}
@@ -83,7 +98,7 @@ class Qmp:
         self.io.write(json.dumps(req) + "\n")
         self.io.flush()
         while True:
-            reply = json.loads(self.io.readline())
+            reply = self._reply()
             if "event" in reply:
                 continue
             if "error" in reply:
@@ -382,7 +397,12 @@ def cmd_stop(args):
     try:
         Qmp().cmd("quit")
     except OSError:
-        os.kill(pid, 15)
+        try:
+            os.kill(pid, 15)
+        except ProcessLookupError:
+            # It exited between running() and here, which is the ordinary
+            # outcome when the guest was already on its way out.
+            pass
     for _ in range(50):
         if not running():
             break
