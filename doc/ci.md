@@ -8,6 +8,17 @@ Workflows live in `.github/workflows/`. Everything runs on GitHub-hosted
 | `ci.yml` | push to `trunk`, pull request | six jobs, below |
 | `toolchain.yml` | `toolchain/edos.pin` changes, or by hand | builds the Rust fork and publishes it |
 | `iso.yml` | by hand | a bootable ISO as a workflow artifact |
+| `dependabot.yml` | dependabot opens a pull request | enables auto-merge on an action bump |
+
+`guest suites` also measures the built image with `scripts/image-sizes` and, on
+a pull request from this repository, compares it against the sizes the last
+successful trunk run recorded and rewrites one comment with the deltas. A diff
+says nothing about what a change costs the live root, which is resident in RAM
+for the whole boot. A fork's pull request gets a read-only token, so the
+comment step is skipped there rather than failing.
+
+Auto-merge needs **Allow auto-merge** enabled in the repository settings;
+without it `gh pr merge --auto` fails and the bump waits for a human.
 
 Releases are not cut by CI. `scripts/release` does that from a local tree; see
 `HOW-TO-RELEASE.md`.

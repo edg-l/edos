@@ -1,0 +1,33 @@
+name: Dependabot
+
+# Action bumps are the only thing dependabot opens here, and a green CI is the
+# whole review. Merging them by hand is the sort of chore that gets skipped
+# until the pins are a year old.
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      # `pull_request_target`, not `pull_request`: a dependabot pull request
+      # gets a read-only token on the latter and cannot enable anything. This
+      # workflow runs from trunk and never checks out the branch, so the
+      # writable token never has the proposed change in front of it.
+      - name: Read what is being bumped
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Merge once the checks pass
+        if: steps.meta.outputs.package-ecosystem == 'github_actions'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR"

@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -177,6 +180,12 @@ jobs:
     name: guest suites
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    # `actions: read` to fetch trunk's recorded sizes, `pull-requests: write`
+    # to leave the one comment that compares against them.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/edos-toolchain
@@ -216,6 +225,23 @@ jobs:
           make ovmf/ovmf-code-x86_64.fd ovmf/ovmf-vars-x86_64.fd
           make all
           make sata-disk.img
+
+      - name: Measure the boot image
+        run: scripts/image-sizes | tee sizes.txt
+
+      - name: Record the sizes for the next comparison
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-sizes
+          path: sizes.txt
+
+      # Skipped for a pull request from a fork, where the token cannot write.
+      - name: Report the size deltas
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/pr-size-comment "${{ github.event.pull_request.number }}" sizes.txt
 
       - name: Run the guest suites
         run: make guest-check

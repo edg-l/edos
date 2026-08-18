@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# What the boot image weighs, as `name<TAB>bytes`.
+#
+# These are the numbers a diff cannot show. The live root is resident in RAM
+# for the whole boot and the ISO is what people write to a stick, so a change
+# that adds a megabyte to either is worth seeing next to the patch that did it.
+#
+# Run after `make all`, which is what produces every file measured here.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+emit() { printf '%s\t%s\n' "$1" "$2"; }
+
+emit "kernel .text" "$(size --format=sysv kernel/kernel | awk '$1==".text" {print $2}')"
+emit "kernel (unstripped)" "$(stat -c %s kernel/kernel)"
+emit "kernel (stripped)" "$(stat -c %s filesystem/boot/kernel)"
+emit "live-root.img" "$(stat -c %s live-root.img)"
+emit "edos-x86_64.iso" "$(stat -c %s edos-x86_64.iso)"
+emit "filesystem/bin" "$(find filesystem/bin -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
+emit "programs" "$(find filesystem/bin -type f | wc -l)"
