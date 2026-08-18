@@ -140,7 +140,7 @@ drives the guest changes.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--pointer tablet\|mouse` |
+| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--no-sata`, `--pointer tablet\|mouse` |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
@@ -160,6 +160,23 @@ drivers and registers it as `/dev/sdc`, behind `/dev/sda` (the SATA root) and
 `/dev/sdb` (the boot ISO). It takes an optional image path and
 defaults to `usb-test.img`, which `make usb-test.img` creates; this is the
 headless equivalent of `make run-storage`, which needs a display.
+
+`--extra-disk` attaches a second SATA drive on its own bus (`ide.3`), which the
+guest does not boot from, so a test can format, mount and cut power on it
+without touching the root. It defaults to `journal-test.img`.
+
+`--nvme-disk` attaches an NVMe controller with one namespace, which the guest
+reaches through its own NVMe driver and registers as block device 3000,
+`/dev/nvme0n1`. It defaults to `nvme-disk.img`, which `make nvme-disk.img`
+creates.
+
+`--no-sata` omits the SATA root disk entirely. It exists for `--nvme-disk`:
+`sata-disk.img` and `nvme-disk.img` are built from the same `filesystem/` tree
+by the same `efs-mkfs`, so both are bootable EDOS roots, and with both attached
+which one becomes root is decided by the `root=UUID=` on the kernel cmdline
+rather than by the disk under test. Dropping the SATA disk leaves exactly one
+candidate. The same hazard is why `journal-test.img` is built with its own
+partition GUID, as the comment on that target in `GNUmakefile` records.
 
 The machine matches `make run`'s devices, including Intel HDA with
 `-audiodev none`: the guest driver runs its DMA engine and interrupts with no

@@ -55,7 +55,6 @@ pub struct NvmeNamespace {
     lba_count: u64,
     /// The id this namespace registers under in `block_io`
     /// (`3000 + controller_index * 64 + (nsid - 1)`).
-    #[expect(dead_code, reason = "read once namespaces register with block_io")]
     device_id: u64,
 }
 
@@ -67,6 +66,11 @@ impl NvmeNamespace {
             lba_count,
             device_id,
         }
+    }
+
+    /// The `block_io` id this namespace is registered under.
+    pub fn device_id(&self) -> u64 {
+        self.device_id
     }
 }
 

@@ -127,6 +127,14 @@ impl IdentifyNamespace {
     pub fn lba_size(&self) -> u32 {
         1u32 << self.lbaf[(self.flbas & 0x0F) as usize].lbads
     }
+
+    /// Bytes of metadata per logical block, from the active LBA format's
+    /// `MS` (NVM Command Set 4.1.5.1). Non-zero means every block carries
+    /// metadata that either extends the block or travels in a separate
+    /// buffer, and this driver builds neither.
+    pub fn metadata_size(&self) -> u16 {
+        self.lbaf[(self.flbas & 0x0F) as usize].ms
+    }
 }
 
 fn trim_ascii(bytes: &[u8]) -> String {

@@ -12,11 +12,12 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use spin::Once;
 use thiserror::Error;
 
 use crate::{
     drivers::{
-        block_io::{AsyncBlockDevice, BlockBuffer, BlockError},
+        block_io::{self, AsyncBlockDevice, BlockBuffer, BlockError},
         nvme::{
             admin::{IO_QID, NvmeController},
             identify::max_transfer_bytes,
@@ -33,6 +34,7 @@ use crate::{
 };
 
 pub mod admin;
+pub mod api;
 pub mod cancel_op;
 pub mod identify;
 pub mod namespace;
@@ -65,6 +67,27 @@ static NVME_PROBE_READ: AtomicBool = AtomicBool::new(false);
 pub fn set_probe_read(enabled: bool) {
     NVME_PROBE_READ.store(enabled, Ordering::Relaxed);
 }
+
+/// Every namespace the probe accepted and registered, in registration order.
+pub static NVME_NAMESPACES: Once<Vec<Arc<NvmeNamespace>>> = Once::new();
+
+/// Signalled once the probe has finished, after `NVME_NAMESPACES` is
+/// published so a waiter that sees this cell also sees the list. Both are
+/// filled even when the machine has no NVMe controller at all, because
+/// `fs_main_thread` waits on this before it scans for partitions and would
+/// otherwise never mount root on an AHCI-only machine.
+pub static NVME_PROBE_DONE: Once<()> = Once::new();
+
+/// The first namespace id a controller registers under in `block_io`. Ids
+/// below this belong to AHCI (`0..1000`), USB storage (`1000..2000`) and the
+/// ramdisk (`2000..3000`).
+pub const NVME_DEVICE_ID_BASE: u64 = 3000;
+
+/// Namespace ids per controller in the `block_io` id space. Also the largest
+/// `nsid` this driver will register: a namespace numbered above it would
+/// collide with the next controller's range. `devfs::block::device_name`
+/// undoes this arithmetic to build `nvme<c>n<n>`.
+pub const NVME_IDS_PER_CONTROLLER: u64 = 64;
 
 pub fn init() {
     queue_spawn_kthread_named("nvme", nvme_driver_main as *const () as u64);
@@ -215,11 +238,7 @@ pub extern "C" fn nvme_driver_main() -> ! {
         }
     }
 
-    // The first 512-byte-LBA namespace found, kept for the cmdline-gated
-    // probe read below. Namespace registration with `block_io` and its
-    // refusal path for other LBA sizes are not implemented by this driver
-    // yet.
-    let mut probe_target: Option<(Arc<NvmeController>, u32, u64)> = None;
+    let mut namespaces: Vec<Arc<NvmeNamespace>> = Vec::new();
 
     for (controller_index, controller) in controllers.iter().enumerate() {
         let ident = match controller.identify_controller() {
@@ -260,40 +279,79 @@ pub extern "C" fn nvme_driver_main() -> ! {
         };
 
         for nsid in nsids {
-            match controller.identify_namespace(nsid) {
-                Ok(ns) => {
+            let ns = match controller.identify_namespace(nsid) {
+                Ok(ns) => ns,
+                Err(e) => {
                     log!(
-                        "nvme{}n{}: {} sn={} {} LBAs of {} B, mdts={}, vwc={}",
+                        "nvme{}n{}: identify namespace failed: {:?}",
                         controller_index,
                         nsid,
-                        model,
-                        serial,
-                        ns.nsze,
-                        ns.lba_size(),
-                        mdts_bytes,
-                        vwc
+                        e
                     );
-                    if probe_target.is_none() && ns.lba_size() == 512 {
-                        probe_target = Some((Arc::clone(controller), nsid, ns.nsze));
-                    }
+                    continue;
                 }
-                Err(e) => log!(
-                    "nvme{}n{}: identify namespace failed: {:?}",
-                    controller_index,
-                    nsid,
-                    e
-                ),
+            };
+            log!(
+                "nvme{}n{}: {} sn={} {} LBAs of {} B, mdts={}, vwc={}",
+                controller_index,
+                nsid,
+                model,
+                serial,
+                ns.nsze,
+                ns.lba_size(),
+                mdts_bytes,
+                vwc
+            );
+
+            // Everything above `block_io` counts in 512-byte sectors and has
+            // nowhere to put per-block metadata, so a namespace this driver
+            // cannot present as a plain 512-byte disk is refused by name
+            // rather than registered and misread.
+            let refusal = if ns.lba_size() != 512 {
+                Some("logical block size is not 512 B")
+            } else if ns.metadata_size() != 0 {
+                Some("namespace carries per-block metadata")
+            } else if nsid == 0 || u64::from(nsid) > NVME_IDS_PER_CONTROLLER {
+                Some("namespace id is outside this driver's id range")
+            } else {
+                None
+            };
+            if let Some(why) = refusal {
+                log!("nvme{controller_index}n{nsid}: refused, {why}");
+                continue;
             }
+
+            let device_id = NVME_DEVICE_ID_BASE
+                + controller_index as u64 * NVME_IDS_PER_CONTROLLER
+                + u64::from(nsid - 1);
+            let namespace = Arc::new(NvmeNamespace::new(
+                Arc::clone(controller),
+                nsid,
+                ns.nsze,
+                device_id,
+            ));
+            block_io::register(
+                namespace.device_id(),
+                Arc::clone(&namespace) as Arc<dyn AsyncBlockDevice>,
+            );
+            log!(
+                "nvme{controller_index}n{nsid}: registered as block device {}",
+                namespace.device_id()
+            );
+            namespaces.push(namespace);
         }
     }
 
+    // Published before the barrier is signalled, so a thread released by
+    // `wait_probe_complete` also sees the list and the registrations.
+    NVME_NAMESPACES.call_once(|| namespaces);
+    NVME_PROBE_DONE.call_once(|| ());
+
     if NVME_PROBE_READ.load(Ordering::Relaxed) {
-        match probe_target {
-            Some((controller, nsid, lba_count)) => {
+        match api::namespaces().first() {
+            Some(ns) => {
                 let args = Box::new(ProbeReadArgs {
-                    controller,
-                    nsid,
-                    lba_count,
+                    namespace: Arc::clone(ns),
                 });
                 queue_spawn_kthread_named_arg(
                     "nvme_probe_read",
@@ -330,9 +388,7 @@ pub extern "C" fn nvme_driver_main() -> ! {
 }
 
 struct ProbeReadArgs {
-    controller: Arc<NvmeController>,
-    nsid: u32,
-    lba_count: u64,
+    namespace: Arc<NvmeNamespace>,
 }
 
 /// `nvme_probe_read` cmdline gate: reads LBA 0 of the first supported
@@ -341,7 +397,7 @@ struct ProbeReadArgs {
 /// path is verified against before anything in the kernel depends on it.
 extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
     let args = *unsafe { Box::from_raw(arg) };
-    let ns = NvmeNamespace::new(args.controller, args.nsid, args.lba_count, 0);
+    let ns = args.namespace;
 
     let read = |lba: u64, sectors: u32| -> Option<Arc<Vec<u8>>> {
         let buf = Arc::new(alloc::vec![0u8; sectors as usize * 512]);

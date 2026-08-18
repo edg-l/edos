@@ -216,7 +216,7 @@ def cmd_start(args):
 
     iso = os.path.join(REPO, "edos-x86_64.iso")
     disk = args.disk if os.path.isabs(args.disk) else os.path.join(REPO, args.disk)
-    required = [(disk, f"create {args.disk}")]
+    required = [] if args.no_sata else [(disk, f"create {args.disk}")]
     if not args.no_cdrom:
         required.append((iso, "make all"))
     usb_disk = None
@@ -229,6 +229,11 @@ def cmd_start(args):
         extra_disk = (args.extra_disk if os.path.isabs(args.extra_disk)
                       else os.path.join(REPO, args.extra_disk))
         required.append((extra_disk, f"make {os.path.basename(extra_disk)}"))
+    nvme_disk = None
+    if args.nvme_disk:
+        nvme_disk = (args.nvme_disk if os.path.isabs(args.nvme_disk)
+                     else os.path.join(REPO, args.nvme_disk))
+        required.append((nvme_disk, f"make {os.path.basename(nvme_disk)}"))
     for path, target in required:
         if not os.path.exists(path):
             raise SystemExit(f"missing {os.path.basename(path)}; run `{target}` first")
@@ -248,7 +253,7 @@ def cmd_start(args):
             file=sys.stderr,
         )
 
-    disk_format = _disk_format(disk)
+    disk_format = None if args.no_sata else _disk_format(disk)
 
     os.makedirs(RUNDIR, exist_ok=True)
     for stale in (SOCK, PIDFILE):
@@ -267,8 +272,6 @@ def cmd_start(args):
         "-smp", str(args.smp),
         "-drive", f"if=pflash,unit=0,format=raw,file={REPO}/ovmf/ovmf-code-x86_64.fd,readonly=on",
         "-drive", f"if=pflash,unit=1,format=raw,file={REPO}/ovmf/ovmf-vars-x86_64.fd",
-        "-drive", f"id=sata0,if=none,format={disk_format},file={disk},aio=io_uring,discard=unmap",
-        "-device", "ide-hd,drive=sata0,bus=ide.1",
         # blob=on needs udmabuf and a local display; plain virtio-vga renders
         # into a buffer QEMU itself owns, which is what VNC and screendump read.
         "-vga", "std" if args.vga == "std" else "none",
@@ -343,6 +346,26 @@ def cmd_start(args):
     if args.pcap:
         pcap = args.pcap if os.path.isabs(args.pcap) else os.path.join(REPO, args.pcap)
         qemu += ["-object", f"filter-dump,id=dump0,netdev=net0,file={pcap}"]
+
+    # The root disk. `--no-sata` omits it so an NVMe image can be the only
+    # candidate root: `sata-disk.img` and `nvme-disk.img` are built from the
+    # same `filesystem/` tree by the same `efs-mkfs` and carry different
+    # partition GUIDs, but both are EDOS roots, and attaching both means the
+    # guest picks whichever the cmdline names rather than the one under test.
+    if not args.no_sata:
+        qemu += [
+            "-drive",
+            f"id=sata0,if=none,format={disk_format},file={disk},aio=io_uring,discard=unmap",
+            "-device", "ide-hd,drive=sata0,bus=ide.1",
+        ]
+
+    # An NVMe controller with one namespace, which the guest reaches through
+    # its own NVMe driver and registers as block device 3000 (/dev/nvme0n1).
+    if nvme_disk:
+        qemu += [
+            "-drive", f"id=nvme0,if=none,format={_disk_format(nvme_disk)},file={nvme_disk}",
+            "-device", "nvme,drive=nvme0,serial=EDOSNVME0",
+        ]
 
     # A second SATA drive on its own bus. The guest does not boot from it, so a
     # test can format, mount and cut power on it without touching the root.
@@ -872,6 +895,12 @@ def main():
                    metavar="IMAGE",
                    help="attach IMAGE (default journal-test.img) as a second SATA drive, "
                         "for filesystems the guest mounts rather than boots from")
+    s.add_argument("--nvme-disk", nargs="?", const="nvme-disk.img", default=None,
+                   metavar="IMAGE",
+                   help="attach IMAGE (default nvme-disk.img) as an NVMe namespace")
+    s.add_argument("--no-sata", action="store_true",
+                   help="do not attach the SATA root disk, leaving another disk "
+                        "(e.g. --nvme-disk) as the only root candidate")
     s.add_argument("--no-cdrom", action="store_true",
                    help="boot without the ISO, e.g. to test an installed disk")
     s.add_argument("--ssh-fwd", type=int, default=2323,

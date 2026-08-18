@@ -10,15 +10,15 @@
 //! later, which is the classic "the install looked fine but does not boot"
 //! failure.
 
-use alloc::{
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use crate::{
-    drivers::{ahci::api::list_devices, block_io, ramdisk::RAMDISK_DEVICE_ID},
+    drivers::{
+        ahci::api::list_devices,
+        block_io,
+        nvme::{NVME_DEVICE_ID_BASE, NVME_IDS_PER_CONTROLLER},
+        ramdisk::RAMDISK_DEVICE_ID,
+    },
     fs::{
         block_page_cache::BlockPageCache,
         devfs::{DevFsDevice, DevFsError, register_device_str},
@@ -37,8 +37,20 @@ pub const BLOCK_IOCTL_SECTOR_COUNT: u64 = 0x424B_0002;
 pub const BLOCK_IOCTL_RESCAN: u64 = 0x424B_0003;
 /// Returns 1 while a mounted filesystem is backed by this device, else 0.
 pub const BLOCK_IOCTL_IS_MOUNTED: u64 = 0x424B_0004;
+/// Returns this node's block-device id, the number every kernel-side block
+/// API is keyed by. Asking the node is the only correct way to learn it: the
+/// devfs name is derived from the id and not the other way round, and for
+/// USB storage and NVMe the derivation is not invertible from the name
+/// alone.
+pub const BLOCK_IOCTL_DEVICE_ID: u64 = 0x424B_0005;
 
 const SECTOR_SIZE: usize = 512;
+
+/// The ramdisk's own range in the id space. One ramdisk exists today, so the
+/// span is a generalization; this pins it to the id that is actually used.
+const RAMDISK_IDS: core::ops::Range<u64> = 2000..NVME_DEVICE_ID_BASE;
+const _: () =
+    assert!(RAMDISK_IDS.start <= RAMDISK_DEVICE_ID && RAMDISK_DEVICE_ID < RAMDISK_IDS.end);
 
 struct BlockDevNode {
     device_id: u64,
@@ -110,6 +122,7 @@ impl DevFsDevice for BlockDevNode {
                 .map_err(|_| DevFsError::IoError),
             BLOCK_IOCTL_SECTOR_COUNT => Ok(self.sectors()),
             BLOCK_IOCTL_IS_MOUNTED => Ok(self.is_mounted() as u64),
+            BLOCK_IOCTL_DEVICE_ID => Ok(self.device_id),
             BLOCK_IOCTL_RESCAN => crate::fs::api::rescan_partitions(self.device_id)
                 .map(|n| n as u64)
                 .map_err(|e| match e {
@@ -127,14 +140,35 @@ impl DevFsDevice for BlockDevNode {
 
 /// devfs name for a block device id.
 ///
+/// The id space is four ranges:
+///
+/// | ids | device | name |
+/// |---|---|---|
+/// | `0..1000` | AHCI ports | `sda`, `sdb`, ... |
+/// | `1000..2000` | USB mass storage | `sd*`, continuing the AHCI series |
+/// | `2000..3000` | ramdisk | `ram0` |
+/// | `3000..` | NVMe namespaces | `nvme0n1`, `nvme0n2`, `nvme1n1`, ... |
+///
 /// AHCI ports and USB mass storage share the `sd*` series in id order, which
 /// is stable because AHCI is fully probed before USB enumeration can add
-/// anything. The ramdisk is deliberately outside that series: it is registered
-/// before USB storage but has a higher id, so it would otherwise rename itself
-/// when a USB stick appeared.
+/// anything. The USB offset is a call-time lookup of the AHCI device count,
+/// not a value captured at boot. The ramdisk is deliberately outside that
+/// series: it is registered before USB storage but has a higher id, so it
+/// would otherwise rename itself when a USB stick appeared. NVMe is outside
+/// it for the same reason and because its own name carries the controller
+/// and namespace numbers, which `sd*` cannot express.
 fn device_name(device_id: u64) -> Option<String> {
-    if device_id == RAMDISK_DEVICE_ID {
-        return Some("ram0".to_string());
+    if RAMDISK_IDS.contains(&device_id) {
+        return Some(format!("ram{}", device_id - RAMDISK_IDS.start));
+    }
+
+    if device_id >= NVME_DEVICE_ID_BASE {
+        let offset = device_id - NVME_DEVICE_ID_BASE;
+        return Some(format!(
+            "nvme{}n{}",
+            offset / NVME_IDS_PER_CONTROLLER,
+            offset % NVME_IDS_PER_CONTROLLER + 1
+        ));
     }
 
     let index = if device_id >= 1000 {

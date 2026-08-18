@@ -21,6 +21,7 @@ use edos_lib::io::ioctl;
 const BLOCK_IOCTL_FLUSH: u64 = 0x424B_0001;
 const BLOCK_IOCTL_RESCAN: u64 = 0x424B_0003;
 const BLOCK_IOCTL_IS_MOUNTED: u64 = 0x424B_0004;
+const BLOCK_IOCTL_DEVICE_ID: u64 = 0x424B_0005;
 
 const SECTOR: u64 = 512;
 /// 1 MiB in, the alignment every partitioning tool uses.
@@ -39,7 +40,7 @@ fn usage() -> ! {
         "Usage: edos-install [OPTIONS] <device>
 
 Arguments:
-  <device>  Block device to install onto, e.g. /dev/sda
+  <device>  Block device to install onto, e.g. /dev/sda or /dev/nvme0n1
 
 Options:
   --esp-size <SIZE>  EFI System Partition size (default 512M)
@@ -121,18 +122,21 @@ fn partitions_of(device_id: u64) -> Vec<(u64, [u8; 16])> {
     out
 }
 
-/// Device id behind a `/dev` node, taken from the partition list. Devices with
-/// no partitions do not appear there, which is exactly the blank disk case, so
-/// fall back to parsing the conventional name.
-fn device_id_for(path: &str) -> u64 {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    if let Some(rest) = name.strip_prefix("ram") {
-        return 2000 + rest.parse::<u64>().unwrap_or(0);
+/// Device id behind an open `/dev` node, asked of the node itself.
+///
+/// The name cannot be parsed back into an id: devfs derives the name from the
+/// id, and that derivation is not invertible. `sd*` numbering continues from
+/// the AHCI device count into USB storage, so a USB stick's letter says
+/// nothing about its id, and NVMe encodes a controller and a namespace number
+/// in a name whose id base is not in the name at all.
+fn device_id_for(dev: &File, path: &str) -> u64 {
+    let ret = device_ioctl(dev, BLOCK_IOCTL_DEVICE_ID);
+    if ret < 0 {
+        fail(&format!(
+            "{path} did not answer BLOCK_IOCTL_DEVICE_ID ({ret}); it is not a block device node"
+        ));
     }
-    match name.strip_prefix("sd").and_then(|s| s.chars().next()) {
-        Some(letter) if letter.is_ascii_lowercase() => (letter as u8 - b'a') as u64,
-        _ => fail(&format!("cannot derive a device id from {path}")),
-    }
+    ret as u64
 }
 
 fn confirm(plan: &str) {
@@ -171,13 +175,14 @@ fn main() {
     }
 
     let device_path = device.unwrap_or_else(|| usage());
-    let device_id = device_id_for(&device_path);
 
     let mut dev = OpenOptions::new()
         .read(true)
         .write(true)
         .open(&device_path)
         .unwrap_or_else(|e| fail(&format!("cannot open {device_path}: {e}")));
+
+    let device_id = device_id_for(&dev, &device_path);
 
     if device_ioctl(&dev, BLOCK_IOCTL_IS_MOUNTED) == 1 {
         fail(&format!(

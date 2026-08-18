@@ -732,10 +732,13 @@ pub extern "C" fn fs_main_thread() -> ! {
     thread.set_priority(IO_PRIORITY);
 
     // AHCI publishes its ports into the block-io registry at the end of its
-    // probe, and `list_devices` blocks until that happens. Waiting here keeps
-    // boot-time discovery deterministic; the ids themselves come from the
-    // registry, which also holds the live-root ramdisk and, later, USB storage.
+    // probe, and `list_devices` blocks until that happens. NVMe publishes its
+    // namespaces the same way. Both barriers exist so the boot-time
+    // `block_io::list()` scan below sees every disk; a driver still probing
+    // when the scan runs would have its partitions discovered only by a later
+    // rescan, which is too late to be root.
     let _ = list_devices();
+    crate::drivers::nvme::api::wait_probe_complete();
     log!("Listed devices");
 
     let requests = FS_REQUESTS.call_once(|| Arc::new(Mailbox::with_capacity(16)));

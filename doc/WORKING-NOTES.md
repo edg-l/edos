@@ -8711,3 +8711,55 @@ touches neither cid, bounce nor `prp_list`; the dispatcher's park loop has the
 required `loop { park_while(pred); work }` shape with no lost-wakeup window;
 `cmd_slots` (182) is never co-held with the CQ (186) or SQ (192) locks; and the
 `create_io_cq`/`create_io_sq` CDW encodings match NVMe 2.0.
+
+## NVMe becomes a disk: id ranges, the probe barrier, and the id ioctl (2026-08-19)
+
+Namespaces now register with `block_io` under `3000 + controller_index * 64 +
+(nsid - 1)`, so the block-device id space has four ranges: AHCI `0..1000`, USB
+mass storage `1000..2000`, ramdisk `2000..3000`, NVMe `3000..`. The base and
+the per-controller stride are `pub const`s in `drivers::nvme`;
+`devfs::block::device_name` imports them rather than repeating the numbers,
+because it undoes exactly that arithmetic to produce `nvme<c>n<n>`.
+
+A namespace is refused, by name in the log, when its logical block size is not
+512, when its active LBA format carries metadata (`MS != 0`), or when its
+`nsid` falls outside the 64 ids reserved per controller. Everything above
+`block_io` counts in 512-byte sectors and has nowhere to put per-block
+metadata, so registering such a namespace would mean misreading it rather than
+supporting it.
+
+**The probe barrier is not optional and must fire on machines with no NVMe.**
+`fs_main_thread` waits on `nvme::api::wait_probe_complete()` beside the
+existing `ahci::api::list_devices()`, because the boot-time `block_io::list()`
+scan runs once: a driver still probing when it runs has its partitions found
+only by a later rescan, which is too late to be root. `NVME_PROBE_DONE` is
+therefore signalled unconditionally at the end of the probe kthread, including
+the no-controller path — an early `continue` that skipped it would hang boot on
+every AHCI-only machine. `NVME_NAMESPACES` is published *before* it, so a
+released waiter also sees the list.
+
+**A `/dev` name cannot be parsed back into a device id, and `edos-install` was
+doing exactly that.** devfs derives the name from the id, and the derivation is
+not invertible: `sd*` numbering continues from the live AHCI device count into
+USB storage, so a stick's letter says nothing about its id, and NVMe encodes a
+controller and a namespace number against a base that is absent from the name.
+`BLOCK_IOCTL_DEVICE_ID` (`0x424B_0005`) returns the node's own id, and
+`edos-install` now opens the device first and asks it. This was already wrong
+for USB storage before NVMe existed.
+
+### Traps hit while doing this
+
+**Do not edit `scripts/edos-vm` while a gate is running.** `make storage-check`
+shells out to it three times over about ten minutes; an edit that lands between
+two of them runs the half-finished script. This cost a `storage-check` run:
+`fs-regression` passed both halves (efs OK, fat32 OK) and `fsbench-run` then
+died in `cmd_start` on an `args.no_sata` that existed in the function body but
+not yet in the argparse block. The failure looks exactly like a guest problem
+from the log — a `CalledProcessError` on `edos-vm start` — and is not one.
+
+**`scripts/edos-vm --no-sata` exists because both root images are bootable.**
+`sata-disk.img` and `nvme-disk.img` come from the same `filesystem/` tree and
+the same `efs-mkfs`; their partition GUIDs differ, so root selection is decided
+by the cmdline rather than being a race, but with both attached the disk under
+test is not necessarily the one mounted. Dropping the SATA disk leaves one
+candidate.
