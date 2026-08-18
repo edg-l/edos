@@ -251,6 +251,56 @@ One dial: 32 KiB parked per thread, whatever mix of sizes.
 `flush_thread_cache` hands it all back and gives up the claim, and std calls it
 last on the way out of a thread, after the destructors that can still free.
 
+### Where the cache lives, and why it is not a `#[thread_local]`
+
+It sits in the thread control block the kernel reserves above `%fs`, at a fixed
+offset, and not in `.tbss`.
+
+The two are the same instructions **today**. `x86_64-unknown-edos` pins
+`tls_model: LocalExec`, so a thread-local is a `%fs`-based address with a
+link-time constant displacement: no call, no lazy initialisation, nothing
+allocated, which is exactly what lets an allocator hold one. They stop being the
+same the moment a module can be loaded at runtime. `dlopen` forces
+general-dynamic TLS, where reaching a thread-local goes through
+`__tls_get_addr`, which allocates lazily for a newly loaded module — and an
+allocator whose fast path holds a thread-local is then re-entrant *through the
+TLS runtime*. That is the bootstrap problem glibc and mimalloc are built around,
+and storage the kernel hands every thread before its first instruction does not
+have it. Dynamic linking alone does not force it; `dlopen` does.
+
+**A pointer in the control block would have been worse than what it replaced.**
+The cache is 528 bytes, so a slot cannot hold it, and allocating it needs the
+allocator — lazy init, an indirection and a per-thread heap allocation on the
+fast path, in place of one instruction against storage the kernel already
+zeroes. It is reserved inline instead.
+
+Three things make that work:
+
+- **All-zero is a valid empty cache owned by nobody.** `allocate_tls_region`
+  zeroes the whole mapping, so every thread starts with an empty cache and
+  nothing runs a constructor. No field here may gain an empty state that is not
+  zero.
+- **Every thread gets a control block, `PT_TLS` or not.** It is part of the
+  thread ABI rather than a consequence of the program declaring a thread-local;
+  treating a missing `PT_TLS` as "no TLS region" would leave `%fs` at zero and
+  turn the offset into a null dereference. `TlsTemplate::empty` is what an image
+  with no `PT_TLS` gets.
+- **The offset clears glibc's slots** — `fs:0` self-pointer, `fs:8` DTV,
+  `fs:0x28` stack guard, `fs:0x30` pointer guard — so a future port can put that
+  layout underneath. The runtime's own range starts at `fs:0x40`.
+
+**The size is agreed across two repos, and `AT_EDOS_TCB` is what keeps them
+honest.** `edos_rt` cannot take a shared crate: it is `rustc-dep-of-std` and
+compiles as part of libstd, so a dependency would be a second crates.io crate
+pinned in the fork forever. Only one number is actually shared — the kernel
+reserves and zeroes the area and never needs to know what is in it — so the
+kernel publishes `TLS_TCB_MIN_SIZE` as a new auxiliary-vector entry and
+`edos_rt::tcb::verify_or_abort` reads it once in `start_rust`, before anything
+can allocate. A runtime claiming more than the kernel reserved says so by name
+at the first instruction of the process. Without it the overrun runs off the top
+of the TLS mapping, which faults — except in the page-rounding slack above the
+block, where it would corrupt quietly instead.
+
 ### What it bought
 
 Four-CPU guest, `allocbench`, cheapest of five rounds:

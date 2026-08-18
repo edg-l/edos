@@ -39,6 +39,23 @@ pub struct TlsTemplate {
     pub align: u64,
 }
 
+impl TlsTemplate {
+    /// What an image with no `PT_TLS` gets.
+    ///
+    /// A thread has a control block whether or not its program declares a
+    /// thread-local, because the runtime keeps its own state there and finds it
+    /// at a fixed offset from `%fs`. Treating a missing `PT_TLS` as "no TLS
+    /// region" would leave `%fs` at zero for such an image and turn that offset
+    /// into a null dereference.
+    pub fn empty() -> Self {
+        Self {
+            init_data: Vec::new(),
+            mem_size: 0,
+            align: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadedInfo {
     pub entry_point: VirtAddr,

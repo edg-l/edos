@@ -324,7 +324,22 @@ static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 const TLS_REGION_STRIDE: u64 = 0x20000; // 128 KiB per-thread slot
 const TLS_GUARD_GAP: u64 = 0x20000; // Keep a gap below the user stack
-const TLS_TCB_MIN_SIZE: u64 = 64;
+/// Bytes reserved above `%fs` for the thread control block, published to the
+/// program as `AT_EDOS_TCB`.
+///
+/// The kernel writes only the self-pointer at offset 0 and zeroes the rest, so
+/// everything above that belongs to the runtime, which reaches its own state
+/// there as a single `%fs`-relative access with a link-time constant offset —
+/// no call, no lazy initialisation, and nothing allocated, which is what lets
+/// an allocator keep its per-thread cache in it. Reserving it here rather than
+/// in `.tbss` is what makes that independent of the target's TLS model: a
+/// module loaded at runtime forces general-dynamic TLS, where reaching a
+/// thread-local goes through `__tls_get_addr` and may allocate.
+///
+/// The number is a ceiling on the runtime's needs with room to spare, not a
+/// measurement. A runtime that wants more than this must see the reservation
+/// and refuse to start, which is what `AT_EDOS_TCB` is for.
+pub(crate) const TLS_TCB_MIN_SIZE: u64 = 1024;
 const PAGE_SIZE: u64 = 4096;
 
 /// A complete process image in a fresh address space, not yet attached to any
@@ -438,19 +453,22 @@ pub(crate) fn load_process_image(
     memory_manager.reloc_vma_range = load_info.reloc_vma_range.take();
     memory_manager.load_base = load_info.load_base;
 
-    let mut tls_runtime: Option<UserThreadTls> = None;
-    let mut tls_fs_base = 0u64;
-
-    if let Some(template) = load_info.tls_template.take() {
-        let template = Arc::new(template);
-        let allocation = allocate_tls_region(&template, 0, &mut memory_manager)?;
-        tls_fs_base = allocation.fs_base;
-        vma_set
-            .lock()
-            .insert(allocation.vma)
-            .map_err(|_| ElfLoadError::MappingFailed)?;
-        tls_runtime = Some(allocation.runtime);
-    }
+    // Unconditionally, even for an image with no `PT_TLS`: the control block at
+    // the top of this region is part of the thread ABI, not a consequence of
+    // the program declaring a thread-local. See [`TlsTemplate::empty`].
+    let template = Arc::new(
+        load_info
+            .tls_template
+            .take()
+            .unwrap_or_else(TlsTemplate::empty),
+    );
+    let allocation = allocate_tls_region(&template, 0, &mut memory_manager)?;
+    let tls_fs_base = allocation.fs_base;
+    vma_set
+        .lock()
+        .insert(allocation.vma)
+        .map_err(|_| ElfLoadError::MappingFailed)?;
+    let tls_runtime = Some(allocation.runtime);
 
     {
         let mut vmas = vma_set.lock();

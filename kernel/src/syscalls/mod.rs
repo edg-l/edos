@@ -25,6 +25,7 @@ use crate::{
     debug::lock_order::{RANK_NET_STACK, RANK_PIPE, RANK_PTY, RANK_SOCKET, RANK_TCP_CONN},
     fs::Error as FsError,
     gdt::selectors,
+    loader::TlsTemplate,
     log,
     memory::{
         STACK_ALIGNMENT,
@@ -2864,18 +2865,16 @@ fn sys_clone(
     // Allocate new thread ID
     let child_id = allocate_thread_id();
 
-    let mut tls_runtime = None;
-    let mut tls_region = None;
-    let mut tls_fs_base = 0u64;
-    if let Some(template) = tls_template.take() {
+    // Every thread gets a control block, whatever the image declared; the
+    // parent's template is empty when it had no `PT_TLS`.
+    let template = tls_template
+        .take()
+        .unwrap_or_else(|| Arc::new(TlsTemplate::empty()));
+    let allocation = {
         let mut manager_guard = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
         let tls_slot = next_tls_slot.fetch_add(1, Ordering::Relaxed);
         match crate::thread::thread::allocate_tls_region(&template, tls_slot, &mut manager_guard) {
-            Ok(allocation) => {
-                tls_fs_base = allocation.fs_base;
-                tls_region = Some(allocation.vma);
-                tls_runtime = Some(allocation.runtime);
-            }
+            Ok(allocation) => allocation,
             Err(_) => {
                 // Unwind the stack claimed above, which this path used to leave
                 // mapped because the VMA had not been recorded yet.
@@ -2893,13 +2892,13 @@ fn sys_clone(
                 return !0u64;
             }
         }
-        drop(manager_guard);
-    }
+    };
+    let tls_fs_base = allocation.fs_base;
+    let tls_runtime = Some(allocation.runtime);
 
     // Add the new TLS VMA to the shared VmaSet; the stack was claimed above.
-    if let Some(vma) = tls_region.take() {
-        ranked_lock!(RANK_VMAS, "sys_clone::tls_vma_insert", parent_vmas).insert_validated(vma);
-    }
+    ranked_lock!(RANK_VMAS, "sys_clone::tls_vma_insert", parent_vmas)
+        .insert_validated(allocation.vma);
 
     address_space_refs.fetch_add(1, Ordering::AcqRel);
 

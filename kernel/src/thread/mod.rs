@@ -106,6 +106,16 @@ mod auxv {
     /// Bytes of entropy `AT_RANDOM` points at. musl seeds its stack guard and
     /// its pointer mangling from exactly this many.
     pub const RANDOM_BYTES: usize = 16;
+
+    /// Bytes reserved above `%fs` for the thread control block, of which the
+    /// kernel uses only the self-pointer at offset 0.
+    ///
+    /// EDOS's own, in the range no psABI or Linux type reaches, since a runtime
+    /// that reads someone else's vector must not find this by accident. It is
+    /// what lets a runtime keeping state at a fixed `%fs` offset check that the
+    /// offset is inside what the kernel actually reserved, and say so at start
+    /// rather than run off the end of the mapping later.
+    pub const AT_EDOS_TCB: u64 = 0x1000;
 }
 
 /// Where the image landed, as the auxiliary vector needs to describe it. Built
@@ -207,6 +217,7 @@ pub fn setup_user_stack(
     aux_entries.push((auxv::AT_SECURE, 0));
     aux_entries.push((auxv::AT_RANDOM, random_ptr));
     aux_entries.push((auxv::AT_EXECFN, execfn_ptr));
+    aux_entries.push((auxv::AT_EDOS_TCB, crate::thread::thread::TLS_TCB_MIN_SIZE));
     aux_entries.push((auxv::AT_NULL, 0));
 
     // Entry alignment. The psABI (§3.4.1) says `%rsp` is 16-byte aligned at
