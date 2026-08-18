@@ -81,7 +81,7 @@ const FEATURE_NUMBER_OF_QUEUES: u32 = 0x07;
 pub struct NvmeController {
     #[expect(
         dead_code,
-        reason = "read once MSI-X/MSI/INTx interrupt configuration runs"
+        reason = "read once MSI-X/MSI interrupt configuration runs"
     )]
     pub pci_device: PciDevice,
     regs: *mut NvmeRegs,

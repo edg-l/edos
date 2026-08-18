@@ -70,8 +70,9 @@ reason: `admin_command_polled` polls its own completion, and the dispatcher is
 forbidden to drain the admin queue, because a drain from a second thread eats the
 completion the poller is waiting for. A queue pair per CPU was never started.
 
-**What QEMU cannot tell us, and so is still unverified**: the INTx and MSI
-fallbacks (QEMU always offers MSI-X), `CSTS.CFS`-driven reset, a 4Kn namespace on
+**What QEMU cannot tell us, and so is still unverified**: the MSI fallback (QEMU
+always offers MSI-X; there is no INTx fallback, see `doc/nvme.md` decision 3),
+`CSTS.CFS`-driven reset, a 4Kn namespace on
 a controller that also offers a 512-byte format, `CAP.MPSMIN > 0`,
 `CAP.DSTRD != 0`, PCIe link errors, and hot-removal. Nor can it reach the
 no-AHCI-controller boot path (`619f10ae`), since q35 always exposes the ICH9
