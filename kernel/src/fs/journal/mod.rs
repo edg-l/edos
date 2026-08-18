@@ -183,6 +183,23 @@ pub static JOURNAL_COMMIT_US: AtomicU64 = AtomicU64::new(0);
 /// Checkpoint passes a commit had to run because the ring was full.
 pub static JOURNAL_CHECKPOINTS: AtomicU64 = AtomicU64::new(0);
 
+/// The committer kthread's one waitqueue, and the generation it watches.
+///
+/// The committer parks before it knows which journal will need it --- at boot
+/// none is registered at all --- so a queue owned by a journal cannot reach it.
+/// A kick and a registration both bump `COMMITTER_WAKE` and wake this queue,
+/// and the generation is what the wait predicate reads: `wait_until_timeout`
+/// loops on its predicate until the deadline, so waking a thread whose
+/// predicate cannot become true is indistinguishable from not waking it.
+pub static COMMITTER_WQ: WaitQueue = WaitQueue::new();
+pub static COMMITTER_WAKE: AtomicU64 = AtomicU64::new(0);
+
+/// Wake the committer: a journal has work, or one has just been registered.
+pub fn wake_committer() {
+    COMMITTER_WAKE.fetch_add(1, Ordering::Release);
+    COMMITTER_WQ.wake_all();
+}
+
 /// Whole microseconds between `t0` and now.
 fn us_since(t0: crate::timer::Instant) -> u64 {
     crate::timer::Instant::now().duration_since(t0).as_micros() as u64
@@ -276,8 +293,6 @@ pub struct Journal {
     committed_seq_pub: AtomicU64,
     /// Woken whenever a transaction is committed.
     pub commit_wq: WaitQueue,
-    /// Woken when the committer should process immediately (e.g. force_commit).
-    pub commit_kick_wq: WaitQueue,
     /// Maps (device_id, fs_block) -> seq of the tx that last enrolled this block.
     /// Used by writeback to skip journalled blocks until their tx is committed.
     pub checkpoint_tracker: BlockingMutex<BTreeMap<(u64, u64), u64>>,
@@ -316,7 +331,6 @@ impl Journal {
             }),
             committed_seq_pub: AtomicU64::new(head_seq.saturating_sub(1)),
             commit_wq: WaitQueue::new(),
-            commit_kick_wq: WaitQueue::new(),
             checkpoint_tracker: BlockingMutex::new(BTreeMap::new()),
             tx_id_counter: AtomicU64::new(head_seq),
         })
@@ -617,7 +631,7 @@ impl Journal {
     // ---- kick_committer -----------------------------------------------------
 
     pub fn kick_committer(&self) {
-        self.commit_kick_wq.wake_all();
+        wake_committer();
     }
 
     // ---- advance_tail -------------------------------------------------------

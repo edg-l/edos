@@ -505,10 +505,12 @@ impl BlockPageCache {
 
     // ---- Journal registry -----------------------------------------------
 
-    /// Associate a journal with a block device. Called at EFS mount time
-    /// (Phase 5 wires this in; the method compiles but is not called in Phase 3).
+    /// Associate a journal with a block device, at EFS mount time.
     pub fn register_device(&self, device_id: u64, journal: Arc<crate::fs::journal::Journal>) {
         ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals).insert(device_id, journal);
+        // The committer parked before this journal existed, so it is watching
+        // the generation rather than any queue of its own.
+        crate::fs::journal::wake_committer();
     }
 
     /// Return all registered journals (for the committer kthread).

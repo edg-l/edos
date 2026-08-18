@@ -1,35 +1,47 @@
 // Journal committer kthread.
 //
-// Loops forever, waiting up to 1 second for a kick or a periodic tick, then
-// drives seal_and_commit on every registered journal.  After each successful
-// commit it advances the tail (reclaims ring space).
+// Waits on the one committer waitqueue for a kick, a newly registered journal
+// or the periodic tick, then drives seal_and_commit on every registered
+// journal. After each successful commit it advances the tail (reclaims ring
+// space).
+//
+// Commits run here and nowhere else: `seal_and_commit` reads the ring head,
+// releases the state lock and only then writes, so two threads committing one
+// journal would claim the same ring position. `force_commit_and_wait` kicks
+// and waits rather than committing inline for that reason, which makes this
+// thread's wakeup latency that caller's latency.
 
-use core::time::Duration;
+use core::{sync::atomic::Ordering, time::Duration};
 
-use crate::{fs::block_page_cache::BlockPageCache, log};
+use crate::{
+    fs::{
+        block_page_cache::BlockPageCache,
+        journal::{COMMITTER_WAKE, COMMITTER_WQ},
+    },
+    log,
+};
+
+/// Periodic commit interval, matching the jbd2 default. A kick or a mount
+/// makes the predicate true and returns well before it.
+const COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn committer_thread() -> ! {
     loop {
         let cache = BlockPageCache::global();
 
-        // Wait up to 1 second for a kick from force_commit_and_wait or a
-        // periodic flush tick.  We use commit_kick_wq of any single journal
-        // (or just sleep) since we iterate all journals anyway.
+        // Read the generation before the journal list: a registration landing
+        // between the two changes the generation, so the wait returns at once
+        // rather than missing the journal it has just gained.
+        let seen = COMMITTER_WAKE.load(Ordering::Acquire);
         let journals = cache.all_journals();
 
-        if journals.is_empty() {
-            // No EFS volumes mounted yet; sleep briefly and retry.
-            let dummy_wq = crate::thread::waitqueue::WaitQueue::new();
-            dummy_wq.wait_until_timeout(|| false, Some(Duration::from_millis(200)));
-        } else {
-            // Wait on the first journal's kick queue with a 5-second timeout
-            // (matches Linux jbd2 default commit interval), then process all.
-            let wq = &journals[0].commit_kick_wq;
-            wq.wait_until_timeout(
-                || journals.iter().any(|j| j.has_pending_work_hint()),
-                Some(Duration::from_secs(5)),
-            );
-        }
+        COMMITTER_WQ.wait_until_timeout(
+            || {
+                COMMITTER_WAKE.load(Ordering::Acquire) != seen
+                    || journals.iter().any(|j| j.has_pending_work_hint())
+            },
+            Some(COMMIT_INTERVAL),
+        );
 
         // Re-fetch journals (may have changed while we slept).
         let journals = cache.all_journals();
