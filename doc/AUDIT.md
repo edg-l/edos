@@ -395,6 +395,15 @@ Beyond affinity (1.2), things that look like the next real improvements:
   `balancebench wake` reports the cost — a seven-way wake burst on an eight-CPU
   boot went from 4.25× to 1.97× the solo lump.
 
+  One enqueue path was left out of that and closed later, on 2026-08-18:
+  `wake_sleepers` open-coded its own enqueue and so poked nobody. It is the path
+  where it matters most, because a sleeper is placed by *nobody* — the sleepers
+  heap is per CPU and hands the thread back to the CPU it slept on, and stealing
+  only reaches threads already queued somewhere. `edos-wm` and `edos-taskbar`,
+  the two busiest things on the desktop, both sat `Sleeping` on CPU 0 with six
+  CPUs empty. It goes through `enqueue_ready` now; `balancebench sleep` is the
+  instrument, 5.34/3.69/3.56 → 2.00/1.99/2.22.
+
 ---
 
 ## 5. Smells
