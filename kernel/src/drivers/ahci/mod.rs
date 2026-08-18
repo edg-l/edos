@@ -9,7 +9,6 @@ use alloc::{
 };
 use spin::Once;
 use thiserror::Error;
-use x86_64::instructions::hlt;
 
 use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
@@ -148,9 +147,15 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     if controllers.is_empty() {
         log!("No AHCI controllers found");
-        loop {
-            hlt();
-        }
+        // Publish both registries empty before parking. `list_devices` is
+        // `DETECTED_DEVICES.wait()`, so a machine with no AHCI controller
+        // would otherwise leave every waiter -- `fs_main_thread` among them,
+        // before it mounts root -- blocked forever on a `Once` nothing will
+        // ever fill.
+        DETECTED_DEVICES.call_once(Vec::new);
+        AHCI_PORTS.call_once(Vec::new);
+        thread_park_while(|| true);
+        unreachable!("ahci kthread unparked with no controllers");
     }
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
