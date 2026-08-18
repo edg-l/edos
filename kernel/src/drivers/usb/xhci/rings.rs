@@ -113,7 +113,7 @@ impl ProducerRing {
         let trbs = dma.as_ptr() as *mut Trb;
         let phys = dma.phys_addr().as_u64();
 
-        // Zero all TRBs (allocate_sized already zeros, but be explicit)
+        // Zero all TRBs: a recycled buffer carries its previous owner's bytes.
         unsafe { core::ptr::write_bytes(trbs, 0, size) };
 
         // Set up Link TRB in the last slot: points back to ring start, with Toggle Cycle.

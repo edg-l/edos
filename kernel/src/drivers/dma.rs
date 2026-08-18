@@ -55,6 +55,10 @@ pub struct DmaBuffer {
     pub virt_addr: VirtAddr,
     pub size: usize,
     phys_addr: Once<PhysAddr>,
+    /// Set on a buffer backed by newly mapped frames, cleared once it has been
+    /// recycled through a bucket. Only a fresh buffer needs zeroing: a recycled
+    /// one is already covered by the documented no-zeroing contract.
+    fresh: bool,
 }
 
 impl DmaBuffer {
@@ -81,15 +85,11 @@ impl DmaBuffer {
             })?;
         }
 
-        // Zero the memory
-        unsafe {
-            ptr::write_bytes(virt_addr.as_mut_ptr::<u8>(), 0, aligned_size as usize);
-        }
-
         Ok(Self {
             virt_addr,
             size: aligned_size as usize,
             phys_addr: Once::new(),
+            fresh: true,
         })
     }
 
@@ -165,12 +165,38 @@ impl DmaAllocator {
         Ok(unsafe { DmaRegion::from_buffer(buffer) })
     }
 
-    /// Allocate a DMA buffer of at least `size` bytes.
+    /// Allocate a DMA buffer of at least `size` bytes, zeroed only when its
+    /// frames are newly mapped.
     ///
-    /// The contents are **not** zeroed: a buffer served from a bucket still holds whatever
-    /// its previous owner left there. Only a device transfer's own byte count may be read
-    /// back; callers that need a zeroed region must zero it themselves.
+    /// A buffer served from a bucket still holds whatever its previous owner
+    /// left there, so a caller that needs the whole region zeroed must zero it
+    /// itself; only a device transfer's own byte count may be read back. A
+    /// *fresh* buffer is zeroed because a structure the device reads before the
+    /// driver has written every field needs defined contents to begin with ---
+    /// an e1000e TX ring's status bytes decide which buffers `tx_clean`
+    /// reclaims, and nothing initialises them.
+    ///
+    /// Use [`Self::allocate_sized_uninit`] where a copy overwrites the whole
+    /// buffer before the device sees it: the mapping is uncached, so zeroing a
+    /// page costs about 58 us.
     pub fn allocate_sized(&self, size: usize) -> Result<DmaBuffer, DmaError> {
+        let buf = self.allocate_sized_uninit(size)?;
+        if buf.fresh {
+            // SAFETY: `buf` owns `buf.size` bytes of mapped, writable memory.
+            unsafe {
+                ptr::write_bytes(buf.as_ptr(), 0, buf.size);
+            }
+        }
+        Ok(buf)
+    }
+
+    /// Allocate a DMA buffer of at least `size` bytes, zeroing nothing.
+    ///
+    /// The buffer holds whatever its frames last did, so every byte the device
+    /// or the caller will read must be written first. This exists because the
+    /// DMA mapping is uncached: zeroing costs ~58 us per 4 KiB page, which is
+    /// worth avoiding for a bounce buffer that a copy immediately overwrites.
+    pub fn allocate_sized_uninit(&self, size: usize) -> Result<DmaBuffer, DmaError> {
         if let Some(bucket) = size_to_bucket(size) {
             let alloc_size = bucket_size(bucket);
             if let Some(buf) = self.buckets[bucket].pop() {
@@ -185,7 +211,8 @@ impl DmaAllocator {
         }
     }
 
-    pub fn dealloc(&self, buffer: DmaBuffer) -> Result<(), DmaError> {
+    pub fn dealloc(&self, mut buffer: DmaBuffer) -> Result<(), DmaError> {
+        buffer.fresh = false;
         if let Some(bucket) = size_to_bucket(buffer.size) {
             self.buckets[bucket].push(buffer);
             Ok(())

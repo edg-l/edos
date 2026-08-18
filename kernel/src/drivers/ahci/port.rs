@@ -138,10 +138,16 @@ pub struct AhciPort {
     fis_area: DmaRegion<HbaFis>,
     command_tables: [Once<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS],
 
-    // Per-slot scatter-gather page pools.
-    // For NCQ: ncq_depth slots allocated. For non-NCQ ATA: 1 slot (slot 0).
-    // For ATAPI: empty (ATAPI uses temporary DMA buffers, not scatter pools).
-    slot_pools: Once<Vec<SlotPool>>,
+    /// Bounce buffers for the scatter-gather fallback, one `Once` per usable
+    /// slot: `ncq_depth` slots under NCQ, slot 0 alone for non-NCQ ATA, and
+    /// none for ATAPI, which uses temporary DMA buffers rather than pools.
+    ///
+    /// A slot's pages are allocated by the first submission that needs them.
+    /// The fallback runs only for a buffer that cannot be described as a PRDT
+    /// directly, which a mapped, word-aligned one always can, so filling every
+    /// slot up front would spend 31 MB and ~470 ms of uncached zeroing on a
+    /// path a whole `fsbench` run does not take.
+    slot_pools: Once<Vec<Once<SlotPool>>>,
 
     // Slot management -- atomic for lock-free NCQ slot allocation.
     free_slots: AtomicU32,
@@ -356,16 +362,7 @@ impl AhciPort {
         }
 
         let mut pools = Vec::with_capacity(num_slots);
-        for _ in 0..num_slots {
-            let mut pages = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
-            let mut phys = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
-            for _ in 0..NCQ_PAGES_PER_SLOT {
-                let buf = dma().allocate_sized(4096)?;
-                phys.push(buf.phys_addr());
-                pages.push(buf);
-            }
-            pools.push(SlotPool { pages, phys });
-        }
+        pools.resize_with(num_slots, Once::new);
         self.slot_pools.call_once(|| pools);
 
         // Set free_slots to include all usable slots.
@@ -384,14 +381,14 @@ impl AhciPort {
 
         if use_ncq {
             log!(
-                "Port {}: NCQ enabled, depth {}, {}MB DMA pools",
+                "Port {}: NCQ enabled, depth {}, up to {}MB of bounce pools on demand",
                 self.port_idx,
                 ncq_depth,
                 (num_slots * NCQ_PAGES_PER_SLOT * 4096) / (1024 * 1024)
             );
         } else if self.device_type == DeviceType::Ata {
             log!(
-                "Port {}: legacy DMA, 1 slot, {}KB pool",
+                "Port {}: legacy DMA, 1 slot, up to {}KB of bounce pool on demand",
                 self.port_idx,
                 NCQ_PAGES_PER_SLOT * 4
             );
@@ -629,8 +626,34 @@ impl AhciPort {
             .expect("command_table not initialized for slot")
     }
 
+    /// The slot's bounce pages, allocating them if this is the first use.
+    ///
+    /// Submission paths only: allocation maps and touches ~1 MB, so a
+    /// completion must never reach it.
+    fn slot_pool_or_alloc(&self, slot: usize) -> Result<&SlotPool, AhciError> {
+        let pools = self.slot_pools.get().ok_or(AhciError::PortNotReady)?;
+        pools[slot].try_call_once(|| {
+            let mut pages = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
+            let mut phys = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
+            for _ in 0..NCQ_PAGES_PER_SLOT {
+                // Uninitialised is safe here: a PRDT entry describes exactly
+                // the bytes the copy wrote, so neither the HBA nor the caller
+                // reads past them.
+                let buf = dma().allocate_sized_uninit(4096)?;
+                phys.push(buf.phys_addr());
+                pages.push(buf);
+            }
+            Ok(SlotPool { pages, phys })
+        })
+    }
+
+    /// The slot's bounce pages, which a submission on this slot has already
+    /// allocated: a completion reads the pool only when its own submission
+    /// took the fallback.
     fn slot_pool(&self, slot: usize) -> &SlotPool {
-        &self.slot_pools.get().expect("slot_pools not initialized")[slot]
+        self.slot_pools.get().expect("slot_pools not initialized")[slot]
+            .get()
+            .expect("pool-path completion on a slot whose submission never allocated a pool")
     }
 
     fn slot_pools_len(&self) -> usize {
@@ -914,7 +937,7 @@ impl AhciPort {
             let fis_bytes = bytemuck::bytes_of(fis);
             table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
 
-            let pool = self.slot_pool(slot);
+            let pool = self.slot_pool_or_alloc(slot)?;
             let mut remaining = total_bytes;
             for i in 0..num_entries {
                 let phys = pool.phys[i];
@@ -1333,7 +1356,15 @@ impl AhciPort {
         if sg.is_none() {
             // Pool path: copy caller buffer (held in op.buffer) into the
             // per-slot pool pages now.
-            let pool = self.slot_pool(slot);
+            let pool = match self.slot_pool_or_alloc(slot) {
+                Ok(pool) => pool,
+                Err(e) => {
+                    self.unwind_ncq_op(slot, &op);
+                    self.exit_ncq_mode();
+                    handle.complete(Err(ahci_err_to_block(e)));
+                    return Ok(handle);
+                }
+            };
             let src = op.buffer.as_ptr();
             let mut offset = 0;
             for i in 0..num_pages {
@@ -1809,7 +1840,7 @@ impl AhciPort {
                 self.issue_command(slot, CMD_HEADER_WRITE, prdtl)?;
             } else {
                 // Fallback: copy to pool pages
-                let pool = self.slot_pool(slot);
+                let pool = self.slot_pool_or_alloc(slot)?;
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
