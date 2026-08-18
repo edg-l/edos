@@ -36,7 +36,8 @@ pub fn kthread_stack_alloc() -> u64 {
         return region_bottom + KTHREAD_STACK_SIZE;
     }
 
-    let stack_bottom = vmalloc(KTHREAD_STACK_REGION_SIZE);
+    let stack_bottom =
+        vmalloc(KTHREAD_STACK_REGION_SIZE).expect("vmalloc: no address space for a kthread stack");
 
     let mut mapper = memory_mapper();
 

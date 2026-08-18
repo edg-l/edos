@@ -67,7 +67,7 @@ impl DmaBuffer {
     fn allocate_sized(size: usize) -> Result<Self, DmaError> {
         let aligned_size = (size as u64 + 0xfff) & !0xfff; // Round up to page boundary
 
-        let virt_addr = vmalloc(aligned_size);
+        let virt_addr = vmalloc(aligned_size).ok_or(DmaError::DmaAllocationFailed)?;
 
         {
             without_interrupts(|| {

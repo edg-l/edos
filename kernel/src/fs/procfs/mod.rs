@@ -140,6 +140,8 @@ impl Procfs {
         let used_bytes = total_bytes.saturating_sub(free_bytes);
         let used_frames = stats.total_frames.saturating_sub(stats.free_frames);
 
+        let va = crate::memory::valloc::stats();
+
         format!(
             concat!(
                 "MemTotal: {} KiB\n",
@@ -149,7 +151,13 @@ impl Procfs {
                 "PageFaults: {}\n",
                 "FramesTotal: {}\n",
                 "FramesFree: {}\n",
-                "FramesUsed: {}\n"
+                "FramesUsed: {}\n",
+                "VmallocRegions: {}\n",
+                "VmallocFree: {} KiB\n",
+                "VmallocLargestFree: {} KiB\n",
+                "VmallocLeakedRegions: {}\n",
+                "VmallocLeakedBytes: {}\n",
+                "VmallocRejectedFrees: {}\n"
             ),
             crate::interrupts::idt::PAGE_FAULTS.load(Ordering::Relaxed),
             total_bytes / 1024,
@@ -158,6 +166,12 @@ impl Procfs {
             stats.total_frames,
             stats.free_frames,
             used_frames,
+            va.regions,
+            va.free_bytes / 1024,
+            va.largest_free / 1024,
+            va.leaked_regions,
+            va.leaked_bytes,
+            va.rejected_frees,
         )
     }
 

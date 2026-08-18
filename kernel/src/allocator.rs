@@ -347,7 +347,7 @@ impl Allocator {
         }
 
         let reserve = chunk * 2;
-        let raw = vmalloc(reserve);
+        let raw = vmalloc(reserve).expect("vmalloc: no address space for a heap expansion");
 
         let base = align_up(raw.as_u64(), chunk);
         let end = base + chunk;

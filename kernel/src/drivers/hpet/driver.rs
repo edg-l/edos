@@ -46,7 +46,7 @@ pub fn init() {
                 }
                 TranslateResult::NotMapped => {
                     println!("HPET not mapped, mapping");
-                    virt_hpet = vmalloc(4096);
+                    virt_hpet = vmalloc(4096).expect("vmalloc: no address space for HPET MMIO");
                     if mapper
                         .map_address(
                             virt_hpet,

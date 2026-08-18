@@ -151,7 +151,8 @@ pub fn init() {
     // trampoline (save_transition_switch) pivots RSP here before calling
     // the transition fn and pick_and_run, so the outgoing thread's kernel
     // stack is completely free before any waker can resume it.
-    let region = vmalloc(KTHREAD_STACK_REGION_SIZE);
+    let region = vmalloc(KTHREAD_STACK_REGION_SIZE)
+        .expect("vmalloc: no address space for a scheduler stack");
     memory_mapper()
         .map_memory(
             region,

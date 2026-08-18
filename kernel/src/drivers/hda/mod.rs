@@ -122,7 +122,7 @@ impl HdaController {
         // Cannot use the boot identity map: it uses cacheable 2MB huge pages,
         // which causes stale reads on MMIO registers.
         let mmio_size: u64 = 0x4000;
-        let mmio_virt = vmalloc(mmio_size);
+        let mmio_virt = vmalloc(mmio_size).expect("vmalloc: no address space for HDA MMIO");
         {
             let mut mapper = memory_mapper();
             mapper

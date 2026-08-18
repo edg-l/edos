@@ -23,7 +23,8 @@ impl Handler for AcpiHandler {
         size: usize,
     ) -> acpi::PhysicalMapping<Self, T> {
         let mut mapper = memory_mapper();
-        let virt_start = vmalloc(size as u64);
+        let virt_start =
+            vmalloc(size as u64).expect("vmalloc: no address space for an ACPI mapping");
 
         // Check if virtual address is canonical
         let addr = virt_start.as_u64();
