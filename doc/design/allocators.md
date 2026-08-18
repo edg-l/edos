@@ -301,6 +301,23 @@ at the first instruction of the process. Without it the overrun runs off the top
 of the TLS mapping, which faults — except in the page-rounding slack above the
 block, where it would corrupt quietly instead.
 
+Watched fail first, by putting `TLS_TCB_MIN_SIZE` back to 64 and rebuilding:
+`edos-init` exits 1 at 0.73 s with `edos_rt: the kernel reserved too little
+thread-control-block space for this runtime` and the desktop never comes up,
+which is the whole point — the alternative is a process that starts, runs, and
+is wrong somewhere else.
+
+**Gates.** `bench/allocstress` on the host covers the cache directly through its
+`concurrent` and `cross-thread` phases, and the shim there is worth knowing
+about: on the host, `%fs` belongs to glibc's `struct pthread`, so the harness
+substitutes a thread-local of the same size rather than writing where the real
+one writes. In the guest, `allocbench`'s `contention` phase reads 30.30 / 58.82
+/ 111.11 / 111.11 M ops/s at 1/2/4/8 threads on a four-CPU boot, unchanged. Take
+the best of several runs and not the median: `ns/op` is reported as an integer,
+so at four threads 9 ns is 111.11 and 13 ns is 76.92 with little between them,
+and one preemption on a guest that is also running a desktop moves the whole
+cell.
+
 ### What it bought
 
 Four-CPU guest, `allocbench`, cheapest of five rounds:
