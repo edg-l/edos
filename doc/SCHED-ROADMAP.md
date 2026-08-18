@@ -390,12 +390,12 @@ is re-armed rarely. TSC-deadline mode would remove the need for a floor at all
 reason to consider it; it is **not** a way to make arming cheaper, since it is
 still a trapping MSR write.
 
-## 6. Priority inversion: 18.17x, halved to 7.67x by lending, still open
+## 6. Done: priority inversion, and the residual was the instrument (2026-08-18)
 
 The Mars Pathfinder shape, and `prio-inversion` in `thread/sched_test.rs` is
 the instrument: on one CPU, a holder at `DEFAULT_PRIORITY` needs 10 ms of CPU
 inside the section, a hog five levels above it stays runnable, and a waiter at
-priority 15 — the highest the machine has — blocks on the same mutex.
+priority 15 — the highest the machine has — blocks on the same lock.
 
 Measured on a 4-CPU boot, before any lending:
 
@@ -409,65 +409,153 @@ waiter's wait is the holder's stretch.** Every microsecond the hog takes from
 the holder is a microsecond added to the wait of a thread eight levels above
 the hog, and the only thing bounding it is how long the hog chooses to run.
 
-`BlockingMutex` now lends: a waiter raises the holder to its own effective
-priority for the length of the section (`Thread::lent_priority`, and every
-`weight_of` site reads `effective_priority()`). Same instrument, same boot
-shape:
+`BlockingMutex` lends: a waiter raises the holder to its own effective priority
+for the length of the section (`Thread::lent_priority`, and every `weight_of`
+site reads `effective_priority()`). That took the factor to 7.67x, and this
+section used to end there, calling the remaining 7.67x an open gap against the
+1.5x that pure share predicts, with two candidates for it.
+
+**Candidate 1 was the whole of it, and it was worse than stated.** The entry
+said the other cases "are not pinned away from it". They are not, but the fatal
+one is not a pinning question at all: `test_starvation_spinner` puts a
+**priority-13 spinner on every CPU for 400 ms**, so no pin could have escaped
+it, which is also why a single-CPU boot read *worse* rather than cleaner and
+why that reading was rightly not trusted. On top of it `contend_cpu` — which is
+where this case ran — carried `share-heavy`, a flat-out spinner at priority 14,
+one level below the waiter. Most of the stretch being attributed to the hog was
+those two.
+
+Given a CPU of its own and a machine that has stopped saturating itself, the
+same instrument at the same commit reads:
 
 ```
-prio-inversion: the top-priority waiter blocked 76707 us on a 10000 us section
-(7.67x), holder stretched 7.23x by a hog 5 levels above it
+prio-inversion:                the waiter blocked 1.40x, holder stretched 1.50x
+prio-inversion-rwlock-write:   the waiter blocked 1.40x, holder stretched 1.50x
+prio-inversion-rwlock-read:    the waiter blocked 1.40x, holder stretched 1.50x
 ```
 
-**Why it is not near 1x, and what to look at next.** Lending buys the holder
-weight, not the CPU: boosted to 15 it has 6104 against the hog's 3125 at level
-12, which is 1.95x and so a 66% share — arithmetic that predicts a 1.5x stretch,
-not 7.23x. Both the before and after numbers are several times what pure share
-predicts, so the gap is not caused by lending and was there before it. Two
-candidates, in order:
+1.50x against the 1.51x the weight table asks for. There is no residual.
+**Candidate 2 — that the loan raises the weight but does not re-place the
+holder, so the `vdeadline` it already holds is stale until spent — is therefore
+refuted as an explanation of anything measurable here.** It remains true of the
+code, and at a section length where one stale deadline mattered it would show;
+at 10 ms it does not.
 
-1. **The instrument is not alone on its CPU.** The threads are pinned to one
-   CPU, but the other 55 cases in the suite run concurrently on a 4-CPU boot
-   and are not pinned away from it. **Measured 2026-08-15 and it is not
-   settled by a single-CPU boot**, which is the wrong instrument rather than a
-   cleaner one: the harness queues all 56 cases at once, so a 1-CPU boot puts
-   every other case's threads on the same CPU this one pins to. It reads
-   *worse*, not better:
+### It is a gate now, not only an instrument
 
-   ```
-   prio-inversion: the top-priority waiter blocked 170342 us on a 10000 us
-   section (17.03x), holder stretched 15.14x by a hog 5 levels above it
-   ```
+The case used to assert only that the hog preempted the holder, with a
+hand-picked `stretch > 1.5x`. That number was calibrated against the confounded
+world and went red the moment the confounds were removed, which is what found
+this. Both bounds are derived from the weight table now:
 
-   That 17.03x is against 7.67x on the 4-CPU boot at the same commit, and the
-   difference is the rest of the suite, not the hog. What would settle it is
-   the case running alone -- a boot that queues this one test -- or the
-   holder's share read directly from `/proc/sched`. Do not read the 1-CPU
-   number as evidence about lending either way.
+- the holder shares its CPU with the hog in proportion to weight, so a section
+  costing `c` of CPU takes `c * (w_holder + w_hog) / w_holder` of wall clock;
+- **lent**, the holder is served at the waiter's weight: `(6104 + 3125) / 6104`
+  = 1.51x;
+- **unlent**, at its own: `(1024 + 3125) / 1024` = 4.05x.
 
-   Two facts about that boot, both worth knowing before running it again:
-   `make test-single` cannot pass, because `load-parked-is-not-load` never
-   completes with one CPU and the suite times out at 55/56; and the target has
-   no `-accel kvm`, so it runs under TCG unless `QEMUFLAGS=-accel kvm` is
-   passed.
-2. **The loan does not re-place the holder.** It raises the weight, so
-   `charge_vruntime` slows the holder's virtual clock from the next charge on,
-   but the `vdeadline` it is holding was computed at the old weight and is only
-   recomputed once spent. Until then the boost has no effect on the pick.
-   Re-placing on the loan is the fix, and it needs the holder's runqueue lock
-   from the waiter's context.
+The gate is the midpoint. A holder that inherits nothing lands above it, which
+was watched: deleting the lend from `RwLock` put the write-held case at 3.52x
+and the read-held case at 3.53x, each against a 2.78x gate, while the other
+flavours stayed green — so the gate is specific to the lock it names.
 
-Known limits of what landed: the loan is a single priority per thread, not a
-stack, so a thread holding two of these forfeits an outer loan when it releases
-the inner lock — conservative, never a loan that outlives its section. And the
+### What lends now, and what a set of holders costs
+
+- `BlockingMutex` (76384ed): one holder, named in the lock, loan ended by the
+  release.
+- `RwLock`, both directions: the write holder is published the same way. Read
+  holders are a *set*, so they are recorded in a slot table on the lock and the
+  loan is ended by the **waiter** rather than the release — a release has no
+  single holder to name, and one that tried to end loans owed to other readers
+  would be ending live ones.
+- Recording readers is **armed**: it costs one relaxed load until the first
+  writer actually blocks on that lock, because otherwise every `SCHEDULERS`
+  read on the placement path and every VFS mount-table read would pay for a
+  case most of these locks never see. Arming is edge-triggered, so the writer
+  that arms a lock misses the readers already in flight and every writer after
+  it is covered. The read-held case measures the second round for that reason.
+- The futex path is different in kind and is covered in section 6a.
+
+Known limits, unchanged: the loan is a single priority per thread rather than a
+stack, so a thread holding two locks forfeits an outer loan when it releases the
+inner one — conservative, never a loan that outlives its section. And the
 donation reaches the holder alone; a chain of holders each blocked on the next
 carries it one link per acquisition rather than transitively in one step.
 
-The test asserts only what it controls — that the hog really did preempt the
-holder (`stretch > 1.5x`, else there was no inversion to measure) and that the
-waiter eventually acquired. It is deliberately **not** a gate on inheritance;
-it becomes one when the factor is near 1x and the two candidates above are
-settled.
+### `make test-single` passes now, and two things had to be true for it
+
+The entry above recorded that it "cannot pass". Both reasons are fixed:
+
+1. `load-parked-is-not-load` asserted an **absolute** load below the parker
+   count, and on a single-CPU boot every one of the suite's threads is on that
+   CPU: it read load 51 against a bound of 32 and failed a working scheduler.
+   The claim is about what parking threads *adds*, so it samples the load before
+   and after and bounds the difference.
+2. Nine inversion threads waiting for a quiet machine were themselves nine
+   sleepers on a poll loop, and `burst-share` compares a **sleeper** against a
+   steady thread. It went red at 1.42x from that alone. A single gate thread
+   waits and then spawns the nine, so they do not exist while anything else is
+   being measured; `burst-share` went back to 0.99x, which is the attribution.
+
+The suite is 58 cases and passes on `make test` and on
+`make test-single AUDIODEV=none QEMUFLAGS=-accel kvm`. Without that
+`QEMUFLAGS` the single-CPU target still runs under TCG.
+
+## 6a. Done: the futex path lends too (2026-08-18)
+
+`BlockingRwLock` and `BlockingMutex` are kernel locks. The one a *program*
+blocks on is the futex, and it is different in kind: **a futex word is opaque to
+the kernel.** It is a `u32` in the program's own memory with no convention
+imposed on it, so unlike every in-kernel lock there is no owner to read out of
+it and nothing to lend to. `std::sync::Mutex` on this target is a three-state
+word — unlocked, locked, contended — which never names a holder at all.
+
+So the waiter names one: `SYS_FUTEX_WAIT_PI` (317) takes an `owner_tid`
+alongside the word, and lends the caller's priority to it for the duration of
+the wait. Three consequences worth stating rather than discovering:
+
+- **The loan ends with the wait, not with the release**, because the release is
+  a userspace store the kernel never sees. A waiter woken while the owner still
+  holds the word re-lends on its next call, which is the loop every futex waiter
+  already runs against a spurious wake.
+- **A wrong or hostile `owner_tid` is bounded rather than checked.** The kernel
+  cannot prove ownership of a word it does not interpret. What it can do is lend
+  only the *caller's own* effective priority, and only while the caller is
+  itself waiting — so the worst a lie achieves is raising another thread to the
+  liar's own priority for the length of the liar's own wait.
+- **A separate syscall number, not a fourth argument on `SYS_FUTEX_WAIT`.** A
+  caller built against the three-argument form leaves whatever it likes in
+  `r10`, and reading that as a thread id would boost a thread chosen by leftover
+  register contents.
+
+`SYS_GETTID` (186) came with it, because there was no way for a thread to learn
+its own id: `getpid` answers for the process, and `sched_setattr` already spoke
+thread ids userspace had no way to obtain.
+
+`edos_lib::sync::PiMutex` is the consumer — owner tid in the word, `WAITERS` in
+the top bit — and `programs/pitest` is the gate. Userspace cannot ask what CPU
+time a thread has had, so it measures a controlled difference instead: the same
+fixed work inside the section, against the same hogs, once with nobody waiting
+and once with a priority-15 thread blocked on the lock.
+
+```
+pitest: 4 cpu(s), 16 hogs at priority 12
+pitest: section 66602 us with nobody waiting, 15459 us with a priority-15 waiter (4.30x)
+```
+
+4.30x against the 4.3x the weight table asks for at four hogs per CPU, and a
+2.00x gate. Watched red at **0.95x** with the owner argument passed as zero,
+which is exactly a plain `futex_wait`.
+
+Two things the shape needs. The hog count comes from `/proc/sched` rather than a
+constant, and it is four per CPU rather than two: at two, a 4-CPU guest read
+1.77x where one CPU read 3.86x, because the balancer kept finding the holder a
+less crowded CPU. The fix is to leave nowhere less crowded. And the settle
+window before the clock starts is outside the timed span — it is a fixed cost on
+both sides, so leaving it in would not change which run is faster, but it would
+drag the ratio towards 1 and understate the mechanism.
+
+`pitest` is in `make guest-check`, which is 16 suites now.
 
 ## What has been tried and did not work
 
@@ -548,7 +636,7 @@ with a CPU to itself, so `slowest / solo` is the whole report — 1.00 means eve
 worker had a CPU, 2.00 means two shared one while another stood empty. It leaves
 a CPU spare deliberately: the desktop is not idle, and a spare CPU is also what
 makes a bad placement visible. Read `/proc/sched` (per-CPU
-`CURRENT QUEUED LOAD STEALS`) beside it, which is what placement believed.
+`CURRENT QUEUED LOAD STEALS REBAL`) beside it, which is what placement believed.
 
 `balancebench wake` prices the other half. The straggler test above *spawns* its
 workers, and a spawn already goes to the least-loaded CPU through
@@ -568,6 +656,53 @@ sleep before it works, so what it asks is whether the concentration one round
 created is still there the next. Its report is `(median burst − sleep) / solo`,
 the same scale again, which is what makes it readable beside `wake fanout`: the
 two agreeing means the sleep path costs what the park path costs.
+
+`balancebench crowd` prices the fourth case, and it is the one the other three
+structurally cannot reach: moving work between two CPUs that are **both busy**.
+`wake` and `sleep` both end with a burst on one runqueue and the rest of the
+machine halted, and what rescues them is a poke — an enqueue that leaves two or
+more threads queued claims a CPU out of `IDLE_CPU_MASK` and IPIs it. That path
+needs an idle CPU to claim. When every CPU is already running something there is
+none, and periodic rebalancing on the timer tick is the only thing left. So the
+mode keeps a spinner per CPU running for its whole length, which takes the idle
+mask permanently empty, and then wakes a burst into it. Its floor is 2.00 rather
+than 1.00, since a burst worker shares its CPU with a resident even when
+placement is perfect. Read the `REBAL` column of `/proc/sched` beside it: it
+counts only the threads periodic rebalancing moved, so a bad fanout with REBAL
+at zero says the dial never fired rather than that it fired and did not help.
+
+### Done: rebalancing every tick rather than every tenth (2026-08-18)
+
+`REBALANCE_INTERVAL` was 10, commented "~50ms at 5ms timeslice" — and both
+halves had stopped being true. The slice is a per-thread request defaulting to
+1 ms, and the tick is not the slice at all: the timer is a one-shot armed for
+whichever comes first of the running thread's deadline and the next sleeper's
+expiry. What 10 actually bought was a correction rate of one thread per CPU per
+~10 ms, against bursts that are over in less — an imbalance outliving the burst
+that caused it is not corrected at all.
+
+`balancebench crowd`, 8-CPU boot, median of three runs on a quiet host, where
+2.00 is a perfectly spread burst and 9.00 is the whole of one behind a single
+resident:
+
+| interval | fanout |
+|----------|--------|
+| 10       | 3.99   |
+| 4        | 3.16   |
+| 1        | 2.36   |
+
+The cost is a `SCHEDULERS` read and a walk of the registered CPUs on the tick
+path, and it did not show: a solo CPU-bound lump on those same boots read
+4.40 ms at an interval of 10 and 4.41 ms at 1. That walk is O(CPUs) under a read
+lock though, and 8 is where this was measured, so the throttle stays in the code
+as the first thing to reach for if a much larger machine ever finds the scan.
+
+`REBALANCE_THRESHOLD` stays at 2, and is now measured rather than assumed:
+dropping it to 1 at an interval of 1 moved the fanout not at all (2.36 either
+way). It should not have, and the reason is worth keeping — the quantity
+includes the running thread on both sides, so at a threshold of 1 a CPU at load
+1 would steal from a CPU at load 2 and leave the pair exactly as unbalanced with
+a migration paid for. Two is the smallest difference a single move can reduce.
 
 **A benchmark whose inner call is pure must break loop invariance itself.**
 `work` is a pure function of `(rounds, seed)` and `#[inline(never)]` does not

@@ -9,7 +9,7 @@ use crate::{
     thread::{
         mutex::BlockingMutex,
         preempt::{PreemptSpinlock, preempt_disable, preempt_enabled},
-        runqueue::{BASE_SLICE, DEFAULT_PRIORITY, PRIORITY_LEVELS},
+        runqueue::{BASE_SLICE, DEFAULT_PRIORITY, PRIORITY_LEVELS, weight_of},
         rwlock::RwLock as BlockingRwLock,
         scheduler::{
             SCHEDULERS, WakePriority, current_thread, current_thread_id, sched, thread_exit,
@@ -123,17 +123,25 @@ struct TestHarness {
     burst_finished: AtomicU32,
     burst_steady: AtomicU64,
     burst_sleeper: AtomicU64,
-    // priority inversion: the lock the low thread holds and the high one wants,
-    // the handshakes that order the three threads, and what each one measured
+    // priority inversion: the two locks the low thread holds and the high one
+    // wants, the handshakes that order the three threads within a flavour and
+    // the flavours against each other, and what each one measured
     pi_mutex: BlockingMutex<u64>,
-    pi_held: AtomicBool,
-    pi_released: AtomicBool,
-    pi_hold_cpu_ns: AtomicU64,
-    pi_hold_wall_ns: AtomicU64,
-    pi_wait_ns: AtomicU64,
+    pi_rwlock: BlockingRwLock<u64>,
+    pi_cpu: u32,
+    /// The flavour that may run now; each one bumps it when its high thread is
+    /// through, so only one inversion is ever being measured.
+    pi_stage: AtomicU32,
+    /// The round within the current flavour, for the same reason.
+    pi_round: [AtomicU32; PI_FLAVOURS],
+    pi_held: [AtomicBool; PI_FLAVOURS],
+    pi_released: [AtomicBool; PI_FLAVOURS],
+    pi_hold_cpu_ns: [AtomicU64; PI_FLAVOURS],
+    pi_hold_wall_ns: [AtomicU64; PI_FLAVOURS],
+    pi_wait_ns: [AtomicU64; PI_FLAVOURS],
 }
 
-const TOTAL_TESTS: u32 = 56;
+const TOTAL_TESTS: u32 = 58;
 
 /// Registered lapic ids in ascending order, which is how the pinning cases
 /// below pick CPUs far enough apart not to measure each other.
@@ -219,11 +227,24 @@ pub fn run_sched_tests() {
         burst_steady: AtomicU64::new(0),
         burst_sleeper: AtomicU64::new(0),
         pi_mutex: BlockingMutex::new(0),
-        pi_held: AtomicBool::new(false),
-        pi_released: AtomicBool::new(false),
-        pi_hold_cpu_ns: AtomicU64::new(0),
-        pi_hold_wall_ns: AtomicU64::new(0),
-        pi_wait_ns: AtomicU64::new(0),
+        pi_rwlock: BlockingRwLock::new(0),
+        // A CPU of its own. The inversion is a statement about one runqueue, so
+        // anything else runnable there is a second competitor the measurement
+        // cannot tell from the hog. Third-lowest id, which is the first one the
+        // contention, burst, affinity and load cases have not already claimed.
+        pi_cpu: cpus
+            .get(2)
+            .or(cpus.get(1))
+            .or(cpus.first())
+            .copied()
+            .unwrap_or(0),
+        pi_stage: AtomicU32::new(0),
+        pi_round: [const { AtomicU32::new(0) }; PI_FLAVOURS],
+        pi_held: [const { AtomicBool::new(false) }; PI_FLAVOURS],
+        pi_released: [const { AtomicBool::new(false) }; PI_FLAVOURS],
+        pi_hold_cpu_ns: [const { AtomicU64::new(0) }; PI_FLAVOURS],
+        pi_hold_wall_ns: [const { AtomicU64::new(0) }; PI_FLAVOURS],
+        pi_wait_ns: [const { AtomicU64::new(0) }; PI_FLAVOURS],
     });
 
     // --- Basic tests (8) ---
@@ -359,16 +380,10 @@ pub fn run_sched_tests() {
     }
 
     // Priority inversion: a low holder, a mid hog that preempts it, and a high
-    // waiter that measures what the section cost it (1)
-    for role in [PI_ROLE_LOW, PI_ROLE_MID, PI_ROLE_HIGH] {
-        let boxed = Box::into_raw(Box::new((harness.clone(), role))) as *mut u8;
-        queue_spawn_kthread_affine(
-            "test-prio-inv",
-            test_priority_inversion as *const () as u64,
-            boxed,
-            contend_mask,
-        );
-    }
+    // waiter that measures what the section cost it, once per lock flavour (3).
+    // Spawned by a gate thread rather than here, so the nine of them do not
+    // exist while the rest of the suite is being measured.
+    spawn_test(&harness, "test-prio-inv-gate", test_priority_inversion_gate);
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -1342,6 +1357,13 @@ extern "C" fn test_load_parked(arg: *mut u8) -> ! {
     let parked_cpu = cpus.pop().expect("load: no schedulers registered");
     let busy_cpu = cpus.pop();
 
+    // Sampled before the parkers exist, because the claim is about what parking
+    // them *adds*. An absolute bound cannot say that: the suite's own threads
+    // land on this CPU too, and on a single-CPU boot all fifty-odd of them do,
+    // which read load 51 against a bound of 32 and failed a working scheduler.
+    // A difference is the quantity under test on any number of CPUs.
+    let load_before = cpu_load(parked_cpu);
+
     for _ in 0..LOAD_PARKERS {
         let boxed = Box::into_raw(Box::new(h.clone())) as *mut u8;
         queue_spawn_kthread_affine(
@@ -1359,14 +1381,18 @@ extern "C" fn test_load_parked(arg: *mut u8) -> ! {
     // reach it. A parker still on its way is runnable and does weigh 1.
     thread_sleep(Duration::from_millis(20));
 
-    // The quantity itself. The bound is the parker count rather than a small
-    // number because the suite's own threads land on that CPU too; what it must
-    // never report is load that scales with the threads parked on it.
-    let parked_load = cpu_load(parked_cpu);
+    // The quantity itself: what it must never report is load that scales with
+    // the threads parked on it. The bound is the parker count so that a handful
+    // of the suite's other threads arriving or leaving between the two samples
+    // cannot decide the result -- what it rules out is the whole cohort landing
+    // in the number.
+    let load_after = cpu_load(parked_cpu);
+    let added = load_after.saturating_sub(load_before);
     assert!(
-        parked_load < LOAD_PARKERS as u64,
-        "[sched-test] load: cpu {parked_cpu} reports load {parked_load} with {LOAD_PARKERS} \
-         threads parked on it -- load is counting membership, not runnable work"
+        added < LOAD_PARKERS as u64,
+        "[sched-test] load: parking {LOAD_PARKERS} threads on cpu {parked_cpu} took its load \
+         from {load_before} to {load_after}, an increase of {added} -- load is counting \
+         membership, not runnable work"
     );
 
     if let Some(busy_cpu) = busy_cpu {
@@ -1401,9 +1427,13 @@ extern "C" fn test_load_parked(arg: *mut u8) -> ! {
             "[sched-test] load: placement chose cpu {chosen} over cpu {parked_cpu}, whose \
              {LOAD_PARKERS} threads are all parked"
         );
-
-        h.load_check_done.store(true, Ordering::Release);
     }
+
+    // Unconditional, and outside the two-CPU branch above: it releases the
+    // spinners, and it is also what the priority-inversion case waits on to
+    // know this one has stopped saturating a CPU. A single-CPU boot skips the
+    // comparison and would otherwise never publish it at all.
+    h.load_check_done.store(true, Ordering::Release);
 
     test_done(&h, "load-parked-is-not-load");
     thread_exit(0);
@@ -1753,17 +1783,34 @@ extern "C" fn test_burst_share(arg: *mut u8) -> ! {
 // ---------------------------------------------------------------------------
 // Priority inversion
 //
-// The Mars Pathfinder shape, on one CPU: a low-priority thread takes a
-// `BlockingMutex` and needs [`PI_HOLD`] of CPU inside the section, a
-// mid-priority thread spins for the whole window, and a high-priority thread
-// blocks on the same mutex. The high thread cannot run until the low one
-// releases, and the low one cannot run while the mid one is runnable, so the
-// mid thread — which wants neither the lock nor anything the high thread has —
-// sets how long the highest-priority thread on the machine waits.
+// The Mars Pathfinder shape, on one CPU: a low-priority thread takes a lock and
+// needs [`PI_HOLD`] of CPU inside the section, a mid-priority thread spins for
+// the whole window, and a high-priority thread blocks on the same lock. The
+// high thread cannot run until the low one releases, and the low one cannot run
+// while the mid one is runnable, so the mid thread — which wants neither the
+// lock nor anything the high thread has — sets how long the highest-priority
+// thread on the machine waits.
 //
 // **The mid-priority hog is the whole test.** Without it the holder simply runs
 // to the end of its section and the waiter measures one hold, which is what a
-// correct mutex costs and says nothing about inheritance.
+// correct lock costs and says nothing about inheritance.
+//
+// Run once per lock flavour, because the three have different holders to find:
+// a `BlockingMutex` and a write-held `RwLock` each have exactly one, and a
+// read-held `RwLock` has a set.
+//
+// **Two things this instrument had to be given before its number meant
+// anything**, both found on 2026-08-18 by asking what else was runnable:
+//
+//   - *A CPU of its own.* It used to share `contend_cpu` with the tri-level and
+//     weighted-share cases, and `share-heavy` is a flat-out spinner one level
+//     below the waiter — so most of the stretch it attributed to the hog was
+//     that thread.
+//   - *A quiet machine.* `test_starvation_spinner` puts a priority-13 spinner
+//     on **every** CPU for 400 ms, so no pin could have escaped it. Every role
+//     now waits for the saturating cases to finish before it starts.
+//
+// With both, the residual is the scheduler's; before them it was the suite's.
 //
 // This is an INSTRUMENT, not a gate on inheritance. The two assertions are
 // things the test itself controls: that the hog really did preempt the holder
@@ -1775,6 +1822,45 @@ extern "C" fn test_burst_share(arg: *mut u8) -> ! {
 const PI_ROLE_LOW: u64 = 0;
 const PI_ROLE_MID: u64 = 1;
 const PI_ROLE_HIGH: u64 = 2;
+
+/// The lock the low thread holds and the high thread wants.
+const PI_MUTEX: u64 = 0;
+const PI_RW_WRITE: u64 = 1;
+const PI_RW_READ: u64 = 2;
+const PI_FLAVOURS: usize = 3;
+
+fn pi_flavour_name(flavour: u64) -> &'static str {
+    match flavour {
+        PI_MUTEX => "prio-inversion",
+        PI_RW_WRITE => "prio-inversion-rwlock-write",
+        PI_RW_READ => "prio-inversion-rwlock-read",
+        _ => unreachable!("pi: unknown lock flavour"),
+    }
+}
+
+/// The wall clock the holder's section takes, as a percentage of its own CPU
+/// time, when it shares the CPU with the hog at `holder_priority`.
+///
+/// Derived from the weight table rather than picked. EEVDF hands out CPU in
+/// proportion to weight, so a section costing `c` of CPU against one competitor
+/// takes `c * (w_holder + w_hog) / w_holder` of wall clock. That gives the two
+/// figures this case is judged between: with the loan in force the holder is
+/// served at the *waiter's* weight, and without it at its own.
+fn pi_stretch_x100(holder_priority: u8) -> u64 {
+    let holder = weight_of(holder_priority);
+    let hog = weight_of(PI_MID_PRIORITY);
+    (holder + hog) * 100 / holder
+}
+
+/// Rounds per flavour, of which only the last is reported.
+///
+/// The read-held case needs the warm-up and the others are given it so all
+/// three are read the same way. `RwLock` records its read holders only once a
+/// writer has blocked on it — see the arming note there — so on a lock nobody
+/// has ever waited to write, the readers in flight are unrecorded and the first
+/// writer to block finds nobody to lend to. That is the design and not a defect
+/// to measure around, so the instrument arms the lock and then measures it.
+const PI_ROUNDS: u32 = 2;
 
 const PI_LOW_PRIORITY: u8 = DEFAULT_PRIORITY;
 /// Five levels over the holder, which is 1.25^5 = 3.05x of weight. Enough that
@@ -1794,84 +1880,270 @@ const PI_HOLD: Duration = Duration::from_millis(10);
 /// rather than a window the measurement depends on.
 const PI_HOG_MS: u64 = 400;
 
-extern "C" fn test_priority_inversion(arg: *mut u8) -> ! {
-    let (h, role) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
-    let me = current_thread().unwrap();
+/// How long a role waits for the suite to go quiet before giving up on it.
+///
+/// A bound rather than a plain loop because a case this one waits on can *die*:
+/// `load-parked-is-not-load` panicked on a single-CPU boot for years, and a
+/// gate that blocks forever on a dead dependency turns one red test into
+/// several silent ones. Well inside the coordinator's own `TIMEOUT_SECS`, so
+/// giving up here still leaves time to report.
+const PI_QUIET_TIMEOUT_MS: u64 = 3_000;
 
-    match role {
-        PI_ROLE_LOW => {
-            me.set_priority(PI_LOW_PRIORITY);
-            let mut guard = h.pi_mutex.lock();
-            let cpu_start = cpu_time_now(&me);
-            let wall_start = Instant::now().as_nanos();
-            h.pi_held.store(true, Ordering::Release);
-            let cpu_end = cpu_start + PI_HOLD.as_nanos() as u64;
-            while cpu_time_now(&me) < cpu_end {
-                *guard += 1;
-                core::hint::spin_loop();
-            }
-            h.pi_hold_cpu_ns
-                .store(cpu_time_now(&me) - cpu_start, Ordering::Relaxed);
-            h.pi_hold_wall_ns.store(
-                Instant::now().as_nanos().saturating_sub(wall_start),
-                Ordering::Relaxed,
+/// Waits for a quiet machine, then queues the nine threads that measure the
+/// inversion.
+///
+/// **One waiting thread, not nine.** The roles used to wait for quiet
+/// themselves, which put nine threads on a poll loop across the window every
+/// other case is measured in — and `burst-share`, which compares a *sleeper*
+/// against a steady thread, is exactly the case nine more sleepers perturb. It
+/// went red on a single-CPU boot at 1.42x from that alone. A gate thread costs
+/// one sleeper instead, and the cases it starts do not exist until the machine
+/// they need is the machine they get.
+extern "C" fn test_priority_inversion_gate(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let quiet = pi_wait_for_quiet(&h);
+    let pi_mask = 1u32 << h.pi_cpu;
+    for flavour in [PI_MUTEX, PI_RW_WRITE, PI_RW_READ] {
+        for role in [PI_ROLE_LOW, PI_ROLE_MID, PI_ROLE_HIGH] {
+            let boxed =
+                Box::into_raw(Box::new((h.clone(), flavour * 3 + role, quiet as u64))) as *mut u8;
+            queue_spawn_kthread_affine(
+                "test-prio-inv",
+                test_priority_inversion as *const () as u64,
+                boxed,
+                pi_mask,
             );
-            drop(guard);
-            h.pi_released.store(true, Ordering::Release);
         }
-        PI_ROLE_MID => {
-            me.set_priority(PI_MID_PRIORITY);
-            while !h.pi_held.load(Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
-            let deadline = Instant::now().as_nanos() + PI_HOG_MS * 1_000_000;
-            while Instant::now().as_nanos() < deadline && !h.pi_released.load(Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
+    }
+    thread_exit(0);
+}
+
+/// Wait until nothing else in the suite is saturating a CPU.
+///
+/// Returns whether it got there, since what the inversion factor means depends
+/// on it entirely.
+///
+/// Every case named here stays runnable for a fixed window rather than until
+/// some other thread lets it go, so this cannot wait on work that is itself
+/// waiting for the inversion case. Sleeping rather than yielding, so a role
+/// waiting here is off the runqueue instead of being one more competitor for
+/// the CPU whose contention is about to be measured.
+fn pi_wait_for_quiet(h: &TestHarness) -> bool {
+    let deadline = Instant::now().as_nanos() + PI_QUIET_TIMEOUT_MS * 1_000_000;
+    loop {
+        if h.starvation_finished.load(Ordering::Acquire) >= h.starvation_spinners
+            && h.tri_finished.load(Ordering::Acquire) >= TRI_SPINNERS
+            && h.share_finished.load(Ordering::Acquire) >= SHARE_THREADS
+            && h.burst_finished.load(Ordering::Acquire) >= BURST_THREADS
+            && h.load_check_done.load(Ordering::Acquire)
+        {
+            return true;
+        }
+        if Instant::now().as_nanos() >= deadline {
+            return false;
+        }
+        thread_sleep(Duration::from_millis(5));
+    }
+}
+
+/// Wait for this flavour's turn, and then for `round` within it.
+fn pi_wait_for_turn(h: &TestHarness, flavour: u64, round: u32) {
+    while h.pi_stage.load(Ordering::Acquire) < flavour as u32
+        || h.pi_round[flavour as usize].load(Ordering::Acquire) < round
+    {
+        thread_sleep(Duration::from_millis(1));
+    }
+}
+
+/// Hold this flavour's lock and burn [`PI_HOLD`] of CPU inside the section.
+///
+/// The three arms differ only in which guard they hold; the body is the same
+/// spin so that the flavours are comparable to each other. The counter is
+/// written through the guard where the guard permits it, so a compiler that
+/// decided the section was dead would fail the test rather than shorten it.
+fn pi_hold_section(h: &TestHarness, flavour: u64, me: &Arc<Thread>) -> (u64, u64) {
+    let cpu_start = cpu_time_now(me);
+    let wall_start = Instant::now().as_nanos();
+    let cpu_end = cpu_start + PI_HOLD.as_nanos() as u64;
+    h.pi_held[flavour as usize].store(true, Ordering::Release);
+
+    let spin = |bump: &mut dyn FnMut()| {
+        while cpu_time_now(me) < cpu_end {
+            bump();
+            core::hint::spin_loop();
+        }
+    };
+    match flavour {
+        PI_MUTEX => {
+            let mut guard = h.pi_mutex.lock();
+            spin(&mut || *guard += 1);
+        }
+        PI_RW_WRITE => {
+            let mut guard = h.pi_rwlock.write();
+            spin(&mut || *guard += 1);
         }
         _ => {
-            me.set_priority(PI_HIGH_PRIORITY);
-            while !h.pi_held.load(Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
-            let start = Instant::now().as_nanos();
-            let guard = h.pi_mutex.lock();
-            let waited = Instant::now().as_nanos().saturating_sub(start);
-            drop(guard);
-            h.pi_wait_ns.store(waited, Ordering::Relaxed);
-
-            let hold_cpu = h.pi_hold_cpu_ns.load(Ordering::Relaxed).max(1);
-            let hold_wall = h.pi_hold_wall_ns.load(Ordering::Relaxed);
-            // The hog is the test: if the holder's section ran at close to its
-            // own CPU speed, nothing preempted it and the number below is not
-            // an inversion.
-            let stretch_x100 = hold_wall.saturating_mul(100) / hold_cpu;
-            assert!(
-                stretch_x100 > 150,
-                "[sched-test] prio-inversion: the holder's {} us section took {} us of wall clock \
-                 ({}.{:02}x); the {} levels of hog above it never preempted it, so there was no \
-                 inversion to measure",
-                hold_cpu / 1000,
-                hold_wall / 1000,
-                stretch_x100 / 100,
-                stretch_x100 % 100,
-                PI_MID_PRIORITY - PI_LOW_PRIORITY,
-            );
-
-            let inversion_x100 = waited.saturating_mul(100) / hold_cpu;
-            println!(
-                "[sched-test] prio-inversion: the top-priority waiter blocked {} us on a {} us \
-                 section ({}.{:02}x), holder stretched {}.{:02}x by a hog {} levels above it",
-                waited / 1000,
-                hold_cpu / 1000,
-                inversion_x100 / 100,
-                inversion_x100 % 100,
-                stretch_x100 / 100,
-                stretch_x100 % 100,
-                PI_MID_PRIORITY - PI_LOW_PRIORITY,
-            );
-            test_done(&h, "prio-inversion");
+            let guard = h.pi_rwlock.read();
+            spin(&mut || {
+                core::hint::black_box(*guard);
+            });
         }
+    }
+    (
+        cpu_time_now(me) - cpu_start,
+        Instant::now().as_nanos().saturating_sub(wall_start),
+    )
+}
+
+extern "C" fn test_priority_inversion(arg: *mut u8) -> ! {
+    let (h, encoded, quiet) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64, u64)) };
+    let (flavour, role) = (encoded / 3, encoded % 3);
+    let quiet = quiet != 0;
+    let me = current_thread().unwrap();
+    let name = pi_flavour_name(flavour);
+    let f = flavour as usize;
+
+    for round in 0..PI_ROUNDS {
+        pi_wait_for_turn(&h, flavour, round);
+        match role {
+            PI_ROLE_LOW => {
+                me.set_priority(PI_LOW_PRIORITY);
+                let (cpu_ns, wall_ns) = pi_hold_section(&h, flavour, &me);
+                h.pi_hold_cpu_ns[f].store(cpu_ns, Ordering::Relaxed);
+                h.pi_hold_wall_ns[f].store(wall_ns, Ordering::Relaxed);
+                h.pi_released[f].store(true, Ordering::Release);
+            }
+            PI_ROLE_MID => {
+                me.set_priority(PI_MID_PRIORITY);
+                while !h.pi_held[f].load(Ordering::Acquire) {
+                    core::hint::spin_loop();
+                }
+                let deadline = Instant::now().as_nanos() + PI_HOG_MS * 1_000_000;
+                while Instant::now().as_nanos() < deadline
+                    && !h.pi_released[f].load(Ordering::Acquire)
+                {
+                    core::hint::spin_loop();
+                }
+            }
+            _ => {
+                me.set_priority(PI_HIGH_PRIORITY);
+                while !h.pi_held[f].load(Ordering::Acquire) {
+                    core::hint::spin_loop();
+                }
+                let start = Instant::now().as_nanos();
+                // Always the exclusive side: the inversion is about a waiter
+                // that cannot share with the holder, which for the read-held
+                // flavour means a writer.
+                match flavour {
+                    PI_MUTEX => drop(h.pi_mutex.lock()),
+                    _ => drop(h.pi_rwlock.write()),
+                }
+                h.pi_wait_ns[f].store(
+                    Instant::now().as_nanos().saturating_sub(start),
+                    Ordering::Relaxed,
+                );
+
+                // The holder is through, so the round's flags can be reset for
+                // the next one. Both are published before the round is bumped,
+                // which is what the other two roles are waiting on.
+                while !h.pi_released[f].load(Ordering::Acquire) {
+                    core::hint::spin_loop();
+                }
+                if round + 1 < PI_ROUNDS {
+                    h.pi_held[f].store(false, Ordering::Release);
+                    h.pi_released[f].store(false, Ordering::Release);
+                    h.pi_round[f].store(round + 1, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    if role == PI_ROLE_HIGH {
+        if !quiet {
+            // Everything below is a statement about one runqueue carrying the
+            // holder, the hog and nothing else. Asserting it against a machine
+            // still running the rest of the suite would be reporting on that
+            // instead, which is exactly the reading this case was built to stop
+            // making -- so say so and gate nothing.
+            println!(
+                "[sched-test] {name}: SKIPPED, the suite was still saturating a CPU after \
+                 {PI_QUIET_TIMEOUT_MS} ms -- a case this one waits on has not finished, so \
+                 there is no quiet machine to measure an inversion on"
+            );
+            test_done(&h, name);
+            // Release the other two roles through every remaining round, or
+            // they wait for a turn this thread is no longer here to publish.
+            h.pi_round[f].store(PI_ROUNDS, Ordering::Release);
+            h.pi_stage.fetch_add(1, Ordering::AcqRel);
+            thread_exit(0);
+        }
+        let waited = h.pi_wait_ns[f].load(Ordering::Relaxed);
+        let hold_cpu = h.pi_hold_cpu_ns[f].load(Ordering::Relaxed).max(1);
+        let hold_wall = h.pi_hold_wall_ns[f].load(Ordering::Relaxed);
+        let stretch_x100 = hold_wall.saturating_mul(100) / hold_cpu;
+        let lent = pi_stretch_x100(PI_HIGH_PRIORITY);
+        let unlent = pi_stretch_x100(PI_LOW_PRIORITY);
+
+        // The hog is the test: if the holder's section ran at its own CPU
+        // speed, nothing preempted it and the number below is not an inversion.
+        // The floor is a tenth of the way from no hog at all to the stretch a
+        // lent holder shows, which is the smallest of the three quantities here
+        // and so the one the bound has to clear.
+        let hog_floor = 100 + (lent - 100) / 10;
+        assert!(
+            stretch_x100 > hog_floor,
+            "[sched-test] {name}: the holder's {} us section took {} us of wall clock \
+             ({}.{:02}x, floor {}.{:02}x); the {} levels of hog above it never preempted it, \
+             so there was no inversion to measure",
+            hold_cpu / 1000,
+            hold_wall / 1000,
+            stretch_x100 / 100,
+            stretch_x100 % 100,
+            hog_floor / 100,
+            hog_floor % 100,
+            PI_MID_PRIORITY - PI_LOW_PRIORITY,
+        );
+
+        // And the gate on inheritance itself. A holder that is lent the
+        // waiter's priority outranks the hog and stretches by `lent`; one that
+        // is not is outranked by it and stretches by `unlent`. Judging against
+        // the midpoint asks only that the loan reached the holder, not that it
+        // arrived instantly, so the window before the waiter blocks does not
+        // decide the result.
+        let gate = (lent + unlent) / 2;
+        assert!(
+            stretch_x100 < gate,
+            "[sched-test] {name}: the holder's {} us section stretched {}.{:02}x, over the \
+             {}.{:02}x gate -- it was served at its own weight against the hog ({}.{:02}x \
+             unlent) rather than at the waiter's ({}.{:02}x lent), so no priority was \
+             inherited across the section",
+            hold_cpu / 1000,
+            stretch_x100 / 100,
+            stretch_x100 % 100,
+            gate / 100,
+            gate % 100,
+            unlent / 100,
+            unlent % 100,
+            lent / 100,
+            lent % 100,
+        );
+
+        let inversion_x100 = waited.saturating_mul(100) / hold_cpu;
+        println!(
+            "[sched-test] {name}: the top-priority waiter blocked {} us on a {} us \
+             section ({}.{:02}x), holder stretched {}.{:02}x by a hog {} levels above it",
+            waited / 1000,
+            hold_cpu / 1000,
+            inversion_x100 / 100,
+            inversion_x100 % 100,
+            stretch_x100 / 100,
+            stretch_x100 % 100,
+            PI_MID_PRIORITY - PI_LOW_PRIORITY,
+        );
+        test_done(&h, name);
+        // Hand the CPU to the next flavour only once this one has reported, so
+        // that no two inversions are ever in flight together.
+        h.pi_stage.fetch_add(1, Ordering::AcqRel);
     }
     thread_exit(0);
 }

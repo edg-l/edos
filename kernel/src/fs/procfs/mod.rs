@@ -277,16 +277,17 @@ impl Procfs {
     /// reports it as.
     fn render_sched() -> String {
         use crate::thread::scheduler::SCHEDULERS;
-        let mut out = String::from("CPU  CURRENT  QUEUED  LOAD  STEALS  SWITCHES  VTIME\n");
+        let mut out = String::from("CPU  CURRENT  QUEUED  LOAD  STEALS  REBAL  SWITCHES  VTIME\n");
         for (&cpu, &sched) in SCHEDULERS.read().iter() {
             let _ = writeln!(
                 out,
-                "{:<4} {:<8} {:<7} {:<5} {:<7} {:<9} {}",
+                "{:<4} {:<8} {:<7} {:<5} {:<7} {:<6} {:<9} {}",
                 cpu,
                 sched.current.load(Ordering::Acquire),
                 sched.queued(),
                 sched.load(),
                 sched.steals(),
+                sched.rebalances(),
                 sched.switches(),
                 sched.vtime(),
             );

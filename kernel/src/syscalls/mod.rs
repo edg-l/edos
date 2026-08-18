@@ -81,7 +81,7 @@ pub mod trace;
 mod window;
 
 use self::ioctl::sys_ioctl;
-use self::sync::{sys_futex_wait, sys_futex_wake};
+use self::sync::{sys_futex_wait, sys_futex_wait_pi, sys_futex_wake};
 use crate::thread::scheduler::{
     current_thread, current_thread_id, current_thread_info, current_thread_killed,
     current_thread_weak, exit_if_killed, stop_if_signalled, thread_exit, thread_park_while,
@@ -372,6 +372,21 @@ const SYS_MONOTONIC_TIME: u64 = 210;
 const SYS_CLONE: u64 = 211;
 const SYS_FUTEX_WAIT: u64 = 212;
 const SYS_FUTEX_WAKE: u64 = 213;
+/// `futex_wait`, plus the thread the caller names as the owner of the lock the
+/// word stands for, so the wait can lend it a priority.
+///
+/// A separate number rather than a fourth argument on [`SYS_FUTEX_WAIT`]: a
+/// caller built against the three-argument form leaves whatever it likes in
+/// `r10`, and reading that as a thread id would boost an unrelated thread
+/// chosen by leftover register contents.
+const SYS_FUTEX_WAIT_PI: u64 = 317;
+/// The calling thread's own id.
+///
+/// `getpid` answers for the process, so every thread in one shares its value
+/// and none of them can name itself. A lock that wants a holder to publish who
+/// it is — see [`SYS_FUTEX_WAIT_PI`] — needs the thread, and `sched_setattr`
+/// already speaks thread ids it gave userspace no way to obtain.
+const SYS_GETTID: u64 = 186;
 const SYS_GETRANDOM: u64 = 214;
 const SYS_SHM_CREATE: u64 = 215;
 const SYS_SHM_MAP: u64 = 216;
@@ -754,6 +769,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_GETPID => {
             ctx.rax = sys_getpid();
         }
+        SYS_GETTID => {
+            ctx.rax = current_thread().map_or(0, |t| t.id.0);
+        }
         SYS_SCHED_YIELD => {
             thread_yield();
             ctx.rax = 0;
@@ -879,6 +897,13 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let expected = ctx.rsi as u32;
             let timeout_ns = ctx.rdx;
             ctx.rax = sys_futex_wait(addr, expected, timeout_ns);
+        }
+        SYS_FUTEX_WAIT_PI => {
+            let addr = ctx.rdi as *const u32;
+            let expected = ctx.rsi as u32;
+            let timeout_ns = ctx.rdx;
+            let owner_tid = ctx.r10;
+            ctx.rax = sys_futex_wait_pi(addr, expected, timeout_ns, owner_tid);
         }
         SYS_FUTEX_WAKE => {
             let addr = ctx.rdi as *const u32;

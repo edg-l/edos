@@ -92,6 +92,8 @@ enum Mode {
     Wake,
     /// Whether a thread that sleeps in a loop ever leaves the CPU it slept on.
     Sleep,
+    /// Whether work moves between two CPUs that are *both* busy.
+    Crowd,
 }
 
 fn main() {
@@ -103,10 +105,11 @@ fn main() {
             "-l" => klog = true,
             "wake" => mode = Mode::Wake,
             "sleep" => mode = Mode::Sleep,
+            "crowd" => mode = Mode::Crowd,
             other => match other.parse::<u64>() {
                 Ok(n) if n > 0 => workers_arg = Some(n),
                 _ => {
-                    eprintln!("usage: balancebench [wake|sleep] [workers] [-l]");
+                    eprintln!("usage: balancebench [wake|sleep|crowd] [workers] [-l]");
                     std::process::exit(2);
                 }
             },
@@ -117,6 +120,7 @@ fn main() {
     match mode {
         Mode::Wake => return wake_burst(&mut out, workers_arg),
         Mode::Sleep => return sleep_burst(&mut out, workers_arg),
+        Mode::Crowd => return crowd_burst(&mut out, workers_arg),
         Mode::Spawn => {}
     }
 
@@ -470,6 +474,131 @@ fn sleep_burst(out: &mut Tee, workers_arg: Option<u64>) {
     ));
     report_sched(out, "after the bursts");
 
+    for req_write in req_writes {
+        let _ = close(req_write);
+    }
+    for ack_read in ack_reads {
+        let _ = close(ack_read);
+    }
+}
+
+/// Prices the one placement path the other three modes cannot reach: moving
+/// work between two CPUs that are **both busy**.
+///
+/// `wake` and `sleep` both end with a burst on one runqueue and the rest of the
+/// machine halted, and what rescues them is a poke: an enqueue that leaves two
+/// or more threads queued claims a CPU out of the idle mask and sends it a
+/// reschedule IPI. That path needs an idle CPU to claim. When every CPU is
+/// already running something, there is none, and the *only* thing left that can
+/// even out the load is periodic rebalancing on the timer tick — which is what
+/// `REBALANCE_THRESHOLD` and `REBALANCE_INTERVAL` in `thread/scheduler.rs`
+/// govern, and what nothing measured before this mode.
+///
+/// So: one resident spinner per CPU, running for the whole mode, which takes
+/// the idle mask permanently empty. Then park a worker per CPU and wake them
+/// all from one thread, which buries the whole burst in the waker's runqueue
+/// with nowhere for a poke to send it. `wall / solo` is the report on the same
+/// scale as `wake fanout`, except that 2.00 rather than 1.00 is the floor: a
+/// burst worker shares its CPU with a resident even when placement is perfect.
+///
+/// Read `REBAL` in the `/proc/sched` block beside it. That column counts only
+/// the threads periodic rebalancing moved, so a run whose fanout is bad and
+/// whose REBAL is zero says the dial never fired rather than that it fired and
+/// did not help.
+fn crowd_burst(out: &mut Tee, workers_arg: Option<u64>) {
+    let cpus = cpus_online();
+    let workers = workers_arg.unwrap_or_else(|| cpus.max(1));
+    out.line(&format!(
+        "balancebench crowd {cpus} cpus online, {workers} workers, {cpus} residents, \
+         {WAKE_BURSTS} bursts"
+    ));
+    if cpus < 2 {
+        out.line("balancebench crowd: NOT a multi-CPU boot, there is nowhere to rebalance to");
+    }
+
+    thread::sleep(WAKE_SETTLE);
+    let t0 = Instant::now();
+    let checksum = work(WAKE_ROUNDS, 1);
+    let solo = t0.elapsed();
+    out.line(&format!(
+        "balancebench crowd solo {:.2} ms for one worker alone (checksum {checksum:#x})",
+        solo.as_secs_f64() * 1000.0
+    ));
+
+    // The residents. One per CPU, spawned rather than woken so placement
+    // spreads them, and spinning rather than sleeping so no CPU is ever idle
+    // for a poke to claim. Each checks the stop flag once per short lump rather
+    // than once per iteration, so the flag costs nothing while it is false and
+    // the mode still cannot leave a core burning when it returns.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut residents = Vec::new();
+    for i in 0..cpus {
+        let stop = std::sync::Arc::clone(&stop);
+        residents.push(thread::spawn(move || {
+            let mut state = i + 1;
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                state = work(WAKE_ROUNDS / 32, state);
+            }
+            state
+        }));
+    }
+    // Let them be picked up and spread before anything is measured against
+    // them; a resident still on its way is not yet occupying a CPU.
+    thread::sleep(WAKE_SETTLE);
+    report_sched(out, "with residents running, before the bursts");
+
+    let mut req_writes = Vec::new();
+    let mut ack_reads = Vec::new();
+    for i in 0..workers {
+        let (req_read, req_write) = pipe().expect("balancebench: request pipe");
+        let (ack_read, ack_write) = pipe().expect("balancebench: ack pipe");
+        req_writes.push(req_write);
+        ack_reads.push(ack_read);
+        thread::spawn(move || wake_worker(req_read, ack_write, WAKE_BURSTS, i + 2));
+    }
+
+    let mut walls: Vec<Duration> = Vec::new();
+    for _ in 0..WAKE_BURSTS {
+        thread::sleep(WAKE_SETTLE);
+        let burst = Instant::now();
+        for &req_write in &req_writes {
+            let n = write(req_write, &[1u8]);
+            assert!(n == 1, "balancebench crowd: request write returned {n}");
+        }
+        let mut slowest_worker = 0u32;
+        for (worker, &ack_read) in ack_reads.iter().enumerate() {
+            slowest_worker = slowest_worker.max(await_ack(ack_read, worker));
+        }
+        let wall = burst.elapsed();
+        out.line(&format!(
+            "balancebench crowd   burst {:.2} ms, slowest worker\'s own loop {:.2} ms",
+            wall.as_secs_f64() * 1000.0,
+            slowest_worker as f64 / 1000.0
+        ));
+        walls.push(wall);
+    }
+    walls.sort_unstable();
+
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let median = walls[walls.len() / 2];
+    out.line(&format!(
+        "balancebench crowd burst fastest {:.2} ms median {:.2} ms slowest {:.2} ms",
+        ms(walls[0]),
+        ms(median),
+        ms(walls[walls.len() - 1])
+    ));
+    out.line(&format!(
+        "balancebench crowd fanout {:.2} (median burst over solo; 2.00 is every worker beside a \
+         resident, {:.2} is the whole burst on one CPU behind one)",
+        ms(median) / ms(solo),
+        (workers + 1) as f64
+    ));
+    report_sched(out, "after the bursts");
+
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    for r in residents {
+        let _ = r.join();
+    }
     for req_write in req_writes {
         let _ = close(req_write);
     }

@@ -44,9 +44,51 @@ use crate::{
     util::per_cpu::{get_percpu_data, read_fs_base, write_fs_base},
 };
 
-/// Rebalance every N timer ticks (~50ms at 5ms timeslice).
-const REBALANCE_INTERVAL: u32 = 10;
-/// Only steal if the busiest CPU has this many more threads than us.
+/// Timer ticks between two periodic rebalance attempts on one CPU.
+///
+/// Ticks, not milliseconds: the timer is a one-shot armed for whichever comes
+/// first of the running thread's slice deadline and the next sleeper's expiry,
+/// so a tick has no fixed period and this is not a fixed interval.
+///
+/// **One, because an imbalance that outlives the burst that caused it was never
+/// corrected at all.** This was 10, described as "~50ms at 5ms timeslice" —
+/// both halves of which had stopped being true, since the slice is a per-thread
+/// request defaulting to [`BASE_SLICE`] and a tick is not the slice. What it
+/// left was a correction rate of one thread per CPU per ~10 ms, against bursts
+/// that are over in less. Measured with `balancebench crowd` on an 8-CPU boot,
+/// median of three runs on a quiet host, where 2.00 is a perfectly spread
+/// burst and 9.00 is the whole of one behind a single resident:
+///
+/// | interval | fanout |
+/// |----------|--------|
+/// | 10       | 3.99   |
+/// | 4        | 3.16   |
+/// | 1        | 2.36   |
+///
+/// The cost is a `SCHEDULERS` read and a walk of the registered CPUs, and it
+/// did not show: a solo CPU-bound lump on those same boots read 4.40 ms at an
+/// interval of 10 and 4.41 ms at 1. That walk is O(CPUs) under a read lock
+/// though, and 8 is where this was measured — so this is the throttle to reach
+/// for first if a much larger machine ever finds the scan on the tick path.
+const REBALANCE_INTERVAL: u32 = 1;
+
+/// How much more load the busiest CPU must carry before this one takes a thread
+/// off it.
+///
+/// **Load, not threads.** It is [`Scheduler::load`] — the runqueue's length
+/// plus whatever is running — so parked and sleeping threads weigh nothing and
+/// this is a difference in *runnable* work.
+///
+/// Two rather than one because the quantity includes the running thread on both
+/// sides: at a threshold of one, a CPU running a thread with an empty queue
+/// (load 1) would steal from one running a thread with an empty queue and a
+/// wake in flight (load 2), leaving the pair exactly as unbalanced as before
+/// with a migration paid for. Two is the smallest difference that a move can
+/// actually reduce.
+///
+/// Confirmed rather than assumed: at [`REBALANCE_INTERVAL`] of 1, dropping this
+/// to one moved `balancebench crowd`'s fanout not at all (2.36 either way) and
+/// only added the churn the paragraph above predicts.
 const REBALANCE_THRESHOLD: u64 = 2;
 
 /// CPUs halted in [`Scheduler::run_idle`], by dense CPU index.
@@ -207,6 +249,15 @@ pub struct Scheduler {
 
     has_work: AtomicBool,
     steal_count: AtomicU64,
+    /// The subset of [`Scheduler::steal_count`] that [`Scheduler::try_rebalance`]
+    /// took, as opposed to an idle CPU pulling work it had none of.
+    ///
+    /// Separate because the two answer different questions and only one of them
+    /// has a dial. An idle steal is triggered by a poke and takes what it finds;
+    /// a periodic one is the only thing that can move work between two CPUs that
+    /// are *both* busy, and whether it ever fires is what
+    /// [`REBALANCE_THRESHOLD`] and [`REBALANCE_INTERVAL`] decide.
+    rebalance_count: AtomicU64,
     steal_scan_start: AtomicU32,
     rebalance_tick: AtomicU32,
 
@@ -301,6 +352,7 @@ impl Scheduler {
             armed_expiry: AtomicU64::new(0),
             has_work: AtomicBool::new(false),
             steal_count: AtomicU64::new(0),
+            rebalance_count: AtomicU64::new(0),
             steal_scan_start: AtomicU32::new(0),
             rebalance_tick: AtomicU32::new(0),
             switches: AtomicU64::new(0),
@@ -365,6 +417,12 @@ impl Scheduler {
     /// Threads this CPU has taken from another's runqueue.
     pub fn steals(&self) -> u64 {
         self.steal_count.load(Ordering::Relaxed)
+    }
+
+    /// The subset of [`Scheduler::steals`] taken by periodic rebalancing, which
+    /// is the only path that can move work between two busy CPUs.
+    pub fn rebalances(&self) -> u64 {
+        self.rebalance_count.load(Ordering::Relaxed)
     }
 
     /// Context switches this CPU has performed.
@@ -1291,6 +1349,7 @@ impl Scheduler {
         self.has_work.store(true, Ordering::Release);
 
         self.steal_count.fetch_add(1, Ordering::Relaxed);
+        self.rebalance_count.fetch_add(1, Ordering::Relaxed);
 
         self.mark_running_thread_need_resched();
     }

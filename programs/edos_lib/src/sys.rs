@@ -54,6 +54,9 @@ pub const SYS_NETINFO: u64 = 250;
 pub const SYS_GETDNS: u64 = 256;
 pub const SYS_SETDNS: u64 = 316;
 pub const SYS_REBOOT: u64 = 169;
+pub const SYS_GETTID: u64 = 186;
+pub const SYS_FUTEX_WAKE: u64 = 213;
+pub const SYS_FUTEX_WAIT_PI: u64 = 317;
 
 pub const AF_INET: u32 = 2;
 pub const SOCK_STREAM: u32 = 1;

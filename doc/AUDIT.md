@@ -352,15 +352,25 @@ Beyond affinity (1.2), things that look like the next real improvements:
   the busy side has to be unambiguous against that. A decayed utilisation
   average is still the better metric and is now an improvement rather than a
   correction.
-- **No priority inheritance — FIXED for `BlockingMutex`, and the residual is
-  measured rather than assumed.** EEVDF bounds how long a low-priority lock
-  holder can be passed over — it falls behind `V` and its deadline expires — but
-  a high-priority waiter still waited behind it. A waiter now lends the holder
-  its effective priority for the duration and the lend is undone on release.
-  The `prio-inversion` case in `thread/sched_test.rs` measures the Mars
-  Pathfinder shape and fell from 18.17x to 7.67x; `doc/SCHED-ROADMAP.md` §6
-  carries the two candidates for the gap that is left. `BlockingRwLock` and the
-  futex path have no lending at all, which is what remains open here.
+- **No priority inheritance — FIXED, and the residual turned out to be the
+  instrument.** EEVDF bounds how long a low-priority lock holder can be passed
+  over — it falls behind `V` and its deadline expires — but a high-priority
+  waiter still waited behind it. A waiter now lends the holder its effective
+  priority for the duration of the wait. `BlockingMutex` (76384ed), `RwLock` in
+  both directions, and the futex path all lend; the last needed an owner the
+  kernel could not read out of an opaque word, so `SYS_FUTEX_WAIT_PI` takes one
+  from the waiter and `SYS_GETTID` lets a holder publish it.
+
+  The `prio-inversion` case fell 18.17x → 7.67x with the mutex lend, and this
+  entry used to carry that 7.67x as an open gap against the 1.5x pure share
+  predicts. It was not a gap: the case shared a CPU with two saturating tests,
+  and `test_starvation_spinner` puts a priority-13 spinner on **every** CPU for
+  400 ms, so no pin escaped it. Given a CPU of its own and a quiet machine it
+  reads 1.50x against the table's 1.51x, for all three lock flavours. The case
+  is a derived gate now rather than an instrument — the midpoint of the lent and
+  unlent stretches the weight table predicts — and was watched red at 3.5x with
+  each lend deleted in turn. `programs/pitest` is the equivalent gate for the
+  futex path, red at 0.95x and green at 4.30x.
 - **The timeslice was a flat 5 ms — FIXED, and the entry understated it.**
   Priority did not merely fail to affect share of CPU; the strict-priority
   buckets that carried it could withhold the CPU entirely. Their anti-starvation

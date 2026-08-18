@@ -156,7 +156,7 @@ down is that any second type owning a descriptor faces the same four:
 
 Verified with the same instrument that found it. The strace above now ends in
 `close(3) = 0`, and the descriptor is 3 rather than 4 because nothing earlier in
-the process is stranded. `guest-check` (15 suites), `ssh-check` and
+the process is stranded. `guest-check` (16 suites), `ssh-check` and
 `storage-check` all pass; `stdtest` is the only program in the tree that uses
 `std::process::Command`, and its `Command::new("/bin/echo").output()` is exactly
 the pipe-EOF path this could have broken.
@@ -2152,7 +2152,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-18 (at v0.8.0)
+## Counts, remeasured 2026-08-18 (at v0.8.0, then again after the priority-inheritance work)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2160,16 +2160,17 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 120 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 120 — a mismatch is the bug |
-| userspace programs | 127 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| syscalls | 122 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 122 — a mismatch is the bug |
+| userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 128 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 113,127 code lines across 453 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 51,178 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,483 | `git rev-list --count HEAD` |
-| in-kernel test suite | 56 | `make test AUDIODEV=none` |
+| binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
+| Rust | 113,779 code lines across 455 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 51,490 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,486 | `git rev-list --count HEAD` |
+| in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
+| guest suites | 16 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
 | `unwrap()`/`expect()` in `kernel/src` | 160, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
