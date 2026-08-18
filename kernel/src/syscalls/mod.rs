@@ -1802,17 +1802,19 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
     // Create new pipe
     let pipe = Arc::new(BlockingMutex::new(Pipe::new()));
 
+    // The fd table is a `BlockingMutex` and its contended path parks, so the
+    // `Arc` leaves the thread-info `IrqSpinlock` before it is locked: taken
+    // inside that guard, the park would happen with interrupts disabled.
+    let fd_table = info.lock().fd_table.clone();
+
     // Allocate read and write file descriptors
-    let read_fd = info
-        .lock()
-        .fd_table
-        .lock()
-        .allocate_fd(FileDescriptor::PipeRead(pipe.clone()));
-    let write_fd = info
-        .lock()
-        .fd_table
-        .lock()
-        .allocate_fd(FileDescriptor::PipeWrite(pipe));
+    let (read_fd, write_fd) = {
+        let mut table = fd_table.lock();
+        (
+            table.allocate_fd(FileDescriptor::PipeRead(pipe.clone())),
+            table.allocate_fd(FileDescriptor::PipeWrite(pipe)),
+        )
+    };
 
     // Copy file descriptor numbers to user space
     let pipefd = [read_fd, write_fd];
@@ -1825,8 +1827,11 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
         )
     } {
         // Close both FDs to avoid leaking unreachable pipe ends
-        info.lock().fd_table.lock().close_fd(read_fd);
-        info.lock().fd_table.lock().close_fd(write_fd);
+        {
+            let mut table = fd_table.lock();
+            table.close_fd(read_fd);
+            table.close_fd(write_fd);
+        }
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }

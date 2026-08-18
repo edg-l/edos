@@ -1332,8 +1332,12 @@ impl Thread {
         if is_last_thread {
             // Close all file descriptors (pipes need proper shutdown for EOF)
             if let Some(info) = THREADS.get_info(self.id) {
+                // The fd table is a `BlockingMutex` and its contended path
+                // parks, so the `Arc` leaves the thread-info `IrqSpinlock`
+                // before it is locked.
+                let fd_table = info.lock().fd_table.clone();
                 let fds: alloc::vec::Vec<(u64, super::pipe::FileDescriptor)> =
-                    info.lock().fd_table.lock().drain_all();
+                    fd_table.lock().drain_all();
                 for (_fd_num, descriptor) in fds {
                     super::pipe::close_descriptor(descriptor, self.id.0);
                 }

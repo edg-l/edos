@@ -2519,23 +2519,27 @@ pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> u64 {
 
     let pty = Arc::new(BlockingMutex::new(Pty::new()));
 
-    let master_fd = info
-        .lock()
-        .fd_table
-        .lock()
-        .allocate_fd(FileDescriptor::PtyMaster(pty.clone()));
+    // The fd table is a `BlockingMutex` and its contended path parks, so the
+    // `Arc` leaves the thread-info `IrqSpinlock` before it is locked: taken
+    // inside that guard, the park would happen with interrupts disabled.
+    let fd_table = info.lock().fd_table.clone();
 
-    let slave_fd = info
-        .lock()
-        .fd_table
-        .lock()
-        .allocate_fd(FileDescriptor::PtySlave(pty));
+    let (master_fd, slave_fd) = {
+        let mut table = fd_table.lock();
+        (
+            table.allocate_fd(FileDescriptor::PtyMaster(pty.clone())),
+            table.allocate_fd(FileDescriptor::PtySlave(pty)),
+        )
+    };
 
     let fds = [master_fd, slave_fd];
     let fds_bytes = core::mem::size_of_val(&fds);
     if !unsafe { try_copy_to_user(pipefd_ptr as *mut u8, fds.as_ptr() as *const u8, fds_bytes) } {
-        info.lock().fd_table.lock().close_fd(master_fd);
-        info.lock().fd_table.lock().close_fd(slave_fd);
+        {
+            let mut table = fd_table.lock();
+            table.close_fd(master_fd);
+            table.close_fd(slave_fd);
+        }
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }

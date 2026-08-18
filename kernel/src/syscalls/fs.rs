@@ -560,7 +560,11 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
         return -1;
     }
 
-    let fd = info.lock().fd_table.lock().get_fd(fd).cloned();
+    // The fd table is a `BlockingMutex` and its contended path parks, so the
+    // `Arc` leaves the thread-info `IrqSpinlock` before it is locked: taken
+    // inside that guard, the park would happen with interrupts disabled.
+    let fd_table = info.lock().fd_table.clone();
+    let fd = fd_table.lock().get_fd(fd).cloned();
     let fd_descriptor = match fd {
         Some(desc) => desc,
         None => {
