@@ -6,9 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A pull request only needs a verdict on its latest push, so superseded runs
+# are cancelled. A push to trunk gets a group of its own instead: the boot jobs
+# take twenty minutes, and cancelling them means a run of commits lands with
+# nothing having tested any of them but the last.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
