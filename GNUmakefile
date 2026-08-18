@@ -482,9 +482,15 @@ sata-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/
 efs-fsck:
 	cargo build --release --manifest-path tools/efs-fsck/Cargo.toml
 
+# The integration tests build their fixtures by running `efs-mkfs` out of its
+# release target dir, and fail rather than skip when it is absent.
 .PHONY: check-fsck
-check-fsck:
+check-fsck: efs-mkfs
 	cargo test --release --manifest-path tools/efs-fsck/Cargo.toml
+
+.PHONY: efs-mkfs
+efs-mkfs:
+	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
 
 .PHONY: clean-sata
 clean-sata:
