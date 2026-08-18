@@ -172,6 +172,38 @@ impl BlockBuffer {
         }
     }
 
+    /// A view of `offset..offset + len` bytes of this buffer that carries
+    /// the same ownership, for a driver that has to split one request into
+    /// several device commands. The backing stays alive as long as any view
+    /// of it does: `Owned` clones the `Arc`, and `ReapedBySubmitter` counts
+    /// the extra borrow so the submitter's `thread_exit` assertion still
+    /// balances.
+    pub fn subrange(&self, offset: usize, len: usize) -> Self {
+        assert!(
+            offset.checked_add(len).is_some_and(|end| end <= self.len),
+            "BlockBuffer::subrange out of range"
+        );
+        let owner = match &self.owner {
+            BufferOwner::Owned(owner) => BufferOwner::Owned(Arc::clone(owner)),
+            BufferOwner::ReapedBySubmitter(weak) => {
+                #[cfg(debug_assertions)]
+                if let Some(t) = weak.upgrade() {
+                    t.borrowed_dma.fetch_add(1, Ordering::Relaxed);
+                }
+                BufferOwner::ReapedBySubmitter(weak.clone())
+            }
+            BufferOwner::Static => BufferOwner::Static,
+        };
+        Self {
+            // SAFETY: bounds-checked against `self.len` above, and `self`
+            // is a valid `ptr..ptr + len` range by its own constructors'
+            // contract.
+            ptr: unsafe { self.ptr.add(offset) },
+            len,
+            owner,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

@@ -8763,3 +8763,46 @@ the same `efs-mkfs`; their partition GUIDs differ, so root selection is decided
 by the cmdline rather than being a race, but with both attached the disk under
 test is not necessarily the one mounted. Dropping the SATA disk leaves one
 candidate.
+
+## NVMe writes, flush and MDTS splitting (2026-08-19)
+
+QEMU's `-device nvme` reports `mdts=524288` (512 KiB) with `vwc=true`. The
+filesystem layer batches at 248 pages (992 KiB), from AHCI's PRDT, so **every
+large run on an NVMe root is split**: one boot of the desktop plus a single
+`echo hi > /var/nvmew` already showed `split_requests=6 split_commands=12` in
+`/proc/nvme_stats`. Splitting is not a corner the `mdts=1` red gate has to
+manufacture; the default QEMU device exercises it on boot.
+
+The split shape: one `SplitOp` holds the caller's `BlockIoHandle`, a count of
+outstanding parts, and a `failed` flag. Each part is an ordinary `NvmeOp` that
+reclaims its own cid, bounce buffer and PRP list page, then reports through
+`Completion::Part`. Two things are load-bearing:
+
+- The first failure completes the handle immediately and sets `failed` **before**
+  the `fetch_sub`, so the part that sees the counter reach zero also sees the
+  flag. `BlockIoHandle::complete` publishes its error code *before* the state
+  CAS it may lose, so an `Ok` racing a recorded failure would store `error = 0`
+  under a `FAILED` state and a waiter would decode `BlockError::from_code(0)`.
+  That is why the success path is gated on `!failed` rather than leaning on
+  `complete`'s idempotence.
+- A submit failure mid-way accounts for **all** the parts never issued in one
+  `parts_done(parts - part, Err(e))`, and returns `Ok(handle)` rather than
+  `Err`: parts are already in flight and the caller must still wait for them.
+
+`BlockBuffer::subrange` is what lets a part address a slice of the caller's
+buffer. It clones the ownership rather than borrowing, and bumps
+`borrowed_dma` for the `ReapedBySubmitter` case so the `thread_exit` assertion
+still balances.
+
+Flush is gated on `Identify Controller` VWC bit 0, logged per namespace at
+probe. With the bit clear the handle completes `Ok` with no command and
+`flushes_elided` counts it, so "the flush did nothing" is answerable from
+`/proc/nvme_stats` rather than by inference.
+
+`Direction::Flush` exists as its own variant instead of being folded into
+`Write`: the completion path's copy-back test asks "was this a read", and a
+flush answering "write" would have been a lie the next reader has to re-derive.
+
+Verified for real: NVMe-**root** boot (`--nvme-disk --no-sata`, `limine.conf`
+cmdline pointed at `NVME_UUID`, restored afterwards) reaches the desktop, root
+mounts on device 3000, a write reads back, `flushes=1`, `command_errors=0`.

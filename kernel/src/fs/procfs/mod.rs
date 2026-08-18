@@ -1443,6 +1443,7 @@ const GLOBAL_FILES: &[GlobalFile] = &[
     ("lock_order_stats", Procfs::render_lock_order_stats),
     ("inflight_stats", Procfs::render_inflight_stats),
     ("ahci_stats", Procfs::render_ahci_stats),
+    ("nvme_stats", crate::drivers::nvme::stats::render),
     ("gpu_stats", Procfs::render_gpu_stats),
     ("windows", Procfs::render_windows),
     ("net", Procfs::render_net),

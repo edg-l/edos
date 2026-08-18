@@ -13,7 +13,7 @@
 //! the watchdog) later observes the device actually finish.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicU8, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::{
     drivers::{
@@ -37,11 +37,13 @@ pub const OP_RECLAIMED: u8 = 3;
 
 /// Which direction this command moves data, so the completion path knows
 /// whether a bounced transfer needs copying back into the caller's buffer.
+/// A flush moves none, and is spelled out rather than folded into `Write`
+/// so that the copy-back test reads as the question it is asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Read,
-    #[expect(dead_code, reason = "constructed by the write path")]
     Write,
+    Flush,
 }
 
 /// The bounce buffer and PRP list page a command may have allocated.
@@ -67,6 +69,64 @@ pub fn dealloc_resources(r: OpResources) {
     }
 }
 
+/// A request too large for one command, tracked across the commands it was
+/// chopped into. The caller holds one [`BlockIoHandle`]; each part is an
+/// ordinary [`NvmeOp`] that reclaims its own command id, bounce buffer and
+/// PRP list page, and reports here instead of completing the handle itself.
+pub struct SplitOp {
+    handle: Arc<BlockIoHandle>,
+    remaining: AtomicU32,
+    failed: AtomicBool,
+}
+
+impl SplitOp {
+    pub fn new(handle: Arc<BlockIoHandle>, parts: u32) -> Self {
+        Self {
+            handle,
+            remaining: AtomicU32::new(parts),
+            failed: AtomicBool::new(false),
+        }
+    }
+
+    /// Account for `parts` finished parts carrying one shared `result`.
+    ///
+    /// The first error completes the caller's handle at once rather than
+    /// waiting for the rest: the data is already wrong, and every
+    /// still-outstanding part reclaims its own resources when the device
+    /// finishes with it. Success completes only when the last part lands,
+    /// and only if no part failed -- `BlockIoHandle::complete` publishes
+    /// its error code before the state CAS it may lose, so an `Ok` racing a
+    /// recorded failure would zero the error a waiter then reads.
+    pub fn parts_done(&self, parts: u32, result: Result<(), BlockError>) {
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+            self.handle.complete(result);
+        }
+        if self.remaining.fetch_sub(parts, Ordering::AcqRel) == parts
+            && !self.failed.load(Ordering::Acquire)
+        {
+            self.handle.complete(Ok(()));
+        }
+    }
+}
+
+/// Where a finished command reports its result: to the caller's handle
+/// directly, or to the split request it is one part of.
+#[derive(Clone)]
+pub enum Completion {
+    Whole(Arc<BlockIoHandle>),
+    Part(Arc<SplitOp>),
+}
+
+impl Completion {
+    pub fn finish(&self, result: Result<(), BlockError>) {
+        match self {
+            Completion::Whole(handle) => handle.complete(result),
+            Completion::Part(split) => split.parts_done(1, result),
+        }
+    }
+}
+
 /// In-flight tracker for one NVMe command (admin or NVM).
 pub struct NvmeOp {
     #[expect(
@@ -78,7 +138,7 @@ pub struct NvmeOp {
     pub cid: u8,
     pub submitter: Weak<Thread>,
     pub state: AtomicU8,
-    pub handle: Arc<BlockIoHandle>,
+    pub completion: Completion,
     pub buffer: BlockBuffer,
     pub direction: Direction,
     pub len: usize,
@@ -96,7 +156,7 @@ impl NvmeOp {
         qid: u16,
         cid: u8,
         submitter: Weak<Thread>,
-        handle: Arc<BlockIoHandle>,
+        completion: Completion,
         buffer: BlockBuffer,
         direction: Direction,
         len: usize,
@@ -109,7 +169,7 @@ impl NvmeOp {
             cid,
             submitter,
             state: AtomicU8::new(OP_PENDING),
-            handle,
+            completion,
             buffer,
             direction,
             len,
@@ -133,10 +193,10 @@ impl CancellableOp for NvmeOp {
         match self.state.compare_exchange(
             OP_PENDING,
             OP_CANCELLED,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         ) {
-            Ok(_) => self.handle.complete(Err(BlockError::Cancelled)),
+            Ok(_) => self.completion.finish(Err(BlockError::Cancelled)),
             Err(OP_COMPLETED) | Err(OP_CANCELLED) => {}
             Err(_) => unreachable!("unexpected NvmeOp state"),
         }

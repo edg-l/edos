@@ -40,6 +40,7 @@ pub mod identify;
 pub mod namespace;
 pub mod queue;
 pub mod regs;
+pub mod stats;
 
 #[derive(Debug, Error, Clone, Copy)]
 pub enum NvmeError {
@@ -146,7 +147,7 @@ impl NvmeController {
         };
         debug_assert_eq!(op.qid, qid, "nvme: op installed on the wrong queue");
 
-        let handle = Arc::clone(&op.handle);
+        let completion = op.completion.clone();
         let mut pending_result = None;
         match op.state.compare_exchange(
             cancel_op::OP_PENDING,
@@ -156,6 +157,9 @@ impl NvmeController {
         ) {
             Ok(_) => {
                 let result = status_to_block_error(status);
+                if result.is_err() {
+                    stats::bump(&stats::COMMAND_ERRORS, 1);
+                }
                 let resources = op.take_resources();
                 // Only a command the device actually completed has anything
                 // to copy back. `allocate_sized_uninit` hands out a pooled
@@ -168,9 +172,10 @@ impl NvmeController {
                     && let Some(bounce) = &resources.bounce
                 {
                     // SAFETY: the bounce buffer and the caller's buffer are
-                    // both at least `op.len` bytes (`submit_read` sized the
-                    // bounce allocation to `len` and validated the caller's
-                    // buffer against it before installing the op), and
+                    // both at least `op.len` bytes (`build_transfer` sized
+                    // the bounce allocation to `len`, and the submit path
+                    // validated the caller's buffer against it before
+                    // installing the op), and
                     // nothing else touches either while the op is still
                     // installed in `cmd_slots`.
                     unsafe {
@@ -211,7 +216,7 @@ impl NvmeController {
         queue.free_cid(cid);
         drop(op);
         if let Some(result) = pending_result {
-            handle.complete(result);
+            completion.finish(result);
         }
     }
 }
@@ -329,6 +334,8 @@ pub extern "C" fn nvme_driver_main() -> ! {
                 nsid,
                 ns.nsze,
                 device_id,
+                mdts_bytes,
+                vwc,
             ));
             block_io::register(
                 namespace.device_id(),

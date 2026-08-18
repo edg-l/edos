@@ -68,6 +68,9 @@ const DIRTY_EXPIRE_MS: u64 = 5_000;
 const WRITE_PAGE_ATTEMPTS: usize = 3;
 
 /// Pages one AHCI command may carry, from the 248-entry PRDT (992 KiB).
+/// A device whose maximum transfer is smaller splits the request itself --
+/// NVMe chops at MDTS in `drivers::nvme::namespace` -- so this stays the
+/// fs-layer batch size rather than the minimum any device can accept.
 const MAX_RUN_PAGES: usize = 248;
 
 /// Pages a single whole-page write run may cover. Bounded by what one command

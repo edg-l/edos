@@ -229,11 +229,6 @@ pub const IDENTIFY_CNS_NAMESPACE: u32 = 0x00;
 pub const IDENTIFY_CNS_CONTROLLER: u32 = 0x01;
 pub const IDENTIFY_CNS_ACTIVE_NAMESPACE_LIST: u32 = 0x02;
 
-#[expect(
-    dead_code,
-    reason = "issued once the write cache reports itself volatile"
-)]
 pub const NVM_OPC_FLUSH: u8 = 0x00;
-#[expect(dead_code, reason = "issued by the write path")]
 pub const NVM_OPC_WRITE: u8 = 0x01;
 pub const NVM_OPC_READ: u8 = 0x02;

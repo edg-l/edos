@@ -31,6 +31,9 @@ use crate::drivers::block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags};
 /// Submit a sector-level read and park on the handle. Returns an `AhciError`
 /// so existing call sites can `?`-propagate without further mapping.
 /// Blocks one AHCI command may carry, from the 248-entry PRDT (992 KiB).
+/// A device whose maximum transfer is smaller splits the request itself --
+/// NVMe chops at MDTS in `drivers::nvme::namespace` -- so this stays the
+/// fs-layer batch size rather than the minimum any device can accept.
 const MAX_RUN_BLOCKS: usize = 248;
 
 fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
