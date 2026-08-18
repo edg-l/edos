@@ -9,6 +9,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::format;
 
+use crate::{
+    drivers::nvme::{api, watchdog},
+    interrupts::io::NVME_IRQS_FIRED,
+};
+
 /// NVM commands written to an I/O submission queue, split parts counted
 /// individually.
 pub static COMMANDS_SUBMITTED: AtomicU64 = AtomicU64::new(0);
@@ -36,9 +41,26 @@ pub fn bump(counter: &AtomicU64, n: u64) {
 
 pub fn render() -> String {
     let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
+    // Read through the `Once` cells' non-blocking accessors: `/proc` is
+    // readable before the probe kthread has published either list, and a
+    // `wait()` here would park the reader instead of showing it zeroes.
+    let controllers = super::NVME_CONTROLLERS.get().map_or(0, |c| c.len());
+    let namespaces = super::NVME_NAMESPACES.get().map_or(0, |n| n.len());
+    let (mdts_bytes, vwc) = api::namespaces_if_probed()
+        .and_then(|list| list.first())
+        .map_or((0, false), |ns| (ns.max_transfer_bytes(), ns.write_cache()));
     format!(
-        "commands_submitted={} split_requests={} split_commands={} bounced_requests={} \
-         flushes={} flushes_elided={} command_errors={}\n",
+        "controllers={} namespaces={} irqs={} dispatcher_passes={} inflight={} \
+         max_inflight={} commands_submitted={} split_requests={} split_commands={} \
+         bounced_requests={} flushes={} flushes_elided={} command_errors={} \
+         watchdog_firings={} watchdog_completions={} resets={} timeout_ms={} \
+         mdts_bytes={} vwc={}\n",
+        controllers,
+        namespaces,
+        get(&NVME_IRQS_FIRED),
+        get(&watchdog::DISPATCHER_PASSES),
+        get(&watchdog::NVME_INFLIGHT),
+        get(&watchdog::NVME_MAX_INFLIGHT),
         get(&COMMANDS_SUBMITTED),
         get(&SPLIT_REQUESTS),
         get(&SPLIT_COMMANDS),
@@ -46,5 +68,11 @@ pub fn render() -> String {
         get(&FLUSHES),
         get(&FLUSHES_ELIDED),
         get(&COMMAND_ERRORS),
+        get(&watchdog::WATCHDOG_FIRINGS),
+        get(&watchdog::WATCHDOG_COMPLETIONS),
+        get(&watchdog::WATCHDOG_RESETS),
+        get(&watchdog::NVME_TIMEOUT_MS),
+        mdts_bytes,
+        u8::from(vwc),
     )
 }

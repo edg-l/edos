@@ -135,6 +135,16 @@ fn main() -> ! {
         println!("ahci: NCQ watchdog timeout set to {ms} ms");
     }
 
+    if let Some(ms) = cmdline.other_params.iter().find_map(|(k, v)| {
+        (k == "nvme_timeout_ms")
+            .then_some(v.as_deref())
+            .flatten()
+            .and_then(|v| v.parse::<u64>().ok())
+    }) {
+        drivers::nvme::watchdog::set_nvme_timeout_ms(ms);
+        println!("nvme: watchdog timeout set to {ms} ms");
+    }
+
     // Exercises the NVMe read path from `nvme_driver_main` once controller
     // bring-up finishes, ahead of the block-io registration that would
     // otherwise be the only way to reach it.

@@ -12,6 +12,7 @@ use x86_64::{PhysAddr, VirtAddr, structures::paging::mapper::TranslateResult};
 use crate::{
     debug::lock_order::{RANK_NVME_CMD, RANK_NVME_CQ, RANK_NVME_SQ},
     drivers::{
+        block_io::BlockError,
         dma::{DmaBuffer, dma},
         nvme::{
             NvmeError,
@@ -248,6 +249,69 @@ impl NvmeQueue {
             "NvmeQueue.cmd_slots",
             self.cmd_slots[cid as usize]
         ) = None;
+    }
+
+    /// Every op currently installed, cloned out. The watchdog's view of
+    /// what is outstanding: each slot is locked and released in turn, so
+    /// this holds no lock while the caller works on the result.
+    pub fn outstanding_ops(&self) -> Vec<Arc<NvmeOp>> {
+        (0..self.cid_depth)
+            .filter_map(|cid| self.cmd_slot(cid))
+            .collect()
+    }
+
+    /// Whether every command slot is free. The precondition a controller
+    /// reset asserts, since a reset clears the slots and would strand the
+    /// DMA memory of anything still installed.
+    pub fn cmd_slots_empty(&self) -> bool {
+        self.cmd_slots
+            .iter()
+            .all(|slot| ranked_lock!(RANK_NVME_CMD, "NvmeQueue.cmd_slots", slot).is_none())
+    }
+
+    /// Return this queue to its start-of-day state for a controller reset:
+    /// empty rings, phase 1, no allocated command ids.
+    ///
+    /// The completion queue buffer is re-zeroed explicitly. The phase-bit
+    /// protocol restarts from phase 1 expecting every entry to read phase
+    /// 0, and this buffer is not fresh: entries left from before the reset
+    /// would be read as completions on the first drain pass.
+    ///
+    /// Locks are taken one at a time and in rank order (`cmd_slots` 182,
+    /// `cq` 186, `sq` 192); nothing here needs two of them at once.
+    pub fn reset_state(&self) {
+        // Anything still installed is failed through the ordinary reclaim
+        // sequence rather than dropped: `DmaBuffer` has no `Drop`, so
+        // clearing a slot any other way strands that command's bounce
+        // buffer and PRP list page. The caller has already declared the
+        // queue hung, so failing a straggler a submitter installed after
+        // its own fail-all pass is the same answer, arrived at later.
+        for op in self.outstanding_ops() {
+            crate::drivers::nvme::retire_op(self, op, Err(BlockError::Io));
+        }
+        // A slot whose op lost the reclaim race to a concurrent completion
+        // has had its resources taken already, so clearing it strands
+        // nothing.
+        for slot in &self.cmd_slots {
+            **ranked_lock!(RANK_NVME_CMD, "NvmeQueue.cmd_slots", slot) = None;
+        }
+        {
+            let mut cq = ranked_lock!(RANK_NVME_CQ, "NvmeQueue.cq", self.cq);
+            cq.head = 0;
+            cq.phase = true;
+            unsafe {
+                ptr::write_bytes(cq.buffer.as_ptr(), 0, cq.buffer.size);
+            }
+        }
+        {
+            let mut sq = ranked_lock!(RANK_NVME_SQ, "NvmeQueue.sq", self.sq);
+            sq.tail = 0;
+        }
+        self.free_cids.store(0, Ordering::Release);
+        // A submitter parked on an exhausted queue would otherwise wait for
+        // a `free_cid` that is never coming: the ops it was waiting behind
+        // were failed, not completed.
+        self.cid_waitq.wake_all();
     }
 
     /// Number of command ids `cmd_slots` was sized for, so a caller can

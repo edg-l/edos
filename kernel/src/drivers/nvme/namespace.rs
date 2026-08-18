@@ -16,7 +16,7 @@ use crate::{
             cancel_op::{Completion, Direction, NvmeOp, SplitOp},
             queue::{NvmeQueue, PRP_LIST_ENTRIES, build_prp},
             regs::{self, SubmissionQueueEntry},
-            stats, status_to_block_error,
+            stats, status_to_block_error, watchdog,
         },
     },
     log,
@@ -85,6 +85,17 @@ impl NvmeNamespace {
     }
 
     /// The `block_io` id this namespace is registered under.
+    /// The controller's `MDTS` in bytes, as `/proc/nvme_stats` reports it.
+    pub fn max_transfer_bytes(&self) -> usize {
+        self.max_transfer_bytes
+    }
+
+    /// Whether the controller reported a volatile write cache, which is
+    /// what decides if a flush issues a command or is elided.
+    pub fn write_cache(&self) -> bool {
+        self.write_cache
+    }
+
     pub fn device_id(&self) -> u64 {
         self.device_id
     }
@@ -186,6 +197,7 @@ impl NvmeNamespace {
         }
         op.issue_time
             .store(Instant::now().as_nanos(), Ordering::Relaxed);
+        watchdog::inflight_inc();
         queue.write_sqe_and_ring(sqe);
         stats::bump(&stats::COMMANDS_SUBMITTED, 1);
     }

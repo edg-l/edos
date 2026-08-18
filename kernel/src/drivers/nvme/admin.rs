@@ -1,6 +1,10 @@
 //! Controller bring-up (NVMe 2.0 3.5.1) and polled admin commands.
 
-use core::{ptr, time::Duration};
+use core::{
+    ptr,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use alloc::vec::Vec;
 use spin::Once;
@@ -58,6 +62,19 @@ const IO_CQ_ENTRIES: u16 = 128;
 /// ever outstanding against the 128-entry ring: the SQ can never fill.
 const IO_CID_DEPTH: u8 = 64;
 
+/// The `CC` value this driver runs a controller at: enabled, the NVM
+/// command set, a 4 KiB host page size, 64-byte SQ entries and 16-byte CQ
+/// entries. Written at bring-up and again by every reset, so the two cannot
+/// drift.
+const CC_ENABLED: u32 = regs::CC_EN
+    | (0 << regs::CC_CSS_SHIFT)
+    | (0 << regs::CC_MPS_SHIFT)
+    | (6 << regs::CC_IOSQES_SHIFT)
+    | (4 << regs::CC_IOCQES_SHIFT);
+
+/// `AQA`: the admin queue sizes, both 0's-based.
+const ADMIN_AQA: u32 = ((ADMIN_CQ_ENTRIES as u32 - 1) << 16) | (ADMIN_SQ_ENTRIES as u32 - 1);
+
 /// Set Features (09h) Feature Identifier for Number of Queues (NVM Command
 /// Set 5.21.1.7).
 const FEATURE_NUMBER_OF_QUEUES: u32 = 0x07;
@@ -80,6 +97,10 @@ pub struct NvmeController {
     /// namespace: nothing issues an NVM command against a queue that does
     /// not exist yet.
     io_queue: Once<NvmeQueue>,
+    /// Set while the watchdog is failing this controller's outstanding
+    /// commands and rebuilding its queues. One reset at a time, and none
+    /// nested inside another.
+    restarting: AtomicBool,
 }
 
 // SAFETY: `regs` is a stable MMIO mapping read and written only through
@@ -197,19 +218,13 @@ impl NvmeController {
             bar0_virt,
         )?;
 
-        let aqa = ((ADMIN_CQ_ENTRIES as u32 - 1) << 16) | (ADMIN_SQ_ENTRIES as u32 - 1);
         unsafe {
-            ptr::write_volatile(&raw mut (*regs).aqa, aqa);
+            ptr::write_volatile(&raw mut (*regs).aqa, ADMIN_AQA);
             ptr::write_volatile(&raw mut (*regs).asq, admin_queue.sq_phys_addr().as_u64());
             ptr::write_volatile(&raw mut (*regs).acq, admin_queue.cq_phys_addr().as_u64());
         }
 
-        let cc = regs::CC_EN
-            | (0 << regs::CC_CSS_SHIFT)
-            | (0 << regs::CC_MPS_SHIFT)
-            | (6 << regs::CC_IOSQES_SHIFT) // 2^6 = 64 bytes
-            | (4 << regs::CC_IOCQES_SHIFT); // 2^4 = 16 bytes
-        unsafe { ptr::write_volatile(&raw mut (*regs).cc, cc) };
+        unsafe { ptr::write_volatile(&raw mut (*regs).cc, CC_ENABLED) };
         if let Err(e) = wait_csts(regs, regs::CSTS_RDY, true, timeout) {
             admin_queue.dealloc_all();
             return Err(e);
@@ -234,6 +249,7 @@ impl NvmeController {
             admin: BlockingMutex::new(()),
             admin_queue,
             io_queue: Once::new(),
+            restarting: AtomicBool::new(false),
         })
     }
 
@@ -280,8 +296,101 @@ impl NvmeController {
         self.cap
     }
 
-    pub fn admin_queue(&self) -> &NvmeQueue {
-        &self.admin_queue
+    /// `CSTS`, read fresh. The watchdog reads `CSTS.CFS` through this.
+    pub fn csts(&self) -> u32 {
+        unsafe { ptr::read_volatile(&raw const (*self.regs).csts) }
+    }
+
+    /// How long this controller is allowed for a state transition.
+    /// `CAP.TO` is in 500 ms units and may legally read 0, which would
+    /// expire a deadline before the transition could possibly finish.
+    fn controller_timeout(&self) -> Duration {
+        Duration::from_millis(regs::cap_to(self.cap) as u64 * 500).max(Duration::from_secs(1))
+    }
+
+    /// Claim the right to reset this controller, or `Err(())` if a reset is
+    /// already under way.
+    pub fn begin_restart(&self) -> Result<(), ()> {
+        self.restarting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+
+    pub fn end_restart(&self) {
+        self.restarting.store(false, Ordering::Release);
+    }
+
+    /// Take the controller through a full reset (NVMe 2.0 3.5.1): disable,
+    /// wait for `CSTS.RDY` to drop, reinitialise both queue pairs in host
+    /// memory, re-enable, then renegotiate the queue count and recreate the
+    /// I/O queue pair on the device -- the controller forgot both when it
+    /// was disabled.
+    ///
+    /// The caller is expected to have failed every outstanding command
+    /// first; `NvmeQueue::reset_state` fails whatever a submitter installed
+    /// in the window since, so no command's bounce buffer or PRP list page
+    /// is stranded either way.
+    pub fn reset_controller(&self) -> Result<(), NvmeError> {
+        {
+            // Held only across the register-level transition: the admin
+            // commands below take it themselves, and `BlockingMutex` is not
+            // reentrant.
+            let _guard = ranked_lock!(RANK_NVME_ADMIN, "NvmeController.reset", self.admin);
+            let timeout = self.controller_timeout();
+            unsafe { ptr::write_volatile(&raw mut (*self.regs).cc, 0) };
+            wait_csts(self.regs, regs::CSTS_RDY, false, timeout)?;
+
+            self.admin_queue.reset_state();
+            if let Some(queue) = self.io_queue() {
+                queue.reset_state();
+            }
+
+            unsafe {
+                ptr::write_volatile(&raw mut (*self.regs).aqa, ADMIN_AQA);
+                ptr::write_volatile(
+                    &raw mut (*self.regs).asq,
+                    self.admin_queue.sq_phys_addr().as_u64(),
+                );
+                ptr::write_volatile(
+                    &raw mut (*self.regs).acq,
+                    self.admin_queue.cq_phys_addr().as_u64(),
+                );
+                ptr::write_volatile(&raw mut (*self.regs).cc, CC_ENABLED);
+            }
+            wait_csts(self.regs, regs::CSTS_RDY, true, timeout)?;
+        }
+
+        self.set_num_queues()?;
+        if let Some(queue) = self.io_queue() {
+            self.create_io_cq(queue)?;
+            self.create_io_sq(queue)?;
+        }
+        Ok(())
+    }
+
+    /// Normal shutdown (NVMe 2.0 3.6.2): set `CC.SHN` to `01b` and wait for
+    /// `CSTS.SHST` to report `10b`, which is what commits a volatile write
+    /// cache. Skipping it risks losing data the controller acknowledged but
+    /// had not written down.
+    pub fn shutdown(&self) -> Result<(), NvmeError> {
+        let _guard = ranked_lock!(RANK_NVME_ADMIN, "NvmeController.shutdown", self.admin);
+        let timeout = self.controller_timeout();
+        let cc = unsafe { ptr::read_volatile(&raw const (*self.regs).cc) };
+        let cc = (cc & !regs::CC_SHN_MASK) | regs::CC_SHN_NORMAL;
+        unsafe { ptr::write_volatile(&raw mut (*self.regs).cc, cc) };
+
+        let start = Instant::now();
+        loop {
+            let csts = self.csts();
+            if csts & regs::CSTS_SHST_MASK == regs::CSTS_SHST_COMPLETE {
+                return Ok(());
+            }
+            if start.elapsed() > timeout {
+                return Err(NvmeError::ControllerTimeout);
+            }
+            thread_sleep(Duration::from_millis(1));
+        }
     }
 
     pub fn io_queue(&self) -> Option<&NvmeQueue> {
@@ -416,8 +525,7 @@ impl NvmeController {
         sqe.cdw0 = (sqe.cdw0 & 0x0000_FFFF) | ((cid as u32) << 16);
         self.admin_queue.write_sqe_and_ring(&sqe);
 
-        let timeout =
-            Duration::from_millis(regs::cap_to(self.cap) as u64 * 500).max(Duration::from_secs(1));
+        let timeout = self.controller_timeout();
         let start = Instant::now();
         let mut result: Option<Result<u32, NvmeError>> = None;
         loop {

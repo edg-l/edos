@@ -90,6 +90,10 @@ fn quiesce(what: &str) {
     println!("{what}: syncing filesystems");
     sys_sync();
     println!("{what}: filesystems synced");
+    // After the sync, so anything the filesystems just wrote is inside the
+    // cache this commits, and before the power transition, which gives the
+    // controller no chance to write it down.
+    crate::drivers::nvme::shutdown_all();
 }
 
 /// Write SLP_TYPa + SLP_EN to PM1a_CNT (and PM1b_CNT when the platform has

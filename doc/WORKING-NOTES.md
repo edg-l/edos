@@ -8806,3 +8806,40 @@ flush answering "write" would have been a lie the next reader has to re-derive.
 Verified for real: NVMe-**root** boot (`--nvme-disk --no-sata`, `limine.conf`
 cmdline pointed at `NVME_UUID`, restored afterwards) reaches the desktop, root
 mounts on device 3000, a write reads back, `flushes=1`, `command_errors=0`.
+
+## The NVMe admin queue is polled-only, and a reset is what proved it
+
+The NVMe dispatcher used to drain the admin completion queue on every wake,
+alongside the I/O queue. That is harmless at bring-up, where every admin
+command is issued before the dispatcher loop starts, and wrong the moment
+anything issues an admin command while the driver is live: `admin_command_polled`
+runs its own `drain`, so a completion the dispatcher consumes first is one the
+poll never sees, and the command times out with the controller entirely healthy.
+
+The controller reset path is exactly that case. It re-runs Set Features
+(Number of Queues) and Create I/O CQ/SQ from the watchdog kthread, and every
+one of them timed out at 7.5 s (`CAP.TO`) while the dispatcher quietly ate the
+completions. The fix is to make the admin queue polled-only: the dispatcher's
+park predicate and drain now consider I/O queues alone. Nothing else needs an
+admin completion asynchronously.
+
+Two related traps in the same path:
+
+- **A reset cannot assume the command slots stay empty.** The watchdog fails
+  every outstanding op before resetting, but nothing excludes a submitter from
+  installing a new command in the window between that pass and the reset.
+  `DmaBuffer` has no `Drop`, so clearing a slot any other way strands that
+  command's bounce buffer and PRP list page. `NvmeQueue::reset_state` therefore
+  retires whatever it finds through the ordinary `retire_op` sequence rather
+  than asserting the slots are empty; a command installed after that is not
+  lost either, since its completion never arrives and the next sweep fails it.
+  The first version of this asserted instead, and panicked within 400 ms of
+  boot under `nvme_timeout_ms=0`.
+- **`nvme_timeout_ms=0` is hostile enough to kill the boot.** It declares every
+  command hung the instant it is issued, so the reset path is reached
+  immediately and repeatedly — which is the point — but the I/O it fails
+  includes the boot's own reads, and nothing above `block_io` retries a
+  `BlockError::Io`. `main.rs`'s init load unwraps it and panics. The setting
+  proves the watchdog and reset run to completion; it does not, as written,
+  leave the guest usable. A retry above `block_io`, or a small non-zero timeout,
+  is what that half needs.

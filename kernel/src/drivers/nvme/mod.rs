@@ -10,6 +10,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     ptr,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
 use spin::Once;
@@ -20,12 +21,13 @@ use crate::{
         block_io::{self, AsyncBlockDevice, BlockBuffer, BlockError},
         nvme::{
             admin::{IO_QID, NvmeController},
+            cancel_op::NvmeOp,
             identify::max_transfer_bytes,
             namespace::NvmeNamespace,
         },
         pci::{pci_manager, structures::PciDevice},
     },
-    log,
+    log, println,
     thread::{
         runqueue::IO_PRIORITY,
         scheduler::{current_thread, current_thread_weak, thread_exit, thread_park_while},
@@ -41,6 +43,7 @@ pub mod namespace;
 pub mod queue;
 pub mod regs;
 pub mod stats;
+pub mod watchdog;
 
 #[derive(Debug, Error, Clone, Copy)]
 pub enum NvmeError {
@@ -68,6 +71,12 @@ static NVME_PROBE_READ: AtomicBool = AtomicBool::new(false);
 pub fn set_probe_read(enabled: bool) {
     NVME_PROBE_READ.store(enabled, Ordering::Relaxed);
 }
+
+/// Every controller the probe brought up, in probe order. Published
+/// before the barrier below, and empty rather than absent on a machine
+/// with no NVMe hardware, so the watchdog and the shutdown path can wait
+/// on it unconditionally.
+pub static NVME_CONTROLLERS: Once<Vec<Arc<NvmeController>>> = Once::new();
 
 /// Every namespace the probe accepted and registered, in registration order.
 pub static NVME_NAMESPACES: Once<Vec<Arc<NvmeNamespace>>> = Once::new();
@@ -119,13 +128,99 @@ pub(crate) fn status_to_block_error(status: u16) -> Result<(), BlockError> {
     }
 }
 
+/// How many times the watchdog re-scans the command slots trying to empty
+/// them before giving up on this sweep. More than one because a submitter
+/// can install a command after the scan, and a losing pass costs only
+/// another walk of the slot array.
+const FAIL_ALL_PASSES: usize = 4;
+
+/// Retire a terminal op through the one reclaim sequence this driver has:
+/// copy a bounced read back when it succeeded, return the bounce buffer and
+/// the PRP list page to `dma()`, drop the cancel hookup, clear the command
+/// slot, free the command id, and complete the caller's handle **last**.
+///
+/// The state CAS inside decides whether this call is the one that reclaims
+/// or loses to a concurrent path, so both callers -- the IRQ dispatcher's
+/// `complete_command` and the watchdog's fail-all -- can call it on the same
+/// op without double-freeing a cid or handing the same `DmaBuffer` back
+/// twice. `DmaBuffer` has no `Drop`: skipping this and letting the last
+/// `Arc<NvmeOp>` fall strands its DMA memory for the life of the boot.
+pub(crate) fn retire_op(queue: &queue::NvmeQueue, op: Arc<NvmeOp>, result: Result<(), BlockError>) {
+    // `None` once the handle has already been completed elsewhere: a
+    // cancelled op told its waiter `Cancelled` at cancel time and is only
+    // here to have its reserved resources returned now the device is
+    // finally done with them.
+    let mut deliver = Some(result);
+    match op.state.compare_exchange(
+        cancel_op::OP_PENDING,
+        cancel_op::OP_COMPLETED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {}
+        Err(cancel_op::OP_CANCELLED) => {
+            // `OP_CANCELLED` is not exclusive -- every later caller that
+            // loses the CAS above observes it -- so the reclaim transition
+            // picks exactly one winner.
+            if op
+                .state
+                .compare_exchange(
+                    cancel_op::OP_CANCELLED,
+                    cancel_op::OP_RECLAIMED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                return;
+            }
+            deliver = None;
+        }
+        Err(_) => return, // already terminal via another completion path
+    }
+
+    let completion = op.completion.clone();
+    let resources = op.take_resources();
+    // Only a command the device actually completed has anything to copy
+    // back. `allocate_sized_uninit` hands out a pooled page still carrying
+    // whatever its frames last held, so on a failed read the bounce
+    // contains another driver's bytes, and copying it would publish them
+    // into the caller's buffer -- a page-cache page, once namespaces
+    // register.
+    if matches!(deliver, Some(Ok(())))
+        && let cancel_op::Direction::Read = op.direction
+        && let Some(bounce) = &resources.bounce
+    {
+        // SAFETY: the bounce buffer and the caller's buffer are both at
+        // least `op.len` bytes (`build_transfer` sized the bounce
+        // allocation to `len`, and the submit path validated the caller's
+        // buffer against it before installing the op), and nothing else
+        // touches either while the op is still installed in `cmd_slots`.
+        unsafe {
+            ptr::copy_nonoverlapping(bounce.as_ptr(), op.buffer.as_mut_ptr(), op.len);
+        }
+    }
+    cancel_op::dealloc_resources(resources);
+    if deliver.is_some()
+        && let Some(t) = op.submitter.upgrade()
+    {
+        t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
+    }
+    let cid = op.cid;
+    queue.clear_cmd_slot(cid);
+    queue.free_cid(cid);
+    watchdog::inflight_dec();
+    drop(op);
+    if let Some(result) = deliver {
+        completion.finish(result);
+    }
+}
+
 impl NvmeController {
     /// IRQ-dispatcher-side completion for command id `cid` on queue `qid`.
     /// Mirrors AHCI's `complete_ncq_slot`: clone the op out from under
-    /// `cmd_slots`' guard, drop the guard, then let the op's own state CAS
-    /// decide whether this call is the one that reclaims the cid, the
-    /// bounce buffer, the PRP list page and the handle, or loses to a
-    /// concurrent cancel or a second drain of the same entry.
+    /// `cmd_slots`' guard, drop the guard, then let [`retire_op`]'s own
+    /// state CAS decide whether this call is the one that reclaims.
     fn complete_command(&self, qid: u16, cid: u16, status: u16) {
         let Some(queue) = self.queue_for(qid) else {
             log!("nvme: completion for unknown queue {}", qid);
@@ -147,76 +242,118 @@ impl NvmeController {
         };
         debug_assert_eq!(op.qid, qid, "nvme: op installed on the wrong queue");
 
-        let completion = op.completion.clone();
-        let mut pending_result = None;
-        match op.state.compare_exchange(
-            cancel_op::OP_PENDING,
-            cancel_op::OP_COMPLETED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                let result = status_to_block_error(status);
-                if result.is_err() {
-                    stats::bump(&stats::COMMAND_ERRORS, 1);
-                }
-                let resources = op.take_resources();
-                // Only a command the device actually completed has anything
-                // to copy back. `allocate_sized_uninit` hands out a pooled
-                // page still carrying whatever its frames last held, so on a
-                // failed read the bounce contains another driver's bytes,
-                // and copying it would publish them into the caller's buffer
-                // -- a page-cache page, once namespaces register.
-                if result.is_ok()
-                    && let cancel_op::Direction::Read = op.direction
-                    && let Some(bounce) = &resources.bounce
-                {
-                    // SAFETY: the bounce buffer and the caller's buffer are
-                    // both at least `op.len` bytes (`build_transfer` sized
-                    // the bounce allocation to `len`, and the submit path
-                    // validated the caller's buffer against it before
-                    // installing the op), and
-                    // nothing else touches either while the op is still
-                    // installed in `cmd_slots`.
-                    unsafe {
-                        ptr::copy_nonoverlapping(bounce.as_ptr(), op.buffer.as_mut_ptr(), op.len);
-                    }
-                }
-                cancel_op::dealloc_resources(resources);
-                pending_result = Some(result);
-                if let Some(t) = op.submitter.upgrade() {
-                    t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
-                }
-            }
-            Err(cancel_op::OP_CANCELLED) => {
-                // The submitter cancelled while this command was still
-                // issued to the device; its handle is already completed
-                // with `Cancelled`. The device has now actually finished,
-                // so this is where the cid and the op's DMA memory are
-                // reclaimed -- not at cancel time, when the device still
-                // considered the command outstanding.
-                if op
-                    .state
-                    .compare_exchange(
-                        cancel_op::OP_CANCELLED,
-                        cancel_op::OP_RECLAIMED,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-                {
-                    // Another completion path already won the reclaim.
-                    return;
-                }
-                cancel_op::dealloc_resources(op.take_resources());
-            }
-            Err(_) => return, // already terminal via another completion path
+        let result = status_to_block_error(status);
+        if result.is_err() {
+            stats::bump(&stats::COMMAND_ERRORS, 1);
         }
-        queue.clear_cmd_slot(cid);
-        queue.free_cid(cid);
-        drop(op);
-        if let Some(result) = pending_result {
-            completion.finish(result);
+        retire_op(queue, op, result);
+    }
+
+    /// One watchdog pass over this controller's I/O queue.
+    ///
+    /// Drains the completion queue first: anything found there is a lost
+    /// interrupt, not a hung device, and recovering it costs a tick of
+    /// latency where a reset would have failed live I/O for nothing. Only
+    /// what is still outstanding *after* that drain, and older than
+    /// `timeout`, counts as hung -- as does `CSTS.CFS`, which the
+    /// controller sets when it has failed outright.
+    pub fn watchdog_sweep(&self, timeout: Duration) {
+        let Some(queue) = self.io_queue() else {
+            return;
+        };
+        let mut recovered = 0u64;
+        queue.drain(|cid, status, _dw0| {
+            recovered += 1;
+            self.complete_command(admin::IO_QID, cid, status);
+        });
+        if recovered != 0 {
+            watchdog::WATCHDOG_COMPLETIONS.fetch_add(recovered, Ordering::Relaxed);
+        }
+
+        let now = crate::timer::Instant::now().as_nanos();
+        let timeout_ns = timeout.as_nanos() as u64;
+        let outstanding = queue.outstanding_ops();
+        let hung = outstanding
+            .iter()
+            .filter(|op| {
+                op.state.load(Ordering::Acquire) == cancel_op::OP_PENDING && {
+                    let issued = op.issue_time.load(Ordering::Relaxed);
+                    issued != 0 && now.saturating_sub(issued) >= timeout_ns
+                }
+            })
+            .count() as u64;
+        let fatal = self.csts() & regs::CSTS_CFS != 0;
+        if hung == 0 && !fatal {
+            return;
+        }
+
+        // One reset at a time, and none while an earlier one is still
+        // rebuilding the queues.
+        if self.begin_restart().is_err() {
+            return;
+        }
+        watchdog::WATCHDOG_FIRINGS.fetch_add(hung, Ordering::Relaxed);
+        log!(
+            "nvme: watchdog firing, {} command(s) past {} ms{}",
+            hung,
+            timeout.as_millis(),
+            if fatal { ", CSTS.CFS set" } else { "" }
+        );
+
+        // Every outstanding op is failed through the same reclaim sequence
+        // a completion uses, before the reset: clearing the slots any other
+        // way would strand each op's bounce buffer and PRP list page, since
+        // `DmaBuffer` has no `Drop`.
+        //
+        // Re-scanned rather than reusing the snapshot above, and in a loop:
+        // nothing stops a submitter from installing a command between the
+        // scan and the reset, and that command is killed by the reset too,
+        // so it has to be failed here or it waits forever for a completion
+        // the controller will never post. A slot can also be momentarily
+        // occupied by an op the dispatcher is already retiring, which the
+        // next pass sees gone.
+        drop(outstanding);
+        for _ in 0..FAIL_ALL_PASSES {
+            for op in queue.outstanding_ops() {
+                retire_op(queue, op, Err(BlockError::Io));
+            }
+            if queue.cmd_slots_empty() {
+                break;
+            }
+        }
+        if !queue.cmd_slots_empty() {
+            // Resetting now would clear the slots and strand their DMA
+            // memory. Skipping costs a tick: the next sweep tries again,
+            // and the commands that are still installed are still hung.
+            log!("nvme: watchdog could not quiesce the queue, deferring the reset");
+            self.end_restart();
+            return;
+        }
+
+        match self.reset_controller() {
+            Ok(()) => {
+                watchdog::WATCHDOG_RESETS.fetch_add(1, Ordering::Relaxed);
+                log!("nvme: controller reset complete");
+            }
+            Err(e) => log!("nvme: controller reset failed: {:?}", e),
+        }
+        self.end_restart();
+    }
+}
+
+/// Set `CC.SHN` on every controller and wait for `CSTS.SHST` to report the
+/// shutdown complete, so a controller with a volatile write cache commits it
+/// (NVMe 2.0 3.6.2). Called from `power::quiesce` after the filesystems are
+/// synced, and like the rest of that path it prints rather than logs: the
+/// ring buffer is not read again after this point.
+pub fn shutdown_all() {
+    let Some(controllers) = NVME_CONTROLLERS.get() else {
+        return;
+    };
+    for (index, controller) in controllers.iter().enumerate() {
+        match controller.shutdown() {
+            Ok(()) => println!("nvme{index}: shutdown complete"),
+            Err(e) => println!("nvme{index}: shutdown did not complete: {e:?}"),
         }
     }
 }
@@ -350,9 +487,19 @@ pub extern "C" fn nvme_driver_main() -> ! {
     }
 
     // Published before the barrier is signalled, so a thread released by
-    // `wait_probe_complete` also sees the list and the registrations.
+    // `wait_probe_complete` also sees the lists and the registrations.
+    let controllers = NVME_CONTROLLERS.call_once(|| controllers);
     NVME_NAMESPACES.call_once(|| namespaces);
     NVME_PROBE_DONE.call_once(|| ());
+
+    // Only worth a thread once there is something to sweep; a machine with
+    // no controller would otherwise wake once a second forever.
+    if !controllers.is_empty() {
+        queue_spawn_kthread_named(
+            "nvme_watchdog",
+            watchdog::watchdog_entry as *const () as u64,
+        );
+    }
 
     if NVME_PROBE_READ.load(Ordering::Relaxed) {
         match api::namespaces().first() {
@@ -372,19 +519,26 @@ pub extern "C" fn nvme_driver_main() -> ! {
 
     // Interrupt dispatch loop. The admin and I/O CQs of every controller
     // share the single vector `configure_interrupt` bound (`IV = 0` on
-    // both), so any wake drains every queue of every controller rather than
+    // both), so a wake says only that some queue somewhere has a
+    // completion; this loop drains every controller's I/O queue rather than
     // routing by vector.
+    //
+    // The admin queue is deliberately not drained here. Admin commands are
+    // polled by their issuer (`admin_command_polled` runs its own `drain`),
+    // and a completion consumed by this thread is one that poll never sees:
+    // the command times out instead. That is unreachable at bring-up, where
+    // this loop has not started yet, but not during a controller reset,
+    // which re-runs Set Features and Create I/O Queue from the watchdog
+    // thread while this one is live.
     loop {
         thread_park_while(|| {
-            !controllers.iter().any(|c| {
-                c.admin_queue().has_pending() || c.io_queue().is_some_and(|q| q.has_pending())
-            })
+            !controllers
+                .iter()
+                .any(|c| c.io_queue().is_some_and(|q| q.has_pending()))
         });
+        watchdog::DISPATCHER_PASSES.fetch_add(1, Ordering::Relaxed);
 
-        for controller in &controllers {
-            controller.admin_queue().drain(|cid, status, _dw0| {
-                controller.complete_command(0, cid, status);
-            });
+        for controller in controllers {
             if let Some(io_queue) = controller.io_queue() {
                 io_queue.drain(|cid, status, _dw0| {
                     controller.complete_command(IO_QID, cid, status);

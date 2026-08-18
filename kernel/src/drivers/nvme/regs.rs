@@ -77,9 +77,7 @@ pub const CC_CSS_SHIFT: u32 = 4;
 pub const CC_MPS_SHIFT: u32 = 7;
 /// `CC.SHN`, bits 15:14: Shutdown Notification.
 pub const CC_SHN_SHIFT: u32 = 14;
-#[expect(dead_code, reason = "written by the controller-shutdown path")]
 pub const CC_SHN_MASK: u32 = 0x3 << CC_SHN_SHIFT;
-#[expect(dead_code, reason = "written by the controller-shutdown path")]
 pub const CC_SHN_NORMAL: u32 = 0b01 << CC_SHN_SHIFT;
 /// `CC.IOSQES`, bits 19:16: I/O Submission Queue Entry Size, as a power of two.
 pub const CC_IOSQES_SHIFT: u32 = 16;
@@ -89,16 +87,10 @@ pub const CC_IOCQES_SHIFT: u32 = 20;
 /// `CSTS.RDY`, bit 0: the controller is ready to accept submission queue doorbell writes.
 pub const CSTS_RDY: u32 = 1 << 0;
 /// `CSTS.CFS`, bit 1: Controller Fatal Status.
-#[expect(
-    dead_code,
-    reason = "checked by the watchdog's reset-or-continue decision"
-)]
 pub const CSTS_CFS: u32 = 1 << 1;
 /// `CSTS.SHST`, bits 3:2: Shutdown Status. `10b` is "shutdown complete".
 pub const CSTS_SHST_SHIFT: u32 = 2;
-#[expect(dead_code, reason = "polled by the controller-shutdown path")]
 pub const CSTS_SHST_MASK: u32 = 0x3 << CSTS_SHST_SHIFT;
-#[expect(dead_code, reason = "polled by the controller-shutdown path")]
 pub const CSTS_SHST_COMPLETE: u32 = 0b10 << CSTS_SHST_SHIFT;
 
 /// Byte offset from `BAR0` of the SQ tail doorbell for queue `qid` (3.1.14).
