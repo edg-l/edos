@@ -52,6 +52,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allocbench"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "alloctest"

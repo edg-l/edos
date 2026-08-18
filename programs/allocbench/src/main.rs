@@ -11,9 +11,13 @@
 //! *grows with the number of live blocks*: a constant means the allocator finds
 //! a block without looking at the others, and growth means every allocation
 //! walks what the program allocated before it.
+//!
+//! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
 use std::hint::black_box;
 use std::time::Instant;
+
+use edos_lib::io::Tee;
 
 /// Sizes a real program asks for: a few words for a node, a string, a buffer.
 const SIZES: [usize; 4] = [24, 64, 256, 1024];
@@ -38,18 +42,29 @@ fn best<F: FnMut() -> u64>(ops: u64, mut round: F) -> u64 {
 }
 
 fn main() {
-    println!("allocbench: allocation cost against live-block count");
+    let mut klog = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-l" => klog = true,
+            _ => {
+                eprintln!("usage: allocbench [-l]");
+                std::process::exit(2);
+            }
+        }
+    }
+    let mut out = Tee::new(klog);
+    out.line("allocbench: allocation cost against live-block count");
 
-    churn();
-    scaling();
-    reuse();
-    growth();
-    contention();
+    churn(&mut out);
+    scaling(&mut out);
+    reuse(&mut out);
+    growth(&mut out);
+    contention(&mut out);
 }
 
 /// Allocate and free the same size in a loop. Nothing accumulates, so this is
 /// the allocator's floor.
-fn churn() {
+fn churn(out: &mut Tee) {
     const ROUNDS: usize = 20_000;
     let each = best(ROUNDS as u64, || {
         let start = Instant::now();
@@ -59,14 +74,16 @@ fn churn() {
         }
         start.elapsed().as_nanos() as u64
     });
-    println!("churn      alloc+free, nothing live: {each} ns/op");
+    out.line(&format!(
+        "churn      alloc+free, nothing live: {each} ns/op"
+    ));
 }
 
 /// Hold `live` blocks, then time allocations made against that population.
 ///
 /// Doubling `live` and watching ns/op double with it is what a per-allocation
 /// walk of the free list looks like from here.
-fn scaling() {
+fn scaling(out: &mut Tee) {
     // Build and drop the largest population first. Without it the first round
     // measured something else entirely: it is the only one whose allocations
     // come from memory the process has never touched, so it paid a page fault
@@ -102,14 +119,16 @@ fn scaling() {
             elapsed
         });
         black_box(&held);
-        println!("scaling    {live:>5} live blocks: {each} ns/alloc");
+        out.line(&format!(
+            "scaling    {live:>5} live blocks: {each} ns/alloc"
+        ));
     }
 }
 
 /// Free a large population and allocate again at the same sizes. An allocator
 /// that reuses what it just freed answers from the free list; one that cannot
 /// find the right hole asks the kernel for more.
-fn reuse() {
+fn reuse(out: &mut Tee) {
     const N: usize = 8_000;
     let held: Vec<Vec<u8>> = (0..N).map(|i| vec![0u8; SIZES[i % SIZES.len()]]).collect();
     drop(held);
@@ -121,7 +140,7 @@ fn reuse() {
         black_box(&again);
         elapsed
     });
-    println!("reuse      after freeing {N}: {each} ns/alloc");
+    out.line(&format!("reuse      after freeing {N}: {each} ns/alloc"));
 }
 
 /// The same allocation workload from several threads at once.
@@ -137,7 +156,7 @@ fn reuse() {
 /// still reports a respectable per-operation figure while the machine as a
 /// whole does less work than it did with one thread, and the per-operation
 /// figure is the one that hides it.
-fn contention() {
+fn contention(out: &mut Tee) {
     const OPS: usize = 25_000;
     const LIVE: usize = 64;
 
@@ -169,7 +188,9 @@ fn contention() {
             start.elapsed().as_nanos() as u64
         });
         let rate = 1000.0 / each.max(1) as f64;
-        println!("contention {threads:>2} threads: {each:>6} ns/op, {rate:.2} M ops/s aggregate");
+        out.line(&format!(
+            "contention {threads:>2} threads: {each:>6} ns/op, {rate:.2} M ops/s aggregate"
+        ));
     }
 }
 
@@ -181,7 +202,7 @@ fn contention() {
 /// it is the free remainder of whatever the allocator is carving from; an
 /// allocator that cannot see that copies every byte it has, at every step, and
 /// the copies dominate the growth.
-fn growth() {
+fn growth(out: &mut Tee) {
     const RUNS: usize = 2_000;
     const CAP: usize = 32 * 1024;
 
@@ -198,8 +219,8 @@ fn growth() {
         }
         start.elapsed().as_nanos() as u64
     });
-    println!(
+    out.line(&format!(
         "growth     8 B -> {} KiB doubling: {each} ns/step",
         CAP / 1024
-    );
+    ));
 }

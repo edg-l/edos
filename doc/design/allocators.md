@@ -311,12 +311,12 @@ is wrong somewhere else.
 `concurrent` and `cross-thread` phases, and the shim there is worth knowing
 about: on the host, `%fs` belongs to glibc's `struct pthread`, so the harness
 substitutes a thread-local of the same size rather than writing where the real
-one writes. In the guest, `allocbench`'s `contention` phase reads 30.30 / 58.82
-/ 111.11 / 111.11 M ops/s at 1/2/4/8 threads on a four-CPU boot, unchanged. Take
-the best of several runs and not the median: `ns/op` is reported as an integer,
-so at four threads 9 ns is 111.11 and 13 ns is 76.92 with little between them,
-and one preemption on a guest that is also running a desktop moves the whole
-cell.
+one writes. In the guest, `allocbench -l`'s `contention` phase reads 30.30 /
+58.82 / 111.11 / 111.11 M ops/s at 1/2/4/8 threads on a four-CPU boot,
+unchanged. Take the best of several runs and not the median: `ns/op` is reported
+as an integer, so at four threads 9 ns is 111.11 and 13 ns is 76.92 with little
+between them, and one preemption on a guest that is also running a desktop moves
+the whole cell.
 
 ### What it bought
 
