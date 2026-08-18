@@ -21,6 +21,7 @@ pub enum InterruptIndex {
     Hda = APIC_OFFSET + 10,
     TlbShootdown = APIC_OFFSET + 11,
     VirtioGpu = APIC_OFFSET + 12,
+    Nvme = APIC_OFFSET + 13,
     Spurious = 0xFF,
 }
 

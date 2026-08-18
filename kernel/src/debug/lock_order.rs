@@ -113,9 +113,6 @@ pub const RANK_AHCI_SLOT: u16 = 180;
 // The per-command-id op handoff between submit, the IRQ dispatcher, the
 // watchdog and cancel -- same shape as `slot_waiters` (180): holders only
 // clone or take, never park, never allocate, never take an inner lock.
-// Reserved here for `NvmeQueue.cmd_slots`, added once its element type
-// exists.
-#[expect(dead_code, reason = "reserved for the per-command-id op table")]
 pub const RANK_NVME_CMD: u16 = 182;
 // The whole completion-queue drain pass: phase compare, head advance, phase
 // toggle, the CQ head doorbell write. Collects into a bounded `heapless::Vec`

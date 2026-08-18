@@ -3,12 +3,15 @@
 use core::{ptr, time::Duration};
 
 use alloc::vec::Vec;
+use spin::Once;
 use x86_64::structures::paging::{PageTableFlags, mapper::MapToError};
 
 use crate::{
+    apic::init::configure_device_interrupt,
     debug::lock_order::RANK_NVME_ADMIN,
     drivers::{
         dma::{DmaBuffer, dma},
+        msi,
         nvme::{
             NvmeError,
             identify::{IdentifyController, IdentifyNamespace},
@@ -20,6 +23,7 @@ use crate::{
             structures::PciDevice,
         },
     },
+    interrupts::InterruptIndex,
     log,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     ranked_lock,
@@ -45,22 +49,37 @@ const ADMIN_CQ_ENTRIES: u16 = 32;
 /// that ever stops being true.
 const ADMIN_CID_DEPTH: u8 = 8;
 
+/// The queue id of this driver's one I/O queue pair (Architecture Decision
+/// "one I/O queue pair, one MSI-X vector, no polled I/O stage").
+pub const IO_QID: u16 = 1;
+const IO_SQ_ENTRIES: u16 = 128;
+const IO_CQ_ENTRIES: u16 = 128;
+/// Command ids come from a single 64-bit bitmap, so at most 64 commands are
+/// ever outstanding against the 128-entry ring: the SQ can never fill.
+const IO_CID_DEPTH: u8 = 64;
+
+/// Set Features (09h) Feature Identifier for Number of Queues (NVM Command
+/// Set 5.21.1.7).
+const FEATURE_NUMBER_OF_QUEUES: u32 = 0x07;
+
 pub struct NvmeController {
     #[expect(
         dead_code,
         reason = "read once MSI-X/MSI/INTx interrupt configuration runs"
     )]
     pub pci_device: PciDevice,
-    #[expect(
-        dead_code,
-        reason = "read by the reset and shutdown register sequences"
-    )]
     regs: *mut NvmeRegs,
     cap: u64,
     /// Serializes admin command issue and controller state transitions
     /// (init, queue create/delete, reset) so at most one is ever in flight.
     admin: BlockingMutex<()>,
     admin_queue: NvmeQueue,
+    /// This driver's one I/O queue pair, created by `setup_io_queue` once
+    /// the controller is enabled and its interrupt is bound. `None` until
+    /// then, and while it stays `None` this controller has no working
+    /// namespace: nothing issues an NVM command against a queue that does
+    /// not exist yet.
+    io_queue: Once<NvmeQueue>,
 }
 
 // SAFETY: `regs` is a stable MMIO mapping read and written only through
@@ -203,17 +222,185 @@ impl NvmeController {
             dstrd
         );
 
+        if let Err(e) = Self::configure_interrupt(&pci_device) {
+            admin_queue.dealloc_all();
+            return Err(e);
+        }
+
         Ok(Self {
             pci_device,
             regs,
             cap,
             admin: BlockingMutex::new(()),
             admin_queue,
+            io_queue: Once::new(),
         })
+    }
+
+    /// Bind this controller's completion queues to one interrupt: MSI-X
+    /// table entry 0, falling back to a single MSI message, falling back to
+    /// the legacy INTx line (Architecture Decision "one I/O queue pair, one
+    /// MSI-X vector"). The admin and I/O CQs are both later created with
+    /// `IV = 0`, so this one vector is all either ever needs.
+    fn configure_interrupt(pci_device: &PciDevice) -> Result<(), NvmeError> {
+        if msi::enable_msix_for_device(pci_device, InterruptIndex::Nvme.as_u8(), 0).is_ok() {
+            log!(
+                "nvme: MSI-X bound on {:02x}:{:02x}.{}",
+                pci_device.address.bus,
+                pci_device.address.device,
+                pci_device.address.function
+            );
+            return Ok(());
+        }
+        if msi::enable_msi_for_device(pci_device, InterruptIndex::Nvme.as_u8()).is_ok() {
+            log!(
+                "nvme: MSI bound on {:02x}:{:02x}.{}",
+                pci_device.address.bus,
+                pci_device.address.device,
+                pci_device.address.function
+            );
+            return Ok(());
+        }
+        if pci_device.header.interrupt_line == 0xFF {
+            return Err(NvmeError::InvalidDevice);
+        }
+        configure_device_interrupt(
+            pci_device.header.interrupt_line,
+            InterruptIndex::Nvme.as_u8(),
+        )
+        .map_err(|_| NvmeError::InvalidDevice)?;
+        log!(
+            "nvme: INTx bound on IRQ {}",
+            pci_device.header.interrupt_line
+        );
+        Ok(())
     }
 
     pub fn cap(&self) -> u64 {
         self.cap
+    }
+
+    pub fn admin_queue(&self) -> &NvmeQueue {
+        &self.admin_queue
+    }
+
+    pub fn io_queue(&self) -> Option<&NvmeQueue> {
+        self.io_queue.get()
+    }
+
+    /// Look up the queue a completion's `qid` belongs to: 0 is always the
+    /// admin queue, `IO_QID` is this driver's one I/O queue once it exists.
+    pub fn queue_for(&self, qid: u16) -> Option<&NvmeQueue> {
+        match qid {
+            0 => Some(&self.admin_queue),
+            IO_QID => self.io_queue(),
+            _ => None,
+        }
+    }
+
+    /// Negotiate and create this driver's one I/O queue pair, with its CQ's
+    /// interrupt vector (`IV`) set to 0 -- the same vector the admin queue
+    /// uses -- so the dispatcher needs only the one IDT entry
+    /// `configure_interrupt` bound.
+    pub fn setup_io_queue(&self) -> Result<(), NvmeError> {
+        self.set_num_queues()?;
+
+        let dstrd = regs::cap_dstrd(self.cap);
+        let bar_virt = x86_64::VirtAddr::new(self.regs as u64);
+        let queue = NvmeQueue::new(
+            IO_QID,
+            IO_SQ_ENTRIES,
+            IO_CQ_ENTRIES,
+            IO_CID_DEPTH,
+            dstrd,
+            bar_virt,
+        )?;
+
+        if let Err(e) = self.create_io_cq(&queue) {
+            queue.dealloc_all();
+            return Err(e);
+        }
+        if let Err(e) = self.create_io_sq(&queue) {
+            // The CQ was created on-device but its `DmaBuffer`s are still
+            // ours to reclaim; the controller is treated as unusable for
+            // I/O from here (`io_queue` stays empty), so the orphaned
+            // on-device CQ resource is never issued against.
+            queue.dealloc_all();
+            return Err(e);
+        }
+
+        self.io_queue.call_once(|| queue);
+        Ok(())
+    }
+
+    /// Set Features: Number of Queues, requesting one I/O SQ and one I/O CQ
+    /// (0's based, so CDW11 = 0). Logs what the controller actually granted.
+    fn set_num_queues(&self) -> Result<(), NvmeError> {
+        let sqe = SubmissionQueueEntry {
+            cdw0: regs::cdw0(regs::ADMIN_OPC_SET_FEATURES, 0),
+            nsid: 0,
+            reserved: 0,
+            mptr: 0,
+            prp1: 0,
+            prp2: 0,
+            cdw10: FEATURE_NUMBER_OF_QUEUES,
+            cdw11: 0,
+            cdw12: 0,
+            cdw13: 0,
+            cdw14: 0,
+            cdw15: 0,
+        };
+        let dw0 = self.admin_command_polled(sqe)?;
+        let nsqr = (dw0 & 0xFFFF) + 1;
+        let ncqr = ((dw0 >> 16) & 0xFFFF) + 1;
+        log!("nvme: granted {} I/O SQ(s), {} I/O CQ(s)", nsqr, ncqr);
+        Ok(())
+    }
+
+    /// Create I/O Completion Queue (05h): `CDW11` sets `IV = 0` (bits
+    /// 31:16), `IEN` (bit 1) and `PC` (bit 0, physically contiguous).
+    fn create_io_cq(&self, queue: &NvmeQueue) -> Result<(), NvmeError> {
+        let cdw10 = ((queue.cq_entries() as u32 - 1) << 16) | queue.qid as u32;
+        let cdw11 = (1 << 1) | 1;
+        let sqe = SubmissionQueueEntry {
+            cdw0: regs::cdw0(regs::ADMIN_OPC_CREATE_IO_CQ, 0),
+            nsid: 0,
+            reserved: 0,
+            mptr: 0,
+            prp1: queue.cq_phys_addr().as_u64(),
+            prp2: 0,
+            cdw10,
+            cdw11,
+            cdw12: 0,
+            cdw13: 0,
+            cdw14: 0,
+            cdw15: 0,
+        };
+        self.admin_command_polled(sqe)?;
+        Ok(())
+    }
+
+    /// Create I/O Submission Queue (01h): `CDW11` carries the owning CQ's
+    /// id (bits 31:16, this driver's 1:1 pairing) and `PC` (bit 0).
+    fn create_io_sq(&self, queue: &NvmeQueue) -> Result<(), NvmeError> {
+        let cdw10 = ((queue.sq_entries() as u32 - 1) << 16) | queue.qid as u32;
+        let cdw11 = ((queue.qid as u32) << 16) | 1;
+        let sqe = SubmissionQueueEntry {
+            cdw0: regs::cdw0(regs::ADMIN_OPC_CREATE_IO_SQ, 0),
+            nsid: 0,
+            reserved: 0,
+            mptr: 0,
+            prp1: queue.sq_phys_addr().as_u64(),
+            prp2: 0,
+            cdw10,
+            cdw11,
+            cdw12: 0,
+            cdw13: 0,
+            cdw14: 0,
+            cdw15: 0,
+        };
+        self.admin_command_polled(sqe)?;
+        Ok(())
     }
 
     /// Submit `sqe` on the admin queue and poll for its completion, bounded

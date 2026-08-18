@@ -17,6 +17,13 @@ use crate::{
 pub static XHCI_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
 pub static E1000E_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
 pub static HDA_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
+pub static NVME_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
+
+/// Total NVMe MSI-X/MSI/INTx interrupts received. The admin and I/O
+/// completion queues share this one vector (Create I/O CQ CDW11.IV = 0), so
+/// the handler cannot tell which queue posted a completion; the dispatcher
+/// drains both on every wake.
+pub static NVME_IRQS_FIRED: AtomicU64 = AtomicU64::new(0);
 
 /// Total AHCI MSIs received (incremented by the interrupt handler).
 /// Used alongside the dispatcher's wake count to diagnose NCQ-timeout
@@ -57,6 +64,14 @@ pub(super) extern "x86-interrupt" fn virtio_gpu_interrupt_handler(
 pub(super) extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: InterruptStackFrame) {
     AHCI_IRQS_FIRED.fetch_add(1, Ordering::Relaxed);
     if let Some(handle) = AHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread_irq(handle, WakePriority::Interrupt);
+    }
+    unsafe { get_lapic().end_of_interrupt() };
+}
+
+pub(super) extern "x86-interrupt" fn nvme_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    NVME_IRQS_FIRED.fetch_add(1, Ordering::Relaxed);
+    if let Some(handle) = NVME_DRIVER_THREAD_ID.get() {
         sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
     unsafe { get_lapic().end_of_interrupt() };

@@ -17,8 +17,8 @@ use crate::{
         InterruptIndex,
         io::{
             ahci_interrupt_handler, device_not_available_handler, e1000e_interrupt_handler,
-            hda_interrupt_handler, mouse_interrupt_handler, virtio_gpu_interrupt_handler,
-            xhci_interrupt_handler,
+            hda_interrupt_handler, mouse_interrupt_handler, nvme_interrupt_handler,
+            virtio_gpu_interrupt_handler, xhci_interrupt_handler,
         },
     },
     log,
@@ -71,6 +71,7 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
         idt[InterruptIndex::E1000e.as_u8()].set_handler_fn(e1000e_interrupt_handler);
         idt[InterruptIndex::Hda.as_u8()].set_handler_fn(hda_interrupt_handler);
         idt[InterruptIndex::VirtioGpu.as_u8()].set_handler_fn(virtio_gpu_interrupt_handler);
+        idt[InterruptIndex::Nvme.as_u8()].set_handler_fn(nvme_interrupt_handler);
         idt[InterruptIndex::TlbShootdown.as_u8()]
             .set_handler_fn(crate::memory::tlb::tlb_shootdown_handler);
         idt[InterruptIndex::Spurious.as_u8()].set_handler_fn(spurious_interrupt_handler);

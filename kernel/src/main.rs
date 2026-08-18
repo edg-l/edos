@@ -135,6 +135,17 @@ fn main() -> ! {
         println!("ahci: NCQ watchdog timeout set to {ms} ms");
     }
 
+    // Exercises the NVMe read path from `nvme_driver_main` once controller
+    // bring-up finishes, ahead of the block-io registration that would
+    // otherwise be the only way to reach it.
+    if cmdline
+        .other_params
+        .iter()
+        .any(|(k, _)| k == "nvme_probe_read")
+    {
+        drivers::nvme::set_probe_read(true);
+    }
+
     // Regression gate for the cancel-time `BlockBuffer` use-after-free: see
     // `block_orphan_test_thread` below. Parsed here, spawned once a device is
     // registered to submit against.

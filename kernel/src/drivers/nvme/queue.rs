@@ -6,18 +6,22 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use x86_64::{PhysAddr, VirtAddr};
+use alloc::{sync::Arc, vec::Vec};
+use x86_64::{PhysAddr, VirtAddr, structures::paging::mapper::TranslateResult};
 
 use crate::{
-    debug::lock_order::{RANK_NVME_CQ, RANK_NVME_SQ},
+    debug::lock_order::{RANK_NVME_CMD, RANK_NVME_CQ, RANK_NVME_SQ},
     drivers::{
         dma::{DmaBuffer, dma},
         nvme::{
             NvmeError,
+            cancel_op::NvmeOp,
             regs::{self, CompletionQueueEntry, SubmissionQueueEntry},
         },
     },
+    memory::mapper::memory_mapper,
     ranked_lock,
+    thread::waitqueue::WaitQueue,
 };
 
 struct SqState {
@@ -40,15 +44,20 @@ struct CqState {
 /// the bitmap width, not the ring size, and there is no ring-full path to
 /// handle.
 pub struct NvmeQueue {
-    #[expect(
-        dead_code,
-        reason = "read by Create I/O SQ/CQ and the dispatcher's per-queue logging"
-    )]
     pub qid: u16,
     sq: spin::Mutex<SqState>,
     cq: spin::Mutex<CqState>,
+    /// Per-command-id op handoff between submit, the IRQ dispatcher, the
+    /// watchdog and cancel. Indexed by cid, sized to `cid_depth` rather than
+    /// the (larger) ring size.
+    cmd_slots: Vec<spin::Mutex<Option<Arc<NvmeOp>>>>,
+    /// Where a submitter parks when every cid below `cid_depth` is
+    /// outstanding. Woken by `free_cid`.
+    cid_waitq: WaitQueue,
     free_cids: AtomicU64,
     cid_depth: u8,
+    sq_entries: u16,
+    cq_entries: u16,
     sq_phys: PhysAddr,
     cq_phys: PhysAddr,
     sq_tail_doorbell: *mut u32,
@@ -97,6 +106,8 @@ impl NvmeQueue {
             ptr::write_bytes(cq_buffer.as_ptr(), 0, cq_buffer.size);
         }
 
+        let cmd_slots = (0..cid_depth).map(|_| spin::Mutex::new(None)).collect();
+
         let sq_phys = sq_buffer.phys_addr();
         let cq_phys = cq_buffer.phys_addr();
 
@@ -126,8 +137,12 @@ impl NvmeQueue {
                 head: 0,
                 phase: true,
             }),
+            cmd_slots,
+            cid_waitq: WaitQueue::new(),
             free_cids: AtomicU64::new(0),
             cid_depth,
+            sq_entries,
+            cq_entries,
             sq_phys,
             cq_phys,
             sq_tail_doorbell,
@@ -143,14 +158,31 @@ impl NvmeQueue {
         self.cq_phys
     }
 
-    /// Claim the lowest free command id below `cid_depth`, or `None` if
-    /// every one is outstanding.
-    pub fn alloc_cid(&self) -> Option<u8> {
-        let mask = if self.cid_depth >= 64 {
+    /// Entry count this queue's SQ was created with, for `Create I/O SQ`'s
+    /// CDW10 size field.
+    pub fn sq_entries(&self) -> u16 {
+        self.sq_entries
+    }
+
+    /// Entry count this queue's CQ was created with, for `Create I/O CQ`'s
+    /// CDW10 size field.
+    pub fn cq_entries(&self) -> u16 {
+        self.cq_entries
+    }
+
+    /// Bitmask covering the `cid_depth` valid command ids.
+    fn cid_mask(&self) -> u64 {
+        if self.cid_depth >= 64 {
             u64::MAX
         } else {
             (1u64 << self.cid_depth) - 1
-        };
+        }
+    }
+
+    /// Claim the lowest free command id below `cid_depth`, or `None` if
+    /// every one is outstanding.
+    pub fn alloc_cid(&self) -> Option<u8> {
+        let mask = self.cid_mask();
         loop {
             let cur = self.free_cids.load(Ordering::Acquire);
             let free = !cur & mask;
@@ -169,8 +201,71 @@ impl NvmeQueue {
         }
     }
 
+    /// Claim a command id, parking on `cid_waitq` while every one below
+    /// `cid_depth` is outstanding. Mirrors AHCI's `allocate_slot_blocking`.
+    pub fn alloc_cid_blocking(&self) -> u8 {
+        loop {
+            if let Some(cid) = self.alloc_cid() {
+                return cid;
+            }
+            let mask = self.cid_mask();
+            self.cid_waitq
+                .wait_until(|| self.free_cids.load(Ordering::Acquire) & mask != mask);
+        }
+    }
+
     pub fn free_cid(&self, cid: u8) {
         self.free_cids.fetch_and(!(1u64 << cid), Ordering::AcqRel);
+        self.cid_waitq.wake_one();
+    }
+
+    /// Install `op` at `cid`'s slot for the IRQ dispatcher, the watchdog and
+    /// cancel to find it by command id.
+    pub fn install_op(&self, cid: u8, op: Arc<NvmeOp>) {
+        **ranked_lock!(
+            RANK_NVME_CMD,
+            "NvmeQueue.cmd_slots",
+            self.cmd_slots[cid as usize]
+        ) = Some(op);
+    }
+
+    /// Clone the op installed at `cid`, or `None` if the slot is empty (a
+    /// concurrent completion path already reclaimed it).
+    pub fn cmd_slot(&self, cid: u8) -> Option<Arc<NvmeOp>> {
+        ranked_lock!(
+            RANK_NVME_CMD,
+            "NvmeQueue.cmd_slots",
+            self.cmd_slots[cid as usize]
+        )
+        .clone()
+    }
+
+    /// Clear `cid`'s slot. Called once the completion path has won the
+    /// reclaim transition on the op's own state.
+    pub fn clear_cmd_slot(&self, cid: u8) {
+        **ranked_lock!(
+            RANK_NVME_CMD,
+            "NvmeQueue.cmd_slots",
+            self.cmd_slots[cid as usize]
+        ) = None;
+    }
+
+    /// Number of command ids `cmd_slots` was sized for, so a caller can
+    /// range-check a completion's cid before indexing.
+    pub fn cid_depth(&self) -> u8 {
+        self.cid_depth
+    }
+
+    /// Whether the entry at the CQ's current head has the expected phase,
+    /// without consuming it. The dispatcher's park predicate across every
+    /// queue of every controller.
+    pub fn has_pending(&self) -> bool {
+        let cq = ranked_lock!(RANK_NVME_CQ, "NvmeQueue.cq", self.cq);
+        let idx = cq.head as usize;
+        let entry = unsafe {
+            ptr::read_volatile(cq.buffer.as_ptr().cast::<CompletionQueueEntry>().add(idx))
+        };
+        regs::cqe_phase(entry.dw3) == cq.phase
     }
 
     /// Write `sqe` at the current tail and ring the SQ tail doorbell.
@@ -246,4 +341,89 @@ impl NvmeQueue {
             f(cid, status, dw0);
         }
     }
+}
+
+/// One list page's worth of PRP entries: 4096 / 8 bytes each.
+const PRP_LIST_ENTRIES: usize = 512;
+
+/// Build PRP1/PRP2 for a `len`-byte transfer starting at `vaddr`
+/// (NVM Command Set 3.3.1).
+///
+/// PRP1 carries its own byte offset into the first page; every entry after
+/// it addresses a whole page and must be page-aligned. Up to two pages need
+/// no list at all (PRP1 alone, or PRP1 plus PRP2 pointing at the second
+/// page). Beyond that, `list` is filled lazily on first use with one 8-byte
+/// entry per remaining page -- one list page (4 KiB) covers
+/// [`PRP_LIST_ENTRIES`] pages (2 MiB), which is why one page per command id
+/// is always enough for any transfer this driver issues.
+///
+/// Every page is translated separately. A virtually contiguous buffer is not
+/// physically contiguous here: the kernel heap is mapped by `map_memory`,
+/// which allocates a frame at a time, and only `map_memory_contiguous` (what
+/// the DMA allocator uses) yields a run of frames. Deriving later pages by
+/// adding 4096 to the first would address unrelated frames and DMA into
+/// them.
+///
+/// `Err(Unsupported)` means a page did not translate, which the caller
+/// answers by bouncing through a `dma()` buffer.
+///
+/// Callers that error out, get cancelled, or otherwise never reach a
+/// completion must reclaim `*list` themselves via `dma().dealloc`:
+/// `DmaBuffer` has no `Drop`.
+pub fn build_prp(
+    vaddr: VirtAddr,
+    len: usize,
+    list: &mut Option<DmaBuffer>,
+) -> Result<(u64, u64), NvmeError> {
+    fn translate(vaddr: VirtAddr) -> Option<PhysAddr> {
+        // Acquired and dropped per page, as AHCI's own scatter-gather walk
+        // does, so the mapper is never held across the rest of the submit.
+        match memory_mapper().translate(vaddr) {
+            TranslateResult::Mapped { frame, offset, .. } => Some(frame.start_address() + offset),
+            _ => None,
+        }
+    }
+
+    let first = translate(vaddr).ok_or(NvmeError::Unsupported)?;
+    let page_offset = (first.as_u64() & 0xFFF) as usize;
+    let first_page_bytes = 4096 - page_offset;
+    if len <= first_page_bytes {
+        return Ok((first.as_u64(), 0));
+    }
+
+    let second_virt = VirtAddr::new((vaddr.as_u64() & !0xFFF) + 4096);
+    let second = translate(second_virt).ok_or(NvmeError::Unsupported)?;
+    debug_assert_eq!(second.as_u64() & 0xFFF, 0, "PRP2 must be page-aligned");
+    let remaining = len - first_page_bytes;
+    if remaining <= 4096 {
+        return Ok((first.as_u64(), second.as_u64()));
+    }
+
+    let num_pages = remaining.div_ceil(4096);
+    if num_pages > PRP_LIST_ENTRIES {
+        return Err(NvmeError::Unsupported);
+    }
+    let list_buf = match list {
+        Some(buf) => buf,
+        None => {
+            let buf = dma()
+                .allocate_sized_uninit(4096)
+                .map_err(NvmeError::DmaError)?;
+            list.insert(buf)
+        }
+    };
+    let entries = list_buf.as_ptr().cast::<u64>();
+    for i in 0..num_pages {
+        let page_virt = VirtAddr::new(second_virt.as_u64() + (i as u64) * 4096);
+        let page_phys = translate(page_virt).ok_or(NvmeError::Unsupported)?;
+        debug_assert_eq!(
+            page_phys.as_u64() & 0xFFF,
+            0,
+            "PRP list entry must be page-aligned"
+        );
+        unsafe {
+            ptr::write_volatile(entries.add(i), page_phys.as_u64());
+        }
+    }
+    Ok((first.as_u64(), list_buf.phys_addr().as_u64()))
 }

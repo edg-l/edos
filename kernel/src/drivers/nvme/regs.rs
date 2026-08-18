@@ -214,20 +214,14 @@ pub fn status_more(status: u16) -> bool {
 // Opcodes
 // ---------------------------------------------------------------------------
 
-#[expect(dead_code, reason = "issued once the I/O queue pair is created")]
 pub const ADMIN_OPC_CREATE_IO_SQ: u8 = 0x01;
 #[expect(
     dead_code,
     reason = "issued by controller reset to tear an I/O CQ down before recreating it"
 )]
 pub const ADMIN_OPC_DELETE_IO_CQ: u8 = 0x04;
-#[expect(dead_code, reason = "issued once the I/O queue pair is created")]
 pub const ADMIN_OPC_CREATE_IO_CQ: u8 = 0x05;
 pub const ADMIN_OPC_IDENTIFY: u8 = 0x06;
-#[expect(
-    dead_code,
-    reason = "issued once the I/O queue pair count is negotiated"
-)]
 pub const ADMIN_OPC_SET_FEATURES: u8 = 0x09;
 
 /// Identify CNS values used by this driver (NVM Command Set 5.17.2.1).
@@ -242,5 +236,4 @@ pub const IDENTIFY_CNS_ACTIVE_NAMESPACE_LIST: u32 = 0x02;
 pub const NVM_OPC_FLUSH: u8 = 0x00;
 #[expect(dead_code, reason = "issued by the write path")]
 pub const NVM_OPC_WRITE: u8 = 0x01;
-#[expect(dead_code, reason = "issued by the read path")]
 pub const NVM_OPC_READ: u8 = 0x02;
