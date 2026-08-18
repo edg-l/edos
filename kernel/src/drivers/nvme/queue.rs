@@ -320,18 +320,6 @@ impl NvmeQueue {
         self.cid_depth
     }
 
-    /// Whether the entry at the CQ's current head has the expected phase,
-    /// without consuming it. The dispatcher's park predicate across every
-    /// queue of every controller.
-    pub fn has_pending(&self) -> bool {
-        let cq = ranked_lock!(RANK_NVME_CQ, "NvmeQueue.cq", self.cq);
-        let idx = cq.head as usize;
-        let entry = unsafe {
-            ptr::read_volatile(cq.buffer.as_ptr().cast::<CompletionQueueEntry>().add(idx))
-        };
-        regs::cqe_phase(entry.dw3) == cq.phase
-    }
-
     /// Write `sqe` at the current tail and ring the SQ tail doorbell.
     pub fn write_sqe_and_ring(&self, sqe: &SubmissionQueueEntry) {
         let mut sq = ranked_lock!(RANK_NVME_SQ, "NvmeQueue.sq", self.sq);

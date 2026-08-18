@@ -25,8 +25,8 @@ The ISO is hybrid and carries its own root as a Limine module served from RAM,
 so it needs no disk to reach a desktop. What to record, in order:
 
 - Does it reach the desktop at all?
-- Does it see any storage? AHCI-only, so an NVMe-only machine sees none, and
-  root selection logs every partition it found before falling back to memfs.
+- Does it see any storage? AHCI and NVMe now, so record which controller
+  bound; root selection logs every partition it found before falling back to memfs.
 - Does the NIC bind? `e1000e` only.
 - Does USB input work? This is the one most likely to already be fine.
 - Does HDA produce sound?
@@ -49,29 +49,37 @@ Worth stating, because it is more than it sounds:
 | Interrupts | APIC + MSI |
 | SMP, ACPI | both present |
 
-## 1. NVMe — the gap that decides whether it installs
+## 1. NVMe — landed for QEMU, unproven on hardware
 
-Storage is AHCI only. A machine built in the last several years may have no SATA
-at all, so it boots the live ISO and then **cannot install**: root selection
-finds no partition and falls back to memfs.
+`kernel/src/drivers/nvme/` is a working driver: PCIe discovery, BAR0 mapping,
+controller reset and enable, admin queue, `Identify Controller`/`Identify
+Namespace`, one I/O queue pair with MSI-X, PRP scatter-gather, reads, writes,
+FUA, VWC-gated flush, MDTS splitting, a staleness watchdog, controller reset and
+`CC.SHN` shutdown. Namespaces register into `block_io` at device id
+`3000 + controller * 64 + (nsid - 1)` and appear as `/dev/nvme<c>n<n>`, so an
+NVMe disk is a root and an `edos-install` target like any other. `/proc/nvme_stats`
+carries 19 counters. A guest boots with root on an NVMe namespace and no SATA
+disk attached.
 
-**The timing is good, and that is the argument for doing it soon.** The async
-block layer built for AHCI is already the right shape. `AsyncBlockDevice`, the
-split submit/complete path with an IRQ-driven dispatcher, and the watchdog
-kthread were all designed around AHCI's 32 command slots, and NVMe's
-submission/completion queues are a cleaner instance of that same model. MSI is
-already there, which NVMe needs.
+**The staging note this section used to carry was not what got built.** It said
+to poll the completion queue first and add MSI-X afterwards; the driver went
+straight to MSI-X plus an IRQ-woken dispatcher kthread, because that is the shape
+the AHCI NCQ path already had and copying it was cheaper than writing a polled
+path to throw away. Polling survives in exactly one place, and for the opposite
+reason: `admin_command_polled` polls its own completion, and the dispatcher is
+forbidden to drain the admin queue, because a drain from a second thread eats the
+completion the poller is waiting for. A queue pair per CPU was never started.
 
-NVMe is in several ways a *simpler* driver than AHCI: one well-written
-specification, no legacy modes, no port multipliers, queues instead of a slot
-bitmap. The work is BAR mapping over the existing PCIe enumeration, admin queue
-setup, `Identify Controller` and `Identify Namespace`, an I/O queue pair, PRP
-lists for scatter-gather, and completion onto the existing `AsyncBlockDevice`.
+**What QEMU cannot tell us, and so is still unverified**: the INTx and MSI
+fallbacks (QEMU always offers MSI-X), `CSTS.CFS`-driven reset, a 4Kn namespace on
+a controller that also offers a 512-byte format, `CAP.MPSMIN > 0`,
+`CAP.DSTRD != 0`, PCIe link errors, and hot-removal. Nor can it reach the
+no-AHCI-controller boot path (`619f10ae`), since q35 always exposes the ICH9
+controller — which is exactly the machine this item exists for.
 
-Stage it: one I/O queue pair with the completion queue *polled* to get reads
-working, then MSI-X, then a queue pair per CPU. QEMU emulates NVMe
-(`-device nvme`), so the whole driver can be written and tested before any real
-hardware is involved.
+Still open: `scripts/nvme-check` and its four cases (NVMe-root boot, SATA+NVMe
+coexistence, the `logical_block_size=4096` refusal, and `edos-install` onto a
+blank image), and `doc/nvme.md`.
 
 ## 2. A modern NIC — the gap that decides whether it networks
 

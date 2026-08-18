@@ -27,6 +27,7 @@ use crate::{
         },
         pci::{pci_manager, structures::PciDevice},
     },
+    interrupts::io::NVME_IRQS_FIRED,
     log, println,
     thread::{
         runqueue::IO_PRIORITY,
@@ -530,12 +531,20 @@ pub extern "C" fn nvme_driver_main() -> ! {
     // this loop has not started yet, but not during a controller reset,
     // which re-runs Set Features and Create I/O Queue from the watchdog
     // thread while this one is live.
+    //
+    // The predicate is the interrupt counter rather than the queues
+    // themselves. A park predicate runs with interrupts off after the CPU has
+    // pivoted onto the transition stack, so it must not take a lock any other
+    // thread can hold -- and the watchdog drains the I/O completion queue
+    // under `NvmeQueue.cq` from its own thread. Reading `seen` *before* the
+    // drain is what makes it lossless: a completion posted after the read is
+    // either picked up by this pass anyway, costing one spurious pass next
+    // time round, or lands after it and leaves the counter ahead, so the next
+    // park returns at once.
+    let mut seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
     loop {
-        thread_park_while(|| {
-            !controllers
-                .iter()
-                .any(|c| c.io_queue().is_some_and(|q| q.has_pending()))
-        });
+        thread_park_while(|| NVME_IRQS_FIRED.load(Ordering::Acquire) == seen);
+        seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
         watchdog::DISPATCHER_PASSES.fetch_add(1, Ordering::Relaxed);
 
         for controller in controllers {

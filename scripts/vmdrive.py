@@ -8,6 +8,7 @@ escapes rather than text.
 
 import os
 import subprocess
+import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,7 +20,21 @@ BOOT_SECONDS = 26
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    """Run a command, forwarding its stderr if it fails.
+
+    `capture_output` is what lets a caller read the serial tail out of
+    stdout, and it also swallows the traceback of whatever went wrong
+    inside `edos-vm`. A gate that reports only `returned non-zero exit
+    status 1` costs a whole re-run to find out what it was.
+    """
+    try:
+        return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    except subprocess.CalledProcessError as e:
+        if e.stderr:
+            sys.stderr.write(e.stderr)
+        if e.stdout:
+            sys.stderr.write(e.stdout)
+        raise
 
 
 def vm(*args):

@@ -2152,7 +2152,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-18 (at v0.8.0, then again after the priority-inheritance work)
+## Counts, remeasured 2026-08-19 (at v0.8.0, after the NVMe driver landed)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2164,14 +2164,15 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 113,779 code lines across 455 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 51,490 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,486 | `git rev-list --count HEAD` |
+| Rust | 116,059 code lines across 465 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,770 code lines | `tokei -t=Rust kernel/src` |
+| NVMe driver | 2,052 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
+| commits | 1,507 | `git rev-list --count HEAD` |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | guest suites | 16 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
-| `unwrap()`/`expect()` in `kernel/src` | 160, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 170, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
@@ -8843,3 +8844,62 @@ Two related traps in the same path:
   proves the watchdog and reset run to completion; it does not, as written,
   leave the guest usable. A retry above `block_io`, or a small non-zero timeout,
   is what that half needs.
+
+## The NVMe dispatcher parked on a lock the watchdog then started holding (2026-08-19)
+
+`nvme_dispatcher_main` parks with
+
+```rust
+thread_park_while(|| controllers.any(|c| c.io_queue().is_some_and(|q| q.has_pending())))
+```
+
+and `NvmeQueue::has_pending` takes rank 186, the CQ lock. A park predicate runs
+with interrupts off after the CPU has pivoted onto the transition stack —
+`debug/lock_order.rs` carries a defensive check for exactly this — so spinning
+there is safe only while nothing else can hold the lock.
+
+That was true through Phase 5, when the dispatcher was the only thread that
+touched any completion queue. **Phase 6 made it false**: `watchdog_sweep` drains
+the I/O completion queue from the watchdog kthread before it judges anything
+stale, so a watchdog preempted under that guard left a dispatcher parking on the
+same CPU spinning with interrupts off, on a stack it had already left. It was
+never observed — the window is a few hundred nanoseconds against a one-second
+sweep, and every gate was green with it in place — which is the point: a lock
+taken from a park predicate is a hazard you find by reading, not by running.
+
+The predicate is the interrupt counter now, which is the shape AHCI already used
+(`drivers/ahci/mod.rs` reads `HBA.IS`, also lock-free):
+
+```rust
+let mut seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
+loop {
+    thread_park_while(|| NVME_IRQS_FIRED.load(Ordering::Acquire) == seen);
+    seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
+    // ...drain every controller's I/O queue...
+}
+```
+
+**Reading `seen` before the drain is the whole correctness argument.** A
+completion posted after that read is either picked up by the pass about to run,
+costing one spurious wake next time round, or lands after it and leaves the
+counter ahead of `seen`, so the next park returns immediately. Reading it after
+the drain instead would lose exactly the completions that arrive during a pass.
+`NvmeQueue::has_pending` had no other caller and is gone.
+
+**Gate state at `168573cd` (Phases 1-6, SATA boot), all green:**
+`make -C kernel check` warning-free across every feature combo, `make host-tests`
+138, `make test AUDIODEV=none` 58/58, `make guest-check` 16/16,
+`make recovery-check`, and `make storage-check` (fs-regression efs and fat32,
+fsbench-run `/var`). The same four fast gates are green with the predicate
+change, and an NVMe-**root** boot (`--nvme-disk --no-sata`, `limine.conf`
+cmdline pointed at `NVME_UUID` and restored afterwards) reaches the desktop with
+root on device 3000, so the whole of userspace loaded through the new predicate.
+
+**A gate that hides its own stderr costs a re-run.** The first `storage-check`
+of the night died with nothing but `Command '[... edos-vm, stop]' returned
+non-zero exit status 1`: `vmdrive.run` passes `capture_output=True` so callers
+can read the serial tail, and that swallowed whatever `edos-vm` printed. It does
+not reproduce — the same gate ran green immediately afterwards, both halves of
+fs-regression included — so the cause is still unknown, and `run` now forwards a
+failing command's stderr and stdout before re-raising, which is what the next
+occurrence needs.

@@ -260,6 +260,14 @@ never co-held with `cmd_slots` (182) in either direction: the callback takes
 under 186 would both be a descending 186 -> 182 acquisition and hold a spin
 lock across a page copy.
 
+**186 is never taken from a park predicate.** A park predicate is evaluated
+with interrupts off after the CPU has pivoted onto the transition stack, so
+spinning there is safe only while no other thread can hold the lock. The
+dispatcher's `thread_park_while` (`drivers/nvme/mod.rs`) therefore compares
+`NVME_IRQS_FIRED` against the value it last drained at, the way the AHCI
+dispatcher reads `HBA.IS`: no lock, and the watchdog is free to drain the same
+queue under 186 from its own thread.
+
 **190, `AhciPort.mmio_lock`.** Very short raw MMIO read-modify-write. True leaf.
 
 **192, `NvmeQueue.sq`.** SQ tail cursor, the 64-byte SQE write, the tail
@@ -594,6 +602,17 @@ no inner lock and no park inside the scope:
 | batch read loop | before `wait_for_ncq_completion`, no ranked lock held |
 | remove-after-wake sites | after park returns, no ranked lock held |
 | `owned_ops_cancel_all` | reaper context; drains under lock, cancels outside |
+
+### `NvmeOp.resources`
+
+`spin::Mutex<OpResources>` in `drivers/nvme/cancel_op.rs`, holding the command's
+bounce buffer and PRP list page so that exactly one of completion and cancel
+returns them to the DMA allocator.
+
+Leaf by construction: every site is `lock() -> mem::take -> drop()`, with no
+inner lock, no allocation, no park and no copy inside the scope, and it is only
+ever reached after the slot lock (182) has been released. A rank would add a
+stack entry and forbid nothing that take-exactly-once does not already forbid.
 
 ### `WaitQueue.inner`
 
