@@ -27,7 +27,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vmdrive import (  # noqa: E402
-    BOOT_SECONDS, REPO, serial_mark, serial_tail, start, type_line, vm, wait_for,
+    BOOT_SECONDS, REPO, serial_mark, serial_tail, start, type_line, vm,
 )
 
 MARKER = "NVMECHECK"
@@ -54,8 +54,11 @@ def boot(*args, panel=True, budget=None):
     Returns the serial offset the boot started at, so a caller can assert on
     lines the kernel logged during it.
     """
-    mark = serial_mark()
     start(*args)
+    # After `start`, not before: `edos-vm start` truncates run_log.txt, so a
+    # mark taken beforehand is a byte offset past the end of the new log and
+    # every assertion against the boot reads an empty string.
+    mark = 0
     if not panel:
         return mark
     deadline = time.time() + (budget or BOOT_SECONDS * 3)
