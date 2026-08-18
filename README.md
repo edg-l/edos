@@ -77,6 +77,16 @@ cd rust && ./x install
 rustup toolchain link edos <install-prefix>
 ```
 
+Or take the one CI uses, which is the same compiler without the wait:
+
+```bash
+gh release download edos-toolchain --repo edg-l/edos --pattern 'edos-toolchain-*.tar.zst'
+mkdir -p ~/edos-toolchain && tar --zstd -xf edos-toolchain-*.tar.zst -C ~/edos-toolchain
+rustup toolchain link edos ~/edos-toolchain
+```
+
+The revision it is built from is pinned in `toolchain/edos.pin`.
+
 The fork is at [edg-l/rust](https://github.com/edg-l/rust/tree/edos_std_v3)
 (branch `edos_std_v3`), and its runtime crate is
 [edos_rt](https://github.com/edg-l/edos_rt). The target triple is
@@ -164,6 +174,7 @@ Start here before changing anything load-bearing:
 - [`doc/bugs/`](doc/bugs/), post-mortems for hangs and races worth recognising
   if they come back
 - [`doc/scripting.txt`](doc/scripting.txt), the shell scripting reference
+- [`doc/ci.md`](doc/ci.md), what CI gates and how the forked toolchain gets there
 
 ## Releases
 

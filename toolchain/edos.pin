@@ -1,0 +1,11 @@
+# The github.com/edg-l/rust revision that programs/ builds against.
+#
+# CI installs a prebuilt toolchain for exactly this revision, published as an
+# asset on the `edos-toolchain` release by .github/workflows/toolchain.yml.
+# Moving the pin without running that workflow leaves CI with nothing to
+# install, and it says so rather than falling back to a different compiler.
+#
+# Sourced by shell, so keep it to KEY=value with no spaces.
+EDOS_RUST_REPO=https://github.com/edg-l/rust.git
+EDOS_RUST_BRANCH=edos_std_v3
+EDOS_RUST_REV=fc0458542abb2216a79ec8a0e2e5f0656270cb6e

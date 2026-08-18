@@ -1,0 +1,159 @@
+name: Toolchain
+
+# Builds the Rust fork userspace links against and publishes the install prefix
+# as an asset on the `edos-toolchain` release. Everything else in CI installs
+# that asset instead of building a compiler, so this is the only job here that
+# costs hours, and it runs only when the pin moves or somebody asks for it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: Fork revision to build. Defaults to the pin in toolchain/edos.pin.
+        required: false
+        type: string
+      force:
+        description: Rebuild and overwrite an asset that already exists.
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [trunk]
+    paths:
+      - toolchain/edos.pin
+      - .github/workflows/toolchain.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: toolchain
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve the revision
+        id: rev
+        env:
+          OVERRIDE: ${{ inputs.rev }}
+        run: |
+          set -euo pipefail
+          . toolchain/edos.pin
+          rev="${OVERRIDE:-$EDOS_RUST_REV}"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "repo=$EDOS_RUST_REPO" >> "$GITHUB_OUTPUT"
+          echo "asset=edos-toolchain-$rev.tar.zst" >> "$GITHUB_OUTPUT"
+
+      - name: Skip a revision that is already published
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.rev.outputs.asset }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          have=no
+          if [ "$FORCE" != "true" ] &&
+             gh release view edos-toolchain --json assets \
+               --jq '.assets[].name' 2>/dev/null | grep -qxF "$ASSET"; then
+            have=yes
+            echo "::notice::$ASSET is already published; nothing to build"
+          fi
+          echo "have=$have" >> "$GITHUB_OUTPUT"
+
+      # A stage2 build with the CI LLVM still wants more room than the runner
+      # image leaves free.
+      - name: Free disk space
+        if: steps.existing.outputs.have == 'no'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build dependencies
+        if: steps.existing.outputs.have == 'no'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config libssl-dev \
+            python3 git curl zstd
+
+      # Full history, no blobs: `download-ci-llvm` walks back to the last
+      # upstream commit that has a prebuilt LLVM, which a shallow clone cannot
+      # reach, and building LLVM here would double the job.
+      - name: Clone the fork
+        if: steps.existing.outputs.have == 'no'
+        env:
+          REPO: ${{ steps.rev.outputs.repo }}
+          REV: ${{ steps.rev.outputs.rev }}
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$REPO" "$RUNNER_TEMP/rust"
+          git -C "$RUNNER_TEMP/rust" checkout --detach "$REV"
+
+      - name: Configure bootstrap
+        if: steps.existing.outputs.have == 'no'
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/rust/bootstrap.toml" <<TOML
+          change-id = "ignore"
+
+          [llvm]
+          download-ci-llvm = true
+
+          [build]
+          target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-edos"]
+          extended = true
+          tools = ["cargo", "rustfmt", "clippy"]
+          docs = false
+          doc-stage = 0
+
+          [install]
+          prefix = "$RUNNER_TEMP/edos-toolchain"
+          sysconfdir = "etc"
+
+          [rust]
+          channel = "nightly"
+          debug = false
+          incremental = false
+          TOML
+
+      - name: Build and install
+        if: steps.existing.outputs.have == 'no'
+        working-directory: ${{ runner.temp }}/rust
+        run: ./x install
+
+      - name: Pack the install prefix
+        if: steps.existing.outputs.have == 'no'
+        env:
+          ASSET: ${{ steps.rev.outputs.asset }}
+          ZSTD_CLEVEL: "10"
+          ZSTD_NBTHREADS: "0"
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP/edos-toolchain/lib/rustlib/x86_64-unknown-edos"
+          tar --zstd -C "$RUNNER_TEMP/edos-toolchain" -cf "$RUNNER_TEMP/$ASSET" .
+          ls -lh "$RUNNER_TEMP/$ASSET"
+
+      # One long-lived prerelease holds every revision that has been built, so
+      # the releases page keeps showing the ISO as the latest thing there.
+      - name: Publish
+        if: steps.existing.outputs.have == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.rev.outputs.asset }}
+          REV: ${{ steps.rev.outputs.rev }}
+        run: |
+          set -euo pipefail
+          gh release view edos-toolchain >/dev/null 2>&1 || \
+            gh release create edos-toolchain \
+              --prerelease \
+              --title "edos toolchain builds" \
+              --notes "Prebuilt \`x86_64-unknown-edos\` toolchains, one asset per revision of the Rust fork. CI installs the one named by \`toolchain/edos.pin\`; see \`doc/ci.md\`."
+          gh release upload edos-toolchain "$RUNNER_TEMP/$ASSET" --clobber
+          echo "::notice::published $ASSET for $REV"

@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  kernel:
+    name: kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the kernel toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' kernel/rust-toolchain.toml)
+          rustup toolchain install "$channel" \
+            --profile default \
+            --component clippy --component rustfmt \
+            --target x86_64-unknown-none
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kernel
+
+      - name: Format
+        run: cargo fmt --check
+        working-directory: kernel
+
+      # `make check` here rather than `make -C .. check`: the top-level target
+      # builds userspace first, and this job has no edos toolchain.
+      - name: Check, every feature one at a time
+        run: make check
+        working-directory: kernel
+
+      - name: Clippy
+        run: cargo clippy --target x86_64-unknown-none -- -D warnings
+        env:
+          RUSTFLAGS: -C relocation-model=static -C force-frame-pointers=yes
+        working-directory: kernel
+
+  host-tests:
+    name: host tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # `scripts/host-tests` asks for `+nightly` explicitly, so the toolchain
+      # has to be there by name rather than resolved from rust-toolchain.toml.
+      - name: Install nightly
+        run: |
+          rustup toolchain install nightly \
+            --profile default \
+            --component llvm-tools-preview --component rust-src \
+            --target x86_64-unknown-none
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: programs
+
+      - name: Userspace unit tests that need no guest
+        run: scripts/host-tests
+
+  tools:
+    name: host tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install nightly
+        run: |
+          rustup toolchain install nightly \
+            --profile default \
+            --component llvm-tools-preview --component rust-src \
+            --target x86_64-unknown-none
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tools/efs-fsck
+            tools/efs-mkfs
+            tools/grab-repo
+
+      - name: efs-fsck tests
+        run: make check-fsck
+
+      - name: Build the host tools
+        run: |
+          set -euo pipefail
+          for t in efs-mkfs efs-fsck grab-repo; do
+            cargo build --release --manifest-path "tools/$t/Cargo.toml"
+          done
+
+  programs:
+    name: userspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/edos-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: programs
+          shared-key: userspace
+
+      - name: Format
+        run: cargo +edos fmt --check
+        working-directory: programs
+
+      - name: Build
+        run: make filesystem programs
+
+  sched-test:
+    name: in-kernel suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/edos-toolchain
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build and boot dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential xorriso mtools gdisk qemu-utils \
+            qemu-system-x86 fonts-lato fonts-jetbrains-mono
+
+      # /dev/kvm exists on the hosted runners but is not writable by the
+      # runner user until something says so.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            kernel
+            programs
+          shared-key: guest
+
+      - name: Run the scheduler and sync suites
+        run: make test AUDIODEV=none
+
+      - name: Serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sched-test-serial-log
+          path: run_log.txt
+          if-no-files-found: warn
+
+  guest-check:
+    name: guest suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/edos-toolchain
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build and boot dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential xorriso mtools gdisk qemu-utils \
+            qemu-system-x86 fonts-lato fonts-jetbrains-mono
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            kernel
+            programs
+          shared-key: guest
+
+      # `guest-check` boots the ISO with sata-disk.img attached as the root, so
+      # both images and the firmware have to exist before it starts.
+      - name: Build the boot media
+        run: |
+          set -euo pipefail
+          make ovmf/ovmf-code-x86_64.fd ovmf/ovmf-vars-x86_64.fd
+          make all
+          make sata-disk.img
+
+      - name: Run the guest suites
+        run: make guest-check
+
+      - name: Serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-check-serial-log
+          path: run_log.txt
+          if-no-files-found: warn

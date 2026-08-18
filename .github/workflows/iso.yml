@@ -1,0 +1,70 @@
+name: ISO
+
+# A bootable image on demand, for trying a branch without a local toolchain.
+# Releases are cut by `scripts/release`, not here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      features:
+        description: Kernel cargo features, space separated. Empty for a shippable build.
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: iso-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  iso:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/edos-toolchain
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential xorriso mtools gdisk qemu-utils \
+            fonts-lato fonts-jetbrains-mono
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            kernel
+            programs
+          shared-key: guest
+
+      - name: Build
+        env:
+          FEATURES: ${{ inputs.features }}
+        run: |
+          set -euo pipefail
+          if [ -n "$FEATURES" ]; then
+            make all CARGO_FLAGS="--features $FEATURES"
+          else
+            make all
+          fi
+          sha256sum edos-x86_64.iso > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edos-iso-${{ github.sha }}
+          path: |
+            edos-x86_64.iso
+            SHA256SUMS
+          compression-level: 0

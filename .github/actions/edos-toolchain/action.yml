@@ -1,0 +1,57 @@
+name: edos toolchain
+description: >-
+  Install the forked Rust toolchain that userspace links against and register it
+  with rustup as `edos`.
+
+outputs:
+  rev:
+    description: The fork revision that was installed.
+    value: ${{ steps.pin.outputs.rev }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the pin
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        . toolchain/edos.pin
+        echo "rev=$EDOS_RUST_REV" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the cached toolchain
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/edos-toolchain
+        key: edos-toolchain-${{ runner.os }}-${{ steps.pin.outputs.rev }}
+
+    # Building it here would put an hour and a half in front of every pull
+    # request, so a miss downloads what the toolchain workflow already built.
+    - name: Download the prebuilt toolchain
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        REV: ${{ steps.pin.outputs.rev }}
+      run: |
+        set -euo pipefail
+        asset="edos-toolchain-$REV.tar.zst"
+        if ! gh release download edos-toolchain --pattern "$asset" --dir "$RUNNER_TEMP"; then
+          echo "::error::no prebuilt toolchain for $REV; run the Toolchain workflow to build and publish one"
+          exit 1
+        fi
+        mkdir -p ~/edos-toolchain
+        tar --zstd -xf "$RUNNER_TEMP/$asset" -C ~/edos-toolchain
+        rm -f "$RUNNER_TEMP/$asset"
+
+    - name: Link it as `edos`
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain link edos ~/edos-toolchain
+        rustc +edos --version
+        cargo +edos --version
+        test -d ~/edos-toolchain/lib/rustlib/x86_64-unknown-edos \
+          || { echo "::error::the installed toolchain has no x86_64-unknown-edos std"; exit 1; }
