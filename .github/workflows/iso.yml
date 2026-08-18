@@ -61,7 +61,7 @@ jobs:
           sha256sum edos-x86_64.iso > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: edos-iso-${{ github.sha }}
           path: |
