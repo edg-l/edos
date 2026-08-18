@@ -1988,6 +1988,10 @@ extern "C" fn transition_park(_arg: *mut u8) -> bool {
 #[repr(C)]
 struct ParkWhileCtx {
     /// Returns true if the thread should park.
+    ///
+    /// Called only while the thread is still Running: `check_ctx` points at a
+    /// closure on the thread's own kernel stack, which stops being readable
+    /// the moment a waker can resume the thread elsewhere.
     check_fn: extern "C" fn(*mut u8) -> bool,
     check_ctx: *mut u8,
 }
@@ -1999,19 +2003,29 @@ extern "C" fn transition_park_while(arg: *mut u8) -> bool {
         return true;
     };
 
+    // The condition is evaluated while the thread is still Running, and that
+    // ordering is load-bearing rather than incidental. `ctx`, the closure it
+    // points at and every variable that closure borrows all live on the
+    // parking thread's kernel stack; this CPU has pivoted off that stack but
+    // the thread still owns it. Publishing Parked first would let a waker on
+    // another CPU claim the thread and resume it on its saved context, whose
+    // RSP points back into those frames, and this read would then return
+    // whatever the resumed thread wrote over them.
+    //
+    // Nothing below touches `ctx`.
+    let should_park = (ctx.check_fn)(ctx.check_ctx);
+
     // Transition Running -> Parked.
     if !cur.cas_state(State::Running, State::Parked) {
         return false; // Not running (Dying, etc.) — don't switch.
     }
 
     // Check the wake-pending token AND the user condition. We bail (don't
-    // park) if either says so. The token covers wakes that arrived after
-    // the caller's last condition check but before our CAS to Parked; the
-    // closure covers state changes the producer made without going through
-    // a wake (or wakes whose target was just transitioned to Parked, where
-    // try_wake will succeed independently).
+    // park) if either says so. The token covers wakes that arrived after the
+    // caller's last condition check but before our CAS to Parked --- including
+    // the window the check above now sits in, where a waker finds the thread
+    // Running and so leaves a token rather than changing state.
     let token = cur.consume_wake_pending();
-    let should_park = (ctx.check_fn)(ctx.check_ctx);
 
     if token || !should_park {
         sched_prof::record(Stage::Transition, probe);
@@ -2041,6 +2055,11 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
         return true;
     };
 
+    // Read the deadline out of `ctx` before publishing Sleeping: `ctx` lives on
+    // the sleeping thread's kernel stack, and once another CPU can resume the
+    // thread that stack is no longer ours to read.
+    let deadline_ns = ctx.deadline_ns;
+
     if !cur.cas_state(State::Running, State::Sleeping) {
         // Interrupts are disabled and we own the Running state -- CAS cannot fail.
         unreachable!("transition_sleep: CAS Running->Sleeping failed");
@@ -2055,7 +2074,6 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
         return true;
     }
 
-    let deadline_ns = ctx.deadline_ns;
     cur.sleep_deadline.store(deadline_ns, Ordering::Release);
 
     let mut sleepers = sched.sleepers.lock();
@@ -2175,6 +2193,14 @@ pub unsafe extern "C" fn save_transition_switch(
         // Load transition fn + arg from the old stack frame via r12.
         // Safe: the thread is still Running (transition hasn't changed state),
         // so no other CPU can touch its stack yet.
+        //
+        // The same rule binds the transition fn itself, and it is the one
+        // thing to get right when writing another one: `arg` points into the
+        // thread's kernel stack, so everything it needs must be read BEFORE it
+        // publishes a state a waker can act on. Past that point another CPU may
+        // resume the thread on its saved context --- whose RSP points back into
+        // these frames --- and any later read returns whatever the resumed
+        // thread wrote over them.
         "mov rax, [r12 + 64]",   // transition fn ptr (saved rdi)
         "mov rdi, [r12 + 72]",   // arg (saved rsi)
         "sub rsp, 8",
