@@ -33,7 +33,12 @@ program `AQA`/`ASQ`/`ACQ`, set `CC` (IOSQES 6, IOCQES 4, 4 KiB page size), set
 is refused by name rather than driven wrong.
 
 **Queues.** One admin queue pair of 32 entries and one I/O queue pair of 128,
-both allocated from the DMA pool and therefore `NO_CACHE`. A submission queue
+both allocated from the DMA pool and therefore `NO_CACHE`. Both are sized
+against `CAP.MQES`: a controller below the admin pair's 32 entries is refused,
+and the I/O pair is clamped down to what `MQES` grants, along with the cid
+bitmap that bounds how many commands may be outstanding against it. Asking for
+more than `MQES` fails Create I/O CQ with "Invalid Queue Size", which this
+driver turns into no I/O queue at all rather than a smaller working one. A submission queue
 entry is written, the tail doorbell is rung, and the completion queue is read by
 phase tag. Admin commands are **polled** by the thread that issues them; I/O
 commands complete on the dispatcher. That split is not a style choice: Identify
@@ -41,8 +46,8 @@ runs during init, before the dispatcher is in its loop, and a dispatcher that
 also drained the admin CQ would eat the completions a live controller reset is
 polling for.
 
-**Interrupts.** MSI-X table entry 0, one IDT vector, and both completion queues
-created with `CDW11.IV = 0`. The handler bumps `NVME_IRQS_FIRED`, wakes the
+**Interrupts.** MSI-X table entry 0, falling back to a single MSI message, one
+IDT vector, and both completion queues created with `CDW11.IV = 0`. The handler bumps `NVME_IRQS_FIRED`, wakes the
 dispatcher and EOIs. The dispatcher's park predicate compares the fired count
 against the count it last processed, so a completion that lands between the
 predicate and the park is not lost.
@@ -78,7 +83,13 @@ entry per call with no affinity control, and every vector needs a hand-written
 handler in `interrupts/io.rs` plus a variant in the static `InterruptIndex`
 enum. N queues is N hand-written handlers, so per-CPU queues are a project, not
 a tweak. NVMe permits completion queues to share a vector, which is what makes
-one enough. The fallback ladder is MSI-X → MSI → INTx.
+one enough. The ladder is MSI-X → MSI, and a controller offering neither is
+refused: an NVMe pin interrupt stays level-asserted until the CQ head doorbell
+write, which this driver performs on the dispatcher rather than in the handler,
+so an INTx line would re-deliver until the dispatcher is scheduled. Masking
+through `INTMS`/`INTMC` around each drain would fix that, but no controller the
+driver runs on lacks MSI, so the untestable path is refused by name rather than
+half-implemented.
 
 **4. Lock ranks 172, 182, 186, 192**, interleaved with AHCI's 170–200 band:
 admin (172) → command slots (182) → completion queue (186) → submission queue
@@ -168,7 +179,7 @@ purpose, so attaching both never makes root selection a race.
 | `msix_qsize=N` | the MSI-X table size, i.e. whether the MSI-X branch of the interrupt ladder is taken at all |
 | `num_queues=N` | the older alias of `max_ioqpairs` |
 | `-device nvme-ns` | more than one namespace on a controller, which exercises the id arithmetic and the devfs naming |
-| `mqes=N` | a controller with a queue-size ceiling below the driver's 128-entry request |
+| `mqes=N` | a controller with a queue-size ceiling below the driver's 128-entry request. `scripts/edos-vm --nvme-mqes`; `--nvme-mqes 63` boots an NVMe root on a clamped 64-entry queue pair |
 | `serial=` | what the probe line prints; the model string comes from Identify Controller |
 
 ## What QEMU cannot tell us
@@ -176,18 +187,13 @@ purpose, so attaching both never makes root selection a race.
 Everything here is coded for and unexercised. It is listed so a hardware bring-up
 knows where to look first, not as a claim that it works.
 
-- **The INTx fallback.** QEMU always offers MSI-X, so the ladder never reaches
-  it. It is also known-incomplete: an NVMe pin interrupt stays level-asserted
-  until the CQ head doorbell write, which happens on the dispatcher, so the
-  IOAPIC re-delivers until the dispatcher is scheduled. `INTMS`/`INTMC` are
-  declared and written nowhere.
-- **The MSI fallback**, for the same reason.
+- **The MSI fallback.** QEMU always offers MSI-X, so the ladder never reaches
+  it. (There is no INTx fallback at all; see decision 3.)
 - **`CSTS.CFS`-driven reset.** Nothing in QEMU sets the controller fatal status.
 - **Real 4Kn refusal on hardware that also offers a 512-byte format.** The gate
   proves the refusal, not the format selection a dual-format drive would need.
 - **`CAP.MPSMIN > 0`** and **`CAP.DSTRD != 0`**: both are refused or handled by
-  code no available controller reaches. `mqes=` at least drives `MQES` below the
-  driver's request.
+  code no available controller reaches.
 - **PCIe link errors and hot-removal.** There is no surprise-removal path.
 - **A machine with no AHCI controller at all**, which is exactly the machine an
   NVMe driver is for. q35 always exposes the ICH9 AHCI controller, so the

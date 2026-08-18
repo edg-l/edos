@@ -146,7 +146,7 @@ drives the guest changes.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--nvme-lbs BYTES`, `--no-sata`, `--iso IMAGE`, `--pointer tablet\|mouse` |
+| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--nvme-lbs BYTES`, `--nvme-mqes N`, `--no-sata`, `--iso IMAGE`, `--pointer tablet\|mouse` |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
@@ -189,7 +189,10 @@ names the SATA one and an NVMe-only boot needs an ISO that names the other.
 `make edos-nvme.iso` builds it from the same tracked `limine.conf` with the GUID
 substituted, and `--iso edos-nvme.iso` boots it. `--nvme-lbs 4096` formats the
 namespace with a 4 KiB logical block size, which the driver refuses by name; it
-exists for `nvme-check`'s refusal case. See `doc/nvme.md`.
+exists for `nvme-check`'s refusal case. `--nvme-mqes N` reports `CAP.MQES = N`
+(0's based) on the controller, which is how the driver's clamp of its
+128-entry I/O queue request is exercised: `--nvme-mqes 63` boots an NVMe root
+on a 64-entry queue pair. See `doc/nvme.md`.
 
 The machine matches `make run`'s devices, including Intel HDA with
 `-audiodev none`: the guest driver runs its DMA engine and interrupts with no

@@ -11,7 +11,6 @@ use spin::Once;
 use x86_64::structures::paging::{PageTableFlags, mapper::MapToError};
 
 use crate::{
-    apic::init::configure_device_interrupt,
     debug::lock_order::RANK_NVME_ADMIN,
     drivers::{
         dma::{DmaBuffer, dma},
@@ -254,10 +253,19 @@ impl NvmeController {
     }
 
     /// Bind this controller's completion queues to one interrupt: MSI-X
-    /// table entry 0, falling back to a single MSI message, falling back to
-    /// the legacy INTx line (Architecture Decision "one I/O queue pair, one
-    /// MSI-X vector"). The admin and I/O CQs are both later created with
-    /// `IV = 0`, so this one vector is all either ever needs.
+    /// table entry 0, falling back to a single MSI message (Architecture
+    /// Decision "one I/O queue pair, one MSI-X vector"). The admin and I/O
+    /// CQs are both later created with `IV = 0`, so this one vector is all
+    /// either ever needs.
+    ///
+    /// There is deliberately no legacy INTx fallback. An NVMe pin-based
+    /// interrupt stays level-asserted until the CQ head doorbell is written
+    /// (NVMe base spec 2.0 §3.5.1), and this driver writes that doorbell
+    /// from the dispatcher thread, not from the handler -- so the IOAPIC
+    /// would re-deliver until the dispatcher is scheduled. Masking through
+    /// `INTMS`/`INTMC` around the drain would fix that, but nothing this
+    /// driver runs on offers a controller without MSI or MSI-X, so the
+    /// untestable path is refused by name instead of half-implemented.
     fn configure_interrupt(pci_device: &PciDevice) -> Result<(), NvmeError> {
         if msi::enable_msix_for_device(pci_device, InterruptIndex::Nvme.as_u8(), 0).is_ok() {
             log!(
@@ -277,19 +285,8 @@ impl NvmeController {
             );
             return Ok(());
         }
-        if pci_device.header.interrupt_line == 0xFF {
-            return Err(NvmeError::InvalidDevice);
-        }
-        configure_device_interrupt(
-            pci_device.header.interrupt_line,
-            InterruptIndex::Nvme.as_u8(),
-        )
-        .map_err(|_| NvmeError::InvalidDevice)?;
-        log!(
-            "nvme: INTx bound on IRQ {}",
-            pci_device.header.interrupt_line
-        );
-        Ok(())
+        log!("nvme: controller offers neither MSI-X nor MSI; unsupported");
+        Err(NvmeError::Unsupported)
     }
 
     pub fn cap(&self) -> u64 {
@@ -416,25 +413,46 @@ impl NvmeController {
 
         let dstrd = regs::cap_dstrd(self.cap);
         let bar_virt = x86_64::VirtAddr::new(self.regs as u64);
-        let queue = NvmeQueue::new(
-            IO_QID,
-            IO_SQ_ENTRIES,
-            IO_CQ_ENTRIES,
-            IO_CID_DEPTH,
-            dstrd,
-            bar_virt,
-        )?;
+
+        // `CAP.MQES` is 0's-based and bounds every queue the controller will
+        // create, not just the admin pair: asking for more fails Create I/O
+        // CQ with "Invalid Queue Size" (NVMe base spec 2.0 5.2.1), which
+        // this driver turns into no I/O queue at all rather than a smaller
+        // working one. `NvmeController::new` has already refused anything
+        // below the 32-entry admin queue, so the clamp cannot reach zero.
+        // The cid bitmap moves with it: outstanding commands must stay
+        // strictly below the ring size, which is what makes the SQ unable
+        // to fill.
+        let max_entries = regs::cap_mqes(self.cap).saturating_add(1);
+        let sq_entries = IO_SQ_ENTRIES.min(max_entries);
+        let cq_entries = IO_CQ_ENTRIES.min(max_entries);
+        let cid_depth = IO_CID_DEPTH.min((sq_entries - 1).min(u8::MAX as u16) as u8);
+        if sq_entries != IO_SQ_ENTRIES || cq_entries != IO_CQ_ENTRIES {
+            log!(
+                "nvme: MQES caps the I/O queue at {} SQ / {} CQ entries, {} outstanding",
+                sq_entries,
+                cq_entries,
+                cid_depth
+            );
+        }
+
+        let queue = NvmeQueue::new(IO_QID, sq_entries, cq_entries, cid_depth, dstrd, bar_virt)?;
 
         if let Err(e) = self.create_io_cq(&queue) {
             queue.dealloc_all();
             return Err(e);
         }
         if let Err(e) = self.create_io_sq(&queue) {
-            // The CQ was created on-device but its `DmaBuffer`s are still
-            // ours to reclaim; the controller is treated as unusable for
-            // I/O from here (`io_queue` stays empty), so the orphaned
-            // on-device CQ resource is never issued against.
-            queue.dealloc_all();
+            // The CQ exists on the controller with `IEN` set and its pages
+            // still named by the Create I/O CQ that installed them, so they
+            // cannot go back to the shared DMA pool until the controller is
+            // told to forget them. If it will not, leak them rather than
+            // hand a live DMA target to the next allocation: `DmaBuffer`
+            // has no `Drop`, so dropping the queue is exactly that leak.
+            match self.delete_io_cq(queue.qid) {
+                Ok(()) => queue.dealloc_all(),
+                Err(e) => log!("nvme: Delete I/O CQ failed ({e}); leaking the queue's DMA pages"),
+            }
             return Err(e);
         }
 
@@ -503,6 +521,29 @@ impl NvmeController {
             prp2: 0,
             cdw10,
             cdw11,
+            cdw12: 0,
+            cdw13: 0,
+            cdw14: 0,
+            cdw15: 0,
+        };
+        self.admin_command_polled(sqe)?;
+        Ok(())
+    }
+
+    /// Delete I/O Completion Queue (04h): `CDW10` carries the queue id.
+    /// Issued only to retire a CQ this driver created and is about to
+    /// reclaim the memory of; the controller rejects it while any SQ is
+    /// still associated with that CQ (NVMe base spec 2.0 5.5).
+    fn delete_io_cq(&self, qid: u16) -> Result<(), NvmeError> {
+        let sqe = SubmissionQueueEntry {
+            cdw0: regs::cdw0(regs::ADMIN_OPC_DELETE_IO_CQ, 0),
+            nsid: 0,
+            reserved: 0,
+            mptr: 0,
+            prp1: 0,
+            prp2: 0,
+            cdw10: qid as u32,
+            cdw11: 0,
             cdw12: 0,
             cdw13: 0,
             cdw14: 0,

@@ -192,9 +192,16 @@ def _orphan():
 
 
 def running():
-    if os.path.exists(PIDFILE):
+    # Opened rather than checked-then-opened: `cmd_start` unlinks this file
+    # and QEMU rewrites it, so an `os.path.exists` guard loses that race and
+    # raises instead of answering. A missing, empty or half-written pidfile
+    # all mean the same thing here -- fall through to the /proc scan.
+    try:
         with open(PIDFILE) as f:
             pid = int(f.read().strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None:
         try:
             os.kill(pid, 0)
             return pid
@@ -366,7 +373,8 @@ def cmd_start(args):
             "-drive", f"id=nvme0,if=none,format={_disk_format(nvme_disk)},file={nvme_disk}",
             "-device", "nvme,drive=nvme0,serial=EDOSNVME0"
             + (f",logical_block_size={args.nvme_lbs},physical_block_size={args.nvme_lbs}"
-               if args.nvme_lbs else ""),
+               if args.nvme_lbs else "")
+            + (f",mqes={args.nvme_mqes}" if args.nvme_mqes is not None else ""),
         ]
 
     # A second SATA drive on its own bus. The guest does not boot from it, so a
@@ -903,6 +911,10 @@ def main():
     s.add_argument("--nvme-lbs", type=int, default=None, metavar="BYTES",
                    help="format the NVMe namespace with this logical block size "
                         "(default 512); 4096 exercises the driver's refusal path")
+    s.add_argument("--nvme-mqes", type=int, default=None, metavar="N",
+                   help="report CAP.MQES=N (0's based, so N+1 entries) on the NVMe "
+                        "controller; below 127 this exercises the driver's clamp of "
+                        "its 128-entry I/O queue request")
     s.add_argument("--no-sata", action="store_true",
                    help="do not attach the SATA root disk, leaving another disk "
                         "(e.g. --nvme-disk) as the only root candidate")

@@ -207,10 +207,6 @@ pub fn status_more(status: u16) -> bool {
 // ---------------------------------------------------------------------------
 
 pub const ADMIN_OPC_CREATE_IO_SQ: u8 = 0x01;
-#[expect(
-    dead_code,
-    reason = "issued by controller reset to tear an I/O CQ down before recreating it"
-)]
 pub const ADMIN_OPC_DELETE_IO_CQ: u8 = 0x04;
 pub const ADMIN_OPC_CREATE_IO_CQ: u8 = 0x05;
 pub const ADMIN_OPC_IDENTIFY: u8 = 0x06;

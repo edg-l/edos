@@ -9063,3 +9063,71 @@ terminal, and `cat /proc/... > /dev/klog` from it puts kernel state in the
 serial log where the host can grep it. That works on any hang that has not
 taken the compositor with it, and it is far quicker than a rebuild with print
 statements.
+
+---
+
+## Three NVMe bring-up findings, closed: an orphaned CQ, an unclamped queue, and an INTx line nothing could deassert (2026-08-19)
+
+The last three findings of the Phase 3 review. None of them is reachable under
+QEMU, which is why all three survived every gate the driver has: each needs a
+controller QEMU does not emulate by default, and the review found them by
+reading the failure arms rather than by running them.
+
+**1. `create_io_sq`'s failure arm handed a live DMA target back to the pool.**
+`setup_io_queue` creates the I/O CQ first, then the SQ. If the SQ creation
+failed it called `queue.dealloc_all()`, which returns the CQ's pages to the
+shared DMA pool while the controller still has CQ 1 registered at exactly that
+address with `IEN` set. The old comment argued this was safe because
+`io_queue` stays empty and nothing would ever submit against the orphan --- true
+of this driver, and beside the point: what the controller does with a queue it
+was told about is not the driver's decision, and the next allocation out of that
+pool gets the pages. It now issues Delete I/O CQ (`ADMIN_OPC_DELETE_IO_CQ`,
+declared since Phase 3 and used nowhere until now) and reclaims only if the
+controller acknowledges. If the delete fails, the pages **leak on purpose**:
+`DmaBuffer` has no `Drop`, so dropping the queue without `dealloc_all` is the
+leak, and a leak costs one boot's worth of pages where the alternative aliases
+a live DMA target.
+
+**2. The I/O queue pair ignored `CAP.MQES`.** `NvmeController::new` refuses a
+controller whose `MQES` is below the 32-entry admin pair, and nothing checked
+the 128-entry I/O pair after that. A controller reporting `MQES` in [31, 126]
+--- legal, and what `-device nvme,mqes=N` produces --- fails Create I/O CQ with
+"Invalid Queue Size", and `mod.rs` turns that into *no I/O queue at all* rather
+than the smaller working one it could have had. `setup_io_queue` now clamps SQ
+and CQ entries to `MQES + 1`, and clamps `IO_CID_DEPTH` with them: the cid
+bitmap is what bounds outstanding commands, and the SQ's "can never fill"
+property is exactly the invariant `cid_depth < sq_entries`. Clamping one without
+the other would trade a refusal for a ring overrun.
+
+This one is exercised, not just reasoned about: QEMU's `-device nvme,mqes=N`
+reports the ceiling, `scripts/edos-vm --nvme-mqes` passes it, and
+`--nvme-mqes 63` boots an NVMe root to the desktop on a 64-entry queue pair
+(`nvme: MQES caps the I/O queue at 64 SQ / 64 CQ entries, 63 outstanding`,
+then `registered as block device 3000`, then `Root partition: ... on device
+3000`). Findings 1 and 3 stay unexercised for the reason above.
+
+**3. The INTx fallback could not deassert its own line, and is gone.** An NVMe
+pin-based interrupt stays level-asserted until the CQ head doorbell is written.
+This driver writes that doorbell from the dispatcher thread, deliberately --- the
+handler bumps a counter, wakes the dispatcher and EOIs --- so on a level-triggered
+line the IOAPIC re-delivers continuously until the dispatcher is scheduled,
+which is a livelock on the CPU taking the interrupt. `INTMS`/`INTMC` are the
+fix (mask in the handler, unmask after the drain pass) and were declared but
+written nowhere. Since no controller the driver can run on lacks both MSI-X and
+MSI, the branch is removed and `configure_interrupt` returns `Unsupported` by
+name. An untestable path that livelocks is worse than an absent one that says
+why.
+
+The doc's "what QEMU cannot tell us" list shrank accordingly: `mqes=` is no
+longer an unexercised knob for a code path that could not use it.
+
+## A pidfile check that loses its own race (2026-08-19)
+
+`scripts/edos-vm`'s `running()` did `os.path.exists(PIDFILE)` and then opened
+it. `cmd_start` unlinks that file before launching and QEMU rewrites it, so the
+window between the two is real, and landing in it raised `FileNotFoundError`
+out of `cmd_stop` --- which is how every `nvme-check` run printed a Python
+traceback before case 1, from the harness's own opening `stop()` on a machine
+with no guest. It is now one `try`/`except (OSError, ValueError)` around the
+open, with a half-written pidfile treated the same as a missing one: fall
+through to the `/proc` scan that finds an orphaned guest.
