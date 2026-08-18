@@ -140,16 +140,41 @@ def screen_size():
     return width, height
 
 
+def _orphan():
+    """A QEMU this script started whose pidfile is gone.
+
+    `cmd_start` clears SOCK and PIDFILE before it launches, so a launch that
+    fails after that point -- QEMU refusing a disk, or the host forward on
+    2323 already taken -- leaves any guest that was still up with no pidfile.
+    Without this, such a guest is invisible to `running()` and unreachable by
+    `stop`, while it keeps the forward and the QMP socket, so every later
+    `start` dies on the same forward with a QEMU error and no explanation.
+    Find it by the -pidfile argument in its own command line: that path names
+    this RUNDIR, and nothing else on the machine passes it.
+    """
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if argv and argv[0].endswith(b"qemu-system-x86_64") and PIDFILE.encode() in argv:
+            return int(entry)
+    return None
+
+
 def running():
-    if not os.path.exists(PIDFILE):
-        return None
-    with open(PIDFILE) as f:
-        pid = int(f.read().strip())
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return None
-    return pid
+    if os.path.exists(PIDFILE):
+        with open(PIDFILE) as f:
+            pid = int(f.read().strip())
+        try:
+            os.kill(pid, 0)
+            return pid
+        except OSError:
+            pass
+    return _orphan()
 
 
 def _disk_format(path):
@@ -351,6 +376,17 @@ def cmd_stop(args):
         if not running():
             break
         time.sleep(0.1)
+    else:
+        # An orphan has no QMP socket to quit through and may ignore SIGTERM
+        # while it holds the host forward. Reporting "stopped" over a guest
+        # that is still up is how the forward stays taken.
+        os.kill(pid, 9)
+        for _ in range(50):
+            if not running():
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit(f"qemu {pid} survived SIGKILL")
     for stale in (SOCK, PIDFILE):
         if os.path.exists(stale):
             os.unlink(stale)

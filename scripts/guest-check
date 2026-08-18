@@ -37,7 +37,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vmdrive import BOOT_SECONDS, VM, serial_mark, serial_tail, type_line, vm  # noqa: E402
+from vmdrive import BOOT_SECONDS, VM, serial_mark, serial_tail, start, type_line, vm  # noqa: E402
 
 # (name, argument string, seconds to allow). The budgets are generous: a suite
 # that overruns one is reported as a timeout rather than silently skipped.
@@ -83,7 +83,7 @@ def boot():
     for, and waiting for the panel to publish itself is steadier than a fixed
     sleep on a loaded host.
     """
-    vm("start")
+    start()
     deadline = time.time() + BOOT_SECONDS * 3
     mark = 0
     while time.time() < deadline:

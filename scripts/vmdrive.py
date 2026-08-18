@@ -26,9 +26,21 @@ def vm(*args):
     return run([VM, *args])
 
 
+def start(*args):
+    """Start the guest, retiring whatever the last run left behind.
+
+    A harness that aborts mid-run -- a timeout, a killed session -- leaves a
+    guest holding the qcow2 write lock and the 2323 host forward, and the next
+    `start` then dies inside QEMU with no hint that a stale guest is the cause.
+    `sata-disk.img` retires the guest for the same reason before it rebuilds.
+    """
+    vm("stop")
+    return vm("start", *args)
+
+
 def boot(disk=None):
     """Boot the guest and give the terminal keyboard focus."""
-    vm("start", *(("--disk", disk) if disk else ()))
+    start(*(("--disk", disk) if disk else ()))
     time.sleep(BOOT_SECONDS)
     vm("click", "400", "300")
     time.sleep(1)

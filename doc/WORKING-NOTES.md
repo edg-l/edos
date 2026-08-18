@@ -8619,3 +8619,40 @@ host, with the switch path and the idle switch count unchanged. A third
 candidate, a poke from `spawn_thread`, was measured in and out and buys nothing:
 it can only fire when every CPU has work, and then there is no halted CPU to
 claim. Full tables in `doc/SCHED-ROADMAP.md`.
+
+## One orphaned guest wedged every storage gate, and nothing could see it (2026-08-19)
+
+`make storage-check` and `make recovery-check` both died in the first
+`edos-vm start`, with QEMU refusing to set up the `tcp:127.0.0.1:2323-:23`
+forward and a Python traceback on top of it. Neither is a filesystem or driver
+failure: a QEMU from an earlier session was still up, holding the forward, the
+QMP socket and the qcow2 write lock.
+
+What made it unrecoverable rather than merely annoying is the order inside
+`cmd_start`. It checks `running()` first, then unlinks `SOCK` and `PIDFILE`,
+then launches. A launch that fails *after* the unlink — the forward already
+taken, a disk QEMU refuses — leaves the previous guest with no pidfile, and
+`running()` read only the pidfile. From that point the guest is invisible:
+`status` says "not running", `stop` says "not running", and every `start`
+re-runs the same failure. One aborted run poisons the host until somebody
+reads a QEMU command line out of `ps`.
+
+`running()` now falls back to scanning `/proc/*/cmdline` for a
+`qemu-system-x86_64` carrying this RUNDIR's `-pidfile` path, which no other
+process on the machine passes, so an orphan is found and `stop` can kill it.
+`cmd_stop` escalates to `SIGKILL` when the QMP quit and the `SIGTERM` both go
+unanswered, rather than printing "stopped" over a guest that is still running
+— an orphan has no socket to quit through, so that path is the normal one for
+it, not the exceptional one.
+
+The harnesses retire the guest before starting one, through a new
+`vmdrive.start()` that the five `vm("start", ...)` sites now go through
+(`guest-check`, `ssh-check`, `recovery-check`, `orphan-check`, and `boot()`
+itself for `fs-regression` and `fsbench-run`). This is the rule the
+`sata-disk.img` recipe already follows and states the reason for at
+`GNUmakefile:481`: a running guest holds the qcow2 write lock, so retire it
+rather than explain the failure afterwards.
+
+**Ruled out:** this is not a regression from NVMe Phase 3 (b6dc2c10). The
+failure is in the host script before QEMU has executed a single guest
+instruction, and it reproduces with any disk argument.

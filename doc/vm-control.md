@@ -406,6 +406,8 @@ on through the log.
 | Blank or frozen screenshot | guest panicked; check `run_log.txt` |
 | No cursor in a screenshot | expected: the cursor is on its own plane, see above |
 | `Could not access KVM kernel module` | not in the `kvm` group in this session |
+| `Could not set up host forwarding rule 'tcp:127.0.0.1:2323-:23'` | a guest from an earlier run still holds the forward; `stop` finds it even with no pidfile |
+| `already running; stop it first` | exactly that, including a guest whose pidfile an aborted `start` removed |
 | Viewer disconnects | QEMU exited, since QEMU *is* the VNC server |
 
 ## usb-tablet, not usb-mouse

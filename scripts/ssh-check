@@ -44,7 +44,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sshdrive  # noqa: E402
 from sshdrive import exit_code, run, ssh  # noqa: E402
-from vmdrive import BOOT_SECONDS, REPO, VM, serial_mark, serial_tail, vm  # noqa: E402
+from vmdrive import BOOT_SECONDS, REPO, VM, serial_mark, serial_tail, start, vm  # noqa: E402
 
 # Big enough to outlast the client's initial channel window (OpenSSH opens with
 # 2 MiB), so a server that stops at the window is caught. /bin/edos-wm is the
@@ -174,7 +174,7 @@ def main():
     subprocess.run([VM, "stop"], capture_output=True)
 
     print("[1/3] booting and starting sshd from /etc/sshd.conf...")
-    vm("start")
+    start()
     time.sleep(BOOT_SECONDS)
     vm("click", "400", "300")
     time.sleep(1)

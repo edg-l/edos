@@ -28,7 +28,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vmdrive import REPO, VM, BOOT_SECONDS, serial_mark, serial_tail, type_line, vm, wait_for  # noqa: E402
+from vmdrive import REPO, VM, BOOT_SECONDS, serial_mark, serial_tail, start, type_line, vm, wait_for  # noqa: E402
 
 EXTRA_DISK = os.path.join(REPO, "journal-test.img")
 # device 2: block device 0 is the boot root (bus ide.1), device 1 is the
@@ -44,7 +44,7 @@ FILES = ["rec_a", "rec_b", "rec_c"]
 
 def boot_with_extra_disk():
     """Boot with journal-test.img as a second SATA drive, focus the terminal."""
-    vm("start", "--extra-disk", EXTRA_DISK)
+    start("--extra-disk", EXTRA_DISK)
     time.sleep(BOOT_SECONDS)
     vm("click", "400", "300")
     time.sleep(1)

@@ -24,7 +24,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vmdrive import REPO, VM, BOOT_SECONDS, serial_mark, serial_tail, type_line, vm, wait_for  # noqa: E402
+from vmdrive import REPO, VM, BOOT_SECONDS, serial_mark, serial_tail, start, type_line, vm, wait_for  # noqa: E402
 
 EXTRA_DISK = os.path.join(REPO, "journal-test.img")
 FSCK = os.path.join(REPO, "tools/efs-fsck/target/release/efs-fsck")
@@ -36,7 +36,7 @@ ORPHANS = 8
 
 
 def boot_with_extra_disk():
-    vm("start", "--extra-disk", EXTRA_DISK)
+    start("--extra-disk", EXTRA_DISK)
     time.sleep(BOOT_SECONDS)
     vm("click", "400", "300")
     time.sleep(1)
