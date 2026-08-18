@@ -17,6 +17,7 @@ const SOURCES: &[&str] = &[
     "/proc/efs_stats",
     "/proc/journal_stats",
     "/proc/readahead_stats",
+    "/proc/nvme_stats",
 ];
 
 /// Counters whose value is a current level rather than a running total.
@@ -25,6 +26,10 @@ const LEVELS: &[&str] = &[
     "block_cache.dirty_pages",
     "inflight_stats.current",
     "ahci_stats.timeout_ms",
+    "nvme_stats.timeout_ms",
+    "nvme_stats.inflight",
+    "nvme_stats.mdts_bytes",
+    "nvme_stats.vwc",
     // Boot-wide averages rather than totals: their final value is meaningful,
     // their difference is not. Divide the totals above them for a run's own.
     "journal_stats.us_per_commit",

@@ -42,9 +42,12 @@ make test-headless    # kernel sched-test suite; `make test` needs a desktop
 make storage-check    # scripts/fs-regression (EFS then FAT32) + scripts/fsbench-run
 make guest-check      # the guest's own suites -- iotest, socktest, mmaptest and
                       # twelve more -- in one boot, judged by their exit codes
+make nvme-check       # scripts/nvme-check: an NVMe-root boot, a SATA+NVMe
+                      # coexistence boot, the logical_block_size=4096 refusal,
+                      # and edos-install onto a blank NVMe image
 ```
 
-All three exit 0 only when the run passed. The sched-test suite reports through
+All four exit 0 only when the run passed. The sched-test suite reports through
 `isa-debug-exit`, so qemu's own status is 1 for a pass and 3 for a failure;
 `make test` translates that, and a guest that dies before reporting a verdict is
 a failure too.
@@ -140,7 +143,7 @@ drives the guest changes.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--no-sata`, `--pointer tablet\|mouse` |
+| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--nvme-lbs BYTES`, `--no-sata`, `--iso IMAGE`, `--pointer tablet\|mouse` |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
@@ -177,6 +180,13 @@ which one becomes root is decided by the `root=UUID=` on the kernel cmdline
 rather than by the disk under test. Dropping the SATA disk leaves exactly one
 candidate. The same hazard is why `journal-test.img` is built with its own
 partition GUID, as the comment on that target in `GNUmakefile` records.
+
+Because the two disks carry different partition GUIDs, the stock ISO's cmdline
+names the SATA one and an NVMe-only boot needs an ISO that names the other.
+`make edos-nvme.iso` builds it from the same tracked `limine.conf` with the GUID
+substituted, and `--iso edos-nvme.iso` boots it. `--nvme-lbs 4096` formats the
+namespace with a 4 KiB logical block size, which the driver refuses by name; it
+exists for `nvme-check`'s refusal case. See `doc/nvme.md`.
 
 The machine matches `make run`'s devices, including Intel HDA with
 `-audiodev none`: the guest driver runs its DMA engine and interrupts with no

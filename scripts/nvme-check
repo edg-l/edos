@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Gate the NVMe driver against four boots and report one verdict.
+
+The in-kernel suites and `guest-check` all run on a SATA root, so nothing they
+do touches this driver. These are the cases that need a machine built for them:
+
+  1. NVMe root -- boot `edos-nvme.iso` (root= names the NVMe partition GUID)
+     with `--nvme-disk --no-sata`, so the NVMe disk is the only root candidate,
+     then run `iotest /var`, a write/verify pair and `fsbench -l -n 32 /var`.
+  2. Coexistence -- boot the ordinary ISO with both disks attached and confirm
+     the SATA disk still wins the root selection while `/dev/nvme0n1` exists.
+  3. Refusal -- boot with `logical_block_size=4096` and confirm the driver says
+     why it refused and registers no device node.
+  4. Install -- `edos-install --yes /dev/nvme0n1` onto a blank NVMe image, then
+     boot that image with no ISO attached and reach a desktop on device 3000.
+
+    make nvme-check
+
+Exits 0 only when every case passes. Each case is judged by a guest exit code
+or by a line the kernel logged, never by a screenshot.
+"""
+
+import os
+import re
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vmdrive import (  # noqa: E402
+    BOOT_SECONDS, REPO, serial_mark, serial_tail, start, type_line, vm, wait_for,
+)
+
+MARKER = "NVMECHECK"
+
+# Bytes the NVMe root disk's own device id resolves to. `NVME_DEVICE_ID_BASE`
+# in kernel/src/drivers/nvme/api.rs; the first namespace of the first
+# controller.
+NVME_DEVICE_ID = 3000
+
+
+def stop():
+    """Stop the guest, tolerating one that is already gone."""
+    try:
+        vm("stop")
+    except Exception:
+        pass
+
+
+def boot(*args, panel=True, budget=None):
+    """Boot with the given `edos-vm start` arguments and focus the terminal.
+
+    Waits for the taskbar to publish itself rather than sleeping a fixed time:
+    four boots on a loaded host vary by more than any constant would cover.
+    Returns the serial offset the boot started at, so a caller can assert on
+    lines the kernel logged during it.
+    """
+    mark = serial_mark()
+    start(*args)
+    if not panel:
+        return mark
+    deadline = time.time() + (budget or BOOT_SECONDS * 3)
+    while time.time() < deadline:
+        if "panel|" in serial_tail(mark):
+            break
+        time.sleep(2)
+    else:
+        return None
+    time.sleep(2)
+    vm("click", "400", "300")
+    time.sleep(1)
+    return mark
+
+
+def run_cmd(command, budget, name):
+    """Run one guest command and return its exit code, or None on timeout.
+
+    The exit code is echoed to `/dev/klog`: stdout goes to the GUI terminal,
+    which the serial log never sees.
+    """
+    mark = serial_mark()
+    type_line(f'{command}; echo "{MARKER} {name} rc=$?" > /dev/klog', settle=1)
+    pattern = re.compile(rf"{MARKER} {re.escape(name)} rc=(\d+)")
+    deadline = time.time() + budget
+    while time.time() < deadline:
+        found = pattern.search(serial_tail(mark))
+        if found:
+            return int(found.group(1))
+        time.sleep(2)
+    return None
+
+
+def report(label, ok, detail=""):
+    print(f"    {label:<34} {'ok' if ok else 'FAILED'}{(' -- ' + detail) if detail and not ok else ''}")
+    return ok
+
+
+def case_nvme_root():
+    """The headline case: the NVMe disk is the root filesystem."""
+    print("[1/4] NVMe root: boot edos-nvme.iso with --nvme-disk --no-sata")
+    mark = boot("--iso", "edos-nvme.iso", "--nvme-disk", "nvme-disk.img", "--no-sata")
+    if mark is None:
+        return report("desktop", False, "the desktop never came up")
+
+    log = serial_tail(mark)
+    ok = report(f"root on device {NVME_DEVICE_ID}",
+                f"on device {NVME_DEVICE_ID}" in log and "Root filesystem mounted" in log,
+                "root selection did not land on the NVMe namespace")
+    ok &= report("/dev/nvme0n1 registered", "/dev/nvme0n1" in log, "no devfs node")
+
+    for label, command, budget in (
+        ("iotest /var", "iotest /var", 240),
+        ("write/verify", "echo nvme-check > /var/nvmegate; grep nvme-check /var/nvmegate", 60),
+        ("fsbench -l -n 32 /var", "fsbench -l -n 32 /var", 420),
+    ):
+        code = run_cmd(command, budget, label.split()[0])
+        ok &= report(label, code == 0,
+                     "timed out" if code is None else f"exit {code}")
+
+    # `irqs` and `dispatcher_passes` are the two counters that prove the
+    # completion path ran rather than the driver polling its way through.
+    code = run_cmd("grep -q 'command_errors: 0' /proc/nvme_stats", 60, "stats")
+    ok &= report("/proc/nvme_stats: no command errors", code == 0,
+                 "timed out" if code is None else f"exit {code}")
+    stop()
+    return ok
+
+
+def case_coexistence():
+    """Both controllers live on one machine, each with its own device node."""
+    print("[2/4] coexistence: SATA root with an NVMe disk attached")
+    mark = boot("--nvme-disk", "nvme-disk.img")
+    if mark is None:
+        stop()
+        return report("desktop", False, "the desktop never came up")
+
+    log = serial_tail(mark)
+    ok = report("SATA still wins root selection",
+                f"on device {NVME_DEVICE_ID}" not in log and "Root filesystem mounted" in log,
+                "the NVMe disk took the root the cmdline named for SATA")
+    ok &= report("nvme0n1 probed alongside AHCI", "/dev/nvme0n1" in log, "no devfs node")
+    code = run_cmd("ls /dev/nvme0n1 && ls /dev/sda", 60, "nodes")
+    ok &= report("both device nodes exist", code == 0,
+                 "timed out" if code is None else f"exit {code}")
+    stop()
+    return ok
+
+
+def case_refusal():
+    """A 4 KiB logical block size is refused by name, not misread."""
+    print("[3/4] refusal: logical_block_size=4096")
+    mark = boot("--nvme-disk", "nvme-disk.img", "--nvme-lbs", "4096")
+    if mark is None:
+        stop()
+        return report("desktop", False, "the desktop never came up")
+
+    log = serial_tail(mark)
+    ok = report("refusal logged by name",
+                "refused, logical block size is not 512 B" in log,
+                "the driver did not say why it refused the namespace")
+    ok &= report("no device node registered", "/dev/nvme0n1" not in log,
+                 "a namespace it refused still reached devfs")
+    stop()
+    return ok
+
+
+def case_install():
+    """`edos-install` onto a blank NVMe disk, then a boot from that disk."""
+    print("[4/4] install: edos-install --yes /dev/nvme0n1 onto a blank image")
+    blank = os.path.join(REPO, "nvme-blank.img")
+    if not os.path.exists(blank):
+        return report("nvme-blank.img", False, "run `make nvme-blank.img` first")
+
+    mark = boot("--nvme-disk", "nvme-blank.img")
+    if mark is None:
+        stop()
+        return report("desktop", False, "the installer's host never came up")
+
+    ok = report("/dev/nvme0n1 registered", "/dev/nvme0n1" in serial_tail(mark), "no devfs node")
+    code = run_cmd("edos-install --yes /dev/nvme0n1", 600, "install")
+    ok &= report("edos-install", code == 0,
+                 "timed out" if code is None else f"exit {code}")
+    stop()
+    if not ok:
+        return ok
+
+    # No ISO and no SATA disk: the only thing left to boot is the ESP
+    # `edos-install` just wrote, with its own limine.conf naming the root GUID
+    # it generated.
+    print("      rebooting from the installed disk...")
+    mark = boot("--nvme-disk", "nvme-blank.img", "--no-sata", "--no-cdrom")
+    if mark is None:
+        stop()
+        return report("boot from the installed disk", False, "the desktop never came up")
+    ok &= report(f"installed root on device {NVME_DEVICE_ID}",
+                 f"on device {NVME_DEVICE_ID}" in serial_tail(mark),
+                 "the installed disk did not become root")
+    stop()
+    return ok
+
+
+def main():
+    for name in ("edos-x86_64.iso", "edos-nvme.iso", "nvme-disk.img", "nvme-blank.img"):
+        if not os.path.exists(os.path.join(REPO, name)):
+            sys.exit(f"missing {name}; run `make nvme-check` rather than this script "
+                     "directly, so the images are built first")
+
+    stop()
+    cases = [
+        ("NVMe root", case_nvme_root),
+        ("coexistence", case_coexistence),
+        ("refusal", case_refusal),
+        ("install", case_install),
+    ]
+    failures = [name for name, fn in cases if not fn()]
+
+    if failures:
+        print(f"nvme-check: FAILED, {len(failures)} case(s): {', '.join(failures)}")
+        return 1
+    print(f"nvme-check: OK, {len(cases)} cases passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

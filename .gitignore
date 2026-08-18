@@ -20,3 +20,4 @@ journal-test.img
 /logs/
 /pkgstage
 release/
+nvme-blank.img

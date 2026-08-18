@@ -8903,3 +8903,28 @@ not reproduce — the same gate ran green immediately afterwards, both halves of
 fs-regression included — so the cause is still unknown, and `run` now forwards a
 failing command's stderr and stdout before re-raising, which is what the next
 occurrence needs.
+
+## An NVMe root needs its own ISO, because root selection is by GUID (2026-08-19)
+
+`select_root_partition` (`kernel/src/main.rs`) matches `root=UUID=` against
+every enumerated partition and mounts memfs when nothing matches. Nothing is
+positional. `nvme-disk.img` deliberately carries a different partition GUID from
+`sata-disk.img` — two disks sharing one GUID make which disk boots a race — so
+the stock ISO's cmdline can never select the NVMe disk, and an NVMe-root boot
+was done by hand-editing the tracked `limine.conf` and remembering to restore it.
+
+That is not something a gate can do. The ISO recipe is now a `define build_iso`
+taking the output path, a staging directory and the partition GUID, and it
+writes `limine.conf` through `sed 's/$(PARTITION_UUID)/$(3)/'` instead of
+copying it. `$(IMAGE_NAME).iso` passes `PARTITION_UUID`, so its content is
+byte-identical to before; `edos-nvme.iso` passes `NVME_UUID`. `limine.conf`
+stays one tracked file. `scripts/edos-vm --iso IMAGE` picks which one to boot.
+
+The trap this removes: an NVMe-root boot that silently lands on memfs looks like
+a working desktop. The `Root partition: ... on device 3000` line is the only
+thing that distinguishes it, which is why `nvme-check` asserts on that line
+rather than on reaching a desktop.
+
+`edos-install` needs none of this. It writes its own GPT with a random root GUID
+and its own ESP carrying a `limine.conf` that names it, so the install case
+boots with `--no-cdrom --no-sata` and the disk supplies its own cmdline.

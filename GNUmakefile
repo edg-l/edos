@@ -295,6 +295,14 @@ storage-check: $(IMAGE_NAME).iso
 	scripts/fsbench-run
 
 
+# The NVMe driver's own gate: an NVMe-root boot, a SATA+NVMe coexistence boot,
+# the 4Kn refusal path, and `edos-install` onto a blank NVMe image followed by
+# a boot from it. Four boots, so budget about ten minutes.
+.PHONY: nvme-check
+nvme-check: $(IMAGE_NAME).iso edos-nvme.iso nvme-disk.img nvme-blank.img
+	scripts/nvme-check
+
+
 .PHONY: run-kvm
 run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel tcg)
@@ -362,24 +370,38 @@ check: programs
 host-tests:
 	scripts/host-tests
 
-$(IMAGE_NAME).iso: limine/limine kernel live-root.img
-	rm -rf iso_root
-	mkdir -p iso_root/boot
-	objcopy --strip-debug kernel/kernel iso_root/boot/kernel
-	cp -v live-root.img iso_root/boot/
-	mkdir -p iso_root/boot/limine
-	cp -v limine.conf iso_root/boot/limine/
-	mkdir -p iso_root/EFI/BOOT
-	cp -v limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp -v limine/BOOTX64.EFI iso_root/EFI/BOOT/
-	cp -v limine/BOOTIA32.EFI iso_root/EFI/BOOT/
+# $(1) = output ISO, $(2) = staging directory, $(3) = partition GUID the
+# cmdline's root= names. Only the GUID differs between the two ISOs this tree
+# builds, and substituting it here keeps limine.conf a single tracked file
+# rather than one per root candidate.
+define build_iso
+	rm -rf $(2)
+	mkdir -p $(2)/boot
+	objcopy --strip-debug kernel/kernel $(2)/boot/kernel
+	cp -v live-root.img $(2)/boot/
+	mkdir -p $(2)/boot/limine
+	sed 's/$(PARTITION_UUID)/$(3)/' limine.conf > $(2)/boot/limine/limine.conf
+	mkdir -p $(2)/EFI/BOOT
+	cp -v limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin $(2)/boot/limine/
+	cp -v limine/BOOTX64.EFI $(2)/EFI/BOOT/
+	cp -v limine/BOOTIA32.EFI $(2)/EFI/BOOT/
 	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
-	./limine/limine bios-install $(IMAGE_NAME).iso
-	rm -rf iso_root
+		$(2) -o $(1)
+	./limine/limine bios-install $(1)
+	rm -rf $(2)
+endef
+
+$(IMAGE_NAME).iso: limine/limine kernel live-root.img
+	$(call build_iso,$(IMAGE_NAME).iso,iso_root,$(PARTITION_UUID))
+
+# The same system with root= naming the NVMe disk's partition GUID, so an
+# NVMe-only machine mounts nvme-disk.img instead of falling back to memfs.
+# `scripts/nvme-check` boots this one; nothing else does.
+edos-nvme.iso: limine/limine kernel live-root.img
+	$(call build_iso,edos-nvme.iso,iso_root_nvme,$(NVME_UUID))
 
 $(IMAGE_NAME).hdd: limine/limine kernel
 	rm -f $(IMAGE_NAME).hdd
@@ -525,9 +547,15 @@ efs-mkfs:
 clean-sata:
 	rm -f sata-disk.img sata-disk.raw
 
+# An unpartitioned disk for the install gate: `edos-install` writes its own GPT,
+# ESP and root partition, so anything already here would only be overwritten.
+nvme-blank.img:
+	rm -f nvme-blank.img
+	qemu-img create -f raw nvme-blank.img 4G >/dev/null
+
 .PHONY: clean-nvme
 clean-nvme:
-	rm -f nvme-disk.img
+	rm -f nvme-disk.img nvme-blank.img edos-nvme.iso
 
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It

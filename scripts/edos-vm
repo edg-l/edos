@@ -214,11 +214,11 @@ def cmd_start(args):
     if running():
         raise SystemExit("already running; stop it first")
 
-    iso = os.path.join(REPO, "edos-x86_64.iso")
+    iso = args.iso if os.path.isabs(args.iso) else os.path.join(REPO, args.iso)
     disk = args.disk if os.path.isabs(args.disk) else os.path.join(REPO, args.disk)
     required = [] if args.no_sata else [(disk, f"create {args.disk}")]
     if not args.no_cdrom:
-        required.append((iso, "make all"))
+        required.append((iso, "make all" if args.iso == "edos-x86_64.iso" else f"make {os.path.basename(iso)}"))
     usb_disk = None
     if args.usb_disk:
         usb_disk = (args.usb_disk if os.path.isabs(args.usb_disk)
@@ -364,7 +364,9 @@ def cmd_start(args):
     if nvme_disk:
         qemu += [
             "-drive", f"id=nvme0,if=none,format={_disk_format(nvme_disk)},file={nvme_disk}",
-            "-device", "nvme,drive=nvme0,serial=EDOSNVME0",
+            "-device", "nvme,drive=nvme0,serial=EDOSNVME0"
+            + (f",logical_block_size={args.nvme_lbs},physical_block_size={args.nvme_lbs}"
+               if args.nvme_lbs else ""),
         ]
 
     # A second SATA drive on its own bus. The guest does not boot from it, so a
@@ -898,11 +900,17 @@ def main():
     s.add_argument("--nvme-disk", nargs="?", const="nvme-disk.img", default=None,
                    metavar="IMAGE",
                    help="attach IMAGE (default nvme-disk.img) as an NVMe namespace")
+    s.add_argument("--nvme-lbs", type=int, default=None, metavar="BYTES",
+                   help="format the NVMe namespace with this logical block size "
+                        "(default 512); 4096 exercises the driver's refusal path")
     s.add_argument("--no-sata", action="store_true",
                    help="do not attach the SATA root disk, leaving another disk "
                         "(e.g. --nvme-disk) as the only root candidate")
     s.add_argument("--no-cdrom", action="store_true",
                    help="boot without the ISO, e.g. to test an installed disk")
+    s.add_argument("--iso", default="edos-x86_64.iso", metavar="IMAGE",
+                   help="boot IMAGE instead of edos-x86_64.iso; edos-nvme.iso carries "
+                        "the same system with root pointed at the NVMe partition GUID")
     s.add_argument("--ssh-fwd", type=int, default=2323,
                    help="host port forwarded to guest TCP 23")
     s.add_argument("--pcap", metavar="FILE",
