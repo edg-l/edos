@@ -8640,10 +8640,13 @@ reads a QEMU command line out of `ps`.
 `running()` now falls back to scanning `/proc/*/cmdline` for a
 `qemu-system-x86_64` carrying this RUNDIR's `-pidfile` path, which no other
 process on the machine passes, so an orphan is found and `stop` can kill it.
-`cmd_stop` escalates to `SIGKILL` when the QMP quit and the `SIGTERM` both go
-unanswered, rather than printing "stopped" over a guest that is still running
-— an orphan has no socket to quit through, so that path is the normal one for
-it, not the exceptional one.
+**A `SIGKILL` escalation in `cmd_stop` was tried and taken back out.** Every
+harness calls `vm("stop")` under `check=True`, so turning "the guest is taking
+longer than five seconds to die" into a raised `SystemExit` failed
+`fs-regression --fat32` outright where the old code merely printed "stopped"
+and carried on. Whatever kept `running()` true past the kill was transient and
+harmless; the orphan the fix exists for is reachable through `SIGTERM`. Do not
+re-add it without first showing a guest that survives one.
 
 The harnesses retire the guest before starting one, through a new
 `vmdrive.start()` that the five `vm("start", ...)` sites now go through

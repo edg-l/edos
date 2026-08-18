@@ -160,8 +160,19 @@ def _orphan():
                 argv = f.read().split(b"\0")
         except OSError:
             continue
-        if argv and argv[0].endswith(b"qemu-system-x86_64") and PIDFILE.encode() in argv:
-            return int(entry)
+        if not argv or not argv[0].endswith(b"qemu-system-x86_64"):
+            continue
+        if PIDFILE.encode() not in argv:
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as f:
+                state = f.read().rsplit(") ", 1)[1].split(" ", 1)[0]
+        except (OSError, IndexError):
+            continue
+        # A process that has exited and is waiting to be reaped holds nothing.
+        if state == "Z":
+            continue
+        return int(entry)
     return None
 
 
@@ -376,17 +387,6 @@ def cmd_stop(args):
         if not running():
             break
         time.sleep(0.1)
-    else:
-        # An orphan has no QMP socket to quit through and may ignore SIGTERM
-        # while it holds the host forward. Reporting "stopped" over a guest
-        # that is still up is how the forward stays taken.
-        os.kill(pid, 9)
-        for _ in range(50):
-            if not running():
-                break
-            time.sleep(0.1)
-        else:
-            raise SystemExit(f"qemu {pid} survived SIGKILL")
     for stale in (SOCK, PIDFILE):
         if os.path.exists(stale):
             os.unlink(stale)
