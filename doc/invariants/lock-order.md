@@ -69,9 +69,13 @@ sections, and wrapping them would recurse into the preemption counter.
 | 150 | `Journal.state` | `BlockingMutex<JournalState>` | `fs/journal/mod.rs` |
 | 160 | `EfsDriver.mutable` | `BlockingMutex<EfsMutableState>` | `fs/efs/mod.rs` |
 | 170 | `AhciPort.legacy_lock` | `BlockingMutex<()>` | `drivers/ahci/port.rs` |
+| 172 | `NvmeController.admin` | `BlockingMutex<()>` | `drivers/nvme/admin.rs` |
 | 180 | `AhciPort.slot_waiters[i]` | `spin::Mutex<Option<Arc<AhciSlotOp>>>` | `drivers/ahci/port.rs` |
 | 180 | `AhciPort.ncq_waiters[i]` | `spin::Mutex<Option<Arc<AhciNcqOp>>>` | `drivers/ahci/port.rs` |
+| 182 | `NvmeQueue.cmd_slots[i]` | `spin::Mutex<Option<Arc<NvmeOp>>>` | `drivers/nvme/queue.rs` |
+| 186 | `NvmeQueue.cq` | `spin::Mutex<CqState>` | `drivers/nvme/queue.rs` |
 | 190 | `AhciPort.mmio_lock` | `spin::Mutex<()>` | `drivers/ahci/port.rs` |
+| 192 | `NvmeQueue.sq` | `spin::Mutex<SqState>` | `drivers/nvme/queue.rs` |
 | 200 | `PCI_CONFIG_LOCK` | `spin::Mutex<()>` | `drivers/pci/config.rs` |
 | 204 | `Mailbox.queue` | `BlockingMutex<VecDeque>` | `thread/mailbox.rs` |
 | 206 | `ResponseInner.value` | `BlockingMutex<Option<R>>` | `thread/mailbox.rs` |
@@ -225,12 +229,36 @@ it before calling into the block page cache (110) or the journal (120, 130, 150)
 **170, `AhciPort.legacy_lock`.** Serializes non-NCQ commands. Nested:
 `slot_waiters` (180), `mmio_lock` (190).
 
+**172, `NvmeController.admin`.** Serializes one admin command at a time
+(init, queue create/delete, reset) across the whole controller. Sits inside
+the AHCI band because an NVMe command is issued from the same FS depth an
+AHCI one is, and the two device stacks are never co-held. The only ascending
+pair in the NVMe band is 172 -> 186: `admin_command_polled` submits under
+`admin` and then polls the admin queue's `cq`.
+
 **180, `slot_waiters[i]` and `ncq_waiters[i]`.** Brief per-slot state. Taken by
 submit, the IRQ dispatcher, TFES `fail_all_ncq_slots` and the watchdog kthread.
 Holders only do `Arc::clone` or `take`: they never park, never allocate, never take
 an inner lock. Same rank, and never co-held with each other.
 
+**182, `NvmeQueue.cmd_slots[i]`.** Per-command-id op handoff between submit,
+the IRQ dispatcher, the watchdog and cancel. Same shape as `slot_waiters`
+(180): holders only `Arc::clone` or `take`, never park, never allocate, never
+take an inner lock.
+
+**186, `NvmeQueue.cq`.** The whole completion-queue drain pass: phase
+compare, head advance, phase toggle, the CQ head doorbell write. The pass
+collects each completion into a bounded `heapless::Vec` under the guard and
+dispatches to the completion callback only after releasing it, so 186 is
+never co-held with `cmd_slots` (182) in either direction: the callback takes
+182 and may copy a bounced read back into the caller's buffer, and doing that
+under 186 would both be a descending 186 -> 182 acquisition and hold a spin
+lock across a page copy.
+
 **190, `AhciPort.mmio_lock`.** Very short raw MMIO read-modify-write. True leaf.
+
+**192, `NvmeQueue.sq`.** SQ tail cursor, the 64-byte SQE write, the tail
+doorbell. True leaf.
 
 **200, `PCI_CONFIG_LOCK`.** Config-space read-modify-write. Acquired alone.
 

@@ -6,6 +6,7 @@
 target/
 out/
 sata-disk.img
+nvme-disk.img
 live-root.img
 install-test.img
 fs-regression.img

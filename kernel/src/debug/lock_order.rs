@@ -33,8 +33,12 @@
 //! |  150 | `Journal.state`                       |
 //! |  160 | `EfsDriver.mutable`                   |
 //! |  170 | `AhciPort.legacy_lock`                |
+//! |  172 | `NvmeController.admin`                |
 //! |  180 | `AhciPort.slot_waiters[i]`            |
+//! |  182 | `NvmeQueue.cmd_slots[i]`              |
+//! |  186 | `NvmeQueue.cq`                        |
 //! |  190 | `AhciPort.mmio_lock`                  |
+//! |  192 | `NvmeQueue.sq`                        |
 //! |  200 | `PCI_CONFIG_LOCK`                     |
 //! |  204 | `Mailbox.queue`                       |
 //! |  206 | `ResponseInner.value`                 |
@@ -98,8 +102,31 @@ pub const RANK_PAGE_WRITE_LOCK: u16 = 140;
 pub const RANK_JOURNAL_STATE: u16 = 150;
 pub const RANK_EFS_MUTABLE: u16 = 160;
 pub const RANK_AHCI_LEGACY: u16 = 170;
+// NVMe. Interleaved with the AHCI band because an NVMe command is issued
+// from the same FS depth an AHCI one is, and the two device stacks are never
+// co-held.
+//
+// `admin` serializes one admin command at a time (init, queue create/delete,
+// reset).
+pub const RANK_NVME_ADMIN: u16 = 172;
 pub const RANK_AHCI_SLOT: u16 = 180;
+// The per-command-id op handoff between submit, the IRQ dispatcher, the
+// watchdog and cancel -- same shape as `slot_waiters` (180): holders only
+// clone or take, never park, never allocate, never take an inner lock.
+// Reserved here for `NvmeQueue.cmd_slots`, added once its element type
+// exists.
+#[expect(dead_code, reason = "reserved for the per-command-id op table")]
+pub const RANK_NVME_CMD: u16 = 182;
+// The whole completion-queue drain pass: phase compare, head advance, phase
+// toggle, the CQ head doorbell write. Collects into a bounded `heapless::Vec`
+// under the guard and dispatches after releasing it, so it is never co-held
+// with `cmd_slots` (182): taking that from inside would be a descending
+// acquisition, and it would hold a spin lock across a bounced read's copy
+// besides.
+pub const RANK_NVME_CQ: u16 = 186;
 pub const RANK_AHCI_MMIO: u16 = 190;
+// SQ tail cursor, the 64-byte SQE write, the tail doorbell. True leaf.
+pub const RANK_NVME_SQ: u16 = 192;
 pub const RANK_PCI_CONFIG: u16 = 200;
 // Request/response transport between a caller and a driver kthread, used by
 // `USB_BLOCK_MAILBOX` and `FS_REQUESTS`. Sits just above the AHCI band because

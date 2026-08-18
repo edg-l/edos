@@ -167,6 +167,13 @@ run-storage: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME)
 usb-test.img:
 	qemu-img create -f raw usb-test.img 16M
 
+# Attaches an NVMe controller and namespace alongside the usual SATA disk, so
+# a boot here proves the driver against a real QEMU model without disturbing
+# root selection: this is not the NVMe-root boot, just NVMe-present.
+.PHONY: run-nvme
+run-nvme: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm -drive id=nvme0$(comma)if=none$(comma)format=raw$(comma)file=nvme-disk.img -device nvme$(comma)drive=nvme0$(comma)serial=EDOSNVME0)
+
 # A scratch EFS whose journal ring is deliberately tiny, so a metadata workload
 # wraps it in seconds rather than in the hours the default 16 MiB would take.
 # Wrapping is the precondition for testing replay's wrapped-region handling,
@@ -394,7 +401,7 @@ clean:
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd live-root.img
 
 .PHONY: distclean
-distclean: clean clean-sata
+distclean: clean clean-sata clean-nvme
 	$(MAKE) -C kernel distclean
 	rm -rf limine ovmf
 
@@ -484,6 +491,22 @@ sata-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/
 	qemu-img convert -f raw -O qcow2 sata-disk.raw sata-disk.img
 	rm -f sata-disk.raw
 
+# Populated the same way as sata-disk.img, but stays raw: `run-nvme` and
+# `-device nvme` want `format=raw`, so there is no qcow2 conversion step here.
+# Its partition GUID differs from $(PARTITION_UUID) for the same reason
+# journal-test.img's does: `run_qemu_uefi` always attaches sata-disk.img, root
+# selection matches the cmdline GUID across every enumerated partition, and two
+# partitions carrying one GUID make which disk boots a race. Booting the NVMe
+# disk as root means attaching it alone and asking for this GUID instead.
+NVME_UUID := 6e766d65-0000-4000-8000-00000000ed05
+nvme-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+	-scripts/edos-vm stop >/dev/null 2>&1
+	rm -f nvme-disk.img
+	qemu-img create -f raw nvme-disk.img 2G >/dev/null
+	sgdisk nvme-disk.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(NVME_UUID)
+	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
+	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --populate filesystem/ --label EDOS nvme-disk.img
+
 .PHONY: efs-fsck
 efs-fsck:
 	cargo build --release --manifest-path tools/efs-fsck/Cargo.toml
@@ -501,6 +524,10 @@ efs-mkfs:
 .PHONY: clean-sata
 clean-sata:
 	rm -f sata-disk.img sata-disk.raw
+
+.PHONY: clean-nvme
+clean-nvme:
+	rm -f nvme-disk.img
 
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
