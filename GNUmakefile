@@ -298,8 +298,12 @@ storage-check: $(IMAGE_NAME).iso
 # The NVMe driver's own gate: an NVMe-root boot, a SATA+NVMe coexistence boot,
 # the 4Kn refusal path, and `edos-install` onto a blank NVMe image followed by
 # a boot from it. Four boots, so budget about ten minutes.
+# `sata-disk.img` is a prerequisite even though only two of the four cases
+# attach it: those two root on it, so they run whatever userspace it holds.
+# `make all` does not build it, so without this the gate silently tests the
+# binaries of whenever that image was last made.
 .PHONY: nvme-check
-nvme-check: $(IMAGE_NAME).iso edos-nvme.iso nvme-disk.img nvme-blank.img
+nvme-check: $(IMAGE_NAME).iso edos-nvme.iso nvme-disk.img sata-disk.img fresh-nvme-blank
 	scripts/nvme-check
 
 
@@ -552,6 +556,14 @@ clean-sata:
 nvme-blank.img:
 	rm -f nvme-blank.img
 	qemu-img create -f raw nvme-blank.img 4G >/dev/null
+
+# The install case writes a partition table and a root filesystem onto this
+# image, so a second run would install over an installed disk rather than a
+# blank one. Recreate it for every gate run.
+.PHONY: fresh-nvme-blank
+fresh-nvme-blank:
+	rm -f nvme-blank.img
+	$(MAKE) nvme-blank.img
 
 .PHONY: clean-nvme
 clean-nvme:

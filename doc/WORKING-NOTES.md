@@ -8962,3 +8962,35 @@ disk still won root selection. Every boot with an NVMe disk attached logs
 became root, so the assertion reported the case backwards -- failing on a boot
 that was correct. `scripts/nvme-check` reads the id off the `Root partition:`
 line now, through one `root_device()` helper all three root assertions share.
+
+## A gate that boots the default SATA disk must depend on sata-disk.img (2026-08-19)
+
+The `syscall3` -> `syscall5` fix above was correct and did not change the
+symptom: `edos-install --yes /dev/nvme0n1` kept failing with `-14` on the
+`nvme-check` install case, on a guest whose `/bin/edos-install` disassembled
+with `r10` and `r8` zeroed. `strace -e ioctl -o /dev/klog` settled it in one
+boot:
+
+    ioctl(4, 0x424b0005, NULL, 2, 0x2) = -14 EFAULT
+
+`arg_len=2`, `flags=IOCTL_FLAG_WRITE`: the running binary was the pre-fix one.
+`nvme-check` cases 2 and 4 boot with the SATA disk attached, and the root
+selection prefers a real disk, so those two cases root on `sata-disk.img` and
+run whatever userspace that image happens to hold. `make all` builds
+`programs`, `kernel` and the ISO -- it never touches `sata-disk.img`, and the
+gate did not list it as a prerequisite, so the image was days old while every
+other artifact was current.
+
+Two rules fall out of this:
+
+- **Any make target that boots a guest with the default SATA disk lists
+  `sata-disk.img` as a prerequisite.** The image's mtime is not a hint: QEMU
+  writes to the qcow2 on every boot, so a stale image looks freshly built.
+- `nvme-blank.img` is now rebuilt by a `fresh-nvme-blank` phony, in the shape
+  `recovery-check` already uses for `journal-test.img`. The install case writes
+  a GPT and a root filesystem onto it, so a second gate run would otherwise
+  install over an installed disk rather than a blank one.
+
+The general form: when a fix demonstrably lands in the source and the symptom
+does not move, disassemble or `strace` the artifact the guest actually ran
+before re-diagnosing the source.

@@ -74,7 +74,10 @@ repeating it, so its pointer commands follow whatever the ISO boots at.
 `run` target attaches `sata-disk.img`, and root selection prefers it over the
 live-root ramdisk, so the guest runs whatever `/bin` that image holds. `make
 all` does not rebuild it: after changing a program, run `make sata-disk.img` or
-the guest silently executes the previous binary.
+the guest silently executes the previous binary. A gate whose guest boots with
+that disk attached therefore lists `sata-disk.img` as a make prerequisite --
+`nvme-check` does -- since the image's mtime moves on every boot and so says
+nothing about how old its `/bin` is.
 
 `scripts/fs-regression` and `scripts/fsbench-run` both share the boot, focus and
 serial-log helpers in `scripts/vmdrive.py`, so a change to how the guest is
