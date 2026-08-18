@@ -132,8 +132,16 @@ impl NvmeController {
             Ordering::Acquire,
         ) {
             Ok(_) => {
+                let result = status_to_block_error(status);
                 let resources = op.take_resources();
-                if let cancel_op::Direction::Read = op.direction
+                // Only a command the device actually completed has anything
+                // to copy back. `allocate_sized_uninit` hands out a pooled
+                // page still carrying whatever its frames last held, so on a
+                // failed read the bounce contains another driver's bytes,
+                // and copying it would publish them into the caller's buffer
+                // -- a page-cache page, once namespaces register.
+                if result.is_ok()
+                    && let cancel_op::Direction::Read = op.direction
                     && let Some(bounce) = &resources.bounce
                 {
                     // SAFETY: the bounce buffer and the caller's buffer are
@@ -147,7 +155,7 @@ impl NvmeController {
                     }
                 }
                 cancel_op::dealloc_resources(resources);
-                pending_result = Some(status_to_block_error(status));
+                pending_result = Some(result);
                 if let Some(t) = op.submitter.upgrade() {
                     t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
                 }

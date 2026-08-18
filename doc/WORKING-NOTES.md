@@ -8659,3 +8659,43 @@ rather than explain the failure afterwards.
 **Ruled out:** this is not a regression from NVMe Phase 3 (b6dc2c10). The
 failure is in the host script before QEMU has executed a single guest
 instruction, and it reproduces with any disk argument.
+
+## NVMe Phase 3, reviewed: a failed read published pool bytes (2026-08-19)
+
+The Phase 3 review found two things worth fixing before namespaces register
+with `block_io`, and both are now fixed.
+
+**A failed read copied recycled DMA-pool memory into the caller's buffer.**
+`complete_command` (`kernel/src/drivers/nvme/mod.rs`) ran the bounce copy-back
+inside the `PENDING -> COMPLETED` arm, *before* the CQE status was turned into
+a result. The bounce comes from `dma().allocate_sized_uninit`, which by its own
+contract hands back a pooled page still holding whatever its frames last did —
+the same bucket the e1000e rings and the AHCI bounce pages draw from. On a
+media error, an out-of-range LBA or a controller reset the device writes
+nothing, so the copy published unrelated kernel and device memory into the
+caller's buffer. Once namespaces register that buffer is a page-cache page,
+reachable from userspace. The copy is now gated on `result.is_ok()`.
+
+**A read above 2 MiB allocated megabytes of contiguous DMA only to fail.**
+`MAX_SECTORS_PER_COMMAND` was 65536, the command format's own maximum (32 MiB),
+but `build_prp` describes a transfer with a single PRP list page and refuses
+anything over `PRP_LIST_ENTRIES` (512 pages, 2 MiB). Between the two, a large
+read took the bounce path: `build_prp` on the caller's pages returned
+`Unsupported`, the `Err` arm allocated and `map_memory_contiguous`-mapped the
+whole request, and `build_prp` then failed on the bounce for exactly the same
+reason, because nothing about bouncing fixes a page-count overflow. The
+constant is derived from `PRP_LIST_ENTRIES` now, so the refusal happens in the
+argument check. `submit_read` also bounds `lba + sectors` against
+`lba_count`, which nothing did.
+
+MDTS is still not enforced — `ident.mdts` is computed in `mod.rs` and dropped
+— and that belongs with Phase 5's splitting, not here.
+
+**Checked and clean,** so that a later reader does not re-derive it: every
+early return in `submit_read` reclaims its bounce and PRP list page; no path
+allocates a cid without installing an op; the `OP_CANCELLED -> OP_RECLAIMED`
+CAS is a correct single-winner gate, so no double reclaim; `NvmeOp::cancel`
+touches neither cid, bounce nor `prp_list`; the dispatcher's park loop has the
+required `loop { park_while(pred); work }` shape with no lost-wakeup window;
+`cmd_slots` (182) is never co-held with the CQ (186) or SQ (192) locks; and the
+`create_io_cq`/`create_io_sq` CDW encodings match NVMe 2.0.

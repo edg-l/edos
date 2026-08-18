@@ -14,7 +14,7 @@ use crate::{
             NvmeError,
             admin::{IO_QID, NvmeController},
             cancel_op::{Direction, NvmeOp},
-            queue::build_prp,
+            queue::{PRP_LIST_ENTRIES, build_prp},
             regs::{self, SubmissionQueueEntry},
             status_to_block_error,
         },
@@ -28,9 +28,14 @@ use crate::{
     timer::Instant,
 };
 
-/// NLB (`CDW12` bits 15:0) is 0's based, so the largest single command
-/// covers this many sectors.
-const MAX_SECTORS_PER_COMMAND: u32 = 65536;
+/// The largest single command this driver issues. NLB (`CDW12` bits 15:0) is
+/// 0's based, so the command format itself allows 65536 sectors, but
+/// [`build_prp`] describes a transfer with one PRP list page, and 512 entries
+/// of 4096 bytes is 2 MiB. Admitting more only reaches a `build_prp` that
+/// refuses -- and reaches it after the bounce path has already allocated and
+/// contiguously mapped the whole request, which for the format's own maximum
+/// is a 32 MiB run of frames asked for and thrown away.
+const MAX_SECTORS_PER_COMMAND: u32 = (PRP_LIST_ENTRIES * 4096 / 512) as u32;
 
 fn nvme_err_to_block(e: NvmeError) -> BlockError {
     match e {
@@ -73,7 +78,13 @@ impl AsyncBlockDevice for NvmeNamespace {
         buffer: BlockBuffer,
     ) -> Result<Arc<BlockIoHandle>, BlockError> {
         let len = sectors as usize * 512;
-        if sectors == 0 || sectors > MAX_SECTORS_PER_COMMAND || buffer.len() < len {
+        if sectors == 0
+            || sectors > MAX_SECTORS_PER_COMMAND
+            || buffer.len() < len
+            || lba
+                .checked_add(sectors as u64)
+                .is_none_or(|end| end > self.lba_count)
+        {
             return Err(BlockError::InvalidArg);
         }
 

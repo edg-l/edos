@@ -344,7 +344,7 @@ impl NvmeQueue {
 }
 
 /// One list page's worth of PRP entries: 4096 / 8 bytes each.
-const PRP_LIST_ENTRIES: usize = 512;
+pub const PRP_LIST_ENTRIES: usize = 512;
 
 /// Build PRP1/PRP2 for a `len`-byte transfer starting at `vaddr`
 /// (NVM Command Set 3.3.1).
