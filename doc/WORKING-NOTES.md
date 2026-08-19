@@ -2154,7 +2154,7 @@ the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
 ## Counts, remeasured 2026-08-19 (at v0.8.0, after the NVMe driver landed
-and its phases 4-7)
+whole and `evicttest` went back into `guest-check`)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2166,10 +2166,10 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,186 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,863 code lines | `tokei -t=Rust kernel/src` |
+| Rust | 116,203 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,872 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,520 | `git rev-list --count HEAD`, counting the commit that states it |
+| commits | 1,522 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -9234,7 +9234,10 @@ Two traps this cost time on, both recurring:
 - The guest under `scripts/vmdrive` boots the **SATA disk**, and `make all`
   does not rebuild `sata-disk.img`. A userspace fix appears to change nothing
   until `make sata-disk.img` runs. This is the same trap `nvme-check` case 4
-  hit.
+  hit, and it is closed the same way: `guest-check`, `storage-check` and
+  `ssh-check` name `sata-disk.img` as a prerequisite now, so the gate builds
+  the userspace it is about to judge. `test`, `recovery-check`, `orphan-check`
+  and `nvme-check` already did.
 - Writing back the pages of a file that has just been unlinked is pointless
   I/O — the blocks are freed immediately afterwards. Dropping an orphan's dirty
   pages at `mark_orphan` time would remove both the I/O and the delay, but

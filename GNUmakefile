@@ -224,7 +224,7 @@ recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.
 # concurrent sessions. It does not cover the shut-window flow-control case; see
 # doc/sshd.md for why, and for what covering it would take.
 .PHONY: ssh-check
-ssh-check: $(IMAGE_NAME).iso
+ssh-check: $(IMAGE_NAME).iso sata-disk.img
 	scripts/ssh-check
 
 # Hold unlinked-but-open files, cut power, and fail if the remount does not
@@ -280,8 +280,13 @@ test-headless:
 # twenty-one test programs and only three were reached by any gate, so
 # `iotest`'s 23 syscall cases and `socktest`'s 16 ran whenever somebody
 # remembered them and never otherwise. Each suite is judged by its exit code.
+#
+# Every gate that drives a real guest boots `sata-disk.img` and runs the
+# userspace inside it, not the one in `filesystem/`. `make all` does not
+# rebuild that image, so without the prerequisite a userspace fix is invisible
+# to the gate and the run silently judges whenever the image was last made.
 .PHONY: guest-check
-guest-check: $(IMAGE_NAME).iso
+guest-check: $(IMAGE_NAME).iso sata-disk.img
 	scripts/guest-check
 
 # Storage regressions, both halves. `fs-regression` reboots between writing and
@@ -289,7 +294,7 @@ guest-check: $(IMAGE_NAME).iso
 # verifies every pattern it writes and reports throughput. Both drive a real
 # guest through scripts/edos-vm and need the ISO already built.
 .PHONY: storage-check
-storage-check: $(IMAGE_NAME).iso
+storage-check: $(IMAGE_NAME).iso sata-disk.img
 	scripts/fs-regression
 	scripts/fs-regression --fat32
 	scripts/fsbench-run
@@ -300,8 +305,6 @@ storage-check: $(IMAGE_NAME).iso
 # a boot from it. Four boots, so budget about ten minutes.
 # `sata-disk.img` is a prerequisite even though only two of the four cases
 # attach it: those two root on it, so they run whatever userspace it holds.
-# `make all` does not build it, so without this the gate silently tests the
-# binaries of whenever that image was last made.
 .PHONY: nvme-check
 nvme-check: $(IMAGE_NAME).iso edos-nvme.iso nvme-disk.img sata-disk.img fresh-nvme-blank
 	scripts/nvme-check
