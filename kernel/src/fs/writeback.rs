@@ -33,10 +33,11 @@ use crate::{
 /// Skipping step 3 is what makes a `sync` return with the caller's last write
 /// still in memory: the size lands (it is written synchronously) but the data
 /// and the metadata the flush allocated do not.
-fn run_pass(cache: &BlockPageCache, force: bool) -> u64 {
-    let mut bytes = flush_blocks(cache, force);
+fn run_pass(cache: &BlockPageCache, force: bool) -> bool {
+    let (mut bytes, ok_a) = flush_blocks(cache, force);
     flush_dirty_inodes();
-    bytes += flush_blocks(cache, force);
+    let (more, ok_b) = flush_blocks(cache, force);
+    bytes += more;
 
     cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
     cache
@@ -46,15 +47,17 @@ fn run_pass(cache: &BlockPageCache, force: bool) -> u64 {
     if bytes > 0 {
         log_debug!("writeback: flushed {} bytes", bytes);
     }
-    bytes
+    ok_a && ok_b
 }
 
-fn flush_blocks(cache: &BlockPageCache, force: bool) -> u64 {
+/// Returns the bytes written and whether every page the pass attempted was
+/// written. A pass that reports `false` left dirty pages behind.
+fn flush_blocks(cache: &BlockPageCache, force: bool) -> (u64, bool) {
     match cache.flush_dirty_once(force) {
-        Ok(b) => b,
+        Ok(b) => (b, true),
         Err(e) => {
             log!("writeback: flush error {:?}", e);
-            0
+            (0, false)
         }
     }
 }
@@ -88,7 +91,22 @@ pub fn writeback_thread() -> ! {
 
         // Explicit kick (sync/fsync/flush_device): write everything, then
         // publish the request number so waiters can rely on it.
-        run_pass(cache, true);
+        //
+        // The request is published even when the pass failed, because a waiter
+        // that is never answered parks forever. It is said out loud instead:
+        // the caller was told its data is durable and some of it is not, which
+        // is the shape a corrupt filesystem takes several minutes later.
+        if !run_pass(cache, true) {
+            cache
+                .stats
+                .failed_sync_passes
+                .fetch_add(1, Ordering::Relaxed);
+            log!(
+                "writeback: forced pass for request {} did not write every dirty page; \
+                 sync is returning without full durability",
+                req
+            );
+        }
         cache.flush_completed.store(req, Ordering::Release);
         cache.sync_done_wq.wake_all();
     }

@@ -336,10 +336,14 @@ fn main() {
     install_boot_files(&guid::format(&root_guid));
 
     lap("bootloader installed", &mut phase);
+    // Sync first, flush second. `sync` is what puts the two new filesystems'
+    // dirty pages on the wire; a device flush issued before it commits an
+    // empty write cache and leaves everything `sync` then submits sitting in
+    // the drive's own cache, which a prompt reboot loses.
+    unsafe { edos_lib::sys::syscall0(edos_lib::sys::SYS_SYNC) };
     if device_ioctl(&dev, BLOCK_IOCTL_FLUSH) < 0 {
         fail("failed to flush the device");
     }
-    unsafe { edos_lib::sys::syscall0(edos_lib::sys::SYS_SYNC) };
     lap("flushed", &mut phase);
     println!("Total: {:.1}s", started.elapsed().as_secs_f32());
 

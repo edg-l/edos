@@ -9439,3 +9439,57 @@ from `limine.conf`. The target to run is `make fresh-nvme-blank`, which the
 gate itself depends on: plain `make nvme-blank.img` is a file target and does
 nothing at all when the file is already there, which is exactly the case after
 a run.
+
+### Two defects found by reading the sync path (2026-08-19, iteration 17)
+
+Neither is proven to be the whole cause of the case-4 corruption above, and
+both are real regardless of that.
+
+**`edos-install` flushed the device before it synced.** The tail of
+`programs/edos-install/src/main.rs` ran `BLOCK_IOCTL_FLUSH` and *then*
+`SYS_SYNC`. `sync` is what puts the two new filesystems' dirty pages on the
+wire, so the flush emptied a write cache that had not yet received them and
+nothing flushed afterwards. Every byte `sync` submitted was left in the drive's
+volatile cache, which is exactly the window a prompt reboot loses. The two
+calls are swapped now.
+
+**A failed forced writeback pass reported success.** `flush_dirty_once` used
+`?` on `write_batch`, so the first failing batch returned from the whole
+function and abandoned every shard after it. `writeback_thread` then logged the
+error, discarded it, and stored `flush_completed = req` anyway, which is what
+`sync_all` waits on. A single bad write therefore shrank a *forced* pass to a
+prefix of itself and `sys_sync` still returned success. That is the exact shape
+of the corruption `efs-fsck` reports on the installed image: some inode-table
+and bitmap blocks current, others an older version of themselves, with the
+directory blocks that reference them written. `flush_dirty_once` now records
+the first error and keeps going so every dirty page is attempted, and a forced
+pass that did not write everything logs
+
+```
+writeback: forced pass for request N did not write every dirty page; sync is returning without full durability
+```
+
+and bumps `failed_sync_passes` in `/proc/block_cache`. The request number is
+still published on failure: a waiter that is never answered parks forever, so
+the choice is between saying it out loud and hanging.
+
+**Ruled out for the case-4 corruption, do not spend the time again:**
+
+- *The journal tail is published into the block cache and left dirty.* This was
+  the previous section's leading hypothesis. `Journal::write_journal_sb` ends in
+  `block_write_fua`, so the superblock write is durable before `advance_tail`
+  returns. Refuted.
+- *QEMU loses the writes when the gate kills it.* `nvme-blank.img` is **raw**,
+  not qcow2, so a guest write that completed is in the host page cache and
+  survives the process dying. There is no qcow2 L2 table held in QEMU's memory
+  to lose. The lost writes never left the guest.
+- *Deferred orphan eviction.* `fs::evict` only runs for inodes with no links;
+  the install creates files and unlinks nothing, so no install write depends on
+  the `evict-inode` kthread.
+
+The install guest's own serial log from the 2026-08-19 repro
+(`copy` traces, `flushed in 0.6s`, `rc=0` at 7.4 s) carries **no**
+`writeback: flush error`, no `sys_sync:` line and no `journal still pending`,
+so on that run nothing failed loudly. The new counter is what would say so; if
+case 4 fails again, read `failed_sync_passes` in `/proc/block_cache` on the
+install guest before theorising further.

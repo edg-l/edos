@@ -267,6 +267,7 @@ pub struct StatsSnapshot {
     pub writeback_runs: u64,
     pub writeback_bytes: u64,
     pub sync_calls: u64,
+    pub failed_sync_passes: u64,
     pub flush_requested: u64,
     pub flush_completed: u64,
 }
@@ -283,6 +284,9 @@ pub(super) struct Stats {
     pub writeback_runs: AtomicU64,
     pub writeback_bytes: AtomicU64,
     pub sync_calls: AtomicU64,
+    /// Forced writeback passes that could not write every dirty page. Non-zero
+    /// means some `sync` returned success over an incomplete flush.
+    pub failed_sync_passes: AtomicU64,
 }
 
 impl Stats {
@@ -297,6 +301,7 @@ impl Stats {
             writeback_runs: AtomicU64::new(0),
             writeback_bytes: AtomicU64::new(0),
             sync_calls: AtomicU64::new(0),
+            failed_sync_passes: AtomicU64::new(0),
         }
     }
 
@@ -311,6 +316,7 @@ impl Stats {
             writeback_runs: self.writeback_runs.load(Ordering::Relaxed),
             writeback_bytes: self.writeback_bytes.load(Ordering::Relaxed),
             sync_calls: self.sync_calls.load(Ordering::Relaxed),
+            failed_sync_passes: self.failed_sync_passes.load(Ordering::Relaxed),
             flush_requested,
             flush_completed,
         }
@@ -1140,6 +1146,12 @@ impl BlockPageCache {
     /// If `force` is true, all dirty pages are flushed immediately (sync/fsync).
     pub fn flush_dirty_once(&self, force: bool) -> Result<u64, AhciError> {
         let mut bytes_written: u64 = 0;
+        // A failing batch is reported, not propagated on the spot. Returning
+        // early abandons every shard after the one that failed, so a single
+        // bad write silently shrinks a *forced* pass to a prefix of itself and
+        // `sync` still returns: the caller is told its data is durable when
+        // most of it was never attempted.
+        let mut failure: Option<AhciError> = None;
 
         for shard_lock in self.shards.iter() {
             // Snapshot the dirty set without holding the lock during I/O.
@@ -1218,14 +1230,27 @@ impl BlockPageCache {
                     journal_seq: journal_seq_for_page,
                 });
                 if batch.len() >= MAX_INFLIGHT_PAGES {
-                    bytes_written += self.write_batch(shard_lock, &mut batch)?;
+                    match self.write_batch(shard_lock, &mut batch) {
+                        Ok(n) => bytes_written += n,
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                        }
+                    }
                 }
             }
 
-            bytes_written += self.write_batch(shard_lock, &mut batch)?;
+            match self.write_batch(shard_lock, &mut batch) {
+                Ok(n) => bytes_written += n,
+                Err(e) => {
+                    failure.get_or_insert(e);
+                }
+            }
         }
 
-        Ok(bytes_written)
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(bytes_written),
+        }
     }
 
     /// Write one batch of dirty pages with their commands outstanding together,
