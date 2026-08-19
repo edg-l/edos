@@ -312,12 +312,6 @@ pub fn run_sched_tests() {
     // The byte ring behind every pipe and PTY, where wrapping meets growth (1)
     spawn_test(&harness, "test-byte-ring", test_byte_ring);
 
-    // Priority starvation: one busy spinner per CPU plus one victim below them (1)
-    for _ in 0..harness.starvation_spinners {
-        spawn_test(&harness, "test-starve-spin", test_starvation_spinner);
-    }
-    spawn_test(&harness, "test-starve-victim", test_starvation_victim);
-
     // Affinity: one thread pinned to a single CPU, asserting where it runs,
     // and an unpinned partner that wakes it from wherever it happens to be (2)
     spawn_test(&harness, "test-affinity-waker", test_affinity_waker);
@@ -331,59 +325,10 @@ pub fn run_sched_tests() {
         );
     }
 
-    // Load metric: threads parked on one CPU must not repel work from it (1)
-    spawn_test(&harness, "test-load-parked", test_load_parked);
-
-    // Three occupied priority levels on one CPU: the bottom one must run (1)
-    let contend_mask = 1u32 << harness.contend_cpu;
-    for prio in [TRI_HIGH_PRIORITY, TRI_MID_PRIORITY] {
-        let boxed = Box::into_raw(Box::new((harness.clone(), prio as u64))) as *mut u8;
-        queue_spawn_kthread_affine(
-            "test-tri-spin",
-            test_tri_spinner as *const () as u64,
-            boxed,
-            contend_mask,
-        );
-    }
-    {
-        let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
-        queue_spawn_kthread_affine(
-            "test-tri-victim",
-            test_tri_victim as *const () as u64,
-            boxed,
-            contend_mask,
-        );
-    }
-
-    // Weighted share: priority must buy CPU in proportion to weight (1)
-    for prio in [SHARE_HEAVY_PRIORITY, SHARE_LIGHT_PRIORITY] {
-        let boxed = Box::into_raw(Box::new((harness.clone(), prio as u64))) as *mut u8;
-        queue_spawn_kthread_affine(
-            "test-share",
-            test_weighted_share as *const () as u64,
-            boxed,
-            contend_mask,
-        );
-    }
-
-    // Lag across a sleep: a thread that sleeps off the end of every slice must
-    // not out-earn one that simply stays runnable (1)
-    let burst_mask = 1u32 << harness.burst_cpu;
-    for sleeps in [false, true] {
-        let boxed = Box::into_raw(Box::new((harness.clone(), sleeps as u64))) as *mut u8;
-        queue_spawn_kthread_affine(
-            "test-burst",
-            test_burst_share as *const () as u64,
-            boxed,
-            burst_mask,
-        );
-    }
-
-    // Priority inversion: a low holder, a mid hog that preempts it, and a high
-    // waiter that measures what the section cost it, once per lock flavour (3).
-    // Spawned by a gate thread rather than here, so the nine of them do not
-    // exist while the rest of the suite is being measured.
-    spawn_test(&harness, "test-prio-inv-gate", test_priority_inversion_gate);
+    // The six cases that measure how much CPU a thread was given (8). None of
+    // them exists until the gate thread reaches it, so no two are ever being
+    // measured at once.
+    spawn_test(&harness, "test-measure-gate", test_measurement_gate);
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -1660,33 +1605,40 @@ extern "C" fn test_weighted_share(arg: *mut u8) -> ! {
 // Each reports the CPU time it was actually given, which is the share itself
 // rather than a proxy for it.
 //
-// The sleeper is the shape that abuses a scheduler which places a waking thread
-// level with the queue. It leaves the runnable set at the point it is furthest
-// ahead — it has just spent a full slice while its competitor waited — so being
-// placed at `V` on return forgives that whole slice of service, every cycle,
-// for the price of a sleep a tenth of one long. Carrying the lag closes it: the
-// sleeper leaves one slice in debt and returns one slice in debt, so its own
-// sleep is the only thing moving it off an even split and it should land
-// slightly *below* the steady thread.
+// Both directions are gated, and which one this workload actually exercises is
+// not the one it first looks like.
 //
-// **The burst is a slice of CPU, not of wall clock**, and the difference is the
-// whole discrimination of the test. Spinning for `BASE_SLICE` of wall clock on
-// a CPU it shares gets it half a slice ahead, not one, so only half the overrun
-// is there to be forgiven: written that way the same defect measured 1.30x,
-// under a threshold that had to sit above the 1.02x a correct kernel reaches.
-// Charging its own CPU time instead puts it exactly one slice ahead at the
-// moment it sleeps, which is where the clamp is and where the effect is
-// largest.
+// **The sleeper leaves under-served, not ahead.** Its burst is charged in its
+// own CPU time, so reaching a full slice of it takes about two slices of wall
+// clock on a CPU it shares — during which the steady thread is served just as
+// much — and then the sleep hands the steady thread a further
+// [`BURST_SLEEP`] on top. Measured from `RunQueue::record_lag` at the moment
+// the sleeper stops being runnable: the first two cycles read a clamped
+// `+994866` and `+1000000` of credit, and the steady state settles between
+// `+1275` and `+25485`, positive throughout. `lag = V - vruntime`, so positive
+// is owed service. There is no overrun here to be forgiven.
+//
+// So carrying the lag is what *pays the sleeper back* its own sleep, and a
+// kernel that places a waking thread level at `V` instead discards the credit
+// and short-changes it. That is the arm this case can prove, and it is the
+// lower bound that catches it.
+//
+// The upper bound stays, because the abuse it names is real even though this
+// workload cannot construct it: a thread that genuinely overruns its share and
+// then sleeps briefly would hand back the overrun every cycle for the price of
+// a sleep a tenth of a slice long. Nothing measured has come near it; it is a
+// statement about the direction that must not appear rather than one this case
+// makes appear.
 //
 // The bound is on the ratio, not on either total, for the reason the weighted
-// share case gives: the rest of the suite is running, and interference moves
-// both threads together. It shows in the spread: the corrected arm reads 0.94x
-// to 0.95x across runs and the defective one 1.20x to 1.72x, so the ratio is
-// stable where it matters and noisy only where it is already failing.
+// share case gives: interference moves both threads together where it would
+// move an absolute count freely. Since the pair runs alone on its CPU — see
+// the measurement chain — there is very little of it left, and the ratio is
+// repeatable to about half a percent.
 // ---------------------------------------------------------------------------
 
 /// One [`BASE_SLICE`] of CPU, so the sleeper leaves exactly at the point its
-/// request runs out and its lag is at the clamp.
+/// request runs out.
 const BURST_RUN: Duration = BASE_SLICE;
 
 /// Short enough that the sleeper is runnable for most of the window, so a fair
@@ -1697,12 +1649,19 @@ const BURST_SLEEP: Duration = Duration::from_micros(100);
 const BURST_WINDOW_MS: u64 = 300;
 const BURST_THREADS: u32 = 2;
 
-/// Where the two arms separate, measured rather than picked. Three runs each,
-/// four CPUs: with the lag carried the sleeper takes 0.94x, 0.94x and 0.95x of
-/// the steady thread's CPU; with `RunQueue::place` reverted to placing it level
-/// at `V`, 1.20x, 1.30x and 1.72x. The bound sits between them with the wider
-/// margin on the side that varies least.
+/// The direction that must never appear: a sleeper out-earning a thread that
+/// stayed runnable. Unreached by either arm below, and kept as a statement
+/// about the abuse rather than as the gate this case goes red on.
 const BURST_MAX_RATIO_X100: u64 = 110;
+
+/// Where the two arms separate, measured rather than picked. With the lag
+/// carried the sleeper takes 1.00x to 1.01x of the steady thread's CPU —
+/// eleven runs on one CPU and nine on four, no reading outside that. With
+/// `RunQueue::place` reverted to placing it level at `V` it takes 0.73x to
+/// 0.91x over twelve runs, tightest on four CPUs where every one read 0.90x or
+/// 0.91x. The bound sits four points under the arm that varies least and nine
+/// over the highest the defect has reached.
+const BURST_MIN_RATIO_X100: u64 = 95;
 
 /// CPU nanoseconds charged to `thread`, including the stretch it is running now.
 ///
@@ -1763,7 +1722,18 @@ extern "C" fn test_burst_share(arg: *mut u8) -> ! {
         ratio_x100 < BURST_MAX_RATIO_X100,
         "[sched-test] burst-share: a thread sleeping {} us off the end of every {} us slice of CPU \
          took {}.{:02}x the CPU of one that stayed runnable ({sleeper} ns against {steady} ns); \
-         its lag is being forgiven at every wake",
+         an overrun is being forgiven at every wake",
+        BURST_SLEEP.as_micros(),
+        BURST_RUN.as_micros(),
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+    );
+    assert!(
+        ratio_x100 > BURST_MIN_RATIO_X100,
+        "[sched-test] burst-share: a thread sleeping {} us off the end of every {} us slice of CPU \
+         took only {}.{:02}x the CPU of one that stayed runnable ({sleeper} ns against \
+         {steady} ns); it leaves owed service and is not being placed back with it, so the \
+         sleep is charged twice",
         BURST_SLEEP.as_micros(),
         BURST_RUN.as_micros(),
         ratio_x100 / 100,
@@ -1880,28 +1850,157 @@ const PI_HOLD: Duration = Duration::from_millis(10);
 /// rather than a window the measurement depends on.
 const PI_HOG_MS: u64 = 400;
 
-/// How long a role waits for the suite to go quiet before giving up on it.
+// ---------------------------------------------------------------------------
+// The measurement chain
+//
+// Six cases here say how much CPU a thread was given: the load metric, priority
+// starvation, three occupied levels, weighted share, lag across a sleep, and
+// the inversion. Every one of them is a statement about a runqueue carrying its
+// own threads and nothing else, and each holds its CPU for a fixed window
+// during which anything else runnable there is a competitor the measurement
+// cannot tell from the one it put there itself.
+//
+// They used to get that separation from *pinning*: `contend_cpu` is the first
+// registered CPU, `burst_cpu` the second, `pi_cpu` the third. That works only
+// while there are CPUs to spread across. On a single-CPU boot all three
+// selections are CPU 0, the starvation spinner is on every CPU by construction,
+// and the six cases then measure each other.
+//
+// `burst-share` shows it first, because its pair is the lowest priority of the
+// group — `DEFAULT_PRIORITY` against the tri-spinners at +2 and +3, the share
+// hog at +7 and the starvation spinner at +3 — and because its sleeper's sample
+// is *whole slices of CPU*. Measured on this tree: on one CPU the pair was
+// served 2 to 3 ms of its 300 ms window, which is two or three bursts, against
+// 36 to 50 ms on four CPUs. A ratio built from three samples moves in steps of
+// a third, and it duly cleared the 1.10 gate in one of eight single-CPU runs
+// under KVM and three of eight under TCG, while the same build on four CPUs
+// read 0.86x to 0.98x every time. Neither the bound nor the scheduler was
+// wrong; the sample was three slices long.
+//
+// So the gate runs them in sequence instead. The cost is the sum of their
+// windows rather than the longest, and what it buys is that each one measures
+// the scheduler on any number of CPUs.
+// ---------------------------------------------------------------------------
+
+/// How much longer than its own window a case may take before the gate stops
+/// waiting for it and starts the next one.
 ///
-/// A bound rather than a plain loop because a case this one waits on can *die*:
+/// A bound rather than a plain loop because a case can *die*:
 /// `load-parked-is-not-load` panicked on a single-CPU boot for years, and a
 /// gate that blocks forever on a dead dependency turns one red test into
-/// several silent ones. Well inside the coordinator's own `TIMEOUT_SECS`, so
-/// giving up here still leaves time to report.
-const PI_QUIET_TIMEOUT_MS: u64 = 3_000;
+/// several silent ones. Generous, because it only decides how a run that is
+/// already failing reports itself, and the whole chain still has to finish
+/// inside the coordinator's `TIMEOUT_SECS`.
+const MEASURE_SLACK_MS: u64 = 2_000;
 
-/// Waits for a quiet machine, then queues the nine threads that measure the
-/// inversion.
+/// Waits for `finished`, or for `window_ms` plus [`MEASURE_SLACK_MS`] to pass.
 ///
-/// **One waiting thread, not nine.** The roles used to wait for quiet
-/// themselves, which put nine threads on a poll loop across the window every
-/// other case is measured in — and `burst-share`, which compares a *sleeper*
-/// against a steady thread, is exactly the case nine more sleepers perturb. It
-/// went red on a single-CPU boot at 1.42x from that alone. A gate thread costs
-/// one sleeper instead, and the cases it starts do not exist until the machine
+/// Returns whether the case finished, which is what the inversion case needs to
+/// know: what its stretch factor means depends entirely on having had the CPU
+/// to itself.
+///
+/// Sleeping rather than yielding, so the gate is off the runqueue instead of
+/// being one more competitor for the CPU it is about to hand over.
+fn measure_wait(window_ms: u64, finished: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now().as_nanos() + (window_ms + MEASURE_SLACK_MS) * 1_000_000;
+    while !finished() {
+        if Instant::now().as_nanos() >= deadline {
+            return false;
+        }
+        thread_sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+/// Runs each measurement case in turn, on a machine the previous one has left.
+///
+/// **One waiting thread, not one per role.** The inversion's nine roles used to
+/// wait for quiet themselves, which put nine threads on a poll loop across the
+/// window every other case is measured in — and `burst-share`, which compares a
+/// *sleeper* against a steady thread, is exactly the case nine more sleepers
+/// perturb. It went red on a single-CPU boot at 1.42x from that alone. One gate
+/// costs one sleeper, and the cases it starts do not exist until the machine
 /// they need is the machine they get.
-extern "C" fn test_priority_inversion_gate(arg: *mut u8) -> ! {
+extern "C" fn test_measurement_gate(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let quiet = pi_wait_for_quiet(&h);
+    let mut quiet = true;
+
+    // Load metric first, and not for its own sake: it spawns fifty-two threads,
+    // and the twenty it leaves spinning on a second CPU are exactly what the
+    // share cases must not be measured against. Its own ceiling is the window,
+    // since it is released by a handshake rather than by a clock.
+    spawn_test(&h, "test-load-parked", test_load_parked);
+    quiet &= measure_wait(LOAD_SPIN_LIMIT_MS, || {
+        h.load_check_done.load(Ordering::Acquire)
+    });
+
+    // Priority starvation: one busy spinner per CPU plus one victim below them
+    // (1). One per CPU means it occupies every runqueue there is, so nothing
+    // else can be measured beside it on any number of CPUs.
+    for _ in 0..h.starvation_spinners {
+        spawn_test(&h, "test-starve-spin", test_starvation_spinner);
+    }
+    spawn_test(&h, "test-starve-victim", test_starvation_victim);
+    quiet &= measure_wait(STARVATION_SPIN_MS, || {
+        h.starvation_finished.load(Ordering::Acquire) >= h.starvation_spinners
+    });
+
+    // Three occupied priority levels on one CPU: the bottom one must run (1)
+    let contend_mask = 1u32 << h.contend_cpu;
+    for prio in [TRI_HIGH_PRIORITY, TRI_MID_PRIORITY] {
+        let boxed = Box::into_raw(Box::new((h.clone(), prio as u64))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-tri-spin",
+            test_tri_spinner as *const () as u64,
+            boxed,
+            contend_mask,
+        );
+    }
+    {
+        let boxed = Box::into_raw(Box::new(h.clone())) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-tri-victim",
+            test_tri_victim as *const () as u64,
+            boxed,
+            contend_mask,
+        );
+    }
+    quiet &= measure_wait(TRI_SPIN_MS, || {
+        h.tri_finished.load(Ordering::Acquire) >= TRI_SPINNERS
+    });
+
+    // Weighted share: priority must buy CPU in proportion to weight (1)
+    for prio in [SHARE_HEAVY_PRIORITY, SHARE_LIGHT_PRIORITY] {
+        let boxed = Box::into_raw(Box::new((h.clone(), prio as u64))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-share",
+            test_weighted_share as *const () as u64,
+            boxed,
+            contend_mask,
+        );
+    }
+    quiet &= measure_wait(SHARE_WINDOW_MS, || {
+        h.share_finished.load(Ordering::Acquire) >= SHARE_THREADS
+    });
+
+    // Lag across a sleep: a thread that sleeps off the end of every slice must
+    // not out-earn one that simply stays runnable (1)
+    let burst_mask = 1u32 << h.burst_cpu;
+    for sleeps in [false, true] {
+        let boxed = Box::into_raw(Box::new((h.clone(), sleeps as u64))) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-burst",
+            test_burst_share as *const () as u64,
+            boxed,
+            burst_mask,
+        );
+    }
+    quiet &= measure_wait(BURST_WINDOW_MS, || {
+        h.burst_finished.load(Ordering::Acquire) >= BURST_THREADS
+    });
+
+    // Priority inversion: a low holder, a mid hog that preempts it, and a high
+    // waiter that measures what the section cost it, once per lock flavour (3)
     let pi_mask = 1u32 << h.pi_cpu;
     for flavour in [PI_MUTEX, PI_RW_WRITE, PI_RW_READ] {
         for role in [PI_ROLE_LOW, PI_ROLE_MID, PI_ROLE_HIGH] {
@@ -1916,34 +2015,6 @@ extern "C" fn test_priority_inversion_gate(arg: *mut u8) -> ! {
         }
     }
     thread_exit(0);
-}
-
-/// Wait until nothing else in the suite is saturating a CPU.
-///
-/// Returns whether it got there, since what the inversion factor means depends
-/// on it entirely.
-///
-/// Every case named here stays runnable for a fixed window rather than until
-/// some other thread lets it go, so this cannot wait on work that is itself
-/// waiting for the inversion case. Sleeping rather than yielding, so a role
-/// waiting here is off the runqueue instead of being one more competitor for
-/// the CPU whose contention is about to be measured.
-fn pi_wait_for_quiet(h: &TestHarness) -> bool {
-    let deadline = Instant::now().as_nanos() + PI_QUIET_TIMEOUT_MS * 1_000_000;
-    loop {
-        if h.starvation_finished.load(Ordering::Acquire) >= h.starvation_spinners
-            && h.tri_finished.load(Ordering::Acquire) >= TRI_SPINNERS
-            && h.share_finished.load(Ordering::Acquire) >= SHARE_THREADS
-            && h.burst_finished.load(Ordering::Acquire) >= BURST_THREADS
-            && h.load_check_done.load(Ordering::Acquire)
-        {
-            return true;
-        }
-        if Instant::now().as_nanos() >= deadline {
-            return false;
-        }
-        thread_sleep(Duration::from_millis(5));
-    }
 }
 
 /// Wait for this flavour's turn, and then for `round` within it.
@@ -2066,9 +2137,9 @@ extern "C" fn test_priority_inversion(arg: *mut u8) -> ! {
             // instead, which is exactly the reading this case was built to stop
             // making -- so say so and gate nothing.
             println!(
-                "[sched-test] {name}: SKIPPED, the suite was still saturating a CPU after \
-                 {PI_QUIET_TIMEOUT_MS} ms -- a case this one waits on has not finished, so \
-                 there is no quiet machine to measure an inversion on"
+                "[sched-test] {name}: SKIPPED, a case ahead of this one in the measurement \
+                 chain did not finish within its window plus {MEASURE_SLACK_MS} ms, so there \
+                 is no quiet machine to measure an inversion on"
             );
             test_done(&h, name);
             // Release the other two roles through every remaining round, or

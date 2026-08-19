@@ -136,7 +136,7 @@ run-gtk: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 
 .PHONY: run-single
 run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
-	$(call run_qemu_uefi,iso,1,)
+	$(call run_qemu_uefi,iso,1,-accel kvm)
 
 .PHONY: run-big
 run-big: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
@@ -283,7 +283,7 @@ test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-d
 test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	rm -f run_log.txt
-	$(call run_qemu_uefi,iso,1,,$(DISPLAY_HEADLESS)) $(sched_test_status)
+	$(call run_qemu_uefi,iso,1,-accel kvm,$(DISPLAY_HEADLESS)) $(sched_test_status)
 
 # The same suite as `test`, against a null audio backend. `test` binds the
 # host's PipeWire session, which a bare SSH login does not have, so this is the
@@ -327,13 +327,13 @@ nvme-check: $(IMAGE_NAME).iso edos-nvme.iso edos-nvme-hostile.iso edos-sata.iso 
 	scripts/nvme-check
 
 
-.PHONY: run-kvm
+.PHONY: run-emu
 run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel tcg)
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img nvme-disk.img
-	$(call run_qemu_uefi,hdd,4,)
+	$(call run_qemu_uefi,hdd,4,-accel kvm)
 
 gdb:
 	rust-gdb -x gdbinit

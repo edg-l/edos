@@ -498,8 +498,57 @@ The entry above recorded that it "cannot pass". Both reasons are fixed:
    being measured; `burst-share` went back to 0.99x, which is the attribution.
 
 The suite is 58 cases and passes on `make test` and on
-`make test-single AUDIODEV=none QEMUFLAGS=-accel kvm`. Without that
-`QEMUFLAGS` the single-CPU target still runs under TCG.
+`make test-single AUDIODEV=none`.
+
+### The measurement cases run one at a time (2026-08-19)
+
+Six cases say how much CPU a thread was given: the load metric, priority
+starvation, three occupied levels, weighted share, lag across a sleep, and the
+inversion. Each is a statement about a runqueue carrying its own threads and
+nothing else, and each held its CPU for a fixed window during which the others
+were running too. They got their separation from **pinning** — `contend_cpu` is
+the first registered CPU, `burst_cpu` the second, `pi_cpu` the third — which
+works only while there are CPUs to spread across. On a single-CPU boot all
+three are CPU 0, the starvation spinner is on every CPU by construction, and
+the six measured each other.
+
+`burst-share` showed it first, because its pair is the lowest priority of the
+group and its sleeper's sample is **whole slices of CPU**. On one CPU the pair
+was served 2 to 3 ms of its 300 ms window — two or three bursts — against 36 to
+50 ms on four. A ratio built from three samples moves in steps of a third, so
+it cleared its gate about one run in four while the same build on four CPUs
+read 0.86x to 0.98x every time.
+
+A gate thread now runs the six in sequence. The cost is the sum of their
+windows rather than the longest, about 1.1 s of guest time, and every one of
+them got sharper for it: `prio-inversion` reads a 1.50x stretch on every run
+against the 1.51x the weight table predicts, `weighted-share` 4.74x to 4.86x
+against the 4.77x it asks for, and `burst-share` 1.00x to 1.01x with a spread
+under half a percent. Before, on a single-CPU boot, those read 3.02x to 3.12x,
+5.83x and anywhere from 0.64x to 1.36x.
+
+### `burst-share` was gating the wrong direction (2026-08-19)
+
+The case was built on the claim that its sleeper "leaves the runnable set at
+the point it is furthest ahead — it has just spent a full slice while its
+competitor waited". **It does not.** The burst is charged in the sleeper's own
+CPU time, so reaching a full slice of it takes about two slices of wall clock
+on a CPU it shares, during which the steady thread is served just as much, and
+then the sleep hands the steady thread a further 100 us. Instrumenting
+`RunQueue::record_lag` at the moment the sleeper stops being runnable: the
+first two cycles read a clamped `+994866` and `+1000000` of credit and the
+steady state settles between `+1275` and `+25485` — positive throughout, and
+`lag = V - vruntime` is positive for *under*-served. There is no overrun to be
+forgiven.
+
+So carrying the lag is what pays the sleeper back its own sleep, and the arm
+this case can prove is the opposite of the one it named. Rebuilt with `place`
+reverted to placing level at `V`, the ratio goes **down**: 0.73x to 0.91x over
+twelve runs, against 1.00x to 1.01x with the lag carried. The old
+`ratio < 1.10` bound sits above both arms and separates nothing — verified on
+the pre-serialization suite too, where the defect read 0.63x to 0.72x on four
+CPUs rather than the 1.20x to 1.72x its calibration recorded. The gate is now
+two-sided, and the lower bound at 0.95x is the one that goes red.
 
 ## 6a. Done: the futex path lends too (2026-08-18)
 
@@ -1083,9 +1132,11 @@ leaves the runnable set and handed back by `RunQueue::place`. Placing a waking
 thread level at `V` forgave whatever it owed, and the shape that abuses it is
 ordinary: burn a slice, sleep for a tenth of one, repeat. Each cycle hands back
 a full slice of overrun for free. Gated by `burst-share`, which measures the CPU
-each of a pair actually received: **0.94x** with the lag carried and **1.20x to
-1.72x** with `place` reverted, against a duty cycle that asks for a shade under
-1.00x.
+each of a pair actually received. The direction is the opposite of what this
+entry first recorded, and the numbers here are superseded — see "`burst-share`
+was gating the wrong direction" above: with the lag carried the sleeper reads
+**1.00x to 1.01x**, and with `place` reverted **0.73x to 0.91x**, because what
+it leaves owed is its own sleep rather than an overrun.
 
 **It costs ~22 ns per park/wake pair** and nothing anywhere else. `switchbench`
 on a single-CPU boot, against trunk at `713ed5a`: a cross-process pipe round

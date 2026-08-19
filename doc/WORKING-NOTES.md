@@ -527,16 +527,20 @@ that is what makes it dangerous. Measured over a wall-clock window instead,
 throughput is **flat to within 3% across a 40x range of slice**. Any benchmark
 whose own subject can lengthen its window has this bug.
 
-**A test that spins for a slice of wall clock does not get a slice of CPU.** The
-`burst-share` gate needs its sleeper to leave the runnable set at the moment it
-is exactly one slice ahead, which is where the effect it gates is largest.
-Written to spin for `BASE_SLICE` of wall clock on a CPU it *shares*, it got half
-a slice ahead, so half the effect was there to be seen: the defect measured
-1.30x against a correct kernel's 1.02x, and the gate could not be set between
-them. Charging the thread's own CPU time — `cpu_time_ns` plus the stretch since
-`run_start_ns`, since the first is only settled at a switch — separated the arms
-to 0.94x and 1.20x-1.72x. On a contended CPU, wall clock is not a proxy for
-service.
+**A test that spins for a slice of wall clock does not get a slice of CPU.**
+`burst-share` charges its sleeper's burst in the thread's own CPU time —
+`cpu_time_ns` plus the stretch since `run_start_ns`, since the first is only
+settled at a switch — rather than spinning for `BASE_SLICE` of wall clock. On a
+contended CPU, wall clock is not a proxy for service, and the numbers move by a
+factor when you swap one for the other.
+
+What that change was *believed* to buy is a separate matter and was wrong: it
+was recorded as putting the sleeper "exactly one slice ahead" at the moment it
+sleeps, and instrumenting `RunQueue::record_lag` shows the opposite. The
+sleeper leaves **under**-served, by roughly its own sleep, so the arms separate
+at 1.00x-1.01x with the lag carried and 0.73x-0.91x with it discarded — the
+low side, not the high one. See "`burst-share` was gating the wrong direction"
+in `doc/SCHED-ROADMAP.md`.
 
 The third lesson is the cheapest: **rule out your own scaffolding first.** The
 new `burst-share` threads pinned to a third CPU, which took it out of the pool
@@ -2171,11 +2175,11 @@ does not have to invent them.
 | kernel Rust | 53,979 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,199 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
 | commits | 1,537 | `git rev-list --count HEAD`, counting the commit that states it |
-| in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
+| in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none` passes too — both targets name `-accel kvm` since 2026-08-19, so no `QEMUFLAGS` is needed |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | guest suites | 17 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
-| `nvme-check` cases | 4 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, and install-and-reboot |
+| `nvme-check` cases | 5 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, install-and-reboot, and the watchdog under `nvme_timeout_ms=0` |
 | `unwrap()`/`expect()` in `kernel/src` | 170, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
