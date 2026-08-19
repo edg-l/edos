@@ -9772,7 +9772,13 @@ Answer, best of five sweeps per device in one boot, after the fix:
 - **Read the max column, not just MiB/s.** The whole finding lived there.
 
 `/dev/ram0` in the same boot is the control worth having: no storage driver at
-all, so it bounds what everything above the driver can deliver.
+all, so it isolates the driver from everything above it. Do not read it as
+memory speed, though -- it is the ceiling of *this path*, and the path is not
+cheap. EFS reads a real AHCI disk faster (over 1.7 GiB/s via `read_via_extents`)
+than the RAM disk manages here, and ram0's 42 us at 64 KiB is 2.6 us per 4 KiB
+page against a copy costing a few hundred nanoseconds. It also inverts, 1452
+MiB/s at 64 KiB down to 1170 at 1 MiB, where neither disk-backed device does.
+That is its own open item; see `doc/fsbench.md`.
 
 Not settled by this: the images differ (`sata-disk.img` is qcow2,
 `nvme-disk.img` raw), and QEMU's device models are not silicon. The comparison

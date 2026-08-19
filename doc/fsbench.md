@@ -273,6 +273,34 @@ microseconds -- a CPU halted with a runnable thread in its own runqueue, waking
 only on `run_idle`'s fallback timer. See
 `doc/bugs/2026-08-19-idle-cpu-halted-with-a-runnable-thread.md`.
 
+**Refuted: the MDTS split is not what costs NVMe its lead at 1 MiB.** QEMU's
+default MDTS of 7 caps one command at 512 KiB, so a 1 MiB request becomes two
+commands (`split_requests` 1024, `split_commands` 2048 over a run). Booting with
+`edos-vm --nvme-mdts 9` raises the cap to 2 MiB and drives `split_requests` to
+**0**; 1 MiB then reads 948 MiB/s against 990 with the split. No gain, slightly
+negative, inside the noise. The smaller sizes, which never split, do not move.
+
+What actually happens at 1 MiB is that the bottleneck leaves the driver: NVMe
+sits at 85% of `/dev/ram0` and AHCI at 77%, so there is about 18% of headroom
+left in total and none of it belongs to the driver. That is why NVMe's lead
+shrinks from 2.2x at 4 KiB to 0-10% at 1 MiB. Chase the shared read path, not
+the driver, for anything above 64 KiB.
+
+**`/dev/ram0` is the ceiling of this path, not of the machine.** Worth stating
+because it is easy to read the control as "memory speed" and conclude the
+drivers are nearly optimal. Two things say otherwise. `doc/fsbench.md`'s own
+earlier finding has EFS reading a real AHCI disk at over 1.7 GiB/s through
+`read_via_extents` -- faster than the RAM disk manages here. And ram0's 64 KiB
+p50 of 42 us is 2.6 us per 4 KiB page, where the copy itself is a few hundred
+nanoseconds, so most of it is block-page-cache work rather than moving bytes.
+
+ram0 also *inverts*: 1452 MiB/s at 64 KiB falling to 1170 at 1 MiB, reproduced
+across boots. Neither disk-backed device inverts (NVMe 675 -> 990, AHCI 451 ->
+898), which argues against a cache-footprint explanation -- all three copy into
+the same 1 MiB user buffer, so an L2 effect should hit all three. The device
+with no I/O cost to amortise is the one that gets worse, which points at the
+raw-device read path itself.
+
 **Two habits this pays for.** Read the `max` column: the finding lived entirely
 there and no throughput average would ever have shown it. And take the best of
 several sweeps rather than one -- consecutive 4 KiB sweeps in an identical
