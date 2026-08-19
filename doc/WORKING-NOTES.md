@@ -9316,9 +9316,11 @@ plus the formatter, and every one is green:
 | `make orphan-check` | the mount reclaimed 8 interrupted deletions, `efs-fsck` exit 0 |
 | `make ssh-check` | auth, refused password, exit status, 11.8 MB each way byte-identical, three concurrent sessions |
 
-`nvme-check` no longer reads that way: at `b769ee40`, three doc-only commits
-later, case 4 fails on both of two consecutive runs. The section below has the
-evidence.
+`nvme-check` stopped reading that way at `b769ee40`, three doc-only commits
+later: case 4 failed on both of two consecutive runs. The section below has the
+evidence and the fix; it is 4/4 again at `dfedf441`, where `make test` (58/58)
+and `make recovery-check` (replayed 1 transaction, files back) were re-run
+beside it.
 
 `storage-check` is the slow one and had not been seen whole since the NVMe work
 started: `fsbench-run` reports `total 19.3s` for `/var` and its
