@@ -2165,10 +2165,10 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,133 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,810 code lines | `tokei -t=Rust kernel/src` |
-| NVMe driver | 2,092 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,518 | `git rev-list --count HEAD` |
+| Rust | 116,186 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,863 code lines | `tokei -t=Rust kernel/src` |
+| NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
+| commits | 1,520 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
