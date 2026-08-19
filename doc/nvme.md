@@ -108,6 +108,20 @@ straggler through `retire_op`. Asserting the slot table is empty at reset time
 is wrong and was tried: nothing excludes a submitter from installing a command
 in that window.
 
+A reset fails commands the device would have completed, so **whatever waits on
+a block handle re-issues it**. `block_io::{read,write,flush,read_batch}_blocking`
+retry a `BlockError` of `Io` or `Timeout` for up to ten seconds, backing off
+five milliseconds between attempts, and every path that keeps commands
+outstanding rather than calling those does the same by holding on to what it
+would take to issue again: the journal's ring writes (`RingCommand`), replay's
+home-block writes (`InflightReplay`) and EFS's staged extent writes
+(`InflightWrite`). A bare handle cannot be retried, which is why each of those
+carries its LBA, its length and its buffer. The bound is time rather than a
+count on purpose — a reset refuses every command issued while it runs, so a
+fixed handful of attempts can land entirely inside one. Without any of this, a
+reset under a live root is a failed mount and a panic. `nvme-check`'s fifth case is the gate;
+`doc/WORKING-NOTES.md` covers what a zero timeout can and cannot prove.
+
 **6. PRP.** PRP1 plus, above 8 KiB, a PRP list page. The list page is allocated
 lazily with `allocate_sized_uninit` and is untouched entirely below 8 KiB,
 because DMA memory is mapped `NO_CACHE` and an 8-byte store into it costs about
@@ -214,20 +228,21 @@ that boots is a gate exercising it.
 ```bash
 make run                       # NVMe root, SATA disk attached beside it
 make run-sata                  # the other way round, via edos-sata.iso
-make nvme-check                # the four-boot gate
+make nvme-check                # the five-boot gate
 
 scripts/edos-vm start --iso edos-nvme.iso --nvme-disk nvme-disk.img --no-sata
 scripts/edos-vm start --iso edos-sata.iso --nvme-lbs 4096
 scripts/edos-vm start --no-nvme          # SATA only; needs an ISO rooting there
 ```
 
-Three ISOs come from the same tracked `limine.conf`, differing only in the GUID
+Four ISOs come from the same tracked `limine.conf`, differing only in the GUID
 the substitution writes into `root=` and in one extra cmdline word:
 `edos-x86_64.iso` (NVMe root), `edos-sata.iso` (SATA root, for the three
-`nvme-check` cases whose point is that NVMe does *not* win root selection), and
-`edos-nvme.iso` (NVMe root plus `nvme_probe_read` for the PRP gate). Both ISOs come from the same tracked `limine.conf`; the ISO rule
-substitutes the GUID. The two disks carry **different** partition GUIDs on
-purpose, so attaching both never makes root selection a race.
+`nvme-check` cases whose point is that NVMe does *not* win root selection),
+`edos-nvme.iso` (NVMe root plus `nvme_probe_read` for the PRP gate) and
+`edos-nvme-hostile.iso` (NVMe root plus `nvme_timeout_ms=0` for the watchdog
+gate). The two disks carry **different** partition GUIDs on purpose, so
+attaching both never makes root selection a race.
 
 ### QEMU knobs and the path each one reaches
 

@@ -36,26 +36,15 @@ use crate::drivers::block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags};
 /// fs-layer batch size rather than the minimum any device can accept.
 const MAX_RUN_BLOCKS: usize = 248;
 
-fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
+fn block_read(device_id: u64, lba: u64, buf: &mut [u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `handle.wait()?` below reaps this op before returning.
-    let handle = dev.submit_read(lba, sectors as u32, unsafe {
-        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), buf.len())
-    })?;
-    handle.wait()?;
+    block_io::read_blocking(&dev, lba, buf)?;
     Ok(())
 }
 
-fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+fn block_write(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `handle.wait()?` below reaps this op before returning.
-    let handle = dev.submit_write(
-        lba,
-        sectors as u32,
-        unsafe { BlockBuffer::reaped_by_submitter(buf.as_ptr() as *mut u8, buf.len()) },
-        WriteFlags::NONE,
-    )?;
-    handle.wait()?;
+    block_io::write_blocking(&dev, lba, buf, WriteFlags::NONE)?;
     Ok(())
 }
 
@@ -78,10 +67,14 @@ fn submit_block_write(
     Ok(handle)
 }
 
-/// One `submit_block_write` that has not been waited on yet.
+/// One `submit_block_write` that has not been waited on yet, kept with what it
+/// would take to issue again: recovering a hung controller fails whatever was
+/// in flight, and those bytes are a file's data.
 struct InflightWrite {
     handle: Arc<BlockIoHandle>,
     staging: Arc<Vec<u8>>,
+    lba: u64,
+    sectors: u16,
     first_page: u64,
     pages: u64,
 }
@@ -90,8 +83,21 @@ struct InflightWrite {
 /// range it overwrote behind the cache's back. The invalidation happens on
 /// failure too: a command that reported an error may still have landed in
 /// part, so a cached page for that range cannot be trusted either way.
-fn reap_write(device_id: u64, write: InflightWrite) -> Result<(), AhciError> {
-    let result = write.handle.wait();
+fn reap_write(device_id: u64, mut write: InflightWrite) -> Result<(), AhciError> {
+    let started = crate::timer::Instant::now();
+    let result: Result<(), AhciError> = loop {
+        match write.handle.wait() {
+            Ok(()) => break Ok(()),
+            Err(e) if block_io::retry_after(e, started) => {
+                match submit_block_write(device_id, write.lba, write.sectors, write.staging.clone())
+                {
+                    Ok(handle) => write.handle = handle,
+                    Err(e) => break Err(e),
+                }
+            }
+            Err(e) => break Err(e.into()),
+        }
+    };
     // The device is only done reading the staging buffer now.
     drop(write.staging);
     BlockPageCache::global().invalidate_pages(device_id, write.first_page, write.pages);
@@ -99,16 +105,9 @@ fn reap_write(device_id: u64, write: InflightWrite) -> Result<(), AhciError> {
     Ok(())
 }
 
-fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+fn block_write_fua(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `handle.wait()?` below reaps this op before returning.
-    let handle = dev.submit_write(
-        lba,
-        sectors as u32,
-        unsafe { BlockBuffer::reaped_by_submitter(buf.as_ptr() as *mut u8, buf.len()) },
-        WriteFlags::FUA,
-    )?;
-    handle.wait()?;
+    block_io::write_blocking(&dev, lba, buf, WriteFlags::FUA)?;
     Ok(())
 }
 use super::path::Path;
@@ -358,7 +357,7 @@ impl EfsDriver {
                 )
             };
             jsb_block[..jsb_bytes.len()].copy_from_slice(jsb_bytes);
-            block_write_fua(partition.device_id, jsb_lba, sectors_per_block, &jsb_block)?;
+            block_write_fua(partition.device_id, jsb_lba, &jsb_block)?;
         }
 
         // j_first_block is already a partition-relative EFS block number.
@@ -645,28 +644,14 @@ impl EfsDriver {
                 .iter()
                 .map(|r| Arc::new(vec![0u8; r.sectors as usize * 512]))
                 .collect();
-            let reqs = batch
+            let reqs: Vec<_> = batch
                 .iter()
                 .zip(staging.iter())
-                .map(|(r, buf)| (r.lba, r.sectors as u32, BlockBuffer::owned_vec(buf.clone())))
+                .map(|(r, buf)| (r.lba, r.sectors as u32, buf.clone()))
                 .collect();
 
-            // Every request comes back with a handle, a failed submission
-            // included, so waiting on all of them is what keeps each staging
-            // buffer alive until its DMA is finished. The error return is the
-            // legacy/ATAPI path, which completes inside `submit_read` and so
-            // leaves nothing outstanding.
             EFS_EXTENT_BATCHES.fetch_add(1, Ordering::Relaxed);
-            let handles = dev.submit_read_batch(reqs).map_err(AhciError::from)?;
-            let mut failure = None;
-            for handle in &handles {
-                if let Err(e) = handle.wait() {
-                    failure.get_or_insert(e);
-                }
-            }
-            if let Some(e) = failure {
-                return Err(AhciError::from(e).into());
-            }
+            block_io::read_batch_blocking(&dev, &reqs).map_err(AhciError::from)?;
 
             for (r, buf) in batch.iter().zip(staging.iter()) {
                 result[r.dest..r.dest + r.len].copy_from_slice(&buf[r.skew..r.skew + r.len]);
@@ -987,7 +972,6 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
-        let spb = self.sectors_per_block();
         let mut written = 0usize;
 
         while written < data.len() {
@@ -1012,11 +996,11 @@ impl EfsDriver {
             let lba = self.block_to_lba(phys_block);
             let mut block_data = vec![0u8; block_size];
             if copy_len != block_size {
-                block_read(self.device.device_id, lba, spb, &mut block_data)?;
+                block_read(self.device.device_id, lba, &mut block_data)?;
             }
             block_data[offset_in_block..offset_in_block + copy_len]
                 .copy_from_slice(&data[written..written + copy_len]);
-            block_write(self.device.device_id, lba, spb, &block_data)?;
+            block_write(self.device.device_id, lba, &block_data)?;
 
             written += copy_len;
         }
@@ -3049,12 +3033,7 @@ impl PageCacheOps for EfsDriver {
         let spb = self.sectors_per_block();
 
         // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
-        block_read(
-            self.device.device_id,
-            lba,
-            spb,
-            &mut buf[..spb as usize * 512],
-        )?;
+        block_read(self.device.device_id, lba, &mut buf[..spb as usize * 512])?;
         if valid_bytes < 4096 {
             buf[valid_bytes..].fill(0);
         }
@@ -3233,7 +3212,7 @@ impl PageCacheOps for EfsDriver {
 
         // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
         let needed = spb as usize * 512;
-        if let Err(e) = block_write(self.device.device_id, lba, spb, &buf[..needed]) {
+        if let Err(e) = block_write(self.device.device_id, lba, &buf[..needed]) {
             tx.abort();
             return Err(e.into());
         }
@@ -3410,6 +3389,8 @@ impl PageCacheOps for EfsDriver {
                     Ok(handle) => inflight.push_back(InflightWrite {
                         handle,
                         staging,
+                        lba,
+                        sectors: sectors as u16,
                         first_page: lba / 8,
                         pages: run_len as u64,
                     }),

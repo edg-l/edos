@@ -8843,14 +8843,53 @@ Two related traps in the same path:
   lost either, since its completion never arrives and the next sweep fails it.
   The first version of this asserted instead, and panicked within 400 ms of
   boot under `nvme_timeout_ms=0`.
-- **`nvme_timeout_ms=0` is hostile enough to kill the boot.** It declares every
-  command hung the instant it is issued, so the reset path is reached
-  immediately and repeatedly — which is the point — but the I/O it fails
-  includes the boot's own reads, and nothing above `block_io` retries a
-  `BlockError::Io`. `main.rs`'s init load unwraps it and panics. The setting
-  proves the watchdog and reset run to completion; it does not, as written,
-  leave the guest usable. A retry above `block_io`, or a small non-zero timeout,
-  is what that half needs.
+- **`nvme_timeout_ms=0` is hostile enough to kill the boot, and what it can
+  prove is narrower than it looks.** It declares every command hung the instant
+  it is issued, so the reset path is reached immediately and repeatedly — which
+  is the point — but the I/O it fails includes the boot's own reads, and
+  nothing above `block_io` re-issued a `BlockError::Io`: the root mount
+  returned it, `mount_system_fs` unwrapped it, and the kernel panicked inside
+  half a second.
+
+  `block_io::{read,write,flush,read_batch}_blocking` re-issue an op the device
+  abandoned, bounded by a ten-second window rather than a count, and the three
+  paths that keep commands outstanding instead of calling those — the journal's
+  ring writes, replay's home blocks, EFS's staged extent writes — hold on to
+  the LBA, length and buffer that let them issue again. The bound has to be
+  time, not attempts: what abandons an op is a reset, a reset refuses every
+  command issued while it runs, and a fixed handful of attempts lands entirely
+  inside one. Ten seconds rather than two because two lost the root mount about
+  one boot in four here, with a five-millisecond backoff against a controller
+  resetting continuously. With that in, a zero-timeout boot mounts its root,
+  starts init, and reports no failed read or write at all.
+
+  It still does not give a responsive desktop, and no correctness fix will. The
+  sweep interval is `min(1 s, max(timeout, 1 ms))`, so a zero timeout sweeps
+  every millisecond against a reset that takes two or three, and the controller
+  is in reset most of the time — around 930 resets a second, measured. The
+  guest reaches init in a second or two and the taskbar sometimes not at all.
+  The other direction is no better: at `nvme_timeout_ms=1`, commands complete
+  in about a hundred microseconds under KVM, so nothing is ever declared hung
+  and the watchdog never fires at all. Zero is the only setting that exercises
+  the path, which is why `nvme-check`'s watchdog case asserts what it can prove
+  — init runs, the watchdog fires, the reset completes, and no I/O is reported
+  failed — and not that the desktop comes up.
+
+  Two traps in reading that boot's log. **A kernel `log!` line the boot emitted
+  once may simply not be there:** a thousand watchdog messages a second evict
+  it from the ring before the klogger drains it, so `Root filesystem mounted`
+  is routinely missing from a boot that plainly mounted its root. Userspace
+  writes to the serial console directly and is not affected, which is why
+  `init: pid` is the liveness marker rather than anything the kernel logged.
+  And **do not sample `run_log.txt` while a loop of boots is running**:
+  `edos-vm start` truncates it, so a grep taken between two boots reports the
+  new boot's first few hundred microseconds and reads as a guest that got
+  nowhere. Copy the file aside per iteration.
+
+  One boot in eight wedges at `Starting mountfs thread` with no sweep, no reset
+  and nothing failed — a hang rather than the retry path, and undiagnosed. The
+  watchdog case says which of the two it saw, so a red run points at the right
+  thing.
 
 ## The NVMe dispatcher parked on a lock the watchdog then started holding (2026-08-19)
 

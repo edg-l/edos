@@ -386,3 +386,187 @@ pub fn lookup(device_id: u64) -> Option<Arc<dyn AsyncBlockDevice>> {
 pub fn list() -> Vec<u64> {
     DEVICES.read().keys().copied().collect()
 }
+
+// ---------------------------------------------------------------------------
+// Blocking helpers
+// ---------------------------------------------------------------------------
+
+/// How long an abandoned op keeps being re-issued before the error reaches
+/// the caller.
+///
+/// A count is the wrong bound here. What abandons an op is a controller reset,
+/// and a reset refuses every command issued while it runs, so a fixed handful
+/// of attempts can land entirely inside one and report a failure the device
+/// was about to be ready for. Ten seconds is far longer than any recovery this
+/// kernel performs -- an NVMe reset takes about three milliseconds -- and far
+/// shorter than a caller's patience for a device that has genuinely stopped
+/// answering. It is sized for the worst case this tree can produce rather than
+/// for the ordinary one: under `nvme_timeout_ms=0` the controller resets
+/// hundreds of times a second, and a two-second window loses the root mount
+/// about one boot in four against that.
+const RETRY_WINDOW: core::time::Duration = core::time::Duration::from_secs(10);
+
+/// Pause between attempts, so a re-issue does not spin through the couple of
+/// milliseconds a reset takes.
+const RETRY_BACKOFF: core::time::Duration = core::time::Duration::from_millis(5);
+
+/// Whether an op that failed with `e` should be issued again, sleeping out the
+/// backoff when it should. `started` is when the first attempt was made, and the
+/// window is measured from there rather than from the last failure.
+pub fn retry_after(e: BlockError, started: crate::timer::Instant) -> bool {
+    if !worth_retrying(e) || started.elapsed() >= RETRY_WINDOW {
+        return false;
+    }
+    crate::thread::scheduler::thread_sleep(RETRY_BACKOFF);
+    true
+}
+
+/// True for an error that says the op was abandoned rather than answered.
+///
+/// Recovering a hung controller means failing every command that was in
+/// flight, including ones the device was about to complete: the NVMe watchdog
+/// does that on its way to a reset, and AHCI's does the same for its NCQ
+/// slots. Those reads are not lost data, they are I/O that has to be asked for
+/// again. An op the device rejected, one the submitter cancelled, and a device
+/// that has gone away all gain nothing from a second attempt.
+pub fn worth_retrying(e: BlockError) -> bool {
+    matches!(e, BlockError::Io | BlockError::Timeout)
+}
+
+/// Flush the device's write cache, re-issuing an op a reset abandoned.
+pub fn flush_blocking(dev: &Arc<dyn AsyncBlockDevice>) -> Result<(), BlockError> {
+    let started = crate::timer::Instant::now();
+    loop {
+        match dev.submit_flush().and_then(|h| h.wait()) {
+            Ok(()) => return Ok(()),
+            Err(e) if retry_after(e, started) => {}
+            Err(e) => {
+                crate::log!("block: flush failed after {:?}: {e:?}", started.elapsed());
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Read into `buf` starting at `lba`, waiting for the device and re-issuing an
+/// op it abandoned.
+///
+/// `buf.len()` must be a whole number of 512-byte sectors.
+pub fn read_blocking(
+    dev: &Arc<dyn AsyncBlockDevice>,
+    lba: u64,
+    buf: &mut [u8],
+) -> Result<(), BlockError> {
+    let sectors = (buf.len() / 512) as u32;
+    let ptr = buf.as_mut_ptr();
+    let len = buf.len();
+    let started = crate::timer::Instant::now();
+    loop {
+        // SAFETY: the wait below reaps the op before this returns, and `buf`
+        // outlives the call, which is what `reaped_by_submitter` promises.
+        let buffer = unsafe { BlockBuffer::reaped_by_submitter(ptr, len) };
+        match dev.submit_read(lba, sectors, buffer).and_then(|h| h.wait()) {
+            Ok(()) => return Ok(()),
+            Err(e) if retry_after(e, started) => {}
+            Err(e) => {
+                crate::log!(
+                    "block: read lba={lba} sectors={sectors} failed after {:?}: {e:?}",
+                    started.elapsed()
+                );
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Submit several reads at once, wait for all of them, and re-issue any the
+/// device abandoned.
+///
+/// Each request's buffer is co-owned, which is what makes a re-issue possible:
+/// the bytes stay valid whatever happened to the first attempt. A failed
+/// request is retried on its own rather than by resubmitting the batch, so one
+/// bad run does not re-read what already landed.
+pub fn read_batch_blocking(
+    dev: &Arc<dyn AsyncBlockDevice>,
+    reqs: &[(u64, u32, Arc<Vec<u8>>)],
+) -> Result<(), BlockError> {
+    let batch = reqs
+        .iter()
+        .map(|(lba, sectors, buf)| (*lba, *sectors, BlockBuffer::owned_vec(buf.clone())))
+        .collect();
+    // Every request comes back with a handle, a failed submission included, so
+    // waiting on all of them is what keeps each buffer alive until its DMA is
+    // finished.
+    let handles = dev.submit_read_batch(batch)?;
+
+    let started = crate::timer::Instant::now();
+    let mut failed: Option<BlockError> = None;
+    let mut retry: Vec<usize> = Vec::new();
+    for (i, handle) in handles.iter().enumerate() {
+        if let Err(e) = handle.wait() {
+            if worth_retrying(e) {
+                retry.push(i);
+            } else {
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+
+    for i in retry {
+        let (lba, sectors, buf) = &reqs[i];
+        loop {
+            let buffer = BlockBuffer::owned_vec(buf.clone());
+            match dev
+                .submit_read(*lba, *sectors, buffer)
+                .and_then(|h| h.wait())
+            {
+                Ok(()) => break,
+                Err(e) if retry_after(e, started) => {}
+                Err(e) => {
+                    crate::log!(
+                        "block: batched read lba={lba} sectors={sectors} failed after {:?}: {e:?}",
+                        started.elapsed()
+                    );
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write `buf` starting at `lba`, with the same retry rule as
+/// [`read_blocking`].
+pub fn write_blocking(
+    dev: &Arc<dyn AsyncBlockDevice>,
+    lba: u64,
+    buf: &[u8],
+    flags: WriteFlags,
+) -> Result<(), BlockError> {
+    let sectors = (buf.len() / 512) as u32;
+    let ptr = buf.as_ptr() as *mut u8;
+    let len = buf.len();
+    let started = crate::timer::Instant::now();
+    loop {
+        // SAFETY: as in `read_blocking`; the device only reads through this
+        // pointer for a write.
+        let buffer = unsafe { BlockBuffer::reaped_by_submitter(ptr, len) };
+        match dev
+            .submit_write(lba, sectors, buffer, flags)
+            .and_then(|h| h.wait())
+        {
+            Ok(()) => return Ok(()),
+            Err(e) if retry_after(e, started) => {}
+            Err(e) => {
+                crate::log!(
+                    "block: write lba={lba} sectors={sectors} failed after {:?}: {e:?}",
+                    started.elapsed()
+                );
+                return Err(e);
+            }
+        }
+    }
+}

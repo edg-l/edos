@@ -317,12 +317,13 @@ storage-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 
 
 # The NVMe driver's own gate: an NVMe-root boot, a SATA+NVMe coexistence boot,
-# the 4Kn refusal path, and `edos-install` onto a blank NVMe image followed by
-# a boot from it. Four boots, so budget about ten minutes.
-# `sata-disk.img` is a prerequisite even though only two of the four cases
+# the 4Kn refusal path, `edos-install` onto a blank NVMe image followed by a
+# boot from it, and a boot whose watchdog resets the controller under a live
+# root. Five boots, so budget about twelve minutes.
+# `sata-disk.img` is a prerequisite even though only two of the five cases
 # attach it: those two root on it, so they run whatever userspace it holds.
 .PHONY: nvme-check
-nvme-check: $(IMAGE_NAME).iso edos-nvme.iso edos-sata.iso nvme-disk.img sata-disk.img fresh-nvme-blank
+nvme-check: $(IMAGE_NAME).iso edos-nvme.iso edos-nvme-hostile.iso edos-sata.iso nvme-disk.img sata-disk.img fresh-nvme-blank
 	scripts/nvme-check
 
 
@@ -438,6 +439,24 @@ edos-sata.iso: limine/limine kernel live-root.img
 # discontiguous, and a PRP list over a contiguous run gates nothing.
 edos-nvme.iso: limine/limine kernel live-root.img
 	$(call build_iso,edos-nvme.iso,iso_root_nvme,$(NVME_UUID),nvme_probe_read)
+
+# The NVMe root again, with `nvme_timeout_ms=0`: the watchdog declares every
+# command hung the moment it is issued and resets the controller under a live
+# root. `nvme-check`'s watchdog case boots this one; the timeout is baked into
+# the cmdline because that is the only place the kernel reads it.
+#
+# What this setting can and cannot show is worth stating, because the plan that
+# introduced it asked for more than it can give. The sweep interval is
+# `min(1 s, max(timeout, 1 ms))`, so a zero timeout sweeps every millisecond
+# and kills whatever it finds, and a reset takes a couple of milliseconds: the
+# device is therefore resetting most of the time and no amount of correctness
+# makes the desktop responsive. Every whole millisecond above zero is the other
+# extreme -- commands complete in about a hundred microseconds under KVM, so
+# nothing is ever declared hung and the watchdog never fires at all. Zero is
+# the only setting that exercises the path, and the gate asserts what it can
+# prove: the reset runs, and no I/O is reported failed.
+edos-nvme-hostile.iso: limine/limine kernel live-root.img
+	$(call build_iso,edos-nvme-hostile.iso,iso_root_nvme_hostile,$(NVME_UUID),nvme_timeout_ms=0)
 
 $(IMAGE_NAME).hdd: limine/limine kernel
 	rm -f $(IMAGE_NAME).hdd

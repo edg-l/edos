@@ -1,8 +1,5 @@
 use crate::{
-    drivers::{
-        ahci,
-        block_io::{self, BlockBuffer},
-    },
+    drivers::{ahci, block_io},
     fs::fat32::structures::Fat32BootSector,
     fs::gpt::{FilesystemType, Partition, PartitionType},
     log,
@@ -17,11 +14,7 @@ fn read_sectors_vec(
     let byte_count = sectors as usize * 512;
     let mut buf = alloc::vec![0u8; byte_count];
     let dev = block_io::lookup(device_id).ok_or(ahci::AhciError::InvalidDevice)?;
-    // SAFETY: `handle.wait()?` below reaps this op before returning.
-    let handle = dev.submit_read(lba, sectors as u32, unsafe {
-        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), byte_count)
-    })?;
-    handle.wait()?;
+    block_io::read_blocking(&dev, lba, &mut buf)?;
     Ok(buf)
 }
 use alloc::{

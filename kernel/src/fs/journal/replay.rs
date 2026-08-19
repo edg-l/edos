@@ -24,18 +24,22 @@ use crate::{
     log,
 };
 
-fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
+fn block_read(device_id: u64, lba: u64, buf: &mut [u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `h.wait()?` below reaps this op before returning.
-    let h = dev.submit_read(lba, sectors as u32, unsafe {
-        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), buf.len())
-    })?;
-    h.wait()?;
+    block_io::read_blocking(&dev, lba, buf)?;
     Ok(())
 }
 
-/// A replay write that has been submitted but not waited on.
-type InflightReplay = alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>;
+/// A replay write that has been submitted but not waited on, kept with what it
+/// would take to issue again: recovering a hung controller fails whatever was
+/// in flight, and a home block that lands nowhere is a transaction replay
+/// silently did not apply.
+struct InflightReplay {
+    handle: alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>,
+    lba: u64,
+    sectors: u16,
+    data: alloc::sync::Arc<Vec<u8>>,
+}
 
 /// Issue a home-block write without waiting, so replay can keep several
 /// outstanding instead of paying a round trip per block. The op co-owns
@@ -47,26 +51,51 @@ fn submit_block_write(
     sectors: u16,
     data: Vec<u8>,
 ) -> Result<InflightReplay, AhciError> {
+    let data = alloc::sync::Arc::new(data);
+    let handle = submit_owned(device_id, lba, sectors, &data)?;
+    Ok(InflightReplay {
+        handle,
+        lba,
+        sectors,
+        data,
+    })
+}
+
+/// Issue one home-block write and return its handle, without waiting.
+fn submit_owned(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    data: &alloc::sync::Arc<Vec<u8>>,
+) -> Result<alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>, AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
     dev.submit_write(
         lba,
         sectors as u32,
-        BlockBuffer::owned_vec(alloc::sync::Arc::new(data)),
+        BlockBuffer::owned_vec(data.clone()),
         WriteFlags::NONE,
     )
     .map_err(Into::into)
 }
 
-/// Wait for one outstanding replay write.
-fn reap_replay(write: InflightReplay) -> Result<(), AhciError> {
-    write.wait()?;
-    Ok(())
+/// Wait for one outstanding replay write, re-issuing it while the failure is
+/// one a controller reset explains.
+fn reap_replay(device_id: u64, mut write: InflightReplay) -> Result<(), AhciError> {
+    let started = crate::timer::Instant::now();
+    loop {
+        match write.handle.wait() {
+            Ok(()) => return Ok(()),
+            Err(e) if block_io::retry_after(e, started) => {
+                write.handle = submit_owned(device_id, write.lba, write.sectors, &write.data)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 fn block_flush(device_id: u64) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let h = dev.submit_flush()?;
-    h.wait()?;
+    block_io::flush_blocking(&dev)?;
     Ok(())
 }
 
@@ -136,7 +165,7 @@ pub fn replay(
         |region_block: u64| -> Result<Vec<u8>, AhciError> {
             let lba = partition_start_lba + (first_block + region_block) * SECTORS_PER_BLOCK as u64;
             let mut buf = vec![0u8; BLOCK_SIZE];
-            block_read(device_id, lba, SECTORS_PER_BLOCK, &mut buf)?;
+            block_read(device_id, lba, &mut buf)?;
             Ok(buf)
         },
     )?;
@@ -207,7 +236,7 @@ pub fn replay(
                 let Some(done) = inflight.pop_front() else {
                     break;
                 };
-                if let Err(e) = reap_replay(done) {
+                if let Err(e) = reap_replay(device_id, done) {
                     failure.get_or_insert(e);
                     break 'outer;
                 }
@@ -242,7 +271,7 @@ pub fn replay(
     // failure path too: returning early would free memory the device is still
     // reading from.
     while let Some(done) = inflight.pop_front() {
-        if let Err(e) = reap_replay(done) {
+        if let Err(e) = reap_replay(device_id, done) {
             failure.get_or_insert(e);
         }
     }

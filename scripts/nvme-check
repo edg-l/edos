@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -u
-"""Gate the NVMe driver against four boots and report one verdict.
+"""Gate the NVMe driver against five boots and report one verdict.
 
 The in-kernel suites and `guest-check` all run on a SATA root, so nothing they
 do touches this driver. These are the cases that need a machine built for them:
@@ -13,6 +13,12 @@ do touches this driver. These are the cases that need a machine built for them:
      why it refused and registers no device node.
   4. Install -- `edos-install --yes /dev/nvme0n1` onto a blank NVMe image, then
      boot that image with no ISO attached and reach a desktop on device 3000.
+  5. Watchdog -- boot `edos-nvme-hostile.iso`, whose cmdline carries
+     `nvme_timeout_ms=0`, so every command is declared hung the moment it is
+     issued and the controller is reset hundreds of times a second under a
+     live root. The root still mounts, init still runs, and no read or write
+     is reported failed, because the block layer re-issues what a reset
+     abandoned.
 
     make nvme-check
 
@@ -111,7 +117,7 @@ def report(label, ok, detail=""):
 
 def case_nvme_root():
     """The headline case: the NVMe disk is the root filesystem."""
-    print("[1/4] NVMe root: boot edos-nvme.iso with --nvme-disk --no-sata")
+    print("[1/5] NVMe root: boot edos-nvme.iso with --nvme-disk --no-sata")
     mark = boot("--iso", "edos-nvme.iso", "--nvme-disk", "nvme-disk.img", "--no-sata")
     if mark is None:
         return report("desktop", False, "the desktop never came up")
@@ -155,7 +161,7 @@ def case_nvme_root():
 
 def case_coexistence():
     """Both controllers live on one machine, each with its own device node."""
-    print("[2/4] coexistence: SATA root with an NVMe disk attached")
+    print("[2/5] coexistence: SATA root with an NVMe disk attached")
     mark = boot("--iso", "edos-sata.iso", "--nvme-disk", "nvme-disk.img")
     if mark is None:
         stop()
@@ -175,7 +181,7 @@ def case_coexistence():
 
 def case_refusal():
     """A 4 KiB logical block size is refused by name, not misread."""
-    print("[3/4] refusal: logical_block_size=4096")
+    print("[3/5] refusal: logical_block_size=4096")
     mark = boot("--iso", "edos-sata.iso", "--nvme-disk", "nvme-disk.img", "--nvme-lbs", "4096")
     if mark is None:
         stop()
@@ -193,7 +199,7 @@ def case_refusal():
 
 def case_install():
     """`edos-install` onto a blank NVMe disk, then a boot from that disk."""
-    print("[4/4] install: edos-install --yes /dev/nvme0n1 onto a blank image")
+    print("[4/5] install: edos-install --yes /dev/nvme0n1 onto a blank image")
     blank = os.path.join(REPO, "nvme-blank.img")
     if not os.path.exists(blank):
         return report("nvme-blank.img", False, "run `make nvme-blank.img` first")
@@ -227,9 +233,68 @@ def case_install():
     return ok
 
 
+def case_watchdog():
+    """Every command declared hung: the reset path runs and I/O still lands.
+
+    `nvme_timeout_ms=0` declares a command hung the moment it is issued, and
+    the sweep interval collapses to a millisecond with it, so the controller is
+    reset hundreds of times a second and everything in flight when a sweep runs
+    is failed. The root filesystem is on that controller, so this is the
+    setting under which a command a reset abandoned has to be asked for again
+    rather than become a failed read. Before it was, the kernel panicked on the
+    root mount inside half a second.
+
+    What this case does NOT assert is a working desktop, and the omission is
+    deliberate rather than a lowered bar. A reset takes a couple of
+    milliseconds and this setting starts one every millisecond, so the guest
+    spends nearly all of its time waiting for a controller that is restarting:
+    measured, it reaches init in a second or two and the taskbar sometimes not
+    at all. No correctness fix changes that, and a liveness assertion over it
+    would be a timing lottery.
+
+    Two properties of the log shape the assertions. Kernel `log!` lines go
+    through a ring the klogger drains, and a thousand watchdog messages a
+    second evict anything the boot said once -- `Root filesystem mounted` is
+    routinely missing from a boot that plainly mounted its root. Userspace
+    writes to the serial console directly and survives, which is why `init:` is
+    the liveness marker here.
+    """
+    print("[5/5] watchdog: nvme_timeout_ms=0 resets under a live root")
+    mark = boot("--iso", "edos-nvme-hostile.iso", "--nvme-disk", "nvme-disk.img",
+                "--no-sata", panel=False)
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        log = serial_tail(mark)
+        if "init: pid" in log and "nvme: controller reset complete" in log:
+            break
+        time.sleep(2)
+    log = serial_tail(mark)
+
+    # `init` runs from the root filesystem, so its own line is the mount
+    # succeeding as well as userspace starting. A boot that never got there
+    # AND never saw the watchdog fire did not fail the retry path -- nothing
+    # had failed yet for it to retry -- so say which one to go and look at.
+    fired = "nvme: watchdog firing" in log
+    ok = report("root mounted and init running", "init: pid" in log,
+                "the boot never got past the mount"
+                if fired else
+                "the guest stopped before the first sweep, with no I/O failed and "
+                "nothing reset: that is a hang, not the retry path")
+    ok &= report("watchdog fired", "nvme: watchdog firing" in log,
+                 "a zero timeout declared nothing hung")
+    ok &= report("controller reset", "nvme: controller reset complete" in log,
+                 "the watchdog fired without resetting")
+    failed = re.search(r"block: (?:read|batched read|write|flush)[^\n]*failed[^\n]*", log)
+    ok &= report("no I/O reported failed", failed is None,
+                 f"the retry window ran out: {failed.group(0) if failed else ''}")
+    stop()
+    return ok
+
+
 def main():
     for name in ("edos-x86_64.iso", "edos-nvme.iso", "edos-sata.iso", "nvme-disk.img",
-                 "nvme-blank.img"):
+                 "nvme-blank.img", "edos-nvme-hostile.iso"):
         if not os.path.exists(os.path.join(REPO, name)):
             sys.exit(f"missing {name}; run `make nvme-check` rather than this script "
                      "directly, so the images are built first")
@@ -240,6 +305,7 @@ def main():
         ("coexistence", case_coexistence),
         ("refusal", case_refusal),
         ("install", case_install),
+        ("watchdog", case_watchdog),
     ]
     failures = [name for name, fn in cases if not fn()]
 

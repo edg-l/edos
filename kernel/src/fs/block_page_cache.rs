@@ -389,11 +389,7 @@ fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `h.wait()?` below reaps this op before returning.
-    let h = dev.submit_read(lba, SECTORS_PER_PAGE as u32, unsafe {
-        BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), PAGE_SIZE)
-    })?;
-    h.wait()?;
+    block_io::read_blocking(&dev, lba, buf)?;
     Ok(())
 }
 
@@ -403,14 +399,7 @@ fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), Ahci
     debug_assert!(!data.is_empty() && data.len().is_multiple_of(PAGE_SIZE));
     let lba = first_page * SECTORS_PER_PAGE as u64;
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `h.wait()?` below reaps this op before returning.
-    let h = dev.submit_write(
-        lba,
-        (data.len() / 512) as u32,
-        unsafe { BlockBuffer::reaped_by_submitter(data.as_ptr() as *mut u8, data.len()) },
-        WriteFlags::NONE,
-    )?;
-    h.wait()?;
+    block_io::write_blocking(&dev, lba, data, WriteFlags::NONE)?;
     Ok(())
 }
 
@@ -453,14 +442,7 @@ fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `h.wait()?` below reaps this op before returning.
-    let h = dev.submit_write(
-        lba,
-        SECTORS_PER_PAGE as u32,
-        unsafe { BlockBuffer::reaped_by_submitter(buf.as_mut_ptr(), PAGE_SIZE) },
-        WriteFlags::NONE,
-    )?;
-    h.wait()?;
+    block_io::write_blocking(&dev, lba, buf, WriteFlags::NONE)?;
     Ok(())
 }
 
@@ -799,42 +781,21 @@ impl BlockPageCache {
             }
         }
 
-        let mut staging: Vec<Arc<Vec<u8>>> = Vec::with_capacity(runs.len());
-        let mut reqs: Vec<(u64, u32, BlockBuffer)> = Vec::with_capacity(runs.len());
+        let mut reqs: Vec<(u64, u32, Arc<Vec<u8>>)> = Vec::with_capacity(runs.len());
         for &(first, len) in &runs {
             let buf = Arc::new(vec![0u8; len * PAGE_SIZE]);
             let lba = (start_page + miss_indices[first] as u64) * SECTORS_PER_PAGE as u64;
-            reqs.push((
-                lba,
-                (len * SECTORS_PER_PAGE as usize) as u32,
-                BlockBuffer::owned_vec(buf.clone()),
-            ));
-            staging.push(buf);
+            reqs.push((lba, (len * SECTORS_PER_PAGE as usize) as u32, buf));
         }
 
-        let handles = match dev.submit_read_batch(reqs) {
-            Ok(h) => h,
-            Err(e) => {
-                for f in &frames {
-                    unsafe { frame_allocator().deallocate_frame(*f) };
-                }
-                return Err(e.into());
-            }
-        };
-        let mut batch_err: Option<AhciError> = None;
-        for h in &handles {
-            if let Err(e) = h.wait() {
-                batch_err.get_or_insert_with(|| e.into());
-            }
-        }
-        if let Some(e) = batch_err {
+        if let Err(e) = block_io::read_batch_blocking(&dev, &reqs) {
             for f in &frames {
                 unsafe { frame_allocator().deallocate_frame(*f) };
             }
-            return Err(e);
+            return Err(e.into());
         }
 
-        for (&(first, len), buf) in runs.iter().zip(staging.iter()) {
+        for (&(first, len), (_, _, buf)) in runs.iter().zip(reqs.iter()) {
             for i in 0..len {
                 let dest = frame_slice(frames[first + i]);
                 dest.copy_from_slice(&buf[i * PAGE_SIZE..(i + 1) * PAGE_SIZE]);
@@ -1370,8 +1331,7 @@ impl BlockPageCache {
         // submit_flush is a no-op on devices without a hardware write cache
         // (USB MSC today), and issues FLUSH CACHE EXT on AHCI.
         let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-        let h = dev.submit_flush()?;
-        h.wait()?;
+        block_io::flush_blocking(&dev)?;
         let t2 = crate::timer::Instant::now();
         if t2.duration_since(t0).as_millis() >= 1_000 {
             log!(

@@ -64,11 +64,52 @@ fn submit_block_write(
 /// trip.
 struct RingWrites {
     device_id: u64,
-    inflight: VecDeque<Arc<BlockIoHandle>>,
+    inflight: VecDeque<RingCommand>,
     failure: Option<AhciError>,
     /// Commands issued, counted so `/proc/journal_stats` can show how many
     /// ring blocks one command carries.
     commands: u64,
+}
+
+/// One queued command, kept with everything needed to issue it again.
+///
+/// Recovering a hung controller fails whatever was in flight, so a queued ring
+/// write can come back `Io` on a device that is working. Re-issuing needs the
+/// parameters, which a bare handle does not carry.
+struct RingCommand {
+    handle: Arc<BlockIoHandle>,
+    lba: u64,
+    sectors: u16,
+    owner: Arc<Vec<u8>>,
+    offset: usize,
+    len: usize,
+}
+
+impl RingCommand {
+    /// Wait for this command, re-issuing it while the failure is one a reset
+    /// explains and the block layer's retry window has not run out.
+    fn wait(mut self, device_id: u64) -> Result<(), AhciError> {
+        let started = crate::timer::Instant::now();
+        loop {
+            match self.handle.wait() {
+                Ok(()) => return Ok(()),
+                Err(e) if block_io::retry_after(e, started) => {
+                    self.handle = submit_block_write(
+                        device_id,
+                        self.lba,
+                        self.sectors,
+                        &self.owner,
+                        self.offset,
+                        self.len,
+                    )?;
+                }
+                Err(e) => {
+                    crate::log!("journal: ring write lba={} failed: {:?}", self.lba, e);
+                    return Err(e.into());
+                }
+            }
+        }
+    }
 }
 
 impl RingWrites {
@@ -101,14 +142,21 @@ impl RingWrites {
             let Some(done) = self.inflight.pop_front() else {
                 break;
             };
-            if let Err(e) = done.wait() {
-                self.failure.get_or_insert(e.into());
+            if let Err(e) = done.wait(self.device_id) {
+                self.failure.get_or_insert(e);
             }
         }
         match submit_block_write(self.device_id, lba, sectors, owner, offset, len) {
             Ok(handle) => {
                 self.commands += 1;
-                self.inflight.push_back(handle);
+                self.inflight.push_back(RingCommand {
+                    handle,
+                    lba,
+                    sectors,
+                    owner: owner.clone(),
+                    offset,
+                    len,
+                });
                 self.failure.is_none()
             }
             Err(e) => {
@@ -121,8 +169,8 @@ impl RingWrites {
     /// Wait for every outstanding command.
     fn drain(&mut self) -> Result<(), AhciError> {
         while let Some(done) = self.inflight.pop_front() {
-            if let Err(e) = done.wait() {
-                self.failure.get_or_insert(e.into());
+            if let Err(e) = done.wait(self.device_id) {
+                self.failure.get_or_insert(e);
             }
         }
         match self.failure.take() {
@@ -132,23 +180,15 @@ impl RingWrites {
     }
 }
 
-fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+fn block_write_fua(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    // SAFETY: `h.wait()?` below reaps this op before returning.
-    let h = dev.submit_write(
-        lba,
-        sectors as u32,
-        unsafe { BlockBuffer::reaped_by_submitter(buf.as_ptr() as *mut u8, buf.len()) },
-        WriteFlags::FUA,
-    )?;
-    h.wait()?;
+    block_io::write_blocking(&dev, lba, buf, WriteFlags::FUA)?;
     Ok(())
 }
 
 fn block_flush(device_id: u64) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let h = dev.submit_flush()?;
-    h.wait()?;
+    block_io::flush_blocking(&dev)?;
     Ok(())
 }
 
@@ -407,7 +447,7 @@ impl Journal {
         data: &[u8],
     ) -> Result<(), AhciError> {
         let lba = self.journal_block_lba(journal_block_idx);
-        block_write_fua(self.device_id, lba, SECTORS_PER_BLOCK, data)
+        block_write_fua(self.device_id, lba, data)
     }
 
     // ---- Journal superblock update ------------------------------------------
@@ -440,7 +480,7 @@ impl Journal {
         let lba = self.partition_start_lba + self.first_block * SECTORS_PER_BLOCK as u64;
         let mut block = vec![0u8; BLOCK_SIZE];
         write_struct(&mut block, 0, &jsb);
-        block_write_fua(self.device_id, lba, SECTORS_PER_BLOCK, &block)
+        block_write_fua(self.device_id, lba, &block)
     }
 
     // ---- TxHandle API -------------------------------------------------------
