@@ -384,7 +384,7 @@ define build_iso
 	objcopy --strip-debug kernel/kernel $(2)/boot/kernel
 	cp -v live-root.img $(2)/boot/
 	mkdir -p $(2)/boot/limine
-	sed 's/$(PARTITION_UUID)/$(3)/' limine.conf > $(2)/boot/limine/limine.conf
+	sed -e 's/$(PARTITION_UUID)/$(3)/' $(if $(4),-e '/root=UUID=$(3)/s|$$| $(4)|',) limine.conf > $(2)/boot/limine/limine.conf
 	mkdir -p $(2)/EFI/BOOT
 	cp -v limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin $(2)/boot/limine/
 	cp -v limine/BOOTX64.EFI $(2)/EFI/BOOT/
@@ -403,9 +403,12 @@ $(IMAGE_NAME).iso: limine/limine kernel live-root.img
 
 # The same system with root= naming the NVMe disk's partition GUID, so an
 # NVMe-only machine mounts nvme-disk.img instead of falling back to memfs.
-# `scripts/nvme-check` boots this one; nothing else does.
+# `scripts/nvme-check` boots this one; nothing else does. It also carries
+# `nvme_probe_read`, whose PRP gate the check asserts on: the probe is the
+# only thing that reports whether the buffer it read through was physically
+# discontiguous, and a PRP list over a contiguous run gates nothing.
 edos-nvme.iso: limine/limine kernel live-root.img
-	$(call build_iso,edos-nvme.iso,iso_root_nvme,$(NVME_UUID))
+	$(call build_iso,edos-nvme.iso,iso_root_nvme,$(NVME_UUID),nvme_probe_read)
 
 $(IMAGE_NAME).hdd: limine/limine kernel
 	rm -f $(IMAGE_NAME).hdd

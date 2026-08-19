@@ -18,6 +18,7 @@ use crate::{
             NvmeError,
             cancel_op::NvmeOp,
             regs::{self, CompletionQueueEntry, SubmissionQueueEntry},
+            stats,
         },
     },
     memory::mapper::memory_mapper,
@@ -419,6 +420,14 @@ pub const PRP_LIST_ENTRIES: usize = 512;
 /// `Err(Unsupported)` means a page did not translate, which the caller
 /// answers by bouncing through a `dma()` buffer.
 ///
+/// Every page past PRP1 is counted in [`stats::PRP_PAGES`], and the ones
+/// whose frame is not the first page's frame plus the page index in
+/// [`stats::PRP_PAGES_DISCONTIGUOUS`]. That second counter is what makes
+/// the translation observable: it is derived from the difference between
+/// the translated address and the naive one, so a regression that goes
+/// back to deriving addresses arithmetically drives it to zero rather than
+/// leaving it unchanged.
+///
 /// Callers that error out, get cancelled, or otherwise never reach a
 /// completion must reclaim `*list` themselves via `dma().dealloc`:
 /// `DmaBuffer` has no `Drop`.
@@ -443,9 +452,20 @@ pub fn build_prp(
         return Ok((first.as_u64(), 0));
     }
 
+    // The address each page would have had if it were derived by adding
+    // 4096 to the first, which is the bug this counting exists to expose.
+    let naive = |i: u64| (first.as_u64() & !0xFFF) + (i + 1) * 4096;
+    let count_page = |i: u64, phys: PhysAddr| {
+        stats::bump(&stats::PRP_PAGES, 1);
+        if phys.as_u64() != naive(i) {
+            stats::bump(&stats::PRP_PAGES_DISCONTIGUOUS, 1);
+        }
+    };
+
     let second_virt = VirtAddr::new((vaddr.as_u64() & !0xFFF) + 4096);
     let second = translate(second_virt).ok_or(NvmeError::Unsupported)?;
     debug_assert_eq!(second.as_u64() & 0xFFF, 0, "PRP2 must be page-aligned");
+    count_page(0, second);
     let remaining = len - first_page_bytes;
     if remaining <= 4096 {
         return Ok((first.as_u64(), second.as_u64()));
@@ -468,6 +488,11 @@ pub fn build_prp(
     for i in 0..num_pages {
         let page_virt = VirtAddr::new(second_virt.as_u64() + (i as u64) * 4096);
         let page_phys = translate(page_virt).ok_or(NvmeError::Unsupported)?;
+        // Page 0 of the list is the same page PRP2 would have carried, and
+        // was counted above before the list turned out to be needed.
+        if i > 0 {
+            count_page(i as u64, page_phys);
+        }
         debug_assert_eq!(
             page_phys.as_u64() & 0xFFF,
             0,

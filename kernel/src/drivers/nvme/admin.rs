@@ -79,10 +79,7 @@ const ADMIN_AQA: u32 = ((ADMIN_CQ_ENTRIES as u32 - 1) << 16) | (ADMIN_SQ_ENTRIES
 const FEATURE_NUMBER_OF_QUEUES: u32 = 0x07;
 
 pub struct NvmeController {
-    #[expect(
-        dead_code,
-        reason = "read once MSI-X/MSI interrupt configuration runs"
-    )]
+    #[expect(dead_code, reason = "read once MSI-X/MSI interrupt configuration runs")]
     pub pci_device: PciDevice,
     regs: *mut NvmeRegs,
     cap: u64,

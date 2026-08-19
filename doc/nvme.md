@@ -144,6 +144,8 @@ One line of `key=value` pairs, in the shape of `/proc/ahci_stats`.
 | `bounced_requests` | requests whose buffer was not DMA-addressable and was copied through the pool. A hot path bouncing is visible here rather than only as slowness |
 | `flushes`, `flushes_elided` | Flush commands issued, and those skipped because the controller reported no volatile write cache |
 | `command_errors` | completions with a non-zero status |
+| `prp_pages` | pages a PRP entry addressed beyond PRP1, each one translated separately |
+| `prp_pages_discontiguous` | those of them whose frame was not the first page's frame plus the page index. See the gate below: a boot that leaves this at zero has not exercised the translation |
 | `watchdog_firings` | sweeps that found a command past its deadline |
 | `watchdog_completions` | commands the watchdog found already complete in the CQ — each one is an interrupt that was lost |
 | `resets` | controller resets performed |
@@ -153,6 +155,41 @@ One line of `key=value` pairs, in the shape of `/proc/ahci_stats`.
 
 `programs/fsbench` samples this file around every run, so an NVMe run's report
 carries an `nvme_stats.*` block beside the block-cache and journal deltas.
+
+## The PRP addressing gate
+
+`build_prp` translates every page of a transfer separately, because a virtually
+contiguous kernel buffer is not physically contiguous: the heap is mapped by
+`map_memory`, a frame at a time. Deriving later pages by adding 4096 to the
+first addresses unrelated frames and DMAs into them.
+
+Testing that is harder than it looks. A read that goes through a PRP list and
+is compared against the same bytes read one page at a time only catches the
+bug **if the buffer it read through was physically discontiguous** — and the
+frame allocator scans forward from a hint, so a fresh multi-page heap
+allocation at boot is very often one contiguous run, which the naive
+derivation gets right by accident. A fixed four-page probe passed with the bug
+deliberately reintroduced.
+
+So the gate reports its own discriminating power. `build_prp` counts each page
+it translates and, separately, each one whose frame is *not* where the naive
+derivation would have looked (`prp_pages_discontiguous` above). The
+`nvme_probe_read` probe reads 4 pages, then 16, then 64, then 256 — capped by
+MDTS and by the 512 entries one list page holds — until that counter moves,
+and only then runs the whole-versus-per-page comparison, logging
+
+```
+nvme: PRP gate discriminating: 4 pages via PRP list, 1 of them not where naive
+addressing would have looked, matches 4 single-page reads
+```
+
+If no candidate size is discontiguous it logs `PRP GATE NOT DISCRIMINATING`
+instead of a pass. `edos-nvme.iso` boots with `nvme_probe_read` for exactly
+this reason, and `scripts/nvme-check`'s first case asserts on the word
+*discriminating*. The counter is derived from the difference between the
+translated address and the naive one, so a regression that goes back to
+arithmetic drives it to zero: the gate then reports NOT DISCRIMINATING rather
+than passing, which is how the reintroduced bug was observed to turn it red.
 
 ## Driving it
 

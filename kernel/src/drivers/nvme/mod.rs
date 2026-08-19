@@ -24,6 +24,7 @@ use crate::{
             cancel_op::NvmeOp,
             identify::max_transfer_bytes,
             namespace::NvmeNamespace,
+            queue::PRP_LIST_ENTRIES,
         },
         pci::{pci_manager, structures::PciDevice},
     },
@@ -602,42 +603,72 @@ extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
         );
     }
 
-    // Thirty-two sectors span four pages, so this is the first read to build
-    // a PRP list rather than PRP1/PRP2 alone. Nothing on the disk has a
-    // known value at that offset, so the check is self-consistency: the same
-    // bytes read one page at a time must match the bytes read in one
-    // command. A PRP list that addresses the wrong frames -- deriving later
-    // pages by adding 4096 to the first, when the kernel heap is mapped a
-    // frame at a time -- reads unrelated memory and fails here while the
-    // single-sector case above still passes.
-    const PAGES: u64 = 4;
-    let whole = read(0, (PAGES as u32) * 8);
-    let mut per_page = Vec::new();
-    for page in 0..PAGES {
-        match read(page * 8, 8) {
-            Some(b) => per_page.push(b),
-            None => break,
+    // A PRP list only gates the translation if the buffer it describes is
+    // physically discontiguous. A run of frames that the naive `first page +
+    // n * 4096` derivation happens to get right proves nothing, and the
+    // kernel heap hands out such runs readily at boot -- a four-page
+    // allocation here was measured contiguous, which is why a fixed-size
+    // probe passed with that bug reintroduced. So grow the buffer until
+    // `build_prp` reports having translated a page the naive derivation
+    // would have addressed wrongly, and say so plainly when no size did.
+    const CANDIDATE_PAGES: [u64; 4] = [4, 16, 64, 256];
+    let max_pages = (ns.max_transfer_bytes() / 4096).min(PRP_LIST_ENTRIES) as u64;
+    let mut gate = None;
+    for pages in CANDIDATE_PAGES {
+        if pages > max_pages {
+            break;
         }
+        let before = stats::PRP_PAGES_DISCONTIGUOUS.load(Ordering::Relaxed);
+        let Some(whole) = read(0, (pages as u32) * 8) else {
+            break;
+        };
+        let scattered = stats::PRP_PAGES_DISCONTIGUOUS.load(Ordering::Relaxed) - before;
+        if scattered > 0 {
+            gate = Some((pages, whole, scattered));
+            break;
+        }
+        log!("nvme: probe {pages}-page buffer was physically contiguous, growing it");
     }
-    match whole {
-        Some(whole) if per_page.len() == PAGES as usize => {
-            let joined: Vec<u8> = per_page.iter().flat_map(|b| b.iter().copied()).collect();
-            let mismatch = whole.iter().zip(joined.iter()).position(|(a, b)| a != b);
-            match mismatch {
-                None => log!(
-                    "nvme: probe read {} pages via PRP list matches {} single-page reads",
-                    PAGES,
-                    PAGES
-                ),
-                Some(off) => log!(
-                    "nvme: PRP LIST MISMATCH at byte {off} (page {}): one-shot {:#04x}, per-page {:#04x}",
-                    off / 4096,
-                    whole[off],
-                    joined[off]
-                ),
+
+    // Nothing on the disk has a known value at that offset, so the check is
+    // self-consistency: the same bytes read one page at a time must match
+    // the bytes read in one command. A PRP list that addresses the wrong
+    // frames reads unrelated memory and fails here while the single-sector
+    // case above still passes.
+    match gate {
+        None => log!(
+            "nvme: PRP GATE NOT DISCRIMINATING -- no candidate buffer up to {} pages was \
+             physically discontiguous, so the multi-page read below would pass with the \
+             page addressing broken",
+            CANDIDATE_PAGES[CANDIDATE_PAGES.len() - 1].min(max_pages)
+        ),
+        Some((pages, whole, scattered)) => {
+            let mut per_page = Vec::new();
+            for page in 0..pages {
+                match read(page * 8, 8) {
+                    Some(b) => per_page.push(b),
+                    None => break,
+                }
+            }
+            if per_page.len() != pages as usize {
+                log!("nvme: probe multi-page read did not complete");
+            } else {
+                let joined: Vec<u8> = per_page.iter().flat_map(|b| b.iter().copied()).collect();
+                match whole.iter().zip(joined.iter()).position(|(a, b)| a != b) {
+                    None => log!(
+                        "nvme: PRP gate discriminating: {pages} pages via PRP list, {scattered} \
+                         of them not where naive addressing would have looked, matches {pages} \
+                         single-page reads"
+                    ),
+                    Some(off) => log!(
+                        "nvme: PRP LIST MISMATCH at byte {off} (page {}): one-shot {:#04x}, per-page {:#04x}",
+                        off / 4096,
+                        whole[off],
+                        joined[off]
+                    ),
+                }
             }
         }
-        _ => log!("nvme: probe multi-page read did not complete"),
     }
 
     thread_exit(0);

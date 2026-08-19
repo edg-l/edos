@@ -9131,3 +9131,43 @@ traceback before case 1, from the harness's own opening `stop()` on a machine
 with no guest. It is now one `try`/`except (OSError, ValueError)` around the
 open, with a half-written pidfile treated the same as a missing one: fall
 through to the `/proc` scan that finds an orphaned guest.
+
+## A PRP list test only tests anything over a discontiguous buffer (2026-08-19)
+
+`build_prp` translates every page of a transfer separately because a virtually
+contiguous kernel buffer is not physically contiguous — the heap is mapped by
+`map_memory`, a frame at a time. Deriving later pages by adding 4096 to the
+first would DMA into unrelated frames.
+
+The probe that was meant to catch that read four pages through a PRP list and
+compared them against the same four pages read one at a time. It did not catch
+it. `BitmapFrameAllocator::find_free_frame` scans forward from `next_free_hint`,
+so consecutive `map_memory` calls at boot hand out consecutive frames, and a
+fresh four-page heap allocation was measured as one contiguous run
+(0x99000..0x9c000). Over a contiguous run the naive derivation is *right*, so
+the comparison passed with the bug deliberately reintroduced. This is the shape
+of the trap: the test exercised the code, the code was wrong, and the test was
+green, because the property under test was accidentally satisfied by the input.
+
+The fix is to make the gate report its own discriminating power rather than
+assume it. `build_prp` now counts each page it translates past PRP1
+(`prp_pages`) and each one whose frame is not the first page's frame plus the
+page index (`prp_pages_discontiguous`), both in `/proc/nvme_stats`. The probe
+reads 4 pages, then 16, 64, 256 — capped by MDTS and by the 512 entries one
+list page holds — until that counter moves, and only then runs the comparison,
+logging `PRP gate discriminating: N pages ... M of them not where naive
+addressing would have looked`. When no size is discontiguous it logs
+`PRP GATE NOT DISCRIMINATING` instead of a pass.
+
+That counter is derived from the difference between the translated address and
+the naive one, so the discriminating check is self-referential in the useful
+direction: reintroducing the `+4096` derivation drives it to zero and the probe
+reports NOT DISCRIMINATING. Verified both ways on real boots — discriminating
+at 4 pages on unmodified trunk (1 of 4 pages scattered), and NOT DISCRIMINATING
+at every size up to the 128-page MDTS ceiling with the bug patched back in.
+
+`edos-nvme.iso` now carries `nvme_probe_read` on its cmdline, which is what lets
+`scripts/nvme-check`'s first case assert on the word *discriminating* without
+spending a fifth boot. The `build_iso` macro takes an optional fourth argument
+appended to the `root=UUID=` cmdline line only, so `edos-x86_64.iso` is
+unchanged and the `root=live` entry in both ISOs is unchanged.

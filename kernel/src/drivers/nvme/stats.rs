@@ -34,6 +34,15 @@ pub static FLUSHES: AtomicU64 = AtomicU64::new(0);
 pub static FLUSHES_ELIDED: AtomicU64 = AtomicU64::new(0);
 /// Commands whose completion carried a non-zero status.
 pub static COMMAND_ERRORS: AtomicU64 = AtomicU64::new(0);
+/// Pages a PRP entry addressed beyond PRP1, each translated separately by
+/// `build_prp`.
+pub static PRP_PAGES: AtomicU64 = AtomicU64::new(0);
+/// Of those, the ones whose frame was *not* the first page's frame plus the
+/// page index: the pages a transfer would have corrupted had `build_prp`
+/// derived its addresses by adding 4096 instead of translating. A boot that
+/// leaves this at zero has not exercised the translation at all, so it also
+/// cannot have caught a regression in it.
+pub static PRP_PAGES_DISCONTIGUOUS: AtomicU64 = AtomicU64::new(0);
 
 pub fn bump(counter: &AtomicU64, n: u64) {
     counter.fetch_add(n, Ordering::Relaxed);
@@ -53,6 +62,7 @@ pub fn render() -> String {
         "controllers={} namespaces={} irqs={} dispatcher_passes={} inflight={} \
          max_inflight={} commands_submitted={} split_requests={} split_commands={} \
          bounced_requests={} flushes={} flushes_elided={} command_errors={} \
+         prp_pages={} prp_pages_discontiguous={} \
          watchdog_firings={} watchdog_completions={} resets={} timeout_ms={} \
          mdts_bytes={} vwc={}\n",
         controllers,
@@ -68,6 +78,8 @@ pub fn render() -> String {
         get(&FLUSHES),
         get(&FLUSHES_ELIDED),
         get(&COMMAND_ERRORS),
+        get(&PRP_PAGES),
+        get(&PRP_PAGES_DISCONTIGUOUS),
         get(&watchdog::WATCHDOG_FIRINGS),
         get(&watchdog::WATCHDOG_COMPLETIONS),
         get(&watchdog::WATCHDOG_RESETS),

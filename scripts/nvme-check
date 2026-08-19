@@ -122,6 +122,18 @@ def case_nvme_root():
                 f"root selection landed on device {root_device(log)}")
     ok &= report("/dev/nvme0n1 registered", "/dev/nvme0n1" in log, "no devfs node")
 
+    # `edos-nvme.iso` boots with `nvme_probe_read`, which reads the same
+    # sectors twice -- once through a PRP list and once a page at a time --
+    # and compares them. It reports the comparison as a gate only when the
+    # buffer it read through was physically discontiguous, so this asserts
+    # on that word: a run of frames the naive `first page + n * 4096`
+    # derivation happens to get right catches nothing, and the probe grows
+    # its buffer until it finds one that does not.
+    ok &= report("PRP page addressing gated",
+                 "PRP gate discriminating" in log,
+                 "PRP GATE NOT DISCRIMINATING" if "NOT DISCRIMINATING" in log
+                 else "the probe never reported a verdict")
+
     for label, command, budget in (
         ("iotest /var", "iotest /var", 240),
         ("write/verify", "echo nvme-check > /var/nvmegate; grep nvme-check /var/nvmegate", 60),
