@@ -555,7 +555,7 @@ window before the clock starts is outside the timed span — it is a fixed cost 
 both sides, so leaving it in would not change which run is faster, but it would
 drag the ratio towards 1 and understate the mechanism.
 
-`pitest` is in `make guest-check`, which is 16 suites now.
+`pitest` is in `make guest-check`, which is 17 suites now.
 
 ## What has been tried and did not work
 

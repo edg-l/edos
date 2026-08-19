@@ -156,7 +156,7 @@ down is that any second type owning a descriptor faces the same four:
 
 Verified with the same instrument that found it. The strace above now ends in
 `close(3) = 0`, and the descriptor is 3 rather than 4 because nothing earlier in
-the process is stranded. `guest-check` (16 suites), `ssh-check` and
+the process is stranded. `guest-check`, `ssh-check` and
 `storage-check` all pass; `stdtest` is the only program in the tree that uses
 `std::process::Command`, and its `Command::new("/bin/echo").output()` is exactly
 the pipe-EOF path this could have broken.
