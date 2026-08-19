@@ -102,6 +102,9 @@ jobs:
             tools/efs-mkfs
             tools/grab-repo
 
+      - name: efs-mkfs tests
+        run: make check-mkfs
+
       - name: efs-fsck tests
         run: make check-fsck
 

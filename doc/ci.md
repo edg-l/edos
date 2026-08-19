@@ -29,7 +29,7 @@ Releases are not cut by CI. `scripts/release` does that from a local tree; see
 |---|---|
 | `kernel` | `cargo fmt --check`, `make check` (which checks every feature one at a time), `cargo clippy -D warnings` |
 | `host tests` | `scripts/host-tests` |
-| `host tools` | `make check-fsck`, and a release build of `efs-mkfs`, `efs-fsck`, `grab-repo` |
+| `host tools` | `make check-mkfs`, `make check-fsck`, and a release build of `efs-mkfs`, `efs-fsck`, `grab-repo` |
 | `userspace` | `cargo +edos fmt --all --check`, `make programs`, `cargo +edos clippy --all-targets -D warnings` |
 | `in-kernel suite` | `make test AUDIODEV=none`, the `sched-test` suites under KVM |
 | `guest suites` | `make guest-check`: iotest, socktest, mmaptest and the rest, in one boot |

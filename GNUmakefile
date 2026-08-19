@@ -610,6 +610,10 @@ check-fsck: efs-mkfs
 efs-mkfs:
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
 
+.PHONY: check-mkfs
+check-mkfs:
+	cargo test --release --manifest-path tools/efs-mkfs/Cargo.toml
+
 .PHONY: clean-sata
 clean-sata:
 	rm -f sata-disk.img sata-disk.raw

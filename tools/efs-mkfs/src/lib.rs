@@ -6,6 +6,7 @@
 
 mod alloc;
 mod disk;
+mod gpt;
 mod layout;
 mod mkfs;
 mod populate;
@@ -201,17 +202,25 @@ pub fn format(spec: &Format) -> std::io::Result<()> {
         .truncate(false)
         .open(spec.target)?;
 
-    let partition_size = match spec.partition_size {
-        Some(size) => size,
+    // Where the partition ends, and how that was decided. A GPT entry is the
+    // answer whenever the image has one: everything after the offset would
+    // include the backup header and entry array the table reserves at the end
+    // of the disk, and writing over those leaves an image standard tools call
+    // damaged and cannot recover a lost primary header from.
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let (partition_size, source) = match spec.partition_size {
+        Some(size) => (size, ""),
         None => {
-            let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
             if file_len <= spec.partition_offset {
                 return Err(std::io::Error::other(format!(
                     "'{}' is too small or empty; give an explicit size",
                     spec.target.display()
                 )));
             }
-            file_len - spec.partition_offset
+            match gpt::partition_size_at(&mut file, spec.partition_offset) {
+                Some(size) => (size, " from GPT"),
+                None => (file_len - spec.partition_offset, ""),
+            }
         }
     };
 
@@ -219,10 +228,21 @@ pub fn format(spec: &Format) -> std::io::Result<()> {
         return Err(std::io::Error::other("partition too small"));
     }
 
+    if file_len != 0 && spec.partition_offset + partition_size > file_len {
+        return Err(std::io::Error::other(format!(
+            "partition runs past the end of '{}': {} bytes at offset {} in a {}-byte image",
+            spec.target.display(),
+            partition_size,
+            spec.partition_offset,
+            file_len
+        )));
+    }
+
     println!(
-        "Formatting {} (partition size {}, block size {}, offset {})...",
+        "Formatting {} (partition size {}{}, block size {}, offset {})...",
         spec.target.display(),
         partition_size,
+        source,
         spec.block_size,
         spec.partition_offset
     );
