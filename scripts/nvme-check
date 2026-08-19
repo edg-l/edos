@@ -127,8 +127,9 @@ def case_nvme_root():
     # and compares them. It reports the comparison as a gate only when the
     # buffer it read through was physically discontiguous, so this asserts
     # on that word: a run of frames the naive `first page + n * 4096`
-    # derivation happens to get right catches nothing, and the probe grows
-    # its buffer until it finds one that does not.
+    # derivation happens to get right catches nothing. The probe builds a
+    # scattered buffer rather than allocating one and hoping, and grows it
+    # if the construction is spoiled.
     ok &= report("PRP page addressing gated",
                  "PRP gate discriminating" in log,
                  "PRP GATE NOT DISCRIMINATING" if "NOT DISCRIMINATING" in log

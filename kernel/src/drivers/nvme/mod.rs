@@ -16,6 +16,8 @@ use core::{
 use spin::Once;
 use thiserror::Error;
 
+use x86_64::{VirtAddr, structures::paging::PageTableFlags};
+
 use crate::{
     drivers::{
         block_io::{self, AsyncBlockDevice, BlockBuffer, BlockError},
@@ -29,7 +31,12 @@ use crate::{
         pci::{pci_manager, structures::PciDevice},
     },
     interrupts::io::NVME_IRQS_FIRED,
-    log, println,
+    log,
+    memory::{
+        mapper::memory_mapper,
+        valloc::{vfree, vmalloc},
+    },
+    println,
     thread::{
         runqueue::IO_PRIORITY,
         scheduler::{current_thread, current_thread_weak, thread_exit, thread_park_while},
@@ -606,11 +613,10 @@ extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
     // A PRP list only gates the translation if the buffer it describes is
     // physically discontiguous. A run of frames that the naive `first page +
     // n * 4096` derivation happens to get right proves nothing, and the
-    // kernel heap hands out such runs readily at boot -- a four-page
-    // allocation here was measured contiguous, which is why a fixed-size
-    // probe passed with that bug reintroduced. So grow the buffer until
-    // `build_prp` reports having translated a page the naive derivation
-    // would have addressed wrongly, and say so plainly when no size did.
+    // kernel heap hands out such runs readily at boot, so the buffer is
+    // built discontiguous rather than allocated and hoped over. Growing it
+    // is the fallback for the one case construction cannot rule out: a
+    // concurrent allocation taking one of the comb's holes.
     const CANDIDATE_PAGES: [u64; 4] = [4, 16, 64, 256];
     let max_pages = (ns.max_transfer_bytes() / 4096).min(PRP_LIST_ENTRIES) as u64;
     let mut gate = None;
@@ -618,16 +624,39 @@ extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
         if pages > max_pages {
             break;
         }
-        let before = stats::PRP_PAGES_DISCONTIGUOUS.load(Ordering::Relaxed);
-        let Some(whole) = read(0, (pages as u32) * 8) else {
+        let bytes = (pages * 4096) as usize;
+        let Some(buf) = discontiguous_buffer(pages) else {
+            log!("nvme: probe could not build a {pages}-page discontiguous buffer");
             break;
         };
-        let scattered = stats::PRP_PAGES_DISCONTIGUOUS.load(Ordering::Relaxed) - before;
-        if scattered > 0 {
-            gate = Some((pages, whole, scattered));
+        let before = stats::PRP_PAGES_DISCONTIGUOUS.load(Ordering::Relaxed);
+        // SAFETY: the buffer is mapped writable for `bytes` and this thread
+        // waits on the handle below before it can reach a kill point.
+        let block_buf = unsafe { BlockBuffer::reaped_by_submitter(buf.as_mut_ptr::<u8>(), bytes) };
+        let read_ok = match ns.submit_read(0, (pages as u32) * 8, block_buf) {
+            Ok(handle) => match handle.wait() {
+                Ok(()) => true,
+                Err(e) => {
+                    log!("nvme: probe {pages}-page read wait failed: {e:?}");
+                    false
+                }
+            },
+            Err(e) => {
+                log!("nvme: probe {pages}-page read submit failed: {e:?}");
+                false
+            }
+        };
+        if !read_ok {
+            release_probe_buffer(buf, pages);
             break;
         }
-        log!("nvme: probe {pages}-page buffer was physically contiguous, growing it");
+        let scattered = stats::PRP_PAGES_DISCONTIGUOUS.load(Ordering::Relaxed) - before;
+        if scattered > 0 {
+            gate = Some((pages, buf, bytes, scattered));
+            break;
+        }
+        release_probe_buffer(buf, pages);
+        log!("nvme: probe {pages}-page buffer came back physically contiguous, growing it");
     }
 
     // Nothing on the disk has a known value at that offset, so the check is
@@ -642,7 +671,11 @@ extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
              page addressing broken",
             CANDIDATE_PAGES[CANDIDATE_PAGES.len() - 1].min(max_pages)
         ),
-        Some((pages, whole, scattered)) => {
+        Some((pages, buf, bytes, scattered)) => {
+            // SAFETY: `discontiguous_buffer` mapped `bytes` writable at
+            // `buf` and the read above has completed, so the range is
+            // initialised and nothing else refers to it.
+            let whole = unsafe { core::slice::from_raw_parts(buf.as_ptr::<u8>(), bytes) };
             let mut per_page = Vec::new();
             for page in 0..pages {
                 match read(page * 8, 8) {
@@ -668,8 +701,57 @@ extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
                     ),
                 }
             }
+            release_probe_buffer(buf, pages);
         }
     }
 
     thread_exit(0);
+}
+
+/// A `pages`-page kernel buffer that is physically discontiguous by
+/// construction, so a PRP list describing it addresses frames the naive
+/// "first frame plus the page index" derivation gets wrong.
+///
+/// [`BitmapFrameAllocator`](crate::memory::frame_allocator) scans forward
+/// from its free hint and moves that hint back to any frame freed below it.
+/// Mapping a comb of `2 * pages` frames and unmapping every other one
+/// therefore leaves an alternating free/busy run that the next `pages`
+/// allocations are served from in ascending order -- comb frame 0, 2, 4 --
+/// so every page of the returned buffer sits at least two frames past its
+/// predecessor. Only a concurrent allocator taking one of those holes can
+/// spoil it, which is why the caller still checks the counter rather than
+/// assuming.
+///
+/// The comb's virtual range is never read or written again, so the stale
+/// kernel TLB entries the unmaps leave on other CPUs are unreachable and no
+/// shootdown is issued for them.
+fn discontiguous_buffer(pages: u64) -> Option<VirtAddr> {
+    const PAGE: u64 = 4096;
+    let flags = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    let comb_bytes = pages * 2 * PAGE;
+    let comb = vmalloc(comb_bytes)?;
+    let buf = vmalloc(pages * PAGE)?;
+
+    let mut mapper = memory_mapper();
+    mapper.map_memory(comb, comb_bytes, flags).ok()?;
+    for i in (0..pages * 2).step_by(2) {
+        mapper.unmap_memory(comb + i * PAGE, PAGE).ok()?;
+    }
+    mapper.map_memory(buf, pages * PAGE, flags).ok()?;
+    for i in (1..pages * 2).step_by(2) {
+        mapper.unmap_memory(comb + i * PAGE, PAGE).ok()?;
+    }
+    drop(mapper);
+    vfree(comb, comb_bytes);
+
+    Some(buf)
+}
+
+/// Returns a [`discontiguous_buffer`] to the frame allocator and the kernel
+/// address space.
+fn release_probe_buffer(buf: VirtAddr, pages: u64) {
+    let bytes = pages * 4096;
+    let _ = memory_mapper().unmap_memory(buf, bytes);
+    vfree(buf, bytes);
 }

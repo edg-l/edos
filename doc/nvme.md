@@ -171,15 +171,25 @@ allocation at boot is very often one contiguous run, which the naive
 derivation gets right by accident. A fixed four-page probe passed with the bug
 deliberately reintroduced.
 
-So the gate reports its own discriminating power. `build_prp` counts each page
-it translates and, separately, each one whose frame is *not* where the naive
-derivation would have looked (`prp_pages_discontiguous` above). The
-`nvme_probe_read` probe reads 4 pages, then 16, then 64, then 256 — capped by
-MDTS and by the 512 entries one list page holds — until that counter moves,
-and only then runs the whole-versus-per-page comparison, logging
+So the probe **builds** a discontiguous buffer rather than allocating one and
+hoping. `discontiguous_buffer` maps a comb of twice as many frames as it needs
+and unmaps every other one; `BitmapFrameAllocator` scans forward from a free
+hint and moves that hint back to any frame freed below it, so the next
+allocations are served from exactly those holes and every page of the buffer
+lands at least two frames past its predecessor. The comb is returned to the
+allocator once the buffer is mapped.
+
+The gate also reports its own discriminating power, because construction is
+not quite a proof: a concurrent allocation can take one of the holes.
+`build_prp` counts each page it translates and, separately, each one whose
+frame is *not* where the naive derivation would have looked
+(`prp_pages_discontiguous` above). The `nvme_probe_read` probe reads 4 pages,
+then 16, then 64, then 256 — capped by MDTS and by the 512 entries one list
+page holds — until that counter moves, and only then runs the
+whole-versus-per-page comparison, logging
 
 ```
-nvme: PRP gate discriminating: 4 pages via PRP list, 1 of them not where naive
+nvme: PRP gate discriminating: 4 pages via PRP list, 3 of them not where naive
 addressing would have looked, matches 4 single-page reads
 ```
 

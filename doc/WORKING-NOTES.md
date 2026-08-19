@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-18
+# Working notes, sessions of 2026-08-08 to 2026-08-19
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -2152,7 +2152,8 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-19 (at v0.8.0, after the NVMe driver landed)
+## Counts, remeasured 2026-08-19 (at v0.8.0, after the NVMe driver landed
+and its phases 4-7)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2164,14 +2165,15 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,059 code lines across 465 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,770 code lines | `tokei -t=Rust kernel/src` |
-| NVMe driver | 2,052 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,507 | `git rev-list --count HEAD` |
+| Rust | 116,133 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,810 code lines | `tokei -t=Rust kernel/src` |
+| NVMe driver | 2,092 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
+| commits | 1,518 | `git rev-list --count HEAD` |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | guest suites | 16 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
+| `nvme-check` cases | 4 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, and install-and-reboot |
 | `unwrap()`/`expect()` in `kernel/src` | 170, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
@@ -9149,22 +9151,50 @@ the comparison passed with the bug deliberately reintroduced. This is the shape
 of the trap: the test exercised the code, the code was wrong, and the test was
 green, because the property under test was accidentally satisfied by the input.
 
-The fix is to make the gate report its own discriminating power rather than
-assume it. `build_prp` now counts each page it translates past PRP1
+The fix has two halves, and the first one alone was not enough.
+
+**Half one: make the gate report its own discriminating power rather than
+assume it.** `build_prp` counts each page it translates past PRP1
 (`prp_pages`) and each one whose frame is not the first page's frame plus the
 page index (`prp_pages_discontiguous`), both in `/proc/nvme_stats`. The probe
-reads 4 pages, then 16, 64, 256 — capped by MDTS and by the 512 entries one
-list page holds — until that counter moves, and only then runs the comparison,
-logging `PRP gate discriminating: N pages ... M of them not where naive
-addressing would have looked`. When no size is discontiguous it logs
+grows the buffer — 4 pages, then 16, 64, 256, capped by MDTS and by the 512
+entries one list page holds — until that counter moves, and only then runs the
+comparison, logging `PRP gate discriminating: N pages ... M of them not where
+naive addressing would have looked`. When no size is discontiguous it logs
 `PRP GATE NOT DISCRIMINATING` instead of a pass.
+
+**Half two: build the buffer discontiguous instead of hoping.** Growing a heap
+allocation until it happens to be scattered is still luck, and the luck ran out
+the first time the whole gate was re-run: a boot of the same ISO found every
+size up to the 64-page MDTS ceiling physically contiguous and `make nvme-check`
+went red on `PRP GATE NOT DISCRIMINATING` — the gate working exactly as
+designed, refusing to claim a pass it could not back, but a gate that is red on
+luck is not a gate. `discontiguous_buffer` in `nvme/mod.rs` constructs the
+property instead. `BitmapFrameAllocator::find_free_frame` scans forward from
+`next_free_hint` and `deallocate_frame` moves that hint *back* to any frame it
+frees below it, so mapping a comb of `2 * pages` frames and unmapping every
+other one leaves an alternating free/busy run, and the next `pages` allocations
+are served from exactly those holes in ascending order. Every page of the
+buffer then sits at least two frames past its predecessor. The escalation loop
+stays as the fallback for the one case construction cannot exclude — a
+concurrent allocation taking one of the holes — which is also why the probe
+still checks the counter rather than asserting the outcome.
+
+The comb's odd frames are returned once the buffer is mapped and the whole
+buffer is unmapped after the comparison, so the probe leaks neither frames nor
+kernel address space. It issues no TLB shootdown for the unmapped comb: those
+virtual addresses are never read or written again, so a stale entry on another
+CPU is unreachable.
 
 That counter is derived from the difference between the translated address and
 the naive one, so the discriminating check is self-referential in the useful
 direction: reintroducing the `+4096` derivation drives it to zero and the probe
-reports NOT DISCRIMINATING. Verified both ways on real boots — discriminating
-at 4 pages on unmodified trunk (1 of 4 pages scattered), and NOT DISCRIMINATING
-at every size up to the 128-page MDTS ceiling with the bug patched back in.
+reports NOT DISCRIMINATING. Verified both ways on real boots — NOT
+DISCRIMINATING at every size up to the MDTS ceiling with the bug patched back
+in, and, once the buffer is constructed rather than allocated, discriminating
+on the first candidate with *every* page past PRP1 scattered (`4 pages via PRP
+list, 3 of them not where naive addressing would have looked`) rather than the
+one page a lucky heap allocation used to give.
 
 `edos-nvme.iso` now carries `nvme_probe_read` on its cmdline, which is what lets
 `scripts/nvme-check`'s first case assert on the word *discriminating* without
