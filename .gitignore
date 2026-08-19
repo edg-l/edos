@@ -21,3 +21,4 @@ journal-test.img
 /pkgstage
 release/
 nvme-blank.img
+/doc/reference/
