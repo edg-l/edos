@@ -403,20 +403,20 @@ impl Procfs {
         // much of the batch the drive sees at once.
         let per = |total: u64| total.checked_div(commits).unwrap_or(0);
         // Summed over every mounted journal, the way the counters above are.
-        let (sealed, pending, tracked) = BlockPageCache::global().all_journals().iter().fold(
-            (0usize, 0usize, 0usize),
-            |(s, p, tr), j| {
-                let (js, jp, jt) = j.depths();
-                (s + js, p + jp, tr + jt)
-            },
-        );
+        let (active, sealed, pending, tracked) = BlockPageCache::global()
+            .all_journals()
+            .iter()
+            .fold((0usize, 0usize, 0usize, 0usize), |(a, s, p, tr), j| {
+                let (ja, js, jp, jt) = j.depths();
+                (a + ja, s + js, p + jp, tr + jt)
+            });
         let mut out = format!(
             concat!(
                 "commits: {}\nempty_commits: {}\ncheckpoints: {}\n",
                 "ring_blocks: {}\ndata_blocks: {}\ncommands: {}\n",
                 "ring_us: {}\nflush_us: {}\ncommit_us: {}\n",
                 "us_per_commit: {}\nblocks_per_commit: {}\nblocks_per_command: {}\n",
-                "sealed: {}\npending: {}\ntracked: {}\n"
+                "active: {}\nsealed: {}\npending: {}\ntracked: {}\n"
             ),
             commits,
             JOURNAL_EMPTY_COMMITS.load(Ordering::Relaxed),
@@ -435,6 +435,7 @@ impl Procfs {
                 .saturating_sub(commits)
                 .checked_div(commands)
                 .unwrap_or(0),
+            active,
             sealed,
             pending,
             tracked,

@@ -9342,7 +9342,9 @@ Two things about running them unattended, both learned the same night:
 
 ## `nvme-check` case 4 went red again, and the installed filesystem is the evidence (2026-08-19)
 
-OPEN, and deterministic: two consecutive whole runs failed the same way, in
+FIXED — the answer is the `sync` fixed point at the end of this section; the
+investigation is kept because three hypotheses were refuted along the way.
+It was deterministic: two consecutive whole runs failed the same way, in
 2 min 25 s and 2 min 35 s. The gate was green 4/4 three separate times, and at
 `b769ee40` — three doc-only commits later — case 4's second half fails: the
 install reports `ok`, and the boot from the installed disk never reaches a
@@ -9514,12 +9516,43 @@ allocations are durable now. What is not durable is **a file's extent list**.
 mapped extent, so everything past the first 4 KiB is a hole. The kernel spawns
 it anyway and the desktop never comes up.
 
-Size and extents come from different places, which is the whole lead:
+Size and extents come from different places, which was the whole lead:
 `page_cache_write` stamps the size **synchronously** through
 `pc_ops.update_size` — `vfs::flush_dirty_inodes` passes `None` for the size
 precisely because of that — while the extents the flush allocates ride the
-journal. So a file can reach disk with a current size and a stale extent list,
-which is exactly what this is. Start at the EFS extent-mapping write path and
-ask what enrols the extent update and whether `sys_sync`'s commit/checkpoint
-rounds actually cover it; do not start again at the block page cache, which the
-two fixes above have now exercised.
+journal.
+
+### `sync` returned one round before the extents were committed — FIXED
+
+That lead was the bug. `sys_sync` loops commit-then-flush to a fixed point, and
+its fixed point was `Journal::needs_checkpoint()` — `sealed` non-empty or
+`committed_pending` non-empty. The flush pass allocates the extents for the
+pages it writes and enrols the inode and bitmap blocks into the journal's
+**active** transaction (`TxHandle::drop` merges into `state.active`; it does not
+seal), and the test could not see that transaction. So the round that wrote the
+data and created its mapping read as converged, the loop broke, and `sync`
+returned with every extent it had just allocated in memory only. The one extent
+each file kept is the block `convert_inline_to_extents` allocated at first
+write, committed by the periodic committer long before the sync — hence a
+correct size and exactly one mapped extent.
+
+The fixed point is `Journal::needs_sync_round()` now, which counts the open
+transaction as work. It terminates because every round commits the active
+transaction before flushing again, so a round's enrolments are the next round's
+committed work and a pass that writes nothing new enrols nothing; two rounds is
+the normal case, and the gate boot logs no `journal still pending`.
+`/proc/journal_stats` gained an `active` field beside `sealed`, `pending` and
+`tracked`, so this is readable from a guest rather than inferrable.
+
+`make nvme-check` is **green 4/4** at this fix, install case included, with the
+guest still stopped the instant `edos-install` exits.
+
+**The reasoning that produced the bug is worth more than the fix.**
+`doc/bugs/2026-08-09-sync-that-left-the-journal-dirty.md` recorded, as a
+termination requirement, that the loop must test *only* committed work, since
+"the open transaction is refilled by every flush and is never replayed". Never
+replayed is true, and it is exactly why an open transaction must not be left
+open: that post-mortem was answering "does `sync` leave the journal
+replay-clean", and the question a caller asks is "does `sync` make my writes
+durable". The two differ by precisely that transaction. Full write-up in
+`doc/bugs/2026-08-19-sync-returned-before-the-extents-were-committed.md`.

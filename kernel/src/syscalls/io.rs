@@ -2412,6 +2412,11 @@ pub fn sys_sync() {
     // transaction whose blocks never reached their home locations. Bounded so
     // a workload dirtying metadata as fast as we flush cannot spin here
     // forever.
+    //
+    // The fixed point is `needs_sync_round`, which counts the open transaction
+    // as work. The round that flushes the data is the round that fills that
+    // transaction, so a test over committed work alone declares victory one
+    // round early and leaves every extent the flush allocated in memory.
     const SYNC_MAX_ROUNDS: usize = 8;
     let mut converged = false;
     for _ in 0..SYNC_MAX_ROUNDS {
@@ -2434,7 +2439,7 @@ pub fn sys_sync() {
         if !BlockPageCache::global()
             .all_journals()
             .iter()
-            .any(|j| j.needs_checkpoint())
+            .any(|j| j.needs_sync_round())
         {
             converged = true;
             break;

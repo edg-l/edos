@@ -28,13 +28,18 @@ rounds, and logs when it hits the cap.
 
 Two things had to be right for that loop to terminate at all:
 
-- **It tests only committed work** (`sealed` plus `committed_pending`). The
-  open transaction is refilled by every flush and is never replayed, so a
-  condition that counts it never goes false.
 - **It advances the tail inside the loop.** `committed_pending` is drained by
   `advance_tail` and by nothing else, so testing before that call can never go
-  false either.
+  false.
 
+The first version of this loop also tested only committed work (`sealed` plus
+`committed_pending`) on the reasoning that the open transaction is refilled by
+every flush and is never replayed. That was wrong and cost an installed disk
+its file extents; see
+`doc/bugs/2026-08-19-sync-returned-before-the-extents-were-committed.md`. The
+open transaction is where the flush pass puts the metadata mapping the data it
+just wrote, and the loop terminates with it counted because each round commits
+it before flushing again.
 ## The checker was wrong too
 
 `efs-fsck` called a journal dirty when `tail_seq != head_seq`. That is not a

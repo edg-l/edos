@@ -579,26 +579,36 @@ impl Journal {
         !s.active.is_empty() || !s.sealed.is_empty()
     }
 
-    /// Whether anything still has to be committed or checkpointed before the
-    /// journal would replay as empty.
+    /// Whether a `sync` still has work to do before the filesystem on disk is
+    /// what the caller wrote.
     ///
-    /// Only committed work counts. A replay applies committed transactions and
-    /// ignores the open one, and every checkpoint pass enrols fresh metadata
-    /// into that open transaction, so including it here never reaches a fixed
-    /// point: `sync` would loop until its cap on every call and still return
-    /// with the journal reporting pending.
-    pub fn needs_checkpoint(&self) -> bool {
+    /// The open transaction counts, and it is the whole reason this exists.
+    /// A flush pass allocates the extents that map the file data it writes and
+    /// enrols the inode and bitmap blocks carrying them into the *active*
+    /// transaction, which is neither sealed nor committed. A test that looks
+    /// only at sealed and committed work therefore reads "converged" on the
+    /// very round that created the metadata, and `sync` returns with a file's
+    /// size on disk and its extent list only in memory. That is a file the
+    /// next mount reads as a hole past its first block.
+    ///
+    /// Each round of the loop this answers commits the active transaction
+    /// before flushing again, so a non-empty active transaction always becomes
+    /// committed work on the next round rather than being rediscovered
+    /// forever; the round after a pass that dirties nothing new converges.
+    pub fn needs_sync_round(&self) -> bool {
         let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-        !s.sealed.is_empty() || !s.committed_pending.is_empty()
+        !s.active.is_empty() || !s.sealed.is_empty() || !s.committed_pending.is_empty()
     }
 
-    /// Sealed transactions, committed-but-not-retired transactions, and blocks
-    /// the checkpoint tracker is still waiting on. What [`Self::needs_checkpoint`]
-    /// answers from, as numbers, so `sync` failing to converge can be read
-    /// rather than inferred: a run that ends with `pending` stuck at a non-zero
-    /// value while `tracked` is 0 means transactions are committed and fully
-    /// checkpointed but never retired.
-    pub fn depths(&self) -> (usize, usize, usize) {
+    /// Blocks enrolled in the open transaction, sealed transactions,
+    /// committed-but-not-retired transactions, and blocks the checkpoint
+    /// tracker is still waiting on. What [`Self::needs_sync_round`] answers
+    /// from, as numbers, so `sync` failing to converge can be read rather than
+    /// inferred: a run that ends with `pending` stuck at a non-zero value while
+    /// `tracked` is 0 means transactions are committed and fully checkpointed
+    /// but never retired, and one that ends with `active` non-zero means
+    /// something is enrolling metadata as fast as the rounds commit it.
+    pub fn depths(&self) -> (usize, usize, usize, usize) {
         let tracked = ranked_lock!(
             RANK_JOURNAL_TRACKER,
             "Journal.checkpoint_tracker",
@@ -606,7 +616,12 @@ impl Journal {
         )
         .len();
         let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-        (s.sealed.len(), s.committed_pending.len(), tracked)
+        (
+            s.active.enrolled_blocks.len() + s.active.revokes.len(),
+            s.sealed.len(),
+            s.committed_pending.len(),
+            tracked,
+        )
     }
 
     /// Ring cursors: `(head_seq, tail_seq, head_block, tail_block, ring_size)`.
@@ -663,7 +678,7 @@ impl Journal {
         // the highest committed sequence rather than that sequence itself.
         // Using `committed` leaves the newest committed transaction pinned
         // forever, since the loop below retires strictly below the bound: it
-        // stays in `committed_pending`, `needs_checkpoint` never goes false, and
+        // stays in `committed_pending`, `needs_sync_round` never goes false, and
         // `sync` spends all `SYNC_MAX_ROUNDS` rounds and then reports the
         // journal still pending. The next mount replays a transaction whose
         // blocks are already at home.
