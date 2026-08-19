@@ -9264,6 +9264,12 @@ same setup. Run whole, in this order, they take a little over an hour.
 | `make storage-check` | `fs-regression` over EFS and FAT32, then `fsbench-run` | `/dev/kvm` |
 | `make ssh-check` | the host's own OpenSSH client against the guest's `sshd`: auth, a refused password, exit status, ~10 MB each way, concurrent sessions | `/dev/kvm`; the host's `ssh` |
 
+**Only the first four run in CI.** `ci.yml` boots a guest for `make test` and
+`make guest-check` and for nothing else, so `nvme-check`, `recovery-check`,
+`orphan-check`, `storage-check` and `ssh-check` gate nothing but a local run —
+`doc/ci.md`'s "What is not covered" says what that costs and what the fix would
+look like.
+
 **Every one of them that drives a real guest boots `sata-disk.img`, and runs
 the userspace inside that image rather than the one in `filesystem/`.** `make
 all` does not rebuild it, so a gate that does not name it as a prerequisite
@@ -9310,6 +9316,10 @@ plus the formatter, and every one is green:
 | `make orphan-check` | the mount reclaimed 8 interrupted deletions, `efs-fsck` exit 0 |
 | `make ssh-check` | auth, refused password, exit status, 11.8 MB each way byte-identical, three concurrent sessions |
 
+`nvme-check` no longer reads that way: at `b769ee40`, three doc-only commits
+later, case 4 fails on both of two consecutive runs. The section below has the
+evidence.
+
 `storage-check` is the slow one and had not been seen whole since the NVMe work
 started: `fsbench-run` reports `total 19.3s` for `/var` and its
 `/proc/nvme_stats` sample carries no command errors, which is the only place
@@ -9327,3 +9337,105 @@ Two things about running them unattended, both learned the same night:
   does not print usage, it boots a guest and runs the whole gate. `--fat32` on
   `fs-regression` and the `edos-vm` flags are the only options anything here
   accepts.
+
+---
+
+## `nvme-check` case 4 went red again, and the installed filesystem is the evidence (2026-08-19)
+
+OPEN, and deterministic: two consecutive whole runs failed the same way, in
+2 min 25 s and 2 min 35 s. The gate was green 4/4 three separate times, and at
+`b769ee40` — three doc-only commits later — case 4's second half fails: the
+install reports `ok`, and the boot from the installed disk never reaches a
+desktop. The serial log names the reason exactly:
+
+```
+Root partition: UUID=... on device 3000
+efs journal: replay scan start tail_seq=35 tail_block=376
+efs journal: scanned, nothing to replay
+Root filesystem mounted
+boot-load bin/edos-init: resolve_inode: FileNotFound
+```
+
+So the target mounted, the journal had nothing outstanding, and the tree was
+not there. `efs-fsck` on the image the installer wrote says how badly:
+
+```
+tools/efs-fsck/target/release/efs-fsck -n -v --partition-offset 537919488 nvme-blank.img
+```
+
+77 orphan inodes, leaked inode-bitmap bits at 154..160, `dir inode 1` with
+entries `boot`, `etc`, `home`, `lib`, `opt`, `root`, `share` and `var` all
+pointing at **unallocated** inodes, `inode 1 link_count on-disk=14 observed=6`,
+and a dir-tree walk that reaches 5 directories and 1 file. The directory data
+blocks landed; the inode table and bitmaps they refer to are an older version
+of themselves. That is a half-written filesystem, not a half-finished copy.
+
+**Ruled out, do not spend the time again:** `sys_sync` failing to write file
+pages. `syscalls/io.rs::sys_sync` calls `BlockPageCache::sync_all`, which bumps
+`flush_requested`, wakes the writeback kthread and waits for the matching
+`flush_completed` — a *forced* pass, which runs `flush_dirty_inodes` between
+two block-cache drains. Dirty file pages are covered.
+
+**The experiment that discriminates, and its answer.** Run the same install by
+hand and leave the guest alive 15 s before stopping it, then boot the installed
+disk: it comes up, `Root partition: ... on device 3000`, desktop and all. The
+install itself is fine — `edos-install` traced 146 `copy` lines including
+`copy /bin/edos-init`, returned `rc=0` 7.4 s into the boot, and the same code
+produces a bootable system whenever the guest is allowed to keep running. What
+the gate does differently is stop the guest the instant `edos-install` exits.
+So **`edos-install` returns success before its writes are durable**, and up to
+one 5 s writeback period later they become so.
+
+**Refuted, both checked in code rather than guessed:**
+
+- *Writeback only submits and does not wait.* `BlockPageCache::write_batch`
+  pushes every `submit_write_frame` handle onto `inflight` and calls
+  `handle.wait()` on each before releasing its guard. The flush is synchronous
+  through to device completion.
+- *`sys_sync` misses file pages.* Covered above: `sync_all` forces a pass that
+  runs `flush_dirty_inodes` between two block-cache drains, and waits for it.
+
+**Leading hypothesis, untested:** `sys_sync`'s last act is a loop of
+`advance_tail()` over every journal, which writes the journal superblock — and
+nothing flushes the block cache afterwards, so that write is still dirty when
+the caller returns. The code's own comment says what a stale on-disk tail
+costs: the next mount "re-applies transactions whose blocks have since been
+checkpointed and overwritten -- it reverts good data with older journal
+copies." A partial revert is exactly the shape `efs-fsck` reports, current
+directory blocks against a stale inode table and bitmap. Against it: the
+failing boot logged `nothing to replay`, so on that boot the tail was not
+stale. Settle that contradiction before changing anything.
+
+Other things worth checking, in order:
+
+- `programs/edos-install` ends with `BLOCK_IOCTL_FLUSH` and *then* `SYS_SYNC`.
+  The device flush precedes the sync that dirties the block cache again, and
+  nothing flushes the device after `sys_sync`'s final `advance_tail`, which
+  writes the journal superblock. A published tail whose checkpoint writes are
+  still in a cache is exactly a mount that replays nothing and finds nothing.
+- The whole gate now takes 2 min 25 s warm and the install itself 7.4 s,
+  against the minutes it took when it was last green. Whatever the window
+  was, it got much narrower, which fits a gate that used to pass by timing
+  rather than by construction.
+- `scripts/nvme-check` stops the guest immediately after `edos-install` exits.
+  Adding a settle there would turn the gate green and hide the defect: a user
+  who installs and reboots promptly gets the same broken disk. Fix the
+  durability, not the gate.
+
+Reproduce with `make nvme-check` and read `run_log.txt` — but note it holds the
+*reboot* guest's log, since each boot overwrites it. Capturing the install
+guest's serial needs a copy taken before the second boot starts, and the copy
+is worth having: `edos-install` traces one `copy <path>` line per file to
+`/dev/klog`, so the install guest's log says whether `bin/edos-init` was
+written at all.
+
+**A repro must recreate `nvme-blank.img` first.** Once a run has installed onto
+it, the image carries a bootable ESP, and QEMU prefers that disk over the CD:
+the next `edos-vm start --nvme-disk nvme-blank.img` boots the installed system
+rather than the ISO, and the guest that comes up is the corrupt one under
+investigation. It announces itself in the cmdline — `root=UUID=` naming the
+GUID `edos-install` generated instead of `87654321-4321-8765-cba9-987654321fed`
+from `limine.conf`. The target to run is `make fresh-nvme-blank`, which the
+gate itself depends on: plain `make nvme-blank.img` is a file target and does
+nothing at all when the file is already there, which is exactly the case after
+a run.

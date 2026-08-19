@@ -90,6 +90,28 @@ rustup toolchain link edos ~/edos-toolchain
 
 ## What is not covered
 
-`storage-check`, `recovery-check`, `orphan-check` and `ssh-check` are multi-boot
-harnesses that cut power on a disk or drive the host's SSH client at the guest.
-They run locally, and `scripts/release prepare` does not gate on them either.
+Five gates never run in CI: `nvme-check`, `storage-check`, `recovery-check`,
+`orphan-check` and `ssh-check`. They are multi-boot harnesses: they cut power
+on a disk mid-write, reboot between a write phase and a verify phase, boot a
+purpose-built ISO, or drive the host's own OpenSSH client at the guest. The
+table in `doc/WORKING-NOTES.md` says what each one costs and needs. The
+consequence is worth stating plainly: **a regression in the NVMe driver, in the journal's replay
+path, in orphan reclamation or in `sshd` is visible only in a local run.**
+`ci.yml` boots a guest in exactly two jobs, for the in-kernel suite and the 17
+guest suites, and nothing else boots.
+
+`scripts/release prepare` does not close the gap either. It gates on the kernel
+check, clippy, both formatters, the host tests, a userspace build and `make
+test`; it runs neither `guest-check` nor any of the five.
+
+Adding them is a judgement about runner minutes rather than a technical
+obstacle: they need `/dev/kvm`, which the `Enable KVM` step already arranges,
+and they take no arguments. The shape that fits is one scheduled workflow
+running the five against `trunk`, not five more jobs in front of every pull
+request. `nvme-check` alone builds two ISOs and two disk images and boots four
+guests: 2 min 25 s on this host with every build already warm, and a runner
+pays the cold build on top, which is a `guest-check` job's work over again, and the driver it gates moves far less often than the tree
+around it. A nightly catching an NVMe regression that a pull request introduced
+and `trunk` shipped is the evidence for promoting `nvme-check` to the
+pull-request path; until that happens, running it on every push pays for a
+class of failure nobody has seen.
