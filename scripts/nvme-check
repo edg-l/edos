@@ -263,7 +263,13 @@ def case_watchdog():
     mark = boot("--iso", "edos-nvme-hostile.iso", "--nvme-disk", "nvme-disk.img",
                 "--no-sata", panel=False)
 
-    deadline = time.time() + 120
+    # Five minutes, and the number is not padding. How long this boot takes is
+    # decided by how much the journal has to replay: with nothing to replay it
+    # reaches init in four seconds, and with a transaction to apply every read
+    # a reset kills costs a backoff, which has been measured at twenty-four
+    # seconds and seen to overrun two minutes. It gets there either way, and
+    # the loop leaves as soon as it does.
+    deadline = time.time() + 300
     while time.time() < deadline:
         log = serial_tail(mark)
         if "init: pid" in log and "nvme: controller reset complete" in log:
