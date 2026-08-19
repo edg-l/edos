@@ -113,7 +113,30 @@ table in `doc/WORKING-NOTES.md` says what each one costs and needs. The
 consequence is worth stating plainly: **a regression in the NVMe driver, in the journal's replay
 path, in orphan reclamation or in `sshd` is visible only in a local run.**
 `ci.yml` boots a guest in exactly two jobs, for the in-kernel suite and the 17
-guest suites, and nothing else boots.
+guest suites, and nothing else boots. `nvme-check` is five boots now rather
+than four: the fifth is the watchdog case, on `edos-nvme-hostile.iso`.
+
+**The `guest suites` job has never passed, and the reason is a kernel bug this
+host cannot see.** Every run fails the same way: `mmaptest` exits 1, the guest
+goes quiet, and the remaining fourteen suites each spend their full budget, so
+the job burns most of its 75 minutes on timeouts. Locally the same gate is
+17/17 green, and stays green with the build and the guest pinned to two host
+CPUs, so it is not the runner's core count. What differs is QEMU: the runner
+image carries 8.2, this host runs 10.0. Under 8.2 the guest panics with
+`thread_park_while with preemption disabled` on the reaper kthread, which is a
+per-CPU preempt count some other thread left non-zero. Reproduce it in one
+command:
+
+```bash
+docker run --rm --device /dev/kvm --security-opt seccomp=unconfined \
+  -v "$PWD":/w -w /w ubuntu:24.04 bash -c \
+  'apt-get update -qq; apt-get install -y -qq --no-install-recommends \
+     qemu-system-x86 python3; scripts/guest-check; rc=$?; exit $rc'
+```
+
+Two things that will otherwise waste an hour: seccomp has to be unconfined or
+QEMU cannot initialise io_uring, and `guest-check` must not be the container's
+pid 1 or `edos-vm` refuses it the guest slot.
 
 `scripts/release prepare` does not close the gap either. It gates on the kernel
 check, clippy, both formatters, the host tests, a userspace build and `make
