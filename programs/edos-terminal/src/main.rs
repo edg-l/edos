@@ -151,11 +151,7 @@ fn main() {
                         // on the wrong window does not paste into it.
                         match event.code {
                             0 => {
-                                terminal.on_mouse_button(
-                                    event.x,
-                                    event.y,
-                                    event.data != 0,
-                                );
+                                terminal.on_mouse_button(event.x, event.y, event.data != 0);
                             }
                             2 if event.data == 0 => terminal.paste_primary(),
                             _ => {}

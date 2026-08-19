@@ -35,8 +35,6 @@ use edos_lib::io::Tee;
 use edos_lib::process::{SchedAttr, sched_getattr, sched_setattr};
 use edos_lib::procinfo::cpus_online;
 
-/// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
-
 /// Context switches performed across every CPU, from `/proc/sched`.
 ///
 /// Only the difference across a measurement means anything: it is a free

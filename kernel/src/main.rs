@@ -2,6 +2,12 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![allow(clippy::fn_to_numeric_cast)]
+// Suppressed crate-wide rather than per function. Splitting a driver's submit
+// path or a widget's draw call into argument structs to satisfy a count is
+// churn that makes the call sites harder to read, not easier; where a bundle
+// genuinely clarifies (`nvme::namespace::Transfer`) it is worth doing on its
+// own merits.
+#![allow(clippy::too_many_arguments)]
 
 use core::{hint::spin_loop, time::Duration};
 

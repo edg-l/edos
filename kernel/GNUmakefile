@@ -52,6 +52,20 @@ check-features:
 			cargo check --quiet --target $(RUST_TARGET) --features "$$f" || exit 1; \
 	done
 
+# Clippy over the default build and every optional feature, denying warnings so
+# a lint is a red gate rather than a line nobody reads. Same feature sweep as
+# `check-features`, and for the same reason: a lint in code behind a
+# `cfg(feature)` is invisible to the default build.
+.PHONY: clippy
+clippy:
+	RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" \
+		cargo clippy --target $(RUST_TARGET) -- -D warnings
+	@for f in $$(sed -n '/^\[features\]/,/^\[/p' Cargo.toml | sed -n 's/^\([a-z0-9-]*\) *=.*/\1/p' | grep -v '^default$$'); do \
+		echo "  clippy --features $$f"; \
+		RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" \
+			cargo clippy --quiet --target $(RUST_TARGET) --features "$$f" -- -D warnings || exit 1; \
+	done
+
 # Remove object files and the final executable.
 .PHONY: clean
 clean:

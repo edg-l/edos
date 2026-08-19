@@ -30,9 +30,24 @@ Releases are not cut by CI. `scripts/release` does that from a local tree; see
 | `kernel` | `cargo fmt --check`, `make check` (which checks every feature one at a time), `cargo clippy -D warnings` |
 | `host tests` | `scripts/host-tests` |
 | `host tools` | `make check-fsck`, and a release build of `efs-mkfs`, `efs-fsck`, `grab-repo` |
-| `userspace` | `cargo +edos fmt --check`, `make programs` |
+| `userspace` | `cargo +edos fmt --all --check`, `make programs`, `cargo +edos clippy --all-targets -D warnings` |
 | `in-kernel suite` | `make test AUDIODEV=none`, the `sched-test` suites under KVM |
 | `guest suites` | `make guest-check`: iotest, socktest, mmaptest and the rest, in one boot |
+
+**Both trees are clippy-gated at `-D warnings`.** The kernel job has been for a
+while; userspace was not, which is how it accumulated 137 warnings nobody saw,
+two of them deny-level lints that made `cargo clippy` on `programs/` fail
+outright and so hid the rest. `make clippy` runs both locally, and `make
+fmt-check` is the reporting form of `make fmt`. Run them before pushing:
+they are cheap, and they are the two gates most likely to red CI on a change
+that otherwise works.
+
+`clippy::too_many_arguments` is allowed globally -- `kernel/src/main.rs` for the
+kernel, `programs/.cargo/config.toml` for the 131-member workspace. Splitting a
+driver's submit path or a widget's draw call into argument structs to satisfy a
+count is churn that makes the call sites harder to read; where a bundle
+genuinely clarifies, it is worth doing on its own merits. Everything else is
+meant to stay at zero.
 
 The two booting jobs need `/dev/kvm`. It exists on the hosted runners but is
 not writable by the runner user until a udev rule says so, which is the `Enable

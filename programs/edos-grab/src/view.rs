@@ -29,8 +29,6 @@ pub const STATUS_H: u32 = space(7);
 pub const BUTTON_W: u32 = space(22);
 /// Share of the window the package list takes, in percent.
 const LIST_PERCENT: u32 = 55;
-/// What stands in for the part of a string that did not fit.
-
 /// A window divided into its panels. Derived state: rebuilt whenever it is
 /// needed rather than kept, so a resize cannot leave a click landing on a
 /// rectangle that has moved.

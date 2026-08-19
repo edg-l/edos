@@ -949,9 +949,8 @@ fn main() {
     let mut events = [WindowEvent::default(); 16];
     loop {
         if let Ok(count) = app.window.poll_events(&mut events) {
-            for index in 0..count {
-                let event = events[index];
-                if !app.handle(&event) {
+            for event in events.iter().take(count) {
+                if !app.handle(event) {
                     return;
                 }
             }

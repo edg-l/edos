@@ -78,7 +78,7 @@ pub fn cmd_echo(args: &[String]) {
     // Support -e flag for escape sequences
     if args.first().map(|s| s.as_str()) == Some("-e") {
         let text = args[1..].join(" ");
-        print!("{}\n", expand_escapes(&text));
+        println!("{}", expand_escapes(&text));
     } else {
         println!("{}", args.join(" "));
     }
@@ -141,7 +141,7 @@ pub fn cmd_test(args: &[String]) -> i32 {
         [flag, operand] if flag == "!" => {
             // Negate a unary expression: `! EXPR` where EXPR is a single word
             // Treat a non-empty string as true (mirrors `test STRING`)
-            let inner = cmd_test(&[operand.clone()]);
+            let inner = cmd_test(std::slice::from_ref(operand));
             if inner == 2 {
                 2
             } else if inner == 0 {

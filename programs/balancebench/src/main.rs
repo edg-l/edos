@@ -47,8 +47,6 @@ use edos_lib::io::Tee;
 use edos_lib::process::{close, pipe, read, write};
 use edos_lib::procinfo::cpus_online;
 
-/// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
-
 /// Blocked threads created per CPU before the workers run.
 const BLOCKED_PER_CPU: u64 = 8;
 

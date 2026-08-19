@@ -276,10 +276,9 @@ impl Game {
         // The tail cell is vacated this tick, so moving into it is legal.
         // Freeing it before the collision test is what makes that true.
         let ate = head == self.food;
-        if !ate
-            && let Some((tx, ty)) = self.snake.pop_back() {
-                self.occupied[ty * self.w + tx] = false;
-            }
+        if !ate && let Some((tx, ty)) = self.snake.pop_back() {
+            self.occupied[ty * self.w + tx] = false;
+        }
 
         if self.occupied[head.1 * self.w + head.0] {
             self.state = State::Lost;

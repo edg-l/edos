@@ -344,7 +344,7 @@ impl<'a> Session<'a> {
         self.channel = Some(Channel {
             remote_id,
             remote_window,
-            remote_max_packet: remote_max_packet.min(MAX_CHANNEL_PACKET).max(1),
+            remote_max_packet: remote_max_packet.clamp(1, MAX_CHANNEL_PACKET),
             local_window: LOCAL_WINDOW,
             pty: None,
             env: Vec::new(),
@@ -398,9 +398,10 @@ impl<'a> Session<'a> {
                         pty.rows = rows;
                     }
                     if let Some(child) = c.child.as_ref()
-                        && child.is_pty {
-                            set_winsize(child.write_fd, cols, rows);
-                        }
+                        && child.is_pty
+                    {
+                        set_winsize(child.write_fd, cols, rows);
+                    }
                 }
                 // RFC 4254 §6.7: window-change never gets a reply.
                 false

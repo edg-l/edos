@@ -33,8 +33,6 @@ use edos_lib::io::Tee;
 use edos_lib::process::{close, fork, pipe, read, sched_yield, write};
 use edos_lib::procinfo::cpus_online;
 
-/// Online CPUs, or 0 if `/proc/cpuinfo` could not be read.
-
 /// Batches a short measurement runs, of the `iters` it was given each.
 ///
 /// Six, not more: the whole run costs about 0.45 s at the default iteration

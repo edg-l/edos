@@ -175,8 +175,7 @@ impl WindowEvent {
 
     /// The size a `Resize` event carries.
     pub fn resize_size(&self) -> Option<(u32, u32)> {
-        (self.event_type == WindowEventType::Resize as u32)
-            .then(|| (self.x as u32, self.y as u32))
+        (self.event_type == WindowEventType::Resize as u32).then(|| (self.x as u32, self.y as u32))
     }
 
     /// Whether this is a mouse button press.

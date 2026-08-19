@@ -73,10 +73,12 @@ fn looks_like_text(data: &[u8]) -> bool {
 fn identify(data: &[u8]) -> String {
     let mut best: Option<(&[u8], &str)> = None;
     for (magic, offset, desc) in MAGIC {
-        if data.len() >= offset + magic.len() && &data[*offset..offset + magic.len()] == *magic
-            && best.is_none_or(|(m, _)| magic.len() > m.len()) {
-                best = Some((magic, desc));
-            }
+        if data.len() >= offset + magic.len()
+            && &data[*offset..offset + magic.len()] == *magic
+            && best.is_none_or(|(m, _)| magic.len() > m.len())
+        {
+            best = Some((magic, desc));
+        }
     }
 
     if let Some((magic, desc)) = best {

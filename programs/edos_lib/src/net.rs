@@ -17,7 +17,6 @@ impl NetError {
     }
 }
 
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SockAddrIn {
@@ -47,7 +46,11 @@ pub fn create_udp_socket() -> Result<u64, NetError> {
             0,
         )
     };
-    if sys::is_err(fd) { Err(NetError(fd as i64)) } else { Ok(fd) }
+    if sys::is_err(fd) {
+        Err(NetError(fd as i64))
+    } else {
+        Ok(fd)
+    }
 }
 
 pub fn create_tcp_socket() -> Result<u64, NetError> {
@@ -59,7 +62,11 @@ pub fn create_tcp_socket() -> Result<u64, NetError> {
             0,
         )
     };
-    if sys::is_err(fd) { Err(NetError(fd as i64)) } else { Ok(fd) }
+    if sys::is_err(fd) {
+        Err(NetError(fd as i64))
+    } else {
+        Ok(fd)
+    }
 }
 
 pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), NetError> {
@@ -71,7 +78,11 @@ pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), NetError> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
+    if sys::is_err(ret) {
+        Err(NetError(ret as i64))
+    } else {
+        Ok(())
+    }
 }
 
 /// `getsockopt(SOL_SOCKET, SO_ERROR)`: the socket's pending error code, and
@@ -107,14 +118,22 @@ pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), NetError> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
+    if sys::is_err(ret) {
+        Err(NetError(ret as i64))
+    } else {
+        Ok(())
+    }
 }
 
 /// Mark a bound TCP socket as accepting connections. `backlog` is the number of
 /// completed connections the kernel queues before it answers a SYN with RST.
 pub fn listen(fd: u64, backlog: u32) -> Result<(), NetError> {
     let ret = unsafe { sys::syscall2(sys::SYS_LISTEN, fd, backlog as u64) };
-    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
+    if sys::is_err(ret) {
+        Err(NetError(ret as i64))
+    } else {
+        Ok(())
+    }
 }
 
 /// Take the next completed connection off a listening socket, blocking until one
@@ -163,7 +182,11 @@ pub fn set_recv_timeout(fd: u64, millis: u64) -> Result<(), NetError> {
             core::mem::size_of::<Timeval>() as u64,
         )
     };
-    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
+    if sys::is_err(ret) {
+        Err(NetError(ret as i64))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, NetError> {
@@ -265,7 +288,11 @@ pub fn recv(fd: u64, buf: &mut [u8]) -> Result<usize, NetError> {
     let ret =
         unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) };
     if ret as i64 <= 0 {
-        if ret == 0 { Ok(0) } else { Err(NetError(ret as i64)) }
+        if ret == 0 {
+            Ok(0)
+        } else {
+            Err(NetError(ret as i64))
+        }
     } else {
         Ok(ret as usize)
     }
@@ -305,7 +332,11 @@ pub const SHUT_RDWR: u64 = 2;
 /// which discards the reply along with the connection.
 pub fn shutdown(fd: u64, how: u64) -> Result<(), NetError> {
     let ret = unsafe { sys::syscall2(sys::SYS_SHUTDOWN, fd, how) };
-    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
+    if sys::is_err(ret) {
+        Err(NetError(ret as i64))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn close(fd: u64) {
@@ -357,7 +388,11 @@ pub fn get_dns() -> Option<[u8; 4]> {
 /// reports both the override and the DHCP address it displaced.
 pub fn set_dns(addr: [u8; 4]) -> Result<(), NetError> {
     let ret = unsafe { sys::syscall1(sys::SYS_SETDNS, &addr as *const [u8; 4] as u64) };
-    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
+    if sys::is_err(ret) {
+        Err(NetError(ret as i64))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> Option<u64> {

@@ -126,11 +126,19 @@ jobs:
           shared-key: userspace
 
       - name: Format
-        run: cargo +edos fmt --check
+        run: cargo +edos fmt --all --check
         working-directory: programs
 
       - name: Build
         run: make filesystem programs
+
+      # Run from inside programs/ so cargo picks up .cargo/config.toml, which
+      # carries the default target and the workspace-wide
+      # `too_many_arguments` allow. --all-targets covers the host test code
+      # that `make host-tests` builds, which has its own lints.
+      - name: Clippy
+        run: cargo +edos clippy --all-targets -- -D warnings
+        working-directory: programs
 
   sched-test:
     name: in-kernel suite

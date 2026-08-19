@@ -388,9 +388,10 @@ fn install_boot_files(root_guid: &str) {
         limine_dir.clone(),
     ] {
         if let Err(e) = std::fs::create_dir(&dir)
-            && e.kind() != std::io::ErrorKind::AlreadyExists {
-                fail(&format!("cannot create {dir}: {e}"));
-            }
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            fail(&format!("cannot create {dir}: {e}"));
+        }
     }
 
     for (from, to) in [

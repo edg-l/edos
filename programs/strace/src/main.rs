@@ -310,7 +310,7 @@ fn emit(out: &mut dyn Write, root: u64, tid: u64, line: &str, took_ns: Option<u6
 
 fn print_summary(table: &SyscallTable, out: &mut dyn Write, stats: &BTreeMap<u32, Stat>) {
     let mut rows: Vec<(&u32, &Stat)> = stats.iter().collect();
-    rows.sort_by(|a, b| b.1.time_ns.cmp(&a.1.time_ns));
+    rows.sort_by_key(|(_, stat)| core::cmp::Reverse(stat.time_ns));
 
     let total_ns: u64 = rows.iter().map(|(_, stat)| stat.time_ns).sum();
     let total_calls: u64 = rows.iter().map(|(_, stat)| stat.calls).sum();

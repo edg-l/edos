@@ -95,7 +95,7 @@ fn main() {
         }
         None => {
             let stdin = io::stdin();
-            let lines = stdin.lock().lines().filter_map(|l| l.ok());
+            let lines = stdin.lock().lines().map_while(Result::ok);
             process_lines(lines, count, only_dup, only_uniq, &mut out);
         }
     }

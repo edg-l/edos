@@ -8,8 +8,8 @@ fn main() {
     let mut show_machine = false;
 
     for arg in &args[1..] {
-        if arg.starts_with('-') {
-            for c in arg[1..].chars() {
+        if let Some(flags) = arg.strip_prefix('-') {
+            for c in flags.chars() {
                 match c {
                     'a' => show_all = true,
                     's' => show_sys = true,

@@ -600,62 +600,63 @@ fn draw_window_direct(
             window.buffer_shm_id,
             window.buffer_width,
             window.buffer_height,
-        ) {
-            let pixel_count = (buf_w as usize) * (buf_h as usize);
-            let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
+        )
+    {
+        let pixel_count = (buf_w as usize) * (buf_h as usize);
+        let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
-            // Content position in window-relative coordinates
-            let content_rx = bw;
-            let content_ry = th;
+        // Content position in window-relative coordinates
+        let content_rx = bw;
+        let content_ry = th;
 
-            // Absolute screen position of content
-            let content_abs_x = window.x as i64 + content_rx;
-            let content_abs_y = window.y as i64 + content_ry;
+        // Absolute screen position of content
+        let content_abs_x = window.x as i64 + content_rx;
+        let content_abs_y = window.y as i64 + content_ry;
 
-            // Skip if content is completely off-screen
-            if content_abs_x + (buf_w as i64) > 0
-                && content_abs_y + (buf_h as i64) > 0
-                && content_abs_x < screen_w
-                && content_abs_y < screen_h
-            {
-                // Calculate source offset (how much to skip in the buffer)
-                let src_off_x = (-content_abs_x).max(0) as u64;
-                let src_off_y = (-content_abs_y).max(0) as u64;
+        // Skip if content is completely off-screen
+        if content_abs_x + (buf_w as i64) > 0
+            && content_abs_y + (buf_h as i64) > 0
+            && content_abs_x < screen_w
+            && content_abs_y < screen_h
+        {
+            // Calculate source offset (how much to skip in the buffer)
+            let src_off_x = (-content_abs_x).max(0) as u64;
+            let src_off_y = (-content_abs_y).max(0) as u64;
 
-                // Calculate destination position (where to draw on screen)
-                let dst_x = content_abs_x.max(0) as u64;
-                let dst_y = content_abs_y.max(0) as u64;
+            // Calculate destination position (where to draw on screen)
+            let dst_x = content_abs_x.max(0) as u64;
+            let dst_y = content_abs_y.max(0) as u64;
 
-                // Calculate visible dimensions of the content.
-                //
-                // Bounded by the window as well as by the buffer: the two
-                // disagree for the frames between a resize and the client
-                // allocating to match, and a buffer wider than its window
-                // paints over the ground the window just vacated -- which is
-                // then stranded there, because nothing marks it dirty again
-                // once the client does catch up.
-                let vis_w = ((buf_w as u64).saturating_sub(src_off_x))
-                    .min(screen_w as u64 - dst_x)
-                    .min(window.width as u64);
-                let vis_h = ((buf_h as u64).saturating_sub(src_off_y))
-                    .min(screen_h as u64 - dst_y)
-                    .min(window.height as u64);
+            // Calculate visible dimensions of the content.
+            //
+            // Bounded by the window as well as by the buffer: the two
+            // disagree for the frames between a resize and the client
+            // allocating to match, and a buffer wider than its window
+            // paints over the ground the window just vacated -- which is
+            // then stranded there, because nothing marks it dirty again
+            // once the client does catch up.
+            let vis_w = ((buf_w as u64).saturating_sub(src_off_x))
+                .min(screen_w as u64 - dst_x)
+                .min(window.width as u64);
+            let vis_h = ((buf_h as u64).saturating_sub(src_off_y))
+                .min(screen_h as u64 - dst_y)
+                .min(window.height as u64);
 
-                if vis_w > 0 && vis_h > 0 {
-                    let _ = screen.blit_pixels_clipped(
-                        pixels,
-                        buf_w as u64,
-                        buf_h as u64,
-                        src_off_x,
-                        src_off_y,
-                        dst_x,
-                        dst_y,
-                        vis_w,
-                        vis_h,
-                    );
-                }
+            if vis_w > 0 && vis_h > 0 {
+                let _ = screen.blit_pixels_clipped(
+                    pixels,
+                    buf_w as u64,
+                    buf_h as u64,
+                    src_off_x,
+                    src_off_y,
+                    dst_x,
+                    dst_y,
+                    vis_w,
+                    vis_h,
+                );
             }
         }
+    }
 }
 
 /// Draw a dock window (no decorations, just content).
@@ -677,58 +678,59 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
             window.buffer_shm_id,
             window.buffer_width,
             window.buffer_height,
-        ) {
-            let pixel_count = (buf_w as usize) * (buf_h as usize);
-            let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
+        )
+    {
+        let pixel_count = (buf_w as usize) * (buf_h as usize);
+        let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
-            // Absolute screen position of content (no decoration offset)
-            let content_abs_x = window.x as i64;
-            let content_abs_y = window.y as i64;
+        // Absolute screen position of content (no decoration offset)
+        let content_abs_x = window.x as i64;
+        let content_abs_y = window.y as i64;
 
-            // Skip if content is completely off-screen
-            if content_abs_x + (buf_w as i64) > 0
-                && content_abs_y + (buf_h as i64) > 0
-                && content_abs_x < screen_w
-                && content_abs_y < screen_h
-            {
-                // Calculate source offset (how much to skip in the buffer)
-                let src_off_x = (-content_abs_x).max(0) as u64;
-                let src_off_y = (-content_abs_y).max(0) as u64;
+        // Skip if content is completely off-screen
+        if content_abs_x + (buf_w as i64) > 0
+            && content_abs_y + (buf_h as i64) > 0
+            && content_abs_x < screen_w
+            && content_abs_y < screen_h
+        {
+            // Calculate source offset (how much to skip in the buffer)
+            let src_off_x = (-content_abs_x).max(0) as u64;
+            let src_off_y = (-content_abs_y).max(0) as u64;
 
-                // Calculate destination position (where to draw on screen)
-                let dst_x = content_abs_x.max(0) as u64;
-                let dst_y = content_abs_y.max(0) as u64;
+            // Calculate destination position (where to draw on screen)
+            let dst_x = content_abs_x.max(0) as u64;
+            let dst_y = content_abs_y.max(0) as u64;
 
-                // Calculate visible dimensions of the content.
-                //
-                // Bounded by the window as well as by the buffer: the two
-                // disagree for the frames between a resize and the client
-                // allocating to match, and a buffer wider than its window
-                // paints over the ground the window just vacated -- which is
-                // then stranded there, because nothing marks it dirty again
-                // once the client does catch up.
-                let vis_w = ((buf_w as u64).saturating_sub(src_off_x))
-                    .min(screen_w as u64 - dst_x)
-                    .min(window.width as u64);
-                let vis_h = ((buf_h as u64).saturating_sub(src_off_y))
-                    .min(screen_h as u64 - dst_y)
-                    .min(window.height as u64);
+            // Calculate visible dimensions of the content.
+            //
+            // Bounded by the window as well as by the buffer: the two
+            // disagree for the frames between a resize and the client
+            // allocating to match, and a buffer wider than its window
+            // paints over the ground the window just vacated -- which is
+            // then stranded there, because nothing marks it dirty again
+            // once the client does catch up.
+            let vis_w = ((buf_w as u64).saturating_sub(src_off_x))
+                .min(screen_w as u64 - dst_x)
+                .min(window.width as u64);
+            let vis_h = ((buf_h as u64).saturating_sub(src_off_y))
+                .min(screen_h as u64 - dst_y)
+                .min(window.height as u64);
 
-                if vis_w > 0 && vis_h > 0 {
-                    let _ = screen.blit_pixels_clipped(
-                        pixels,
-                        buf_w as u64,
-                        buf_h as u64,
-                        src_off_x,
-                        src_off_y,
-                        dst_x,
-                        dst_y,
-                        vis_w,
-                        vis_h,
-                    );
-                }
+            if vis_w > 0 && vis_h > 0 {
+                let _ = screen.blit_pixels_clipped(
+                    pixels,
+                    buf_w as u64,
+                    buf_h as u64,
+                    src_off_x,
+                    src_off_y,
+                    dst_x,
+                    dst_y,
+                    vis_w,
+                    vis_h,
+                );
             }
         }
+    }
 }
 
 /// Draw the cursor.

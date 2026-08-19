@@ -22,13 +22,14 @@ fn main() {
     let args = efs_fsck::parse_args();
 
     if let Ok(dev) = File::open(&args.image)
-        && ioctl(dev.as_raw_fd() as u64, BLOCK_IOCTL_IS_MOUNTED, 0) == 1 {
-            eprintln!(
-                "fsck: {} is mounted; unmount it before checking it",
-                args.image.display()
-            );
-            process::exit(FsckExitCode::OperationalError.code());
-        }
+        && ioctl(dev.as_raw_fd() as u64, BLOCK_IOCTL_IS_MOUNTED, 0) == 1
+    {
+        eprintln!(
+            "fsck: {} is mounted; unmount it before checking it",
+            args.image.display()
+        );
+        process::exit(FsckExitCode::OperationalError.code());
+    }
 
     efs_fsck::run(args);
 }

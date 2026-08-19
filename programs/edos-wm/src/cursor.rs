@@ -126,9 +126,9 @@ const RESIZE_BDIAG: [[u8; 16]; 16] = [
 fn build_cursor_texture(bitmap: &[[u8; 16]; 16]) -> Texture {
     let mut texture = Texture::new(CURSOR_SIZE, CURSOR_SIZE).unwrap();
 
-    for y in 0..16 {
-        for x in 0..16 {
-            let color = match bitmap[y][x] {
+    for (y, row) in bitmap.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            let color = match cell {
                 1 => Color::WHITE,
                 2 => Color::BLACK,
                 _ => continue, // transparent - skip

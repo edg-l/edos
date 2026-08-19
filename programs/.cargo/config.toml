@@ -1,2 +1,8 @@
 [build]
 target = "x86_64-unknown-edos"
+# Suppressed for the whole workspace rather than per crate: 131 members would
+# otherwise each need the attribute. Splitting a widget's draw call or a
+# layout function into argument structs to satisfy a count is churn that makes
+# the call sites harder to read; where a bundle genuinely clarifies it is worth
+# doing on its own merits, not to silence a lint.
+rustflags = ["-A", "clippy::too_many_arguments"]

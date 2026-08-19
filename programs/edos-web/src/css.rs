@@ -2206,11 +2206,11 @@ fn parse_attr(body: &str) -> Option<AttrTest> {
     // have eaten one.
     if !value.ends_with(['"', '\''])
         && let Some((head, flag)) = value.rsplit_once(char::is_whitespace)
-            && matches!(flag, "i" | "I" | "s" | "S")
-        {
-            fold = flag.eq_ignore_ascii_case("i");
-            value = head.trim_end();
-        }
+        && matches!(flag, "i" | "I" | "s" | "S")
+    {
+        fold = flag.eq_ignore_ascii_case("i");
+        value = head.trim_end();
+    }
     let mut value = value.to_string();
     if value.len() >= 2
         && let Some(quote) = value.chars().next()
@@ -2766,10 +2766,9 @@ impl Math<'_> {
                     .find(|c: char| !c.is_ascii_alphabetic())
                     .map_or(rest.len(), |stop| end + stop);
                 let (number, unit) = (&rest[..end], &rest[end..unit_end]);
-                let (number, unit) = if number.ends_with('%') {
-                    (&number[..number.len() - 1], "%")
-                } else {
-                    (number, unit)
+                let (number, unit) = match number.strip_suffix('%') {
+                    Some(without) => (without, "%"),
+                    None => (number, unit),
                 };
                 self.at += unit_end;
                 let number: f32 = number.parse().ok()?;
@@ -4376,8 +4375,8 @@ mod tests {
         assert_eq!(cascade(&sheet, &plain, None).color, None);
         assert_eq!(cascade(&sheet, &linked, None).color, Some(rgb(255, 0, 0)));
         assert_eq!(cascade(&sheet, &exact, None).color, Some(rgb(0, 0, 255)));
-        assert!(cascade(&sheet, &vec![element_with("p", &[("hidden", "")])], None).hidden);
-        assert!(!cascade(&sheet, &vec![element_with("p", &[])], None).hidden);
+        assert!(cascade(&sheet, &[element_with("p", &[("hidden", "")])], None).hidden);
+        assert!(!cascade(&sheet, &[element_with("p", &[])], None).hidden);
     }
 
     #[test]

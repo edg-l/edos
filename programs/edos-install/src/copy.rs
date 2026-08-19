@@ -54,9 +54,10 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<usize> {
 
     crate::klog::trace(&format!("mkdir {}", to.display()));
     if let Err(e) = fs::create_dir(to)
-        && e.kind() != io::ErrorKind::AlreadyExists {
-            return Err(at(to, "mkdir", e));
-        }
+        && e.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(at(to, "mkdir", e));
+    }
 
     let mut copied = 0;
     for entry in fs::read_dir(from).map_err(|e| at(from, "read_dir", e))? {

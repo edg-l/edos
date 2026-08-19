@@ -227,9 +227,10 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
         format!("{done:?}"),
     );
     if io::poll_readable(listener, 2000)
-        && let Ok((peer, _)) = net::accept(listener) {
-            net::close(peer);
-        }
+        && let Ok((peer, _)) = net::accept(listener)
+    {
+        net::close(peer);
+    }
     net::close(blocking);
     net::close(listener);
 }

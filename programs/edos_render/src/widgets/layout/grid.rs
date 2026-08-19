@@ -361,9 +361,10 @@ impl GridLayout {
         // Second pass: distribute remaining space to expanding items
         for (i, policy) in policies.iter().enumerate() {
             if let SizePolicy::Expand { weight } = policy
-                && total_expand_weight > 0.0 {
-                    sizes[i] = ((remaining as f32 * weight) / total_expand_weight) as u32;
-                }
+                && total_expand_weight > 0.0
+            {
+                sizes[i] = ((remaining as f32 * weight) / total_expand_weight) as u32;
+            }
         }
 
         sizes

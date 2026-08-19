@@ -218,6 +218,10 @@ impl Transport {
 
     fn recv_raw(&mut self) -> Result<Vec<u8>> {
         let mut plain;
+        // `if let Some(dir) = &mut self.rx` cannot be used here: `read_exact`
+        // below takes `&self`, and a binding into `self.rx` held across it
+        // borrows `self` twice. The re-lookups are what keep the borrows short.
+        #[allow(clippy::unnecessary_unwrap)]
         if self.rx.is_some() {
             // The length lives inside the encryption, so the first block has to
             // be decrypted before the rest of the packet can even be read.

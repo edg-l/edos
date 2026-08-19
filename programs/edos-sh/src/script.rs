@@ -517,7 +517,7 @@ pub fn run_script(path: &str, args: &[String]) -> i32 {
         0
     };
 
-    let lines: Vec<&str> = raw_lines[start..].iter().copied().collect();
+    let lines: Vec<&str> = raw_lines[start..].to_vec();
 
     let blocks = match parse_blocks(&lines) {
         Ok(b) => b,

@@ -100,10 +100,9 @@ fn main() {
         match table[b as usize] {
             None => {}
             Some(mapped) => {
-                if squeeze && set2.contains(&mapped)
-                    && last_out == Some(mapped) {
-                        continue;
-                    }
+                if squeeze && set2.contains(&mapped) && last_out == Some(mapped) {
+                    continue;
+                }
                 if out.write_all(&[mapped]).is_err() {
                     break;
                 }

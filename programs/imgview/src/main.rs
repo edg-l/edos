@@ -46,7 +46,9 @@ enum Mode {
 /// be drawn again at any size.
 enum Source {
     Raster(Image),
-    Vector(Svg),
+    /// Boxed: an `Svg` is 392 bytes against `Image`'s 32, and every
+    /// `Source` would otherwise be sized for the larger of the two.
+    Vector(Box<Svg>),
 }
 
 impl Source {
@@ -164,7 +166,7 @@ fn open(path: &str) -> Result<Source, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("{path}: {err}"))?;
     if looks_like_svg(&bytes) {
         return Svg::parse(&bytes)
-            .map(Source::Vector)
+            .map(|svg| Source::Vector(Box::new(svg)))
             .map_err(|err| match err {
                 ImageError::Svg(message) => format!("{path}: {message}"),
                 other => format!("{path}: {other:?}"),

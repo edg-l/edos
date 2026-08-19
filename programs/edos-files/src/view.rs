@@ -43,8 +43,6 @@ pub const SIZE_W: u32 = 52;
 pub const SCROLLBAR_W: u32 = space(1);
 /// Height of the meter at the foot of the rail.
 pub const METER_H: u32 = space(1);
-/// What stands in for the part of a name that did not fit.
-
 /// A window divided into its panels.
 pub struct Layout {
     pub toolbar: Rect,
@@ -552,7 +550,7 @@ impl Span {
     fn position(&self, size: u64) -> f32 {
         let low = ((self.smallest + 1) as f32).ln();
         let high = ((self.largest + 1) as f32).ln();
-        if high - low < f32::EPSILON {
+        if (high - low).abs() < f32::EPSILON {
             return 1.0;
         }
         ((((size + 1) as f32).ln() - low) / (high - low)).clamp(0.0, 1.0)
@@ -578,8 +576,9 @@ pub fn draw_list(
     canvas.fill(layout.list, theme.background.raw());
     let columns = Columns::new(layout.list);
 
-    for index in scroll..(scroll + layout.rows_visible).min(entries.len()) {
-        let entry = &entries[index];
+    let last = (scroll + layout.rows_visible).min(entries.len());
+    for (index, entry) in entries[scroll..last].iter().enumerate() {
+        let index = index + scroll;
         let rect = row_rect(layout.list, index, scroll);
 
         if index == selected {

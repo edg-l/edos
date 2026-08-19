@@ -105,7 +105,7 @@ fn capture_command_output(cmd: &str) -> String {
     // Parent closes write end so read end gets EOF when child exits
     edos_lib::process::close(write_fd);
 
-    let output = match pid {
+    match pid {
         Some(child_pid) => {
             let mut buf = Vec::new();
             let mut chunk = [0u8; 512];
@@ -126,9 +126,7 @@ fn capture_command_output(cmd: &str) -> String {
             edos_lib::process::close(read_fd);
             String::new()
         }
-    };
-
-    output
+    }
 }
 
 /// Expand `$VAR`, `${VAR}`, `$(cmd)`, and special parameters in a string segment.
@@ -614,9 +612,8 @@ pub fn parse_heredoc_marker(line: &str) -> Option<(String, String, bool)> {
                     let after = line[i + 2..].trim_start();
 
                     // Parse marker: may be single-quoted
-                    let (marker, raw) = if after.starts_with('\'') {
+                    let (marker, raw) = if let Some(rest) = after.strip_prefix('\'') {
                         // Single-quoted marker: strip quotes
-                        let rest = &after[1..];
                         if let Some(close) = rest.find('\'') {
                             (rest[..close].to_string(), true)
                         } else {
@@ -855,72 +852,72 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
                 Some(n) => n.parse().unwrap_or(2),
                 None => last_exit_code(),
             };
-            return ExecResult::Exit(code);
+            ExecResult::Exit(code)
         }
         "help" => {
             builtins::cmd_help();
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "pwd" => {
             builtins::cmd_pwd();
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "cd" => {
             builtins::cmd_cd(args);
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "clear" => {
             builtins::cmd_clear();
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "echo" => {
             builtins::cmd_echo(args);
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "export" => {
             builtins::cmd_export(args);
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "unset" => {
             builtins::cmd_unset(args);
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "env" => {
             builtins::cmd_env();
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "test" => {
             let code = builtins::cmd_test(args);
-            return if code == 0 {
+            if code == 0 {
                 ExecResult::Success(0)
             } else {
                 ExecResult::Failed(code)
-            };
+            }
         }
         "[" => {
             // Strip trailing ']' argument
             let test_args: Vec<String> =
                 args.iter().filter(|a| a.as_str() != "]").cloned().collect();
             let code = builtins::cmd_test(&test_args);
-            return if code == 0 {
+            if code == 0 {
                 ExecResult::Success(0)
             } else {
                 ExecResult::Failed(code)
-            };
+            }
         }
         "break" => {
             // Flow control handled by the script executor; return success here
             // so the executor can detect "break" was the command.
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "continue" => {
             // Flow control handled by the script executor; return success here
             // so the executor can detect "continue" was the command.
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "return" => {
             // Flow control handled by the script executor.
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "set" => {
             match args.first().map(|s| s.as_str()) {
@@ -928,19 +925,19 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
                 Some("+e") => set_exit_on_error(false),
                 _ => {} // Ignore unrecognized set flags
             }
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "kill" => {
             let code = builtins::cmd_kill(args);
-            return if code == 0 {
+            if code == 0 {
                 ExecResult::Success(0)
             } else {
                 ExecResult::Failed(code)
-            };
+            }
         }
         "jobs" => {
             crate::JOB_LIST.lock().unwrap().print();
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         "fg" | "bg" => {
             let code = if command == "fg" {
@@ -948,11 +945,11 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             } else {
                 crate::cmd_bg(args)
             };
-            return if code == 0 {
+            if code == 0 {
                 ExecResult::Success(0)
             } else {
                 ExecResult::Failed(code)
-            };
+            }
         }
         "wait" => {
             let code = if let Some(pid_str) = args.first() {
@@ -966,15 +963,15 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             } else {
                 crate::JOB_LIST.lock().unwrap().wait_all()
             };
-            return if code == 0 {
+            if code == 0 {
                 ExecResult::Success(0)
             } else {
                 ExecResult::Failed(code)
-            };
+            }
         }
         "ifconfig" | "ip" => {
             builtins::cmd_ifconfig(args);
-            return ExecResult::Success(0);
+            ExecResult::Success(0)
         }
         _ if command.contains('=') && !command.starts_with('=') => {
             // Bare VAR=value assignment
@@ -995,24 +992,24 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
                 let code = edos_lib::process::waitpid(pid);
                 edos_lib::io::pty_set_raw(0);
-                return if code == 0 {
+                if code == 0 {
                     ExecResult::Success(0)
                 } else {
                     ExecResult::Failed(code)
-                };
+                }
             } else {
                 eprintln!("Command not found: {}", command);
                 edos_lib::io::pty_set_raw(0);
-                return ExecResult::Failed(127);
+                ExecResult::Failed(127)
             }
         }
         _ if crate::script::is_function(command) => {
             let code = crate::script::call_function(command, args);
-            return if code == 0 {
+            if code == 0 {
                 ExecResult::Success(0)
             } else {
                 ExecResult::Failed(code)
-            };
+            }
         }
         _ => {
             // Restore canonical mode for child (echo + line buffering)
@@ -1020,15 +1017,15 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
                 let code = edos_lib::process::waitpid(pid);
                 edos_lib::io::pty_set_raw(0);
-                return if code == 0 {
+                if code == 0 {
                     ExecResult::Success(0)
                 } else {
                     ExecResult::Failed(code)
-                };
+                }
             } else {
                 eprintln!("Command not found: {}", command);
                 edos_lib::io::pty_set_raw(0);
-                return ExecResult::Failed(127);
+                ExecResult::Failed(127)
             }
         }
     }

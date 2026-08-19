@@ -166,7 +166,6 @@ pub struct NvmeOp {
 }
 
 impl NvmeOp {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         controller: Weak<NvmeController>,
         qid: u16,

@@ -64,11 +64,13 @@ fn result(table: &SyscallTable, exit: &TraceRecord) -> String {
 
     // Errno is only meaningful on a failure; a successful call leaves whatever
     // the previous one set.
-    if signed < 0 && exit.errno != 0
-        && let Some(name) = table.errno_name(exit.errno) {
-            out.push(' ');
-            out.push_str(name);
-        }
+    if signed < 0
+        && exit.errno != 0
+        && let Some(name) = table.errno_name(exit.errno)
+    {
+        out.push(' ');
+        out.push_str(name);
+    }
     out
 }
 

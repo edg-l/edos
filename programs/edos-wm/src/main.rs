@@ -448,13 +448,15 @@ fn validate_window_state(
     resize_state: &mut Option<ResizeState>,
 ) {
     if let Some(ref drag) = *drag_state
-        && !windows.iter().any(|w| w.id == drag.window_id) {
-            *drag_state = None;
-        }
+        && !windows.iter().any(|w| w.id == drag.window_id)
+    {
+        *drag_state = None;
+    }
     if let Some(ref resize) = *resize_state
-        && !windows.iter().any(|w| w.id == resize.window_id) {
-            *resize_state = None;
-        }
+        && !windows.iter().any(|w| w.id == resize.window_id)
+    {
+        *resize_state = None;
+    }
 }
 
 /// Determine the cursor shape based on current interaction state and hover position.
@@ -827,10 +829,9 @@ fn main() {
                         && w.width == slot.width
                         && w.height == slot.height
                 });
-                if !still_here
-                    && let Some(r) = slot.dirty_rect().clipped(screen_w, screen_h) {
-                        dirty.mark_dirty(r);
-                    }
+                if !still_here && let Some(r) = slot.dirty_rect().clipped(screen_w, screen_h) {
+                    dirty.mark_dirty(r);
+                }
             }
 
             // Mark cursor regions dirty when cursor moved.
@@ -922,12 +923,13 @@ fn main() {
         // not cover. Reachable with the pointer perfectly still: releasing the
         // button at the end of a drag while over a resize edge, or a window
         // moving or resizing under it.
-        if !hw_cursor && cursor.shape() != previous_shape
+        if !hw_cursor
+            && cursor.shape() != previous_shape
             && let Some(r) = DirtyRect::new(cursor.x, cursor.y, CURSOR_SIZE, CURSOR_SIZE)
                 .clipped(screen_w, screen_h)
-            {
-                dirty.mark_dirty(r);
-            }
+        {
+            dirty.mark_dirty(r);
+        }
 
         // The desktop menu is compositor-owned too. While it is open its
         // rectangle joins the dirty set every frame, but the frame it closes or

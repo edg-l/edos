@@ -76,7 +76,11 @@ impl TraceRecord {
             0
         } else {
             let prev = self.str_lens[slot - 1];
-            if Self::is_length(prev) { prev as usize } else { 0 }
+            if Self::is_length(prev) {
+                prev as usize
+            } else {
+                0
+            }
         };
         self.strs.get(start..start + len as usize)
     }

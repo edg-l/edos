@@ -154,55 +154,56 @@ impl VBoxLayout {
         let mut y = content_y;
         for (i, item) in self.items.iter().enumerate() {
             if let Some(id) = item.widget_id
-                && let Some(widget) = container.get_mut(id) {
-                    let item_height = actual_heights[i].saturating_sub(item.margin.vertical());
-                    let item_y = y + item.margin.top as i32;
+                && let Some(widget) = container.get_mut(id)
+            {
+                let item_height = actual_heights[i].saturating_sub(item.margin.vertical());
+                let item_y = y + item.margin.top as i32;
 
-                    // Calculate widget width based on policy
-                    let widget_width = match item.width_policy {
-                        SizePolicy::Fixed(w) => w,
-                        SizePolicy::Preferred => widget.size_hint().preferred_width,
-                        SizePolicy::Expand { .. } => {
-                            content_width.saturating_sub(item.margin.horizontal())
-                        }
-                    };
+                // Calculate widget width based on policy
+                let widget_width = match item.width_policy {
+                    SizePolicy::Fixed(w) => w,
+                    SizePolicy::Preferred => widget.size_hint().preferred_width,
+                    SizePolicy::Expand { .. } => {
+                        content_width.saturating_sub(item.margin.horizontal())
+                    }
+                };
 
-                    // Calculate widget height
-                    let widget_height = match item.height_policy {
-                        SizePolicy::Fixed(h) => h,
-                        SizePolicy::Preferred => widget.size_hint().preferred_height,
-                        SizePolicy::Expand { .. } => item_height,
-                    };
+                // Calculate widget height
+                let widget_height = match item.height_policy {
+                    SizePolicy::Fixed(h) => h,
+                    SizePolicy::Preferred => widget.size_hint().preferred_height,
+                    SizePolicy::Expand { .. } => item_height,
+                };
 
-                    // Calculate x position based on horizontal alignment
-                    let available_width = content_width.saturating_sub(item.margin.horizontal());
-                    let x = match item.alignment.horizontal {
-                        HAlign::Start => content_x + item.margin.left as i32,
-                        HAlign::Center => {
-                            content_x
-                                + item.margin.left as i32
-                                + (available_width.saturating_sub(widget_width) / 2) as i32
-                        }
-                        HAlign::End => {
-                            content_x
-                                + item.margin.left as i32
-                                + available_width.saturating_sub(widget_width) as i32
-                        }
-                        HAlign::Stretch => content_x + item.margin.left as i32,
-                    };
+                // Calculate x position based on horizontal alignment
+                let available_width = content_width.saturating_sub(item.margin.horizontal());
+                let x = match item.alignment.horizontal {
+                    HAlign::Start => content_x + item.margin.left as i32,
+                    HAlign::Center => {
+                        content_x
+                            + item.margin.left as i32
+                            + (available_width.saturating_sub(widget_width) / 2) as i32
+                    }
+                    HAlign::End => {
+                        content_x
+                            + item.margin.left as i32
+                            + available_width.saturating_sub(widget_width) as i32
+                    }
+                    HAlign::Stretch => content_x + item.margin.left as i32,
+                };
 
-                    // Calculate y position based on vertical alignment within allocated space
-                    let final_y = match item.alignment.vertical {
-                        VAlign::Start => item_y,
-                        VAlign::Center => {
-                            item_y + (item_height.saturating_sub(widget_height) / 2) as i32
-                        }
-                        VAlign::End => item_y + item_height.saturating_sub(widget_height) as i32,
-                        VAlign::Stretch => item_y,
-                    };
+                // Calculate y position based on vertical alignment within allocated space
+                let final_y = match item.alignment.vertical {
+                    VAlign::Start => item_y,
+                    VAlign::Center => {
+                        item_y + (item_height.saturating_sub(widget_height) / 2) as i32
+                    }
+                    VAlign::End => item_y + item_height.saturating_sub(widget_height) as i32,
+                    VAlign::Stretch => item_y,
+                };
 
-                    widget.set_position(x, final_y);
-                }
+                widget.set_position(x, final_y);
+            }
 
             y += actual_heights[i] as i32 + self.spacing as i32;
         }

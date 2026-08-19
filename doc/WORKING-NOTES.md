@@ -9814,3 +9814,37 @@ somewhere confusing later. The failure names the gate holding the slot.
 Also worth knowing: a gate that dies without releasing its guest leaves a QEMU
 holding the slot, and the next `make` fails on that same `stop`. `scripts/edos-vm
 status` names the pid and `stop --force` clears it.
+
+## `make clippy` and `make fmt-check` are gates now (2026-08-19)
+
+Both trees are clippy-clean at `-D warnings` and both are wired into CI. The
+kernel job had been gated for a while; userspace never was, which is how it
+accumulated 137 warnings nobody saw.
+
+**Two of those were deny-level lints that made `cargo clippy` on `programs/`
+fail outright**, which is why the other 135 were invisible: the run aborted
+before reaching them. Worth knowing as a shape -- a lint gate that has never
+been green does not degrade gracefully, it just stops reporting.
+
+One of the two was a real behavioural bug. `top`'s interval wait never looped:
+every path through it broke, so any keystroke forced an immediate redraw,
+contradicting the comment directly above it. `handle_key` returned a bare bool
+and could not distinguish "changed an option" from "ignored". `uniq` had
+another, found only once `-D warnings` was on: `lines().filter_map(|l| l.ok())`
+spins forever on a persistent read error, where `map_while(Result::ok)` stops.
+
+**A grep for `^warning:` undercounts.** Several clippy messages begin with a
+backtick (``warning: `filter_map()` will run forever...``), so a count keyed on
+a leading letter misses them. The honest measure is the exit code under
+`-D warnings`, which is what `make clippy` uses.
+
+**`.cargo/config.toml` is found relative to the working directory, not to
+`--manifest-path`.** `cargo +edos clippy --manifest-path programs/Cargo.toml`
+run from the repo root silently ignores `programs/.cargo/config.toml`, so it
+loses both the default target and the workspace-wide lint allow. The make rule
+and the CI step both `cd programs` first. This cost a confusing round where the
+same command passed locally and failed from the root.
+
+`clippy::too_many_arguments` is allowed globally rather than per site:
+`kernel/src/main.rs` for the kernel, `programs/.cargo/config.toml` for the
+131-member workspace, where the per-crate attribute would mean 131 edits.

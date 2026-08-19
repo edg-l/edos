@@ -467,6 +467,34 @@ distclean: clean clean-sata clean-nvme
 .PHONY: fmt
 fmt:
 	$(MAKE) -C kernel fmt
+	cargo +edos fmt --manifest-path programs/Cargo.toml --all
+	@for m in tools/efs-mkfs tools/efs-fsck libs/efs-common libs/intrusive_list \
+	          libs/window-abi libs/edos-trace-abi; do \
+		[ -f $$m/Cargo.toml ] && cargo fmt --manifest-path $$m/Cargo.toml; \
+	done
+
+# The gate form of `fmt`: reports rather than rewrites, so CI fails on
+# unformatted code instead of silently fixing it in a checkout nobody keeps.
+.PHONY: fmt-check
+fmt-check:
+	cargo fmt --manifest-path kernel/Cargo.toml -- --check
+	cargo +edos fmt --manifest-path programs/Cargo.toml --all -- --check
+	@for m in tools/efs-mkfs tools/efs-fsck libs/efs-common libs/intrusive_list \
+	          libs/window-abi libs/edos-trace-abi; do \
+		[ -f $$m/Cargo.toml ] && cargo fmt --manifest-path $$m/Cargo.toml -- --check; \
+	done
+
+# Clippy over the kernel's every feature combination and the whole userspace
+# workspace, warnings denied. `clippy::too_many_arguments` is allowed globally
+# (kernel/src/main.rs, programs/.cargo/config.toml); everything else is meant
+# to stay at zero.
+.PHONY: clippy
+clippy: programs
+	$(MAKE) -C kernel clippy
+	# Run from inside programs/: cargo discovers .cargo/config.toml relative to
+	# the working directory, not to --manifest-path, so the workspace-wide
+	# `too_many_arguments` allow (and the default target) are only picked up here.
+	cd programs && cargo +edos clippy --all-targets -- -D warnings
 
 .PHONY: programs
 programs:

@@ -158,8 +158,8 @@ impl Browser {
         let mut events = [WindowEvent::default(); 16];
         loop {
             if let Ok(count) = self.window.poll_events(&mut events) {
-                for index in 0..count {
-                    if !self.handle(events[index]) {
+                for event in events.iter().take(count) {
+                    if !self.handle(*event) {
                         return;
                     }
                 }
@@ -497,10 +497,12 @@ impl Browser {
         // carrying no fragment is a reload, which is what a browser does with
         // one and what the page that wrote it meant.
         if let Some(fragment) = fragment
-            && self.loading.is_none() && (page.is_empty() || page == self.url) {
-                self.scroll_to(fragment);
-                return;
-            }
+            && self.loading.is_none()
+            && (page.is_empty() || page == self.url)
+        {
+            self.scroll_to(fragment);
+            return;
+        }
         self.begin(page, true, 0, fragment.map(str::to_string));
     }
 

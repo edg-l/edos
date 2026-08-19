@@ -1157,18 +1157,20 @@ impl BlendMode {
 
                 // Blend factor based on relative intensities (0-255)
                 let total_intensity = src_intensity + dst_intensity;
-                if total_intensity == 0 {
-                    Color::from_rgb(0, 0, 0)
-                } else {
-                    let src_factor = (src_intensity * 255) / total_intensity;
-                    let dst_factor = 255 - src_factor;
+                match (src_intensity * 255).checked_div(total_intensity) {
+                    None => Color::from_rgb(0, 0, 0),
+                    Some(src_factor) => {
+                        let dst_factor = 255 - src_factor;
 
-                    let r = (src.red() as u32 * src_factor + dst.red() as u32 * dst_factor) / 255;
-                    let g =
-                        (src.green() as u32 * src_factor + dst.green() as u32 * dst_factor) / 255;
-                    let b = (src.blue() as u32 * src_factor + dst.blue() as u32 * dst_factor) / 255;
+                        let r =
+                            (src.red() as u32 * src_factor + dst.red() as u32 * dst_factor) / 255;
+                        let g = (src.green() as u32 * src_factor + dst.green() as u32 * dst_factor)
+                            / 255;
+                        let b =
+                            (src.blue() as u32 * src_factor + dst.blue() as u32 * dst_factor) / 255;
 
-                    Color::from_rgb(r as u8, g as u8, b as u8)
+                        Color::from_rgb(r as u8, g as u8, b as u8)
+                    }
                 }
             }
             BlendMode::Add => {

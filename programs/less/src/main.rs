@@ -312,7 +312,7 @@ impl Pager {
         let doc = &self.documents[self.current];
         let total = doc.lines.len();
         let last = (doc.top + screen.text_rows()).min(total);
-        let percent = if total == 0 { 100 } else { last * 100 / total };
+        let percent = (last * 100).checked_div(total).unwrap_or(100);
         let mut status = doc.name.clone();
         if self.documents.len() > 1 {
             status.push_str(&format!(

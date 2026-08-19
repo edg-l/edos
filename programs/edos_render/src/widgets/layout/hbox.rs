@@ -181,55 +181,54 @@ impl HBoxLayout {
         let mut x = content_x;
         for (i, item) in self.items.iter().enumerate() {
             if let Some(id) = item.widget_id
-                && let Some(widget) = container.get_mut(id) {
-                    let item_width = actual_widths[i].saturating_sub(item.margin.horizontal());
-                    let item_x = x + item.margin.left as i32;
+                && let Some(widget) = container.get_mut(id)
+            {
+                let item_width = actual_widths[i].saturating_sub(item.margin.horizontal());
+                let item_x = x + item.margin.left as i32;
 
-                    // Calculate widget height based on policy
-                    let widget_height = match item.height_policy {
-                        SizePolicy::Fixed(h) => h,
-                        SizePolicy::Preferred => widget.size_hint().preferred_height,
-                        SizePolicy::Expand { .. } => {
-                            content_height.saturating_sub(item.margin.vertical())
-                        }
-                    };
+                // Calculate widget height based on policy
+                let widget_height = match item.height_policy {
+                    SizePolicy::Fixed(h) => h,
+                    SizePolicy::Preferred => widget.size_hint().preferred_height,
+                    SizePolicy::Expand { .. } => {
+                        content_height.saturating_sub(item.margin.vertical())
+                    }
+                };
 
-                    // Calculate widget width
-                    let widget_width = match item.width_policy {
-                        SizePolicy::Fixed(w) => w,
-                        SizePolicy::Preferred => widget.size_hint().preferred_width,
-                        SizePolicy::Expand { .. } => item_width,
-                    };
+                // Calculate widget width
+                let widget_width = match item.width_policy {
+                    SizePolicy::Fixed(w) => w,
+                    SizePolicy::Preferred => widget.size_hint().preferred_width,
+                    SizePolicy::Expand { .. } => item_width,
+                };
 
-                    // Calculate y position based on vertical alignment
-                    let available_height = content_height.saturating_sub(item.margin.vertical());
-                    let y = match item.alignment.vertical {
-                        VAlign::Start => content_y + item.margin.top as i32,
-                        VAlign::Center => {
-                            content_y
-                                + item.margin.top as i32
-                                + (available_height.saturating_sub(widget_height) / 2) as i32
-                        }
-                        VAlign::End => {
-                            content_y
-                                + item.margin.top as i32
-                                + available_height.saturating_sub(widget_height) as i32
-                        }
-                        VAlign::Stretch => content_y + item.margin.top as i32,
-                    };
+                // Calculate y position based on vertical alignment
+                let available_height = content_height.saturating_sub(item.margin.vertical());
+                let y = match item.alignment.vertical {
+                    VAlign::Start => content_y + item.margin.top as i32,
+                    VAlign::Center => {
+                        content_y
+                            + item.margin.top as i32
+                            + (available_height.saturating_sub(widget_height) / 2) as i32
+                    }
+                    VAlign::End => {
+                        content_y
+                            + item.margin.top as i32
+                            + available_height.saturating_sub(widget_height) as i32
+                    }
+                    VAlign::Stretch => content_y + item.margin.top as i32,
+                };
 
-                    // Calculate x position based on horizontal alignment within allocated space
-                    let final_x = match item.alignment.horizontal {
-                        HAlign::Start => item_x,
-                        HAlign::Center => {
-                            item_x + (item_width.saturating_sub(widget_width) / 2) as i32
-                        }
-                        HAlign::End => item_x + item_width.saturating_sub(widget_width) as i32,
-                        HAlign::Stretch => item_x,
-                    };
+                // Calculate x position based on horizontal alignment within allocated space
+                let final_x = match item.alignment.horizontal {
+                    HAlign::Start => item_x,
+                    HAlign::Center => item_x + (item_width.saturating_sub(widget_width) / 2) as i32,
+                    HAlign::End => item_x + item_width.saturating_sub(widget_width) as i32,
+                    HAlign::Stretch => item_x,
+                };
 
-                    widget.set_position(final_x, y);
-                }
+                widget.set_position(final_x, y);
+            }
 
             x += actual_widths[i] as i32 + self.spacing as i32;
         }

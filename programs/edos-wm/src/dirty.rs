@@ -121,6 +121,10 @@ impl DirtyRegion {
     /// So a pair is merged only when the union costs little more than the two
     /// apart. Areas are summed without subtracting the overlap, which biases
     /// very slightly toward merging, and toward fewer ioctls.
+    #[allow(
+        clippy::mut_range_bound,
+        reason = "every `n -= 1` is followed at once by `break 'pairs`, so the                   ranges the loops already captured are never read again; the                   outer `loop` re-enters with the new `n`"
+    )]
     pub fn coalesced(&self) -> ([DirtyRect; MAX_RECTS], usize) {
         let mut out = self.rects;
         let mut n = self.count;

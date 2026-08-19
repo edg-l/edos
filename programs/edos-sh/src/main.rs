@@ -721,8 +721,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             let mut seq = [0u8; 2];
             if poll_stdin(20) {
                 let n = sys_read(0, &mut seq[..1]);
-                if n == 1 && seq[0] == b'[' {
-                    if poll_stdin(20) {
+                if n == 1 && seq[0] == b'[' && poll_stdin(20) {
+                    {
                         let n = sys_read(0, &mut seq[1..2]);
                         if n == 1 {
                             match seq[1] {
@@ -776,14 +776,12 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                                         let _ = std::io::stdout().flush();
                                     }
                                 }
-                                b'F' => {
-                                    // End
-                                    if cursor < line.len() {
-                                        let chars_after = line[cursor..].chars().count();
-                                        print!("\x1B[{}C", chars_after);
-                                        cursor = line.len();
-                                        let _ = std::io::stdout().flush();
-                                    }
+                                // End
+                                b'F' if cursor < line.len() => {
+                                    let chars_after = line[cursor..].chars().count();
+                                    print!("\x1B[{}C", chars_after);
+                                    cursor = line.len();
+                                    let _ = std::io::stdout().flush();
                                 }
                                 _ => {}
                             }
@@ -798,10 +796,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             // Tab completion: find the current word under the cursor
             let line_before_cursor = &line[..cursor];
             // Find start of the current word (scan back to last space)
-            let word_start = line_before_cursor
-                .rfind(|c: char| c == ' ')
-                .map(|p| p + 1)
-                .unwrap_or(0);
+            let word_start = line_before_cursor.rfind(' ').map(|p| p + 1).unwrap_or(0);
             let word = &line[word_start..cursor];
 
             // Determine if this is command position (first token on line)
@@ -930,10 +925,10 @@ fn main() {
         if std::env::var("HOME").is_err() {
             std::env::set_var("HOME", "/home/edos");
         }
-        if std::env::var("PWD").is_err() {
-            if let Ok(cwd) = std::env::current_dir() {
-                std::env::set_var("PWD", cwd);
-            }
+        if std::env::var("PWD").is_err()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            std::env::set_var("PWD", cwd);
         }
     }
 
@@ -1073,8 +1068,8 @@ fn main() {
         }
 
         // Handle interactive function definition: collect lines until `end`
-        if trimmed.starts_with("function ") {
-            let func_name = trimmed["function ".len()..].trim().to_string();
+        if let Some(after) = trimmed.strip_prefix("function ") {
+            let func_name = after.trim().to_string();
             if func_name.is_empty() {
                 eprintln!("sh: function: missing name");
                 continue;
@@ -1087,7 +1082,7 @@ fn main() {
                     break;
                 };
                 let body_line = body_input.trim_end_matches('\n').to_string();
-                let body_first = body_line.trim().split_whitespace().next().unwrap_or("");
+                let body_first = body_line.split_whitespace().next().unwrap_or("");
                 match body_first {
                     "if" | "while" | "for" | "function" => depth += 1,
                     "end" => {
@@ -1112,10 +1107,7 @@ fn main() {
         if let Some((cleaned_line, marker, raw)) = command::parse_heredoc_marker(trimmed_check) {
             // Collect heredoc body lines interactively until the marker is seen.
             let mut heredoc_content: Vec<String> = Vec::new();
-            loop {
-                let Some(hline) = read_line(&[], "> ") else {
-                    break;
-                };
+            while let Some(hline) = read_line(&[], "> ") {
                 let hline_trimmed = hline.trim_end_matches('\n').to_string();
                 if hline_trimmed.trim() == marker {
                     break;

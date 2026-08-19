@@ -128,10 +128,11 @@ fn print_unified_diff(path1: &str, path2: &str, edits: &[Edit], lines1: &[&str],
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (start, end) in &expanded {
         if let Some(last) = merged.last_mut()
-            && *start <= last.1 {
-                last.1 = *end;
-                continue;
-            }
+            && *start <= last.1
+        {
+            last.1 = *end;
+            continue;
+        }
         merged.push((*start, *end));
     }
 

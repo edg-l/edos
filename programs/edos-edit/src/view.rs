@@ -469,9 +469,9 @@ pub fn draw_pane(
 
         // Indent guides: one hairline per whole step of the line's own
         // leading whitespace, ending right where its text begins.
-        if guide_step > 0 {
+        {
             let lead = line.text.chars().take_while(|c| c.is_whitespace()).count();
-            for level in 1..=(lead / guide_step) {
+            for level in 1..=lead.checked_div(guide_step).unwrap_or(0) {
                 let col = level * guide_step;
                 if col < buffer.scroll_col || col >= buffer.scroll_col + visible_cols {
                     continue;

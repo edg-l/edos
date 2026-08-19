@@ -653,9 +653,10 @@ impl Terminal {
                 } else {
                     for opt in [&mut self.selection_start, &mut self.selection_end] {
                         if let Some((line_idx, _)) = opt
-                            && *line_idx < history_len {
-                                *line_idx -= 1;
-                            }
+                            && *line_idx < history_len
+                        {
+                            *line_idx -= 1;
+                        }
                     }
                 }
             }
@@ -1237,10 +1238,8 @@ impl Terminal {
 
         let mut current = std::mem::take(&mut self.current);
         current.resize(self.rows, Vec::new());
-        for display_row in 0..self.rows {
-            let mut row = std::mem::take(&mut current[display_row]);
-            self.render_row_into(display_row, &mut row);
-            current[display_row] = row;
+        for (display_row, row) in current.iter_mut().enumerate() {
+            self.render_row_into(display_row, row);
         }
         let cursor = self.cursor_mark();
 
@@ -1277,14 +1276,8 @@ impl Terminal {
 
         if redraw_all {
             self.fill_padding(buffer, buffer_width, buffer_height);
-            for display_row in 0..self.rows {
-                self.draw_row(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    display_row,
-                    &current[display_row],
-                );
+            for (display_row, row) in current.iter().enumerate() {
+                self.draw_row(buffer, buffer_width, buffer_height, display_row, row);
             }
         }
 
@@ -1294,15 +1287,9 @@ impl Terminal {
             moved_cursor || current[display_row] != record.rows[display_row]
         };
 
-        for display_row in 0..self.rows {
+        for (display_row, row) in current.iter().enumerate() {
             if !redraw_all && differs(&self.painted[slot], display_row) {
-                self.draw_row(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    display_row,
-                    &current[display_row],
-                );
+                self.draw_row(buffer, buffer_width, buffer_height, display_row, row);
             }
             if report_all || differs(&self.painted[slot ^ 1], display_row) {
                 first = first.min(display_row);

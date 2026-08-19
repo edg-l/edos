@@ -36,11 +36,8 @@ pub fn wait_foreground(pids: &[u64]) -> Foreground {
     for (i, &pid) in pids.iter().enumerate() {
         match process::waitpid_untraced_blocking(pid) {
             Some(ChildState::Stopped) => return Foreground::Stopped,
-            Some(ChildState::Exited(code)) => {
-                if i + 1 == pids.len() {
-                    last = code;
-                }
-            }
+            Some(ChildState::Exited(code)) if i + 1 == pids.len() => last = code,
+            Some(ChildState::Exited(_)) => {}
             None => {}
         }
     }

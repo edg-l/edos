@@ -45,9 +45,10 @@ fn wait_for_drain(target: u64) -> Option<u64> {
     let deadline = Instant::now() + DRAIN_TIMEOUT;
     loop {
         if let Some(c) = read_drain_count()
-            && c >= target {
-                return Some(c);
-            }
+            && c >= target
+        {
+            return Some(c);
+        }
         if Instant::now() >= deadline {
             return read_drain_count();
         }

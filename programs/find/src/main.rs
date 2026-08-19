@@ -94,11 +94,9 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     let (pn, sn) = (pat.len(), s.len());
 
     // dp[i][j] = does pat[..i] match s[..j]?
+    // `vec![false; _]` already clears every cell, so only dp[0] differs.
     let mut dp = vec![false; sn + 1];
     dp[0] = true;
-    for j in 1..=sn {
-        dp[j] = false;
-    }
 
     for i in 1..=pn {
         let pc = pat[i - 1];

@@ -170,21 +170,22 @@ pub fn fetch(
         let (mut reader, head, http11) = request_once(&target, opts)?;
 
         if is_redirect(head.status)
-            && let Some(location) = head.header("Location") {
-                let next = target.join(location)?;
-                // The body of a redirect is of no interest, but reading it is
-                // what leaves the connection at the start of the next response
-                // rather than in the middle of this one. A body that does not
-                // frame its own end is not worth draining, since draining it
-                // *is* reading to the close.
-                let drained = read_body(&mut reader, &head, opts, &mut io::sink(), &mut |_, _| {})
-                    .unwrap_or(false);
-                if opts.keep_alive && reusable(&head, http11, drained) {
-                    put_idle(pool_key(&target), reader);
-                }
-                target = next;
-                continue;
+            && let Some(location) = head.header("Location")
+        {
+            let next = target.join(location)?;
+            // The body of a redirect is of no interest, but reading it is
+            // what leaves the connection at the start of the next response
+            // rather than in the middle of this one. A body that does not
+            // frame its own end is not worth draining, since draining it
+            // *is* reading to the close.
+            let drained = read_body(&mut reader, &head, opts, &mut io::sink(), &mut |_, _| {})
+                .unwrap_or(false);
+            if opts.keep_alive && reusable(&head, http11, drained) {
+                put_idle(pool_key(&target), reader);
             }
+            target = next;
+            continue;
+        }
 
         // A gzipped body is inflated on the way to the sink rather than
         // buffered and inflated after: the caller asked for a stream, and a
@@ -383,19 +384,20 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
     let key = pool_key(target);
 
     if opts.keep_alive
-        && let Some(mut reader) = take_idle(&key) {
-            // A write to a connection the far end has since closed may well
-            // succeed -- the failure arrives as a reset or an empty read on
-            // the way back -- so this is not where a stale connection is
-            // caught. The retry is.
-            let sent = reader
-                .get_mut()
-                .write_all(request.as_bytes())
-                .and_then(|()| reader.get_mut().flush());
-            if sent.is_ok() {
-                return Ok((reader, request, true));
-            }
+        && let Some(mut reader) = take_idle(&key)
+    {
+        // A write to a connection the far end has since closed may well
+        // succeed -- the failure arrives as a reset or an empty read on
+        // the way back -- so this is not where a stale connection is
+        // caught. The retry is.
+        let sent = reader
+            .get_mut()
+            .write_all(request.as_bytes())
+            .and_then(|()| reader.get_mut().flush());
+        if sent.is_ok() {
+            return Ok((reader, request, true));
         }
+    }
 
     let addr = target.authority();
     let tcp = connect(&addr, opts.connect_timeout).map_err(|source| Error::Connect {
@@ -545,11 +547,12 @@ fn read_body(
         .and_then(|v| v.trim().parse().ok());
 
     if let Some(length) = declared
-        && length > opts.max_body {
-            return Err(Error::TooLarge {
-                limit: opts.max_body,
-            });
-        }
+        && length > opts.max_body
+    {
+        return Err(Error::TooLarge {
+            limit: opts.max_body,
+        });
+    }
 
     if chunked {
         read_chunked(reader, opts, sink, progress)?;

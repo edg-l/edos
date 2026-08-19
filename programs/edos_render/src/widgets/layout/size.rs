@@ -1,8 +1,7 @@
 //! Size policy and hints for layout calculations.
 
 /// Policy for how a widget should be sized in a layout.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum SizePolicy {
     /// Use an exact fixed size.
     Fixed(u32),
@@ -12,7 +11,6 @@ pub enum SizePolicy {
     /// Expand to fill available space, with relative weight.
     Expand { weight: f32 },
 }
-
 
 impl SizePolicy {
     /// Create an expand policy with the given weight.

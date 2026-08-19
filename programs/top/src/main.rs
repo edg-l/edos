@@ -175,7 +175,7 @@ fn sort_samples(samples: &mut [Sample], sort: Sort) {
                 .unwrap_or(0)
                 .cmp(&a.process.rss_kib.unwrap_or(0))
         }),
-        Sort::Time => samples.sort_by(|a, b| b.process.cpu_ms.cmp(&a.process.cpu_ms)),
+        Sort::Time => samples.sort_by_key(|s| core::cmp::Reverse(s.process.cpu_ms)),
         Sort::Pid => samples.sort_by_key(|s| s.process.pid),
     }
 }

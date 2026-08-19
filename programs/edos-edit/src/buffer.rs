@@ -408,10 +408,7 @@ impl Buffer {
     pub fn retokenize_from(&mut self, index: usize) {
         let lang = self.lang;
         let mut i = index;
-        loop {
-            let Some(line) = self.lines.get(i) else {
-                break;
-            };
+        while let Some(line) = self.lines.get(i) {
             let (tokens, ends_in_block) = syntax::tokenize(&line.text, line.opens_in_block, lang);
             if i == index {
                 self.lines[i].tokens = Some(tokens);
