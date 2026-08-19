@@ -9312,7 +9312,7 @@ slot:
 | `make host-tests` | 138 |
 | `make test AUDIODEV=none` | 58/58 |
 | `make guest-check` | 17/17 |
-| `make storage-check` | `fs-regression` EFS OK; FAT32 and `fsbench-run` still running at the cutoff |
+| `make storage-check` | `fs-regression` EFS OK, FAT32 OK, `fsbench-run /var` OK |
 | `make recovery-check` | green at `dfedf441`, not re-run here |
 | `make nvme-check` | 4/4 at `dfedf441`, not re-run here |
 
@@ -9321,7 +9321,8 @@ The last two rows carry over rather than being re-measured: `f3212014` is
 kernel and the images those two gates judge are byte-for-byte the ones they
 were run against. `storage-check` is the slow gate and the chain reached it
 last; run it first next time, since a stricter `sys_sync` is where a
-round-count latency change would show.
+round-count latency change would show. It found none: `fsbench-run /var` is
+green at `f3212014` with the fixed-point change in.
 
 `make orphan-check` and `make ssh-check` are the two of the nine this chain did
 not run. Both were green at `b769ee40`, but `orphan-check` is the one to run
