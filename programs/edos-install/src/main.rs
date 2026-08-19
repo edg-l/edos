@@ -94,6 +94,19 @@ fn mount(device_id: u64, partition_idx: u64, at: &str, fs_type: &str) {
     }
 }
 
+/// Forced writeback passes that could not write every dirty page, from
+/// `/proc/block_cache`. Zero when the file cannot be read: a missing counter
+/// must not be the reason an install fails.
+fn failed_sync_passes() -> u64 {
+    let Ok(text) = std::fs::read_to_string("/proc/block_cache") else {
+        return 0;
+    };
+    text.lines()
+        .find_map(|l| l.strip_prefix("failed_sync_passes:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// The partition table as the kernel now sees it: (index, guid) for `device_id`.
 fn partitions_of(device_id: u64) -> Vec<(u64, [u8; 16])> {
     let mut buf = vec![0u8; 4096];
@@ -340,7 +353,17 @@ fn main() {
     // dirty pages on the wire; a device flush issued before it commits an
     // empty write cache and leaves everything `sync` then submits sitting in
     // the drive's own cache, which a prompt reboot loses.
+    //
+    // `SYS_SYNC` returns no error -- a forced writeback pass that could not
+    // write every dirty page only logs and counts -- so the counter is read
+    // either side of it. An install that reports success over a partial
+    // flush is a disk that mounts and then does not boot, which costs far
+    // more to diagnose than it costs to notice here.
+    let passes_before = failed_sync_passes();
     unsafe { edos_lib::sys::syscall0(edos_lib::sys::SYS_SYNC) };
+    if failed_sync_passes() > passes_before {
+        fail("the kernel could not write every dirty page; the install is not durable");
+    }
     if device_ioctl(&dev, BLOCK_IOCTL_FLUSH) < 0 {
         fail("failed to flush the device");
     }

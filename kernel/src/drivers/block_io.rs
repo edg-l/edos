@@ -28,10 +28,20 @@
 //!   reach a point where it could be killed. The promise is counted on the
 //!   thread and checked at `thread_exit`.
 //!
+//! That last one binds the driver as well as the submitter, and the
+//! obligation runs the other way: **a driver that splits one request across
+//! several device commands must not complete the shared handle until every
+//! one of them has reported.** Completing it is what releases the submitting
+//! thread, so an early completion -- on the first part to fail, say -- ends
+//! the buffer's promised lifetime while the remaining commands still hold
+//! descriptors into subranges of it. The right shape is to record the first
+//! error and deliver it when the last part lands; `nvme::cancel_op::SplitOp`
+//! is the worked example.
+//!
 //! [`CancellableOp::cancel`]: crate::thread::cancel::CancellableOp::cancel
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use crate::thread::preempt::PreemptRwLock as RwLock;
 use crate::thread::scheduler::current_thread_weak;
@@ -54,7 +64,7 @@ pub enum BlockError {
 }
 
 impl BlockError {
-    const fn from_code(c: u32) -> Self {
+    pub(crate) const fn from_code(c: u32) -> Self {
         match c {
             2 => Self::Timeout,
             3 => Self::Cancelled,
@@ -242,6 +252,12 @@ const BLOCK_IO_FAILED: u8 = 2;
 /// [`complete`]: BlockIoHandle::complete
 /// [`wait`]: BlockIoHandle::wait
 pub struct BlockIoHandle {
+    /// Claimed before anything is published, so exactly one caller writes
+    /// the result. The state alone cannot serve: a waiter reads `error`
+    /// only after seeing `state` terminal, so `error` has to be published
+    /// first, and a losing caller that has already written it has corrupted
+    /// the winner's answer whatever the state CAS then decides.
+    claimed: AtomicBool,
     state: AtomicU8,
     error: AtomicU32,
     waiters: WaitQueue,
@@ -250,16 +266,27 @@ pub struct BlockIoHandle {
 impl BlockIoHandle {
     pub fn pending() -> Arc<Self> {
         Arc::new(Self {
+            claimed: AtomicBool::new(false),
             state: AtomicU8::new(BLOCK_IO_PENDING),
             error: AtomicU32::new(0),
             waiters: WaitQueue::new(),
         })
     }
 
-    /// Driver-side completion. Idempotent: only the first caller (whoever
-    /// wins the CAS) wakes waiters. Safe to call from any context that
-    /// can drive the wait queue.
+    /// Driver-side completion. Idempotent: only the first caller publishes
+    /// a result and wakes waiters, and a later call is discarded whole
+    /// rather than allowed to overwrite half of one. Safe to call from any
+    /// context that can drive the wait queue.
     pub fn complete(&self, result: Result<(), BlockError>) {
+        // The claim comes first because the two fields cannot be published
+        // atomically together. A caller that lost would otherwise have
+        // already stored its error code by the time it discovered it lost,
+        // and a late `Ok` stores zero -- which a waiter that reads
+        // `BLOCK_IO_FAILED` then decodes as a different, entirely plausible
+        // `BlockError`.
+        if self.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let (new_state, code) = match result {
             Ok(()) => (BLOCK_IO_SUCCESS, 0),
             Err(e) => (BLOCK_IO_FAILED, e as u32),
@@ -267,18 +294,8 @@ impl BlockIoHandle {
         // Publish error code before state so any waker that reads state in
         // a terminal value can trust the error field is set.
         self.error.store(code, Ordering::Release);
-        if self
-            .state
-            .compare_exchange(
-                BLOCK_IO_PENDING,
-                new_state,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            self.waiters.wake_all();
-        }
+        self.state.store(new_state, Ordering::Release);
+        self.waiters.wake_all();
     }
 
     /// Park until terminal. Indefinite.

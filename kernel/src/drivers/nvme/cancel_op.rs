@@ -77,6 +77,11 @@ pub struct SplitOp {
     handle: Arc<BlockIoHandle>,
     remaining: AtomicU32,
     failed: AtomicBool,
+    /// The first error any part reported, as a [`BlockError`] code. `0`
+    /// until one does: the discriminants start at 1, so zero is free to
+    /// mean "nothing recorded" and the CAS below cannot mistake a real
+    /// error for it.
+    error: AtomicU32,
 }
 
 impl SplitOp {
@@ -85,27 +90,38 @@ impl SplitOp {
             handle,
             remaining: AtomicU32::new(parts),
             failed: AtomicBool::new(false),
+            error: AtomicU32::new(0),
         }
     }
 
     /// Account for `parts` finished parts carrying one shared `result`.
     ///
-    /// The first error completes the caller's handle at once rather than
-    /// waiting for the rest: the data is already wrong, and every
-    /// still-outstanding part reclaims its own resources when the device
-    /// finishes with it. Success completes only when the last part lands,
-    /// and only if no part failed -- `BlockIoHandle::complete` publishes
-    /// its error code before the state CAS it may lose, so an `Ok` racing a
-    /// recorded failure would zero the error a waiter then reads.
+    /// The handle is completed exactly once, by the last part to report,
+    /// whether the request succeeded or failed. Completing early on the
+    /// first error would be wrong even though the data is already known
+    /// bad: the caller's handle is what releases the submitting thread, and
+    /// a `BlockBuffer::reaped_by_submitter` range must stay valid until
+    /// that thread reaps -- while every still-outstanding part holds live
+    /// PRP descriptors into a subrange of it, and a bounced read copies
+    /// back into it at retire time. So the error is recorded and delivered
+    /// at the end, and the caller waits out the parts the device still owns.
     pub fn parts_done(&self, parts: u32, result: Result<(), BlockError>) {
-        if result.is_err() {
+        if let Err(e) = result {
+            // First error wins; later ones are dropped rather than
+            // overwriting it, so the caller is told what went wrong first
+            // rather than last.
+            let _ = self
+                .error
+                .compare_exchange(0, e as u32, Ordering::AcqRel, Ordering::Acquire);
             self.failed.store(true, Ordering::Release);
-            self.handle.complete(result);
         }
-        if self.remaining.fetch_sub(parts, Ordering::AcqRel) == parts
-            && !self.failed.load(Ordering::Acquire)
-        {
-            self.handle.complete(Ok(()));
+        if self.remaining.fetch_sub(parts, Ordering::AcqRel) == parts {
+            let result = if self.failed.load(Ordering::Acquire) {
+                Err(BlockError::from_code(self.error.load(Ordering::Acquire)))
+            } else {
+                Ok(())
+            };
+            self.handle.complete(result);
         }
     }
 }

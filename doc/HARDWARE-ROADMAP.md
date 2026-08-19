@@ -58,7 +58,7 @@ FUA, VWC-gated flush, MDTS splitting, a staleness watchdog, controller reset and
 `CC.SHN` shutdown. Namespaces register into `block_io` at device id
 `3000 + controller * 64 + (nsid - 1)` and appear as `/dev/nvme<c>n<n>`, so an
 NVMe disk is a root and an `edos-install` target like any other. `/proc/nvme_stats`
-carries 19 counters. A guest boots with root on an NVMe namespace and no SATA
+carries 21 counters. A guest boots with root on an NVMe namespace and no SATA
 disk attached.
 
 **The staging note this section used to carry was not what got built.** It said

@@ -725,25 +725,52 @@ extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
 /// The comb's virtual range is never read or written again, so the stale
 /// kernel TLB entries the unmaps leave on other CPUs are unreachable and no
 /// shootdown is issued for them.
+/// Every failure path returns both virtual ranges: `vmalloc` reserves address
+/// space that nothing else reclaims, so a bare `?` here would spend a
+/// megabyte of it per attempt across the escalating candidate sizes the
+/// caller tries.
 fn discontiguous_buffer(pages: u64) -> Option<VirtAddr> {
     const PAGE: u64 = 4096;
     let flags = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
     let comb_bytes = pages * 2 * PAGE;
+    let buf_bytes = pages * PAGE;
     let comb = vmalloc(comb_bytes)?;
-    let buf = vmalloc(pages * PAGE)?;
+    let Some(buf) = vmalloc(buf_bytes) else {
+        vfree(comb, comb_bytes);
+        return None;
+    };
 
     let mut mapper = memory_mapper();
-    mapper.map_memory(comb, comb_bytes, flags).ok()?;
-    for i in (0..pages * 2).step_by(2) {
-        mapper.unmap_memory(comb + i * PAGE, PAGE).ok()?;
-    }
-    mapper.map_memory(buf, pages * PAGE, flags).ok()?;
-    for i in (1..pages * 2).step_by(2) {
-        mapper.unmap_memory(comb + i * PAGE, PAGE).ok()?;
+    let mut build = || -> Option<()> {
+        mapper.map_memory(comb, comb_bytes, flags).ok()?;
+        for i in (0..pages * 2).step_by(2) {
+            mapper.unmap_memory(comb + i * PAGE, PAGE).ok()?;
+        }
+        mapper.map_memory(buf, buf_bytes, flags).ok()?;
+        for i in (1..pages * 2).step_by(2) {
+            mapper.unmap_memory(comb + i * PAGE, PAGE).ok()?;
+        }
+        Some(())
+    };
+    let built = build().is_some();
+    if !built {
+        // A failure leaves the comb in a half-punched state, so it is torn
+        // down a page at a time: `unmap_memory` propagates `PageNotMapped`
+        // and would stop at the first hole if handed the whole range.
+        for i in 0..pages * 2 {
+            let _ = mapper.unmap_memory(comb + i * PAGE, PAGE);
+        }
+        for i in 0..pages {
+            let _ = mapper.unmap_memory(buf + i * PAGE, PAGE);
+        }
     }
     drop(mapper);
     vfree(comb, comb_bytes);
+    if !built {
+        vfree(buf, buf_bytes);
+        return None;
+    }
 
     Some(buf)
 }

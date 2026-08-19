@@ -2167,9 +2167,9 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,241 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,910 code lines | `tokei -t=Rust kernel/src` |
-| NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
+| Rust | 116,276 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,932 code lines | `tokei -t=Rust kernel/src` |
+| NVMe driver | 2,172 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
 | commits | 1,535 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
@@ -9679,3 +9679,59 @@ that refuses while a gate holds the slot. Both went through, because a make
 rule's prerequisites run before the gate script that claims the slot. That
 ordering is what makes the strict `stop` safe to depend on: the refusal is for
 a *second* gate, not for the one whose own prerequisites are still building.
+
+## A completion handle published its error outside the CAS that owned it (2026-08-19)
+
+`BlockIoHandle::complete` stored the error code *before* the state CAS that
+decides idempotence:
+
+```rust
+self.error.store(code, Ordering::Release);
+if self.state.compare_exchange(PENDING, new_state, ..).is_ok() {
+    self.waiters.wake_all();
+}
+```
+
+The store has to come first, because a waiter reads `error` only after it has
+seen `state` terminal. But it is unconditional, so a caller that goes on to
+*lose* the CAS has already overwritten the winner's answer. A late
+`complete(Ok(()))` stores zero, and a waiter that reads `BLOCK_IO_FAILED`
+decodes that zero through `BlockError::from_code` into `Io` — a different,
+entirely plausible error that never happened.
+
+The fix is to claim before publishing anything: a `claimed: AtomicBool` swapped
+`true`, and whoever finds it already set returns without touching either field.
+The state is then a plain `store`, since the claim already picked the winner.
+
+**Two fields that must be read in a fixed order cannot be guarded by a CAS on
+the second one.** The CAS orders the *state*, and by the time it answers, the
+other field is already written.
+
+## A split NVMe request completed its caller while its siblings were still writing
+
+`SplitOp::parts_done` completed the caller's handle on the first error, on the
+reasoning that the data was already wrong and each still-outstanding part would
+reclaim its own bounce buffer and PRP list page when the device finished with
+it. Both halves of that are true, and the conclusion was still wrong: the
+caller's handle is what releases the submitting thread, and a
+`BlockBuffer::reaped_by_submitter` range is only promised to stay valid *until
+that thread reaps*. Every outstanding part holds live PRP descriptors into a
+`subrange` of it, and `retire_op` copies a bounced read back into it. So the
+early completion invites the device, and the driver, to write into a buffer
+whose owner has been told it may go.
+
+Reachable three ways: `issue_transfer` returning `NoMemory` part-way through the
+loop, any one part completing with a non-zero status, and the watchdog's
+fail-all, which fails one part and reaches the rest on a later pass. Latent
+rather than observed — a split needs a request over MDTS, 512 KiB on QEMU, and
+then an error on one part — and in a debug build the `borrowed_dma` assertion at
+`thread_exit` is what would catch it. A release build would not.
+
+`parts_done` records the first error and completes the handle exactly once, when
+`remaining` reaches zero, whatever the outcome. The caller waiting out parts the
+device still owns is not a cost to be optimised away; it is the contract.
+
+**The rule this is an instance of:** a handle that fans out to several device
+commands may not be completed until every one of them has reported, because
+completing it is what tells the owner of the buffer that nobody is reading it
+any more.

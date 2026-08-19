@@ -122,8 +122,11 @@ impl NvmeNamespace {
     ) -> Result<(u64, u64, Option<DmaBuffer>, Option<DmaBuffer>), BlockError> {
         // A caller's buffer is always a single contiguous virtual range
         // (Architecture Decision "PRP, and how it meets the NO_CACHE
-        // cost"); translating its first page is enough to know whether the
-        // dword-aligned, matching AHCI's own PRDT DBA rule.
+        // cost"), so translating its first page is enough to learn where
+        // the transfer physically begins. PRP1 must be dword-aligned (NVM
+        // Command Set 3.3.1), matching AHCI's own PRDT DBA rule, and a
+        // start that is not goes down the bounce path with everything else
+        // `build_prp` cannot describe.
         let vaddr = VirtAddr::new(buffer.as_ptr() as u64);
         let dword_aligned = match memory_mapper().translate(vaddr) {
             TranslateResult::Mapped { frame, offset, .. } => {
