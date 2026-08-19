@@ -542,7 +542,11 @@ Not performance, but found by this work and unfixed.
 - **`sys_sync` sometimes logs `journal still pending after 8 rounds`** even
   though the resulting image is fsck-clean. The bound is doing its job, but the
   loop takes more rounds to converge than the mechanism suggests it should
-  (`kernel/src/syscalls/io.rs`).
+  (`kernel/src/syscalls/io.rs`). The predicate it converges against is stricter
+  since `dfedf441` — `needs_sync_round` counts the open transaction, where
+  `needs_checkpoint` did not — so a run that hits the cap now means something
+  different from a run that hit it before, and the message has not been seen
+  since. Re-measure before acting on this: no gate run at `f3212014` logged it.
 - **A full filesystem is indistinguishable from an I/O error.** `alloc_block`
   returns `Error::IoError` when no group has a free block; `fs::Error` has no
   no-space variant, so userspace cannot report ENOSPC. `/proc/efs_stats`

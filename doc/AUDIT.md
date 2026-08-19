@@ -426,16 +426,19 @@ Beyond affinity (1.2), things that look like the next real improvements:
 
 ## 5. Smells
 
-- **204 `unwrap()`/`expect()` in kernel code.** Most are genuinely infallible
+- **170 `unwrap()`/`expect()` in kernel code** (`grep -rIno --include='*.rs' -e
+  '\.unwrap()' -e '\.expect(' kernel/src | wc -l`; 18 of them are in
+  `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests).
+  Most are genuinely infallible
   but the density makes the real ones hard to find. Worth a pass that converts
   the ones on I/O and parsing results, and leaves a comment on the ones that are
   structurally impossible. The ELF loader is done: its field reads go through
   `le_u16`/`le_u32`/`le_u64`/`le_i64`, which bound-check.
-- **`fs/` is 17.5k lines and `drivers/` 13.6k**, together over half the kernel's 61k.
-  Nothing wrong, but both are past the size where a module-level README pays for
-  itself.
-- **Only 6 TODO markers in 48k lines**, which is genuinely good hygiene; one of
-  them (1.6) was stale and is gone, leaving 5.
+- **`fs/` is 14.4k code lines and `drivers/` 12.7k** (`tokei -t=Rust
+  kernel/src/<dir>`), together over half the kernel's 53.9k. Nothing wrong, but
+  both are past the size where a module-level README pays for itself.
+- **Only 5 TODO markers in 53.9k code lines**, which is genuinely good hygiene;
+  one of them (1.6) was stale and is gone.
 
 ---
 

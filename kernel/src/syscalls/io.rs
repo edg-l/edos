@@ -2446,8 +2446,9 @@ pub fn sys_sync() {
         }
     }
     if !converged {
-        // Reaching the cap means `sync` returned with a committed transaction
-        // still un-checkpointed, which the next mount will replay.
+        // Reaching the cap means `sync` returned with a journal round still
+        // owing: a committed transaction the next mount will replay, or an
+        // open one holding metadata that has reached no disk at all.
         log!("sys_sync: journal still pending after {SYNC_MAX_ROUNDS} rounds");
     }
 

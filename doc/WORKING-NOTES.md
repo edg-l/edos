@@ -2153,8 +2153,9 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-19 (at v0.8.0, after the NVMe driver landed
-whole and `evicttest` went back into `guest-check`)
+## Counts, remeasured 2026-08-19 (at `f3212014`, after the NVMe driver landed
+whole, `evicttest` went back into `guest-check`, and `sys_sync` learned to wait
+for the open transaction)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2166,10 +2167,10 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,203 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,872 code lines | `tokei -t=Rust kernel/src` |
+| Rust | 116,241 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,910 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,524 | `git rev-list --count HEAD`, counting the commit that states it |
+| commits | 1,531 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -9298,10 +9299,11 @@ finished writing.
 
 ---
 
-## The whole gate set, run at `f27f37c1`
+## The whole gate set, run at `f3212014`
 
-All nine gates in the table above were run against the tree as it stands,
-plus the formatter, and every one is green:
+Every gate the overnight charter names was run against the tree as it stands,
+plus the formatter, in one serial chain — nothing here shares the single QEMU
+slot:
 
 | gate | verdict |
 |---|---|
@@ -9310,22 +9312,32 @@ plus the formatter, and every one is green:
 | `make host-tests` | 138 |
 | `make test AUDIODEV=none` | 58/58 |
 | `make guest-check` | 17/17 |
-| `make nvme-check` | 4/4 |
-| `make recovery-check` | replayed, files back |
-| `make storage-check` | `fs-regression` EFS OK, FAT32 OK, `fsbench-run /var` OK |
-| `make orphan-check` | the mount reclaimed 8 interrupted deletions, `efs-fsck` exit 0 |
-| `make ssh-check` | auth, refused password, exit status, 11.8 MB each way byte-identical, three concurrent sessions |
+| `make storage-check` | `fs-regression` EFS OK; FAT32 and `fsbench-run` still running at the cutoff |
+| `make recovery-check` | green at `dfedf441`, not re-run here |
+| `make nvme-check` | 4/4 at `dfedf441`, not re-run here |
 
-`nvme-check` stopped reading that way at `b769ee40`, three doc-only commits
-later: case 4 failed on both of two consecutive runs. The section below has the
-evidence and the fix; it is 4/4 again at `dfedf441`, where `make test` (58/58)
-and `make recovery-check` (replayed 1 transaction, files back) were re-run
-beside it.
+The last two rows carry over rather than being re-measured: `f3212014` is
+`dfedf441` plus one commit that touches this file and nothing else, so the
+kernel and the images those two gates judge are byte-for-byte the ones they
+were run against. `storage-check` is the slow gate and the chain reached it
+last; run it first next time, since a stricter `sys_sync` is where a
+round-count latency change would show.
 
-`storage-check` is the slow one and had not been seen whole since the NVMe work
-started: `fsbench-run` reports `total 19.3s` for `/var` and its
-`/proc/nvme_stats` sample carries no command errors, which is the only place
-the whole-set run touches the new driver while rooted on SATA.
+`make orphan-check` and `make ssh-check` are the two of the nine this chain did
+not run. Both were green at `b769ee40`, but `orphan-check` is the one to run
+first next time: unlinked-but-open files across a power cut is exactly the
+shape the `sys_sync` fixed-point change at `dfedf441` moves, and no gate has
+judged it since.
+
+This section used to report the same set at `f27f37c1`, where it was also
+green. That reading did not survive: `nvme-check` went red at `b769ee40`, three
+doc-only commits later, and stayed red through two more fixes before the actual
+cause — `sys_sync` converging one round early — was found. The sections below
+carry that evidence in the order it was found.
+
+`storage-check` is the slow one: `fs-regression` over EFS and FAT32 and then
+`fsbench-run /var`, and its `/proc/nvme_stats` sample is the only place a
+SATA-rooted whole-set run touches the new driver.
 
 Two things about running them unattended, both learned the same night:
 
