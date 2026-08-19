@@ -9493,3 +9493,33 @@ The install guest's own serial log from the 2026-08-19 repro
 so on that run nothing failed loudly. The new counter is what would say so; if
 case 4 fails again, read `failed_sync_passes` in `/proc/block_cache` on the
 install guest before theorising further.
+
+**The gate was re-run at 7a110a65 and is STILL RED — but it fails somewhere
+else now, and the new failure names the mechanism.** Cases 1, 2 and 3 pass and
+case 4's install passes; the boot from the installed disk gets further than it
+used to and then dies differently:
+
+```
+Root partition: UUID=... on device 3000
+efs journal: replay scan start tail_seq=4 tail_block=192
+efs journal: scanned, nothing to replay
+Root filesystem mounted
+efs: read hole at logical block 1 (byte 4096) of a 248448-byte file, 1 extents mapped
+Spawned bin/edos-init tid=20 cpu=0
+```
+
+No `resolve_inode: FileNotFound` any more: the directory tree and the inode
+allocations are durable now. What is not durable is **a file's extent list**.
+`bin/edos-init` has its correct on-disk size, 248448 bytes, and exactly one
+mapped extent, so everything past the first 4 KiB is a hole. The kernel spawns
+it anyway and the desktop never comes up.
+
+Size and extents come from different places, which is the whole lead:
+`page_cache_write` stamps the size **synchronously** through
+`pc_ops.update_size` — `vfs::flush_dirty_inodes` passes `None` for the size
+precisely because of that — while the extents the flush allocates ride the
+journal. So a file can reach disk with a current size and a stale extent list,
+which is exactly what this is. Start at the EFS extent-mapping write path and
+ask what enrols the extent update and whether `sys_sync`'s commit/checkpoint
+rounds actually cover it; do not start again at the block page cache, which the
+two fixes above have now exercised.
