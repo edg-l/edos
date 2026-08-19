@@ -11,9 +11,24 @@ use std::{
     fs::{self, File, read_to_string},
     io::Write,
     process::ExitCode,
+    thread::sleep,
+    time::{Duration, Instant},
 };
 
 const N_PER_DIR: u64 = 32;
+
+/// How long to wait for the drain count to catch up.
+///
+/// An unlinked file with dirty pages is pinned by the writeback list, which
+/// holds a strong reference until the writeback kthread flushes it, and that
+/// kthread wakes at most every five seconds. So on a filesystem with writeback
+/// the eviction lands on the next pass, not on the unlink, and anything
+/// shorter than a few periods measures the timer rather than the pipeline.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Poll interval while waiting. A spin would starve nothing on an SMP guest
+/// but says nothing useful either: the wait is dominated by a 5 s timer.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn read_drain_count() -> Option<u64> {
     let text = read_to_string("/proc/evict_stats").ok()?;
@@ -26,17 +41,19 @@ fn read_drain_count() -> Option<u64> {
     None
 }
 
-fn wait_for_drain(target: u64, timeout_iters: u32) -> Option<u64> {
-    for _ in 0..timeout_iters {
+fn wait_for_drain(target: u64) -> Option<u64> {
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    loop {
         if let Some(c) = read_drain_count() {
             if c >= target {
                 return Some(c);
             }
         }
-        // Busy-wait. The evict kthread runs concurrently; orphan processing
-        // is fast (a few AHCI writes per inode for EFS, noop for memfs).
+        if Instant::now() >= deadline {
+            return read_drain_count();
+        }
+        sleep(POLL_INTERVAL);
     }
-    read_drain_count()
 }
 
 fn test_dir(dir: &str) -> Result<(), String> {
@@ -55,7 +72,7 @@ fn test_dir(dir: &str) -> Result<(), String> {
     }
 
     let target = before + N_PER_DIR;
-    let after = wait_for_drain(target, 200_000)
+    let after = wait_for_drain(target)
         .ok_or_else(|| "failed to read /proc/evict_stats after".to_string())?;
     println!("evicttest: {dir} drain_count after  = {after} (expected >= {target})");
 

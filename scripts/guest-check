@@ -23,9 +23,6 @@ Not here, and why:
   * `orphantest` never returns either: it holds descriptors open and waits for
     the harness to cut power. `make orphan-check` is its gate.
   * `fstest` needs a reboot between its halves; `fs-regression` is its gate.
-  * `evicttest` does not pass on any filesystem and did not on v0.6.2 either;
-    see the todo. Putting a suite nobody has watched fail into a gate is how
-    this situation arose in the first place.
   * `syscallfuzz` is a fuzzer, not a fixed suite, and wants its own budget.
   * `tcptest` and `wintest` need the network and a window respectively; both
     belong here once they are made to report an exit code under automation.
@@ -58,6 +55,7 @@ SUITES = [
     ("inflighttest", "", 120),
     ("lookuptest", "", 120),
     ("pitest", "", 120),
+    ("evicttest", "", 120),
 ]
 
 MARKER = "GUESTCHECK"

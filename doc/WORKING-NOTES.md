@@ -165,8 +165,9 @@ the pipe-EOF path this could have broken.
 past fifteen minutes without reaching its own 200,000-iteration bound, because
 it reads `/proc/evict_stats` every iteration and each read stranded a
 descriptor in a `BTreeMap` that only grew. It now finishes in about a second —
-and fails honestly, `drain_count` 2 against an expected 34, which is the
-eviction defect it was written to catch and which the hang was hiding.
+and then failed honestly, `drain_count` advancing 0 against an expected 32 on
+`/var`. That second failure was the test's own impatience, not an eviction
+defect; the section below has the measurement.
 
 **The fork could not be checked at all, and now can.** `./x check library/std
 --target x86_64-unknown-edos` failed on a *pristine* `~/dev/rust` with 266
@@ -2172,7 +2173,7 @@ does not have to invent them.
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| guest suites | 16 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
+| guest suites | 17 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
 | `nvme-check` cases | 4 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, and install-and-reboot |
 | `unwrap()`/`expect()` in `kernel/src` | 170, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
@@ -9201,3 +9202,42 @@ one page a lucky heap allocation used to give.
 spending a fifth boot. The `build_iso` macro takes an optional fourth argument
 appended to the `root=UUID=` cmdline line only, so `edos-x86_64.iso` is
 unchanged and the `root=live` entry in both ISOs is unchanged.
+
+---
+
+## `evicttest` was measuring the writeback timer, not the evict pipeline
+
+The eviction pipeline was never broken. `/proc/evict_stats` now carries
+`posted_count` and `error_count` beside `drain_count`, and those three separate
+the three ways it could have failed: the orphan never reached the queue, the
+kthread never drained it, or `evict_inode` returned an error. Measured on a
+boot, `evicttest /var` moves `posted_count` and `drain_count` by exactly +32
+each with `error_count` 0. Nothing is lost.
+
+What the test got wrong is *when*. An unlinked file with dirty pages is pinned
+by `DIRTY_INODES`, which holds a **strong** `Arc<VfsInode>` so that closing the
+last descriptor cannot free pages that never reached the disk. `VfsInode::drop`
+— and therefore `post_evict` — cannot fire until writeback releases that pin,
+and `writeback_thread` waits up to five seconds per pass. So on any filesystem
+with writeback the eviction lands on the next pass, and `/tmp` (memfs, no
+writeback, no pin) drains instantly while `/var` (EFS) does not.
+
+The old test spun a fixed 200,000 iterations with no sleep, exhausted them in
+about 1.2 s, and gave up roughly four seconds before the orphans it created
+were posted. It waits on a 20 s wall-clock deadline now, polling every 100 ms.
+Observed on a real boot: `/tmp` passes in 0.7 s, `/var` in 5.0 s — one
+writeback period, which is the confirmation that the period is what it was
+waiting on. `evicttest` is back in `make guest-check`, which is 17 suites.
+
+Two traps this cost time on, both recurring:
+
+- The guest under `scripts/vmdrive` boots the **SATA disk**, and `make all`
+  does not rebuild `sata-disk.img`. A userspace fix appears to change nothing
+  until `make sata-disk.img` runs. This is the same trap `nvme-check` case 4
+  hit.
+- Writing back the pages of a file that has just been unlinked is pointless
+  I/O — the blocks are freed immediately afterwards. Dropping an orphan's dirty
+  pages at `mark_orphan` time would remove both the I/O and the delay, but
+  `remove_file` documents the opposite on purpose: live mappings keep reading
+  and writing through those pages. Not attempted; it belongs behind its own
+  measurement.

@@ -311,11 +311,15 @@ impl Procfs {
 
     fn render_evict_stats() -> String {
         use crate::fs::evict::{
-            EVICT_DROPPED_COUNT, EVICT_SYNC_FALLBACK_COUNT, evict_kthread_drain_count,
+            EVICT_DROPPED_COUNT, EVICT_ERROR_COUNT, EVICT_POSTED_COUNT, EVICT_SYNC_FALLBACK_COUNT,
+            evict_kthread_drain_count,
         };
         format!(
-            "drain_count: {}\ndropped_count: {}\nsync_fallback_count: {}\n",
+            "posted_count: {}\ndrain_count: {}\nerror_count: {}\n\
+             dropped_count: {}\nsync_fallback_count: {}\n",
+            EVICT_POSTED_COUNT.load(Ordering::Relaxed),
             evict_kthread_drain_count(),
+            EVICT_ERROR_COUNT.load(Ordering::Relaxed),
             EVICT_DROPPED_COUNT.load(Ordering::Relaxed),
             EVICT_SYNC_FALLBACK_COUNT.load(Ordering::Relaxed),
         )

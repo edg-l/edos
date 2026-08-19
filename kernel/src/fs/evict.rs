@@ -81,6 +81,18 @@ static EVICT_OVERFLOW: PreemptSpinlock<Vec<EvictRequest>> = PreemptSpinlock::new
 /// them, so this is queue-pressure telemetry and not a leak count.
 pub static EVICT_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Requests handed to [`post_evict`], before any queue-full fallback.
+///
+/// The pair (`posted_count`, `drain_count`) separates "the orphan never
+/// reached the queue" from "the kthread never drained it", which otherwise
+/// look identical from `/proc/evict_stats`.
+pub static EVICT_POSTED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// `evict_inode` calls the kthread completed with an error. Those do not
+/// advance `drain_count`, so without this a failing filesystem is
+/// indistinguishable from a parked kthread.
+pub static EVICT_ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Evictions the caller had to perform itself because the queue was full.
 ///
 /// A burst of unlinks fills a 256-deep queue in well under a second, so this
@@ -113,6 +125,7 @@ fn evict_queue() -> &'static ArrayQueue<EvictRequest> {
 /// Falls back to synchronous `evict_inode` if the queue is full and the caller
 /// is not the evict kthread. Panics if both conditions hold (D8).
 pub fn post_evict(mount_id: usize, ino: u64) {
+    EVICT_POSTED_COUNT.fetch_add(1, Ordering::Relaxed);
     match evict_queue().push(EvictRequest { mount_id, ino }) {
         Ok(()) => {
             if let Some(handle) = EVICT_HANDLE.get() {
@@ -235,9 +248,11 @@ fn overflow_is_empty() -> bool {
 
 fn evict_one(req: EvictRequest) {
     let Some(fs) = fs_by_mount_id(req.mount_id) else {
+        EVICT_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     };
     if let Err(e) = fs.evict_inode(req.ino) {
+        EVICT_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         crate::log!(
             "evict_kthread: evict_inode(mount={}, ino={}) failed: {:?}",
             req.mount_id,
