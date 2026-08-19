@@ -663,11 +663,6 @@ pub fn spawn_pipeline(stages: &[PipelineStage]) -> Vec<u64> {
             return pids;
         };
 
-        // The first stage leads the job's process group and the rest join it,
-        // so one Ctrl+C reaches every stage.
-        let leader = *pids.first().unwrap_or(&pid);
-        setpgid(pid, leader);
-
         pids.push(pid);
         prev_read_fd = read_fd;
     }

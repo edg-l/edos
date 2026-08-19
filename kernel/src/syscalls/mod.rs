@@ -2244,17 +2244,17 @@ fn do_spawn(
 
     let child_pid = user_thread.id.0;
 
-    // A child reading the terminal leads a new process group and that group
-    // becomes the terminal's foreground job, so Ctrl+C reaches it and not its
-    // spawner. A shell building a pipeline puts the remaining stages into this
-    // same group with `setpgid`, which is what makes one Ctrl+C stop all of it.
-    {
-        let child_info = get_thread_info_by_id(user_thread.id).unwrap();
-        let child_fd_table = child_info.lock().fd_table.clone();
-        if let Some(FileDescriptor::PtySlave(pty)) = child_fd_table.lock().get_fd(0).cloned() {
-            user_thread.pgid.store(child_pid, Ordering::Release);
-            ranked_lock!(RANK_PTY, "sys_spawn::foreground", pty).foreground_pgid = Some(child_pid);
-        }
+    // A child joins its spawner's process group, the way both fork paths
+    // already hand theirs down. Without it every spawned process leads a group
+    // of one, and a signal aimed at a group reaches only what was put there by
+    // hand: `sshd` hanging up on a disconnected session would kill the shell
+    // and leave the command it started running.
+    //
+    // Which group owns the terminal is not decided here. The kernel routes the
+    // signal to whatever group `tcsetpgrp` named; picking that group is job
+    // control, and job control is a shell's business.
+    if let Some(parent) = current_thread() {
+        user_thread.pgid.store(parent.pgid(), Ordering::Release);
     }
 
     let load_ns = spawn_start.elapsed().as_nanos() as u64;

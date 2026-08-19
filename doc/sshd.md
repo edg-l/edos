@@ -120,18 +120,26 @@ not the server. The escalation is aimed at the shell alone, because `SIGKILL`
 cannot be ignored and a group-wide one would take the connection thread with
 it, leaving the socket unclosed.
 
-**Known limitation: a grandchild can outlive the connection.** The shell dies,
-but what it started may not. A `Thread` in this kernel starts with `pgid` 0,
-which reads as "leads its own group", and only `fork` copies the parent's — a
-*spawned* child does not, so `sh -c 'sleep 3600'` leaves `sleep` in a group of
-its own that the hangup cannot name. Measured directly: `sh -c "sleep 300"`
-runs as pid 38 pgid 38 with its `sleep` as pid 39 pgid **39**. POSIX has a
-spawned child inherit the group, and making `do_spawn` do so is a one-line
-change — but it was tried here and did not move the observable, so something
-else is also at work and it was reverted rather than shipped unverified. The
-next step is to find what sets the child's group after `do_spawn` runs; the
-terminal case is explained (a child whose stdin is a pty slave deliberately
-leads a new group, so it becomes the foreground job), the pipe case is not.
+**A grandchild inherits the session's group.** `do_spawn` copies the spawner's
+`pgid` the way both `fork` paths already did, so everything the session shell
+starts shares the group the connection thread took before spawning it, and one
+`SIGHUP` reaches the whole tree. `sh -c "sleep 300"` and its `sleep` now read
+the same `pgid` in `/proc/processes`, where the `sleep` used to lead a group of
+its own that the hangup could not name.
+
+Inheritance alone was not enough, and that is why an earlier attempt at the
+one-line kernel change looked like it did nothing: `edos-sh` put every pipeline
+in a group of its own unconditionally, undoing the inheritance immediately
+after the spawn. Job control is an interactive shell's business, so the shell
+now only does it when it is interactive — a `-c` command and a script leave
+their children where they were started. The kernel likewise no longer decides
+that a child reading a pty leads a new group; an interactive shell claims the
+terminal for itself with `setpgid` and `tcsetpgrp`, which is where that policy
+belongs.
+
+An interactive session is the one case where the shell does leave the
+connection's group, since job control requires it. `Child::drop` therefore
+signals the shell's own group as well as the session's.
 
 ### With and without a pty
 

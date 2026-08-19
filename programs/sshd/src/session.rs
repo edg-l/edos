@@ -122,6 +122,13 @@ impl Drop for Child {
         // killing only the shell leaves the sleep reparented to init.
         let reaped = process::waitpid_nonblocking(self.pid).is_some();
         process::kill_group(self.pgid, process::SIGHUP);
+        // An interactive shell takes a process group of its own so that Ctrl+C
+        // reaches a job and not the shell, which puts it and everything it runs
+        // outside the session group above. That group is led by the shell, so
+        // its pid names it.
+        if self.pid != self.pgid {
+            process::kill_group(self.pid, process::SIGHUP);
+        }
         if reaped {
             return;
         }

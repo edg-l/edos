@@ -204,9 +204,12 @@ Quoting the marker suppresses expansion:
 Job Control
 -----------
 
-Each pipeline gets its own process group, and the terminal is handed to
-whichever group is in the foreground, so Ctrl+C on "sleep 30 | cat"
-kills both stages rather than one.
+An interactive shell puts each pipeline in a process group of its own,
+and hands the terminal to whichever group is in the foreground, so Ctrl+C
+on "sleep 30 | cat" kills both stages rather than one. A shell running a
+script or a -c command does none of that: its children stay in the group
+it was started in, so one signal aimed at that group reaches the whole
+tree, which is what lets sshd hang up on a session cleanly.
 
   sleep 60 &                Run in the background
   jobs                      List running and suspended jobs

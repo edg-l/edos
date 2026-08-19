@@ -22,19 +22,52 @@ static JOB_LIST: Mutex<jobs::JobList> = Mutex::new(jobs::JobList::new());
 /// to it every time a foreground job ends.
 static SHELL_PGID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Record the group the shell leads, so the terminal can be handed back to it.
+/// Whether this shell runs jobs in process groups of their own.
+///
+/// Only an interactive shell does. `sh -c` and a script leave every command in
+/// the group they were started in, so one signal aimed at that group reaches
+/// the whole tree: `sshd` hanging up on a session kills the command it ran and
+/// not just the shell that ran it.
+static JOB_CONTROL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn job_control() -> bool {
+    JOB_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Put a freshly spawned pipeline in a group of its own, led by its first
+/// stage, so that one Ctrl+C reaches every stage and no other job.
+fn group_job(pids: &[u64]) {
+    if !job_control() {
+        return;
+    }
+    let Some(&leader) = pids.first() else {
+        return;
+    };
+    for &pid in pids {
+        edos_lib::process::setpgid(pid, leader);
+    }
+}
+
+/// Take over job control: lead a group of the shell's own, hold the terminal,
+/// and record that group so it can be handed back after every job.
+///
+/// A child inherits its spawner's group, so a shell that did not do this would
+/// share the terminal's foreground group with everything it runs, and Ctrl+C
+/// would reach the shell along with the job.
 fn claim_terminal() {
+    JOB_CONTROL.store(true, std::sync::atomic::Ordering::Relaxed);
+    edos_lib::process::setpgid(0, 0);
     let pgid = edos_lib::process::getpgid(0);
     if pgid > 0 {
         SHELL_PGID.store(pgid as u64, std::sync::atomic::Ordering::Relaxed);
     }
+    reclaim_terminal();
 }
 
 /// Take the terminal back from a job.
 ///
-/// The kernel makes any spawned child whose standard input is the terminal the
-/// foreground process group, so this is needed after every job, background ones
-/// included: otherwise the next Ctrl+C goes to a job the user is not looking at.
+/// Needed after every job, background ones included: otherwise the next Ctrl+C
+/// goes to a job the user is not looking at.
 fn reclaim_terminal() {
     let pgid = SHELL_PGID.load(std::sync::atomic::Ordering::Relaxed);
     if pgid != 0 {
@@ -194,6 +227,7 @@ fn run_foreground(
     // Restore canonical mode for the child (echo + line buffering).
     edos_lib::io::pty_set_canonical(0);
     let pids = spawn::spawn_pipeline(stages);
+    group_job(&pids);
     for open in opened {
         open.close();
     }
@@ -202,7 +236,9 @@ fn run_foreground(
         return 127;
     }
 
-    edos_lib::process::tcsetpgrp(0, pids[0]);
+    if job_control() {
+        edos_lib::process::tcsetpgrp(0, pids[0]);
+    }
     let outcome = jobs::wait_foreground(&pids);
     reclaim_terminal();
     edos_lib::io::pty_set_raw(0);
@@ -234,9 +270,13 @@ fn run_background(segment: &str) -> i32 {
         Prepared::Builtin { cmd, args, open } => {
             let pid = edos_lib::process::fork();
             if pid == 0 {
-                // Lead a group of its own: a background job must not be in the
-                // shell's group, where Ctrl+C would reach it.
-                edos_lib::process::setpgid(0, 0);
+                // Under job control, lead a group of its own: a background job
+                // must not be in the shell's group, where Ctrl+C would reach
+                // it. A non-interactive shell has no job control and leaves it
+                // where it is, so a hangup aimed at the session reaches it.
+                if job_control() {
+                    edos_lib::process::setpgid(0, 0);
+                }
                 let fds = resolve_slots(&open.slots, [0, 1, 2]);
                 let result = if open.is_default() {
                     command::execute_command(&cmd, &args)
@@ -259,11 +299,11 @@ fn run_background(segment: &str) -> i32 {
         }
         Prepared::External { stages, opened } => {
             let pids = spawn::spawn_pipeline(&stages);
+            group_job(&pids);
             for open in opened {
                 open.close();
             }
-            // The kernel hands the terminal to a spawned child that reads it;
-            // a background job must not keep it.
+            // A background job must not hold the terminal.
             reclaim_terminal();
             if pids.is_empty() {
                 return 127;
