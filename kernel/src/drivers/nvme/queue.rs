@@ -3,7 +3,7 @@
 
 use core::{
     ptr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use alloc::{sync::Arc, vec::Vec};
@@ -39,6 +39,13 @@ struct CqState {
     phase: bool,
 }
 
+/// Pack the completion queue's head and phase into one word. Read back by
+/// [`NvmeQueue::has_pending_lockfree`]; see `cq_cursor` for why the pair must
+/// travel together.
+const fn cq_cursor(head: u16, phase: bool) -> u32 {
+    ((phase as u32) << 16) | head as u32
+}
+
 /// One submission/completion queue pair (admin, or one I/O pair).
 ///
 /// Command ids come from a single 64-bit bitmap capped at `cid_depth`, so the
@@ -57,6 +64,19 @@ pub struct NvmeQueue {
     /// outstanding. Woken by `free_cid`.
     cid_waitq: WaitQueue,
     free_cids: AtomicU64,
+    /// The completion queue's `(phase << 16) | head`, republished on every
+    /// change to `cq`. One atomic rather than two so a reader gets a
+    /// *consistent* pair: a head from before an update paired with a phase
+    /// from after it would name an entry whose phase bit means the opposite
+    /// of what the reader concludes.
+    ///
+    /// Exists so [`Self::has_pending_lockfree`] can answer without taking
+    /// `cq` (rank 186), which a park predicate must not do.
+    cq_cursor: AtomicU32,
+    /// Base of the completion queue ring. Stable for the queue's life --
+    /// `reset_state` re-zeroes the buffer but never moves it -- so a reader
+    /// outside the lock can index it.
+    cq_ring: *const CompletionQueueEntry,
     cid_depth: u8,
     sq_entries: u16,
     cq_entries: u16,
@@ -112,6 +132,10 @@ impl NvmeQueue {
 
         let sq_phys = sq_buffer.phys_addr();
         let cq_phys = cq_buffer.phys_addr();
+        let cq_ring = cq_buffer
+            .as_ptr()
+            .cast::<CompletionQueueEntry>()
+            .cast_const();
 
         let sq_tail_doorbell = unsafe {
             bar_virt
@@ -142,6 +166,8 @@ impl NvmeQueue {
             cmd_slots,
             cid_waitq: WaitQueue::new(),
             free_cids: AtomicU64::new(0),
+            cq_cursor: AtomicU32::new(cq_cursor(0, true)),
+            cq_ring,
             cid_depth,
             sq_entries,
             cq_entries,
@@ -303,6 +329,8 @@ impl NvmeQueue {
             unsafe {
                 ptr::write_bytes(cq.buffer.as_ptr(), 0, cq.buffer.size);
             }
+            self.cq_cursor
+                .store(cq_cursor(cq.head, cq.phase), Ordering::Release);
         }
         {
             let mut sq = ranked_lock!(RANK_NVME_SQ, "NvmeQueue.sq", self.sq);
@@ -313,6 +341,38 @@ impl NvmeQueue {
         // a `free_cid` that is never coming: the ops it was waiting behind
         // were failed, not completed.
         self.cid_waitq.wake_all();
+    }
+
+    /// Whether the entry at the completion queue's head carries the phase a
+    /// drain would accept -- that is, whether the device has posted work this
+    /// driver has not consumed. Takes no lock.
+    ///
+    /// This is the dispatcher's park predicate, and it has to be the *queue*
+    /// rather than an interrupt counter. "No interrupt since I last looked"
+    /// is not the same claim as "the queue is empty": an MSI-X message
+    /// coalesced with one already counted leaves a completion sitting here
+    /// with the counter unchanged, and a dispatcher parked on the counter
+    /// sleeps in front of work it could see, until the watchdog's sweep a
+    /// second later. That is worth roughly a 100 ms stall per occurrence in
+    /// practice -- the idle CPU's fallback timer -- and it is what made a
+    /// raw NVMe sweep slower than AHCI despite a better median.
+    ///
+    /// Staleness is safe in one direction only, which is the direction it
+    /// falls: a cursor read from before a drain names an entry that drain
+    /// already consumed, whose phase still matches the phase read with it, so
+    /// the answer is a spurious `true` and costs one empty pass. It cannot
+    /// produce a spurious `false`, which would be a missed wake.
+    pub fn has_pending_lockfree(&self) -> bool {
+        let cursor = self.cq_cursor.load(Ordering::Acquire);
+        let head = (cursor & 0xFFFF) as usize;
+        let phase = (cursor >> 16) != 0;
+        // SAFETY: `cq_ring` is the base of a `cq_entries`-long ring that
+        // lives as long as this queue, and `head` is always below that count
+        // because every writer wraps it. The read races the device's own DMA
+        // writes by design -- exactly as `drain`'s does -- which is why it is
+        // volatile and why the phase bit, not the payload, is what it trusts.
+        let entry = unsafe { ptr::read_volatile(self.cq_ring.add(head)) };
+        regs::cqe_phase(entry.dw3) == phase
     }
 
     /// Number of command ids `cmd_slots` was sized for, so a caller can
@@ -389,6 +449,10 @@ impl NvmeQueue {
                     ptr::write_volatile(self.cq_head_doorbell, cq.head as u32);
                 }
             }
+            // Republished under the lock, so a reader outside it never sees a
+            // cursor newer than the ring it describes.
+            self.cq_cursor
+                .store(cq_cursor(cq.head, cq.phase), Ordering::Release);
         }
         for (cid, status, dw0) in completions {
             f(cid, status, dw0);

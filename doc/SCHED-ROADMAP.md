@@ -557,6 +557,40 @@ drag the ratio towards 1 and understate the mechanism.
 
 `pitest` is in `make guest-check`, which is 17 suites now.
 
+## 7. Done: an idle CPU could halt with a runnable thread of its own (2026-08-19)
+
+Found from the storage side, not from here: an NVMe raw sweep was 2-4x slower
+than the same sweep on AHCI while posting a *better* median at every request
+size, and the gap was one ~100.0 ms outlier per test. 100.0 ms is
+`run_idle`'s fallback timer, so the stall was a CPU asleep on work it already
+had.
+
+`enqueue_ready` had three ways to tell a CPU it had work and all three could
+miss together: `mark_running_thread_need_resched` is a no-op on an idle CPU,
+`poke_idle_cpu` declines when `load() < 2` -- which is exactly one thread woken
+onto an idle CPU -- and `has_work` is cleared on the way into `run_idle`, so an
+enqueue racing that clear loses its flag. A thread landing between the decision
+to idle and `publish_idle()` was invisible to `claim_idle_cpu` as well, and
+waited for the timer.
+
+Fixed by separating the two duties. `wake_if_idle` pokes the CPU the thread was
+enqueued on, unconditionally; `poke_idle_cpu` keeps its guard, because
+recruiting a *second* CPU to steal is only worth an IPI when there is surplus.
+`run_idle` re-checks `queued()` -- not `has_work`, which can have been
+clobbered -- after publishing itself idle, with a `SeqCst` fence on each side
+so the two orders are exclusive.
+
+Worth 1.9-2.2x on NVMe throughput and about 10% on AHCI at 1 MiB, and it
+removes a ~100 ms tail from every IRQ-driven wake in the system. Full numbers
+and the two refuted diagnoses in
+`doc/bugs/2026-08-19-idle-cpu-halted-with-a-runnable-thread.md`.
+
+**The lesson for this document: a mean hides a rare stall.** The wake path had
+been measured here repeatedly and read healthy, because `switchbench` reports
+averages over a hot loop where the CPU never idles. What caught it was a
+benchmark that prints p50, p99 and max in the same row, on a workload that goes
+idle between operations.
+
 ## What has been tried and did not work
 
 - **A deadline-aware wakeup check.** Built and reverted 2026-08-15; the numbers

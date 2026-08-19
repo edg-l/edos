@@ -540,18 +540,30 @@ pub extern "C" fn nvme_driver_main() -> ! {
     // which re-runs Set Features and Create I/O Queue from the watchdog
     // thread while this one is live.
     //
-    // The predicate is the interrupt counter rather than the queues
-    // themselves. A park predicate runs with interrupts off after the CPU has
-    // pivoted onto the transition stack, so it must not take a lock any other
-    // thread can hold -- and the watchdog drains the I/O completion queue
-    // under `NvmeQueue.cq` from its own thread. Reading `seen` *before* the
-    // drain is what makes it lossless: a completion posted after the read is
-    // either picked up by this pass anyway, costing one spurious pass next
-    // time round, or lands after it and leaves the counter ahead, so the next
-    // park returns at once.
+    // The predicate asks the completion queues themselves, through
+    // `has_pending_lockfree`, and takes no lock doing it: a park predicate
+    // runs with interrupts off after the CPU has pivoted onto the transition
+    // stack, so it must not take `NvmeQueue.cq` (186), which the watchdog
+    // holds from its own thread.
+    //
+    // The interrupt counter is kept beside it, but only as the cheap half of
+    // an `or`. On its own it is the wrong question. "No interrupt since I
+    // last looked" does not mean "the queue is empty" -- an MSI-X message
+    // coalesced with one already counted leaves a completion posted and the
+    // counter unmoved -- and a dispatcher that parks on that sleeps in front
+    // of work until the watchdog sweeps a second later. Measured, that cost a
+    // ~100 ms stall per occurrence (the idle CPU's fallback timer) and made a
+    // raw NVMe sweep slower than AHCI on every request size despite a better
+    // median. The queue is the source of truth; the counter only saves a ring
+    // read when an interrupt has plainly already arrived.
     let mut seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
     loop {
-        thread_park_while(|| NVME_IRQS_FIRED.load(Ordering::Acquire) == seen);
+        thread_park_while(|| {
+            NVME_IRQS_FIRED.load(Ordering::Acquire) == seen
+                && !controllers
+                    .iter()
+                    .any(|c| c.io_queue().is_some_and(|q| q.has_pending_lockfree()))
+        });
         seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
         watchdog::DISPATCHER_PASSES.fetch_add(1, Ordering::Relaxed);
 

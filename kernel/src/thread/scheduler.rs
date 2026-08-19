@@ -300,8 +300,43 @@ impl Scheduler {
                 tid: thread.id.0
             });
             sc.mark_running_thread_need_resched();
+            // Two different duties, and they need different conditions.
+            // `wake_if_idle` wakes the CPU this thread was just put on, which
+            // matters most when that CPU has nothing else -- exactly the case
+            // `poke_idle_cpu` declines. `poke_idle_cpu` recruits a *second*
+            // CPU to steal, which is only worth an IPI when there is surplus.
+            sc.wake_if_idle();
             sc.poke_idle_cpu();
         })
+    }
+
+    /// Poke this CPU because a thread was just enqueued on it, if it has
+    /// published itself idle.
+    ///
+    /// `poke_idle_cpu` cannot serve here: it declines when `load() < 2`, and
+    /// a single thread woken onto an idle CPU is the case that needs the IPI
+    /// most. `load()`'s own contract says as much -- a stale count costs a
+    /// balance decision a slightly worse placement, but costs a wakeup a
+    /// thread nobody runs.
+    ///
+    /// The fence pairs with the one in `run_idle` between `publish_idle` and
+    /// its re-check of `queued`. Between them they make the two orders
+    /// exclusive: either this sees the idle bit and sends the IPI, or the
+    /// idling CPU sees the enqueue and does not halt. Without it both sides
+    /// can read stale and the thread waits for the 100 ms idle fallback timer.
+    fn wake_if_idle(&self) {
+        if self.cpu_index == NOT_TRACKED {
+            return;
+        }
+        core::sync::atomic::fence(Ordering::SeqCst);
+        let bit = 1u64 << self.cpu_index;
+        if IDLE_CPU_MASK.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+            // Not idle: it is running something and will reschedule itself.
+            return;
+        }
+        if self.cpu != get_percpu_data().lapic_id.get() {
+            self.send_reschedule_ipi(self.cpu);
+        }
     }
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
@@ -734,6 +769,18 @@ impl Scheduler {
             // interrupts were off is delivered after the `hlt` begins rather
             // than before it, so the wakeup cannot be missed.
             self.publish_idle();
+            // Re-check *after* publishing, and against `queued` rather than
+            // `has_work`: the flag was cleared on the way in here and an
+            // enqueue that raced that clear has already lost it, whereas the
+            // runqueue count is authoritative. Skipping this is a 100 ms
+            // stall -- the fallback timer above is the only thing that would
+            // then notice the work.
+            core::sync::atomic::fence(Ordering::SeqCst);
+            if self.queued() > 0 {
+                self.has_work.store(true, Ordering::Release);
+                self.take_idle();
+                continue;
+            }
             x86_64::instructions::interrupts::enable_and_hlt();
             poked = !self.take_idle();
 

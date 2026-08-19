@@ -2167,10 +2167,10 @@ does not have to invent them.
 | userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,276 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,932 code lines | `tokei -t=Rust kernel/src` |
-| NVMe driver | 2,172 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,535 | `git rev-list --count HEAD`, counting the commit that states it |
+| Rust | 116,323 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,979 code lines | `tokei -t=Rust kernel/src` |
+| NVMe driver | 2,199 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
+| commits | 1,537 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -9735,3 +9735,45 @@ device still owns is not a cost to be optimised away; it is the contract.
 commands may not be completed until every one of them has reported, because
 completing it is what tells the owner of the buffer that nobody is reading it
 any more.
+
+## Is NVMe faster than AHCI? Yes, once the scheduler stopped napping (2026-08-19)
+
+The question was asked directly and the first answer was wrong. `fsbench raw`
+on both devices in one boot said NVMe lost at every request size, 2-4x. It also
+said NVMe's *median* won at every request size. Both were true, and the second
+is the one that mattered: the throughput gap was one ~100 ms stall per test
+against p99s in the tens of microseconds.
+
+That 100 ms is `Scheduler::run_idle`'s fallback timer, not a device time.
+Root cause and fix in
+`doc/bugs/2026-08-19-idle-cpu-halted-with-a-runnable-thread.md`; it is a
+scheduler defect that every IRQ-driven driver was paying, not a storage one.
+
+Answer, best of five sweeps per device in one boot, after the fix:
+
+| request | NVMe | AHCI |
+|---|---|---|
+| 512 B | 77.7 MiB/s | 37.9 |
+| 4 KiB | 92.4 | 41.2 |
+| 64 KiB | 674 | 455 |
+| 1 MiB | 996 | 983 |
+
+**How to ask this question again, because three of the four ways are wrong.**
+
+- Both devices in **one boot** (`edos-vm start --nvme-disk nvme-disk.img`
+  keeps SATA). Two boots compare host cache states, not drivers.
+- `fsbench raw /dev/sdX` and `raw /dev/nvme0n1`, not a filesystem sweep. A
+  filesystem run measures EFS's 992 KiB batching against NVMe's MDTS splitting
+  and the page cache in front of both.
+- **Best of several sweeps, not one.** Consecutive 4 KiB sweeps in an identical
+  configuration read 21.4 and 57.6 MiB/s. A single run invents findings; the
+  guest is running a desktop beside the benchmark, and interference only ever
+  makes a round look slower.
+- **Read the max column, not just MiB/s.** The whole finding lived there.
+
+`/dev/ram0` in the same boot is the control worth having: no storage driver at
+all, so it bounds what everything above the driver can deliver.
+
+Not settled by this: the images differ (`sata-disk.img` is qcow2,
+`nvme-disk.img` raw), and QEMU's device models are not silicon. The comparison
+rests on the latency distribution, which those differences do not explain.

@@ -254,6 +254,31 @@ bulk commands up to 992 KiB: 21 MiB/s at 512 B, 151 at 4 KiB, 1047 at 64 KiB,
 `mmap load 4MiB` faults in at 25 MiB/s against 1739 MiB/s for a `read` of the
 same bytes, roughly 70x.
 
+### 4. NVMe against AHCI, and the stall that hid the answer
+
+`fsbench raw` on both devices in one boot, best of five sweeps each, is how the
+question "is NVMe faster?" is settled. It is also how a 100 ms scheduler stall
+was found, because the answer flipped once the stall was fixed:
+
+| request | NVMe before | NVMe after | AHCI after | ram0 (no driver) |
+|---|---|---|---|---|
+| 512 B | 32.4 MiB/s | 77.7 | 37.9 | 343 |
+| 4 KiB | 24.3 | 92.4 | 41.2 | 998 |
+| 64 KiB | 376 | 674 | 455 | 1462 |
+| 1 MiB | 450 | 996 | 983 | 1183 |
+
+Before the fix NVMe lost at every size while posting a better median at every
+size. The gap was one ~100.0 ms outlier per test against p99s in the tens of
+microseconds -- a CPU halted with a runnable thread in its own runqueue, waking
+only on `run_idle`'s fallback timer. See
+`doc/bugs/2026-08-19-idle-cpu-halted-with-a-runnable-thread.md`.
+
+**Two habits this pays for.** Read the `max` column: the finding lived entirely
+there and no throughput average would ever have shown it. And take the best of
+several sweeps rather than one -- consecutive 4 KiB sweeps in an identical
+configuration read 21.4 and 57.6 MiB/s, so a single run is enough to invent a
+2x regression that does not exist.
+
 ## Bugs this turned up
 
 Fixed:
