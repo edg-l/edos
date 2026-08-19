@@ -203,16 +203,29 @@ than passing, which is how the reintroduced bug was observed to turn it red.
 
 ## Driving it
 
+**NVMe is the default root.** `edos-x86_64.iso`'s `root=` names
+`nvme-disk.img`'s partition GUID, and every `run` target and every gate attaches
+both disks, so an ordinary `make run` boots with `/dev/nvme0n1` as root and
+`/dev/sda` beside it. `scripts/edos-vm` attaches the namespace by default for
+the same reason. It is the default because it is the faster of the two here
+(see `doc/fsbench.md`) and the less proven of the two drivers, so every gate
+that boots is a gate exercising it.
+
 ```bash
-make run-nvme                  # SATA root, NVMe disk attached as a second device
+make run                       # NVMe root, SATA disk attached beside it
+make run-sata                  # the other way round, via edos-sata.iso
 make nvme-check                # the four-boot gate
 
 scripts/edos-vm start --iso edos-nvme.iso --nvme-disk nvme-disk.img --no-sata
-scripts/edos-vm start --nvme-disk nvme-disk.img --nvme-lbs 4096
+scripts/edos-vm start --iso edos-sata.iso --nvme-lbs 4096
+scripts/edos-vm start --no-nvme          # SATA only; needs an ISO rooting there
 ```
 
-`edos-nvme.iso` is the ordinary system with `root=` naming `nvme-disk.img`'s
-partition GUID. Both ISOs come from the same tracked `limine.conf`; the ISO rule
+Three ISOs come from the same tracked `limine.conf`, differing only in the GUID
+the substitution writes into `root=` and in one extra cmdline word:
+`edos-x86_64.iso` (NVMe root), `edos-sata.iso` (SATA root, for the three
+`nvme-check` cases whose point is that NVMe does *not* win root selection), and
+`edos-nvme.iso` (NVMe root plus `nvme_probe_read` for the PRP gate). Both ISOs come from the same tracked `limine.conf`; the ISO rule
 substitutes the GUID. The two disks carry **different** partition GUIDs on
 purpose, so attaching both never makes root selection a race.
 

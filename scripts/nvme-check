@@ -156,7 +156,7 @@ def case_nvme_root():
 def case_coexistence():
     """Both controllers live on one machine, each with its own device node."""
     print("[2/4] coexistence: SATA root with an NVMe disk attached")
-    mark = boot("--nvme-disk", "nvme-disk.img")
+    mark = boot("--iso", "edos-sata.iso", "--nvme-disk", "nvme-disk.img")
     if mark is None:
         stop()
         return report("desktop", False, "the desktop never came up")
@@ -176,7 +176,7 @@ def case_coexistence():
 def case_refusal():
     """A 4 KiB logical block size is refused by name, not misread."""
     print("[3/4] refusal: logical_block_size=4096")
-    mark = boot("--nvme-disk", "nvme-disk.img", "--nvme-lbs", "4096")
+    mark = boot("--iso", "edos-sata.iso", "--nvme-disk", "nvme-disk.img", "--nvme-lbs", "4096")
     if mark is None:
         stop()
         return report("desktop", False, "the desktop never came up")
@@ -198,7 +198,7 @@ def case_install():
     if not os.path.exists(blank):
         return report("nvme-blank.img", False, "run `make nvme-blank.img` first")
 
-    mark = boot("--nvme-disk", "nvme-blank.img")
+    mark = boot("--iso", "edos-sata.iso", "--nvme-disk", "nvme-blank.img")
     if mark is None:
         stop()
         return report("desktop", False, "the installer's host never came up")
@@ -228,7 +228,8 @@ def case_install():
 
 
 def main():
-    for name in ("edos-x86_64.iso", "edos-nvme.iso", "nvme-disk.img", "nvme-blank.img"):
+    for name in ("edos-x86_64.iso", "edos-nvme.iso", "edos-sata.iso", "nvme-disk.img",
+                 "nvme-blank.img"):
         if not os.path.exists(os.path.join(REPO, name)):
             sys.exit(f"missing {name}; run `make nvme-check` rather than this script "
                      "directly, so the images are built first")

@@ -352,7 +352,7 @@ def cmd_start(args):
                       else os.path.join(REPO, args.extra_disk))
         required.append((extra_disk, f"make {os.path.basename(extra_disk)}"))
     nvme_disk = None
-    if args.nvme_disk:
+    if args.nvme_disk and not args.no_nvme:
         nvme_disk = (args.nvme_disk if os.path.isabs(args.nvme_disk)
                      else os.path.join(REPO, args.nvme_disk))
         required.append((nvme_disk, f"make {os.path.basename(nvme_disk)}"))
@@ -1024,7 +1024,8 @@ def main():
                    metavar="IMAGE",
                    help="attach IMAGE (default journal-test.img) as a second SATA drive, "
                         "for filesystems the guest mounts rather than boots from")
-    s.add_argument("--nvme-disk", nargs="?", const="nvme-disk.img", default=None,
+    s.add_argument("--nvme-disk", nargs="?", const="nvme-disk.img",
+                   default="nvme-disk.img",
                    metavar="IMAGE",
                    help="attach IMAGE (default nvme-disk.img) as an NVMe namespace")
     s.add_argument("--nvme-lbs", type=int, default=None, metavar="BYTES",
@@ -1034,6 +1035,10 @@ def main():
                    help="report CAP.MQES=N (0's based, so N+1 entries) on the NVMe "
                         "controller; below 127 this exercises the driver's clamp of "
                         "its 128-entry I/O queue request")
+    s.add_argument("--no-nvme", action="store_true",
+                   help="do not attach the NVMe namespace. The default ISO roots on "
+                        "it, so a guest booted this way falls back to memfs unless "
+                        "--iso names one whose root= points elsewhere")
     s.add_argument("--nvme-mdts", type=int, default=None, metavar="N",
                    help="report MDTS=N on the NVMe controller: the maximum transfer "
                         "is 2^N pages, so QEMU's default 7 caps one command at "

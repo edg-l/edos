@@ -9783,3 +9783,34 @@ That is its own open item; see `doc/fsbench.md`.
 Not settled by this: the images differ (`sata-disk.img` is qcow2,
 `nvme-disk.img` raw), and QEMU's device models are not silicon. The comparison
 rests on the latency distribution, which those differences do not explain.
+
+## NVMe is the default root now (2026-08-19)
+
+`edos-x86_64.iso`'s `root=` names `nvme-disk.img`'s partition GUID, every `run`
+target and every gate attaches both disks, and `scripts/edos-vm` attaches the
+NVMe namespace unless told `--no-nvme`. So an ordinary boot roots on
+`/dev/nvme0n1` with `/dev/sda` beside it.
+
+Two reasons: NVMe measures faster than AHCI at every request size once the
+scheduler stall was fixed (`doc/fsbench.md`), and it is the less proven of the
+two drivers, so making every gate boot it is free coverage.
+
+**The trap this sets, and what it cost to find.** Three of `nvme-check`'s four
+cases exist to prove the NVMe disk does *not* become root: coexistence, the 4Kn
+refusal, and installing onto a blank image. Flipping the default ISO silently
+inverts all three -- the coexistence assertion starts asserting the opposite of
+what it means, and the other two lose their root entirely and fall back to
+memfs, because a blank or 4Kn NVMe disk has no partition matching the GUID the
+cmdline now names. They boot `edos-sata.iso` for that reason, and a fourth ISO
+is not needed only because the GUID is already a `build_iso` parameter.
+
+**A second trap, from the disk-image rules.** `nvme-disk.img` is a prerequisite
+of nearly every target now, and its rule begins with `scripts/edos-vm stop`,
+which refuses while a gate holds the slot. That is deliberate -- rebuilding a
+disk under a running gate is the worse outcome -- but it means a `make` in one
+terminal while a gate runs in another now fails on the *image* rule rather than
+somewhere confusing later. The failure names the gate holding the slot.
+
+Also worth knowing: a gate that dies without releasing its guest leaves a QEMU
+holding the slot, and the next `make` fails on that same `stop`. `scripts/edos-vm
+status` names the pid and `stop --force` clears it.

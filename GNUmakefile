@@ -74,6 +74,13 @@ DISPLAY_HEADLESS := -vga none -device virtio-vga,xres=1920,yres=1080 -display no
 # device against a null backend.
 AUDIODEV ?= pipewire
 
+# The ISO a run boots. The default one's `root=` names the NVMe partition, so
+# an ordinary `make run` and every gate below root on `/dev/nvme0n1` with the
+# SATA disk attached beside it. `edos-sata.iso` is the same system with `root=`
+# naming the SATA partition, for the cases that have to assert the other way
+# round. Override per target rather than globally.
+BOOT_ISO ?= $(IMAGE_NAME).iso
+
 # QEMU runner function
 # $(1) = boot media type (iso/hdd)
 # $(2) = smp cores
@@ -87,13 +94,15 @@ define run_qemu_uefi
 		-machine memory-backend=mem1 \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		$(if $(filter iso,$(1)),-cdrom $(IMAGE_NAME).iso,-hda $(IMAGE_NAME).hdd) \
+		$(if $(filter iso,$(1)),-cdrom $(BOOT_ISO),-hda $(IMAGE_NAME).hdd) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-chardev stdio,id=ser0,signal=off,logfile=run_log.txt \
 		-serial chardev:ser0 \
 		-no-reboot -d cpu_reset -D /tmp/qemu_reset.log \
 		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img,aio=$(QEMU_AIO),discard=unmap \
 		-device ide-hd,drive=sata0,bus=ide.1 \
+		-drive id=nvme0,if=none,format=raw,file=nvme-disk.img \
+		-device nvme,drive=nvme0,serial=EDOSNVME0 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		$(USB_INPUT) \
 		-netdev user,id=net0 -device e1000e,netdev=net0 \
@@ -105,7 +114,7 @@ define run_qemu_uefi
 endef
 
 .PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -s -no-reboot -no-shutdown)
 
 # Like `run` but swaps the SATA backend's aio=io_uring for aio=threads.
@@ -114,53 +123,53 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 # disappears here, blame io_uring; otherwise the bug is deeper.
 .PHONY: run-aio-threads
 run-aio-threads: QEMU_AIO := threads
-run-aio-threads: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-aio-threads: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -s -no-reboot -no-shutdown)
 
 .PHONY: run-vga
-run-vga: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-vga: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm,$(DISPLAY_VGA))
 
 .PHONY: run-gtk
-run-gtk: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-gtk: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm,$(DISPLAY_VIRTIO_GTK))
 
 .PHONY: run-single
-run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,1,)
 
 .PHONY: run-big
-run-big: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-big: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,16,)
 
 .PHONY: run-gdb
-run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,1,-no-shutdown -accel tcg -s -S)
 
 .PHONY: run-gdb-4
-run-gdb-4: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-gdb-4: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-no-shutdown -accel tcg -s -S)
 
 .PHONY: run-gdb-kvm
-run-gdb-kvm: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-gdb-kvm: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-no-shutdown -accel kvm -s -S)
 
 # Boot with no local display: VNC for a human, QMP for scripts and agents.
 # See scripts/edos-vm for screenshot, keyboard and pointer control.
 .PHONY: run-headless
-run-headless: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-headless: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	scripts/edos-vm start
 
 .PHONY: run-capture
-run-capture: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-capture: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -object filter-dump$(comma)id=dump0$(comma)netdev=net0$(comma)file=/tmp/edos.pcap)
 
 .PHONY: run-debug-fault
-run-debug-fault: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img usb-test.img
+run-debug-fault: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img usb-test.img
 	$(call run_qemu_uefi,iso,4,-no-shutdown -accel tcg -s -d int -D /tmp/qemu_fault.log -drive id=usbdisk0$(comma)if=none$(comma)format=raw$(comma)file=usb-test.img -device usb-storage$(comma)drive=usbdisk0)
 
 .PHONY: run-storage
-run-storage: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img usb-test.img
+run-storage: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img usb-test.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -drive id=usbdisk0$(comma)if=none$(comma)format=raw$(comma)file=usb-test.img -device usb-storage$(comma)drive=usbdisk0)
 
 
@@ -172,7 +181,14 @@ usb-test.img:
 # root selection: this is not the NVMe-root boot, just NVMe-present.
 .PHONY: run-nvme
 run-nvme: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
-	$(call run_qemu_uefi,iso,4,-accel kvm -drive id=nvme0$(comma)if=none$(comma)format=raw$(comma)file=nvme-disk.img -device nvme$(comma)drive=nvme0$(comma)serial=EDOSNVME0)
+	$(call run_qemu_uefi,iso,4,-accel kvm)
+
+# `make run` with the SATA disk as root instead. Both disks are attached either
+# way; the only difference is which partition GUID the ISO's `root=` names.
+.PHONY: run-sata
+run-sata: BOOT_ISO := edos-sata.iso
+run-sata: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd edos-sata.iso sata-disk.img nvme-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm)
 
 # A scratch EFS whose journal ring is deliberately tiny, so a metadata workload
 # wraps it in seconds rather than in the hours the default 16 MiB would take.
@@ -194,7 +210,7 @@ journal-test.img: tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
 # attached as a second SATA drive. See doc/journal-recovery-test.md for the
 # procedure; the disk is not the root, so cutting power on it is safe.
 .PHONY: run-recovery
-run-recovery: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img journal-test.img
+run-recovery: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img journal-test.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/edos-vm start --extra-disk journal-test.img
 
@@ -215,7 +231,7 @@ fresh-journal-test-img:
 # checkpointing, fsync a workload, cut power, remount, and fail if replay
 # did not bring it back. Needs the fault-inject build for /dev/journal-ctl.
 .PHONY: recovery-check
-recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img fresh-journal-test-img
+recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img fresh-journal-test-img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/recovery-check
 
@@ -224,19 +240,19 @@ recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.
 # concurrent sessions. It does not cover the shut-window flow-control case; see
 # doc/sshd.md for why, and for what covering it would take.
 .PHONY: ssh-check
-ssh-check: $(IMAGE_NAME).iso sata-disk.img
+ssh-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	scripts/ssh-check
 
 # Hold unlinked-but-open files, cut power, and fail if the remount does not
 # finish the deletions the crash interrupted. The orphan chain's regression;
 # see doc/efs.md section 14.
 .PHONY: orphan-check
-orphan-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img fresh-journal-test-img efs-fsck
+orphan-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img fresh-journal-test-img efs-fsck
 	$(MAKE) $(IMAGE_NAME).iso
 	scripts/orphan-check
 
 .PHONY: run-trace
-run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img
 	$(MAKE) -C kernel CARGO_FLAGS="--features trace"
 	$(MAKE) $(IMAGE_NAME).iso
 	$(call run_qemu_uefi,iso,4,-accel kvm -m 2G)
@@ -258,13 +274,13 @@ sched_test_status = ; rc=$$?; \
 	else echo "sched-test: qemu exited $$rc without a verdict"; exit 1; fi
 
 .PHONY: test
-test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	rm -f run_log.txt
 	$(call run_qemu_uefi,iso,4,-accel kvm,$(DISPLAY_HEADLESS)) $(sched_test_status)
 
 .PHONY: test-single
-test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	rm -f run_log.txt
 	$(call run_qemu_uefi,iso,1,,$(DISPLAY_HEADLESS)) $(sched_test_status)
@@ -286,7 +302,7 @@ test-headless:
 # rebuild that image, so without the prerequisite a userspace fix is invisible
 # to the gate and the run silently judges whenever the image was last made.
 .PHONY: guest-check
-guest-check: $(IMAGE_NAME).iso sata-disk.img
+guest-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	scripts/guest-check
 
 # Storage regressions, both halves. `fs-regression` reboots between writing and
@@ -294,7 +310,7 @@ guest-check: $(IMAGE_NAME).iso sata-disk.img
 # verifies every pattern it writes and reports throughput. Both drive a real
 # guest through scripts/edos-vm and need the ISO already built.
 .PHONY: storage-check
-storage-check: $(IMAGE_NAME).iso sata-disk.img
+storage-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	scripts/fs-regression
 	scripts/fs-regression --fat32
 	scripts/fsbench-run
@@ -306,16 +322,16 @@ storage-check: $(IMAGE_NAME).iso sata-disk.img
 # `sata-disk.img` is a prerequisite even though only two of the four cases
 # attach it: those two root on it, so they run whatever userspace it holds.
 .PHONY: nvme-check
-nvme-check: $(IMAGE_NAME).iso edos-nvme.iso nvme-disk.img sata-disk.img fresh-nvme-blank
+nvme-check: $(IMAGE_NAME).iso edos-nvme.iso edos-sata.iso nvme-disk.img sata-disk.img fresh-nvme-blank
 	scripts/nvme-check
 
 
 .PHONY: run-kvm
-run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,iso,4,-accel tcg)
 
 .PHONY: run-hdd-x86_64
-run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img
+run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img nvme-disk.img
 	$(call run_qemu_uefi,hdd,4,)
 
 gdb:
@@ -401,8 +417,18 @@ define build_iso
 	rm -rf $(2)
 endef
 
+# Roots on NVMe. Both disks are attached by every run target, so this decides
+# which one wins root selection, and NVMe is the default because it is the
+# faster of the two here and the less proven of the two drivers -- every gate
+# that boots is a gate exercising it.
 $(IMAGE_NAME).iso: limine/limine kernel live-root.img
-	$(call build_iso,$(IMAGE_NAME).iso,iso_root,$(PARTITION_UUID))
+	$(call build_iso,$(IMAGE_NAME).iso,iso_root,$(NVME_UUID))
+
+# The same system with `root=` naming the SATA partition. `nvme-check` boots it
+# for the three cases whose whole point is that the NVMe disk does *not* become
+# root: coexistence, the 4Kn refusal, and installing onto a blank NVMe image.
+edos-sata.iso: limine/limine kernel live-root.img
+	$(call build_iso,edos-sata.iso,iso_root_sata,$(PARTITION_UUID))
 
 # The same system with root= naming the NVMe disk's partition GUID, so an
 # NVMe-only machine mounts nvme-disk.img instead of falling back to memfs.
@@ -576,7 +602,7 @@ fresh-nvme-blank:
 
 .PHONY: clean-nvme
 clean-nvme:
-	rm -f nvme-disk.img nvme-blank.img edos-nvme.iso
+	rm -f nvme-disk.img nvme-blank.img edos-nvme.iso edos-sata.iso
 
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
