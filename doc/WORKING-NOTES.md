@@ -2170,7 +2170,7 @@ does not have to invent them.
 | Rust | 116,241 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 53,910 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,531 | `git rev-list --count HEAD`, counting the commit that states it |
+| commits | 1,533 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -9291,9 +9291,12 @@ It is not the same thing: `fs-regression` reboots between its write and verify
 phases, so for a second or two between them there is no guest at all and then a
 new one, and `scripts/nvme-check` does the same four times. Before stopping
 what looks abandoned, ask who owns it —
-`pgrep -af 'fs-regression|fsbench-run|guest-check|nvme-check|ssh-check'` names
-the running gate, and `ls -l /proc/<make-pid>/fd/1` names the log it is writing
-to. A stop issued into a live gate's write phase does not fail loudly; the
+`pgrep -af 'fs-regression|fsbench-run|guest-check|nvme-check|ssh-check|orphan-check|recovery-check'`
+names the running gate, and `ls -l /proc/<make-pid>/fd/1` names the log it is
+writing to. All seven guest-driving gates have to be in that alternation or the
+remedy misses the one that owns the slot: the first version of it listed five,
+and the two it left out are the two that cut power, which is exactly when a
+guest looks abandoned. A stop issued into a live gate's write phase does not fail loudly; the
 script proceeds to its verify phase and judges an image the guest never
 finished writing.
 
@@ -9328,7 +9331,8 @@ green at `f3212014` with the fixed-point change in.
 not run. Both were green at `b769ee40`, but `orphan-check` is the one to run
 first next time: unlinked-but-open files across a power cut is exactly the
 shape the `sys_sync` fixed-point change at `dfedf441` moves, and no gate has
-judged it since.
+judged it since. **Both were run at `5c9c7381` and both are green** — see the
+section below.
 
 This section used to report the same set at `f27f37c1`, where it was also
 green. That reading did not survive: `nvme-check` went red at `b769ee40`, three
@@ -9571,3 +9575,41 @@ open: that post-mortem was answering "does `sync` leave the journal
 replay-clean", and the question a caller asks is "does `sync` make my writes
 durable". The two differ by precisely that transaction. Full write-up in
 `doc/bugs/2026-08-19-sync-returned-before-the-extents-were-committed.md`.
+
+---
+
+## The two gates the fixed-point change had never been judged by (2026-08-19)
+
+`sys_sync`'s convergence test changing at `dfedf441` moves exactly one thing:
+when metadata reaches disk relative to the call that asked for it. Two of the
+nine gates read that directly and neither had run since the change —
+`orphan-check`, which power-cuts a guest holding eight unlinked-but-open files
+and asserts the next mount finishes the deletions, and `ssh-check`, which is
+the only gate that moves ten megabytes each way through the file system under a
+real network client. Both are green at `5c9c7381`:
+
+| gate | verdict at `5c9c7381` |
+|---|---|
+| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | clean |
+| `make -C kernel check` | warning-free across every feature combination |
+| `make orphan-check` | `efs: freed 8 orphaned inode(s)`, `efs-fsck` exit 0, no orphans reported |
+| `make ssh-check` | auth, refusal and exit status; 11,854,720 bytes each way with matching sha256; three concurrent sessions |
+
+The other five carry over from the runs recorded above rather than being
+re-measured, and the reason is checkable rather than assumed: `5c9c7381` is
+`dfedf441` plus three commits, and the only one of them that touches a `.rs`
+file at all changes a comment inside `sys_sync`. The kernel image those gates
+judged is the one they would build today.
+
+**A gate that collides with another gate fails as a Python traceback, not as a
+message.** Two `make orphan-check` runs and one `make ssh-check` overlapped
+here, and what came out was `FileNotFoundError` on the QMP socket from
+`cmd_click`, wrapped in a `CalledProcessError` from `vmdrive.run` — nothing in
+it says "another gate owns the guest". The failing run is the loser of the
+race and the winner's verdict is still sound (`ssh-check` printed all three
+phases with real byte counts and hashes, and re-ran identically with the slot to
+itself), but the traceback reads exactly like a driver bug in the gate that
+lost. Before believing one, check whether a
+second gate was running: the `pgrep` alternation above names them. What would
+remove the confusion is `scripts/edos-vm start` refusing when a live guest
+already holds the pidfile, rather than racing for it.
