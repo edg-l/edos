@@ -2169,7 +2169,7 @@ does not have to invent them.
 | Rust | 116,203 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 53,872 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,522 | `git rev-list --count HEAD`, counting the commit that states it |
+| commits | 1,524 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -9244,3 +9244,31 @@ Two traps this cost time on, both recurring:
   `remove_file` documents the opposite on purpose: live mappings keep reading
   and writing through those pages. Not attempted; it belongs behind its own
   measurement.
+
+---
+
+## The gate set, and which of them build the disk they judge (2026-08-19)
+
+There are eight local gates now and they do not cost the same thing or need the
+same setup. Run whole, in this order, they take a little over an hour.
+
+| gate | what it is | needs |
+|---|---|---|
+| `make -C kernel check` | every feature combination, one at a time; must be warning-free | nothing |
+| `make host-tests` | 138 userspace unit tests that need no guest, about a second | nothing |
+| `make test AUDIODEV=none` | the in-kernel `sched-test` suite, 58 cases, 4-CPU KVM | `/dev/kvm`; a PipeWire session unless `AUDIODEV=none` |
+| `make guest-check` | 17 guest suites in one boot, each judged by its exit code | `/dev/kvm` |
+| `make nvme-check` | four boots: NVMe root, SATA+NVMe coexistence, the 4Kn refusal, install-and-reboot | `/dev/kvm`; builds `edos-nvme.iso` and a blank `nvme-disk.img` |
+| `make recovery-check` | pause checkpointing, cut power, remount, assert replay | a `fault-inject` ISO, which it builds; a freshly formatted `journal-test.img` |
+| `make orphan-check` | unlinked-but-open files across a power cut | the same fresh image, plus `efs-fsck` |
+| `make storage-check` | `fs-regression` over EFS and FAT32, then `fsbench-run` | `/dev/kvm` |
+
+**Every one of them that drives a real guest boots `sata-disk.img`, and runs
+the userspace inside that image rather than the one in `filesystem/`.** `make
+all` does not rebuild it, so a gate that does not name it as a prerequisite
+judges whatever binaries the image happened to hold. That cost two separate
+investigations in one day — `nvme-check` case 4 chasing an `edos-install`
+`EFAULT` that had already been fixed, and `evicttest` appearing not to change.
+Every gate above that boots a guest names it now, and so does `make ssh-check`. The rebuild is not free (a 5 GB raw image, `efs-mkfs`,
+and a qcow2 convert, roughly a minute) and it discards whatever the development
+root held, which is the price of judging the tree you actually have.
