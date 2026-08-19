@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -u
 """Gate the NVMe driver against four boots and report one verdict.
 
 The in-kernel suites and `guest-check` all run on a SATA root, so nothing they

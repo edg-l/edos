@@ -9249,7 +9249,7 @@ Two traps this cost time on, both recurring:
 
 ## The gate set, and which of them build the disk they judge (2026-08-19)
 
-There are eight local gates now and they do not cost the same thing or need the
+There are nine local gates now and they do not cost the same thing or need the
 same setup. Run whole, in this order, they take a little over an hour.
 
 | gate | what it is | needs |
@@ -9262,6 +9262,7 @@ same setup. Run whole, in this order, they take a little over an hour.
 | `make recovery-check` | pause checkpointing, cut power, remount, assert replay | a `fault-inject` ISO, which it builds; a freshly formatted `journal-test.img` |
 | `make orphan-check` | unlinked-but-open files across a power cut | the same fresh image, plus `efs-fsck` |
 | `make storage-check` | `fs-regression` over EFS and FAT32, then `fsbench-run` | `/dev/kvm` |
+| `make ssh-check` | the host's own OpenSSH client against the guest's `sshd`: auth, a refused password, exit status, ~10 MB each way, concurrent sessions | `/dev/kvm`; the host's `ssh` |
 
 **Every one of them that drives a real guest boots `sata-disk.img`, and runs
 the userspace inside that image rather than the one in `filesystem/`.** `make
@@ -9269,6 +9270,60 @@ all` does not rebuild it, so a gate that does not name it as a prerequisite
 judges whatever binaries the image happened to hold. That cost two separate
 investigations in one day — `nvme-check` case 4 chasing an `edos-install`
 `EFAULT` that had already been fixed, and `evicttest` appearing not to change.
-Every gate above that boots a guest names it now, and so does `make ssh-check`. The rebuild is not free (a 5 GB raw image, `efs-mkfs`,
-and a qcow2 convert, roughly a minute) and it discards whatever the development
-root held, which is the price of judging the tree you actually have.
+Every gate above that boots a guest names it now. The rebuild is not free (a
+5 GB raw image, `efs-mkfs`, and a qcow2 convert, roughly a minute) and it
+discards whatever the development root held, which is the price of judging the
+tree you actually have.
+
+**A gate holds the one QEMU slot for its whole run, and an idle-looking guest
+is usually a live gate's.** `scripts/edos-vm` keeps a single pidfile and a
+single QMP socket under `$XDG_RUNTIME_DIR/edos-vm`, so any shell can stop any
+guest, and a `qemu-system-x86_64` sitting there with no visible driver reads
+exactly like the orphan that cost iteration 1 of the overnight run an hour.
+It is not the same thing: `fs-regression` reboots between its write and verify
+phases, so for a second or two between them there is no guest at all and then a
+new one, and `scripts/nvme-check` does the same four times. Before stopping
+what looks abandoned, ask who owns it —
+`pgrep -af 'fs-regression|fsbench-run|guest-check|nvme-check|ssh-check'` names
+the running gate, and `ls -l /proc/<make-pid>/fd/1` names the log it is writing
+to. A stop issued into a live gate's write phase does not fail loudly; the
+script proceeds to its verify phase and judges an image the guest never
+finished writing.
+
+---
+
+## The whole gate set, run at `f27f37c1`
+
+All nine gates in the table above were run against the tree as it stands,
+plus the formatter, and every one is green:
+
+| gate | verdict |
+|---|---|
+| `cargo fmt --manifest-path kernel/Cargo.toml` (not a gate, but run first) | clean |
+| `make -C kernel check` | warning-free across every feature combination |
+| `make host-tests` | 138 |
+| `make test AUDIODEV=none` | 58/58 |
+| `make guest-check` | 17/17 |
+| `make nvme-check` | 4/4 |
+| `make recovery-check` | replayed, files back |
+| `make storage-check` | `fs-regression` EFS OK, FAT32 OK, `fsbench-run /var` OK |
+| `make orphan-check` | the mount reclaimed 8 interrupted deletions, `efs-fsck` exit 0 |
+| `make ssh-check` | auth, refused password, exit status, 11.8 MB each way byte-identical, three concurrent sessions |
+
+`storage-check` is the slow one and had not been seen whole since the NVMe work
+started: `fsbench-run` reports `total 19.3s` for `/var` and its
+`/proc/nvme_stats` sample carries no command errors, which is the only place
+the whole-set run touches the new driver while rooted on SATA.
+
+Two things about running them unattended, both learned the same night:
+
+- **They print nothing until they exit when you redirect them to a file.**
+  Python line-buffers a terminal and block-buffers a pipe, so
+  `make orphan-check > log 2>&1 &` shows a boot and then five silent minutes,
+  which reads exactly like a hang and invites killing a healthy run. Every gate
+  script's shebang is `#!/usr/bin/env -S python3 -u` now, so the `[1/4]`,
+  `[2/4]` progress lines arrive as they happen.
+- **They take no arguments and do not say so.** `scripts/guest-check --help`
+  does not print usage, it boots a guest and runs the whole gate. `--fat32` on
+  `fs-regression` and the `edos-vm` flags are the only options anything here
+  accepts.

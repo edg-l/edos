@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -u
 """Throughput regression: boot the guest, run `fsbench`, report the result.
 
 `fsbench` verifies every pattern it writes, so a run that finishes without a
