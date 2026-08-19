@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-123 programs and 3 libraries, all in the `programs/` cargo workspace.
+128 programs and 3 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -21,11 +21,11 @@
 | Packages | `grab` (the package manager, lib + CLI), `edos-grab` (its GUI) |
 | Web | `edos-web` (fetches a URL, parses the HTML, lays it out in a window, follows links) |
 | Audio | `play` |
-| Images | `imgview` (BMP and SVG viewer) |
+| Images | `imgview` (BMP and SVG viewer), `screenshot` (writes what the display is showing to a BMP; a pointer that appears in it is one the compositor drew, and one that does not is the display's own plane) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest`, `fputest` (SSE state across a context switch), `auxvtest`, `lookuptest` |
-| Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`), `balancebench` (placement across CPUs; wants a multi-CPU boot, where the others want one CPU), `latbench` (how long a woken thread waits for a CPU, against the throughput and switches that wait is traded for), `termbench` (the terminal widget with no window and no compositor) |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest`, `fputest` (SSE state across a context switch), `auxvtest`, `lookuptest`, `pitest` (whether a userspace `PiMutex` hands its holder the waiter's priority, which the kernel's own in-kernel prio inversion cases cannot reach because they never take the futex path) |
+| Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`), `balancebench` (placement across CPUs; wants a multi-CPU boot, where the others want one CPU), `latbench` (how long a woken thread waits for a CPU, against the throughput and switches that wait is traded for), `termbench` (the terminal widget with no window and no compositor), `allocbench` (what an allocation costs and whether that cost grows with the allocations before it) |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows), `edos_http` (HTTP/1.1 over TLS) |
 
 ## Done

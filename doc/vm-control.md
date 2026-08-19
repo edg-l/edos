@@ -33,8 +33,8 @@ left, and the next boot replays the journal. It refuses while a gate
 (`scripts/fs-regression`, `nvme-check`, `guest-check`, ...) is driving the
 guest, naming the gate, because there is one QEMU here and cutting power under
 a running gate makes it judge an image the guest never finished writing;
-`--force` overrides. `start` refuses on the same grounds. Typing `shutdown` in the guest
-(`-r` to reboot, `-H` to halt) syncs every filesystem first and then powers the
+`--force` overrides. `start` refuses on the same grounds. Typing `shutdown` in
+the guest (`-r` to reboot, `-H` to halt) syncs every filesystem first and then powers the
 machine off through ACPI, which is what to use before running `efs-fsck` on the
 disk image.
 

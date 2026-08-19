@@ -2153,9 +2153,9 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-19 (at `f3212014`, after the NVMe driver landed
-whole, `evicttest` went back into `guest-check`, and `sys_sync` learned to wait
-for the open transaction)
+## Counts, remeasured 2026-08-19 (at `d97b802a`, after the NVMe driver landed
+whole, `evicttest` went back into `guest-check`, `sys_sync` learned to wait for
+the open transaction, and the gates learned to hold one QEMU slot)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2170,7 +2170,7 @@ does not have to invent them.
 | Rust | 116,241 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 53,910 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,145 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,533 | `git rev-list --count HEAD`, counting the commit that states it |
+| commits | 1,535 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none QEMUFLAGS=-accel kvm` passes too since 2026-08-18 |
 | host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
@@ -2187,8 +2187,11 @@ a per-file tally before believing its position.
 A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
 exists" table drifted six programs behind the workspace (`nproc`, `pollbench`,
 `socktest`, `stdtest`, `switchbench`, `syscallfuzz`) while its header count was
-also wrong in the other direction, so the two errors hid each other. Diff the
-two sets rather than comparing totals:
+also wrong in the other direction, so the two errors hid each other. It drifted
+again by three — `allocbench`, `pitest` and `screenshot`, with the header
+reading 123 against a workspace of 128 — which is what this check is for: it
+costs a second and it is the only thing that catches a program added without a
+row. Diff the two sets rather than comparing totals:
 
 ```bash
 cd /home/edgar/dev/edos-v2
@@ -9630,3 +9633,49 @@ boots anything, and a command that does find the socket missing reports
 `no guest on <sock> ...; it exited or was stopped`, naming the gate holding the
 slot when there is one. `Qmp.__init__` raises that as `NoGuest`, an `OSError`
 subclass, so `cmd_stop`'s existing fallback to `kill` still catches it.
+
+---
+
+## The whole gate set once more, at `d97b802a`, with the slot lock live (2026-08-19)
+
+The slot lock is the thing under test as much as the tree is: every gate now
+takes `RUNDIR/slot.lock` through `vmdrive.py` before it boots anything, so a
+serial chain of all nine is also the first run where each gate's `edos-vm`
+calls go through a lock its own process holds. Nothing in the chain refused
+itself, and an outsider was refused by name while `recovery-check` held it:
+
+```
+$ scripts/edos-vm start
+refusing to start: pid 2616005 (scripts/recovery-check) holds the guest slot. [...]
+$ scripts/edos-vm status
+pid 2616013, running, vnc 127.0.0.1:5901
+```
+
+`status` still answers, which is right: reading the slot is not driving it.
+
+| gate | verdict at `d97b802a` |
+|---|---|
+| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | clean |
+| `make -C kernel check` | warning-free across every feature combination |
+| `make host-tests` | 138 across eight binaries |
+| `make nvme-check` | 4/4: NVMe root, coexistence, the 4Kn refusal, install-and-reboot |
+| `make recovery-check` | `replayed 1 transactions (7 ring blocks)`, `rec_a`/`rec_b`/`rec_c` survived |
+| `make orphan-check` | `efs: freed 8 orphaned inode(s)`, `efs-fsck` exit 0, no orphans reported |
+| `make ssh-check` | auth, a refused password and exit status; 11,854,720 bytes each way with matching sha256; three concurrent sessions |
+| `make storage-check` | `fs-regression` EFS OK and FAT32 OK, `fsbench-run /var` OK in 15.6 s, `/proc/nvme_stats` reporting no command errors |
+| `make test AUDIODEV=none` | 58/58 |
+| `make guest-check` | 17/17 |
+
+Timings, for sizing an unattended run: the whole chain took 11 minutes wall on
+this host with a warm build tree — `nvme-check` 1m28s, `recovery-check` 1m33s,
+`orphan-check` 1m22s, `ssh-check` 44s, `storage-check` 4m27s, `make test` 10s,
+`guest-check` 1m11s, and the three build-and-lint gates seconds each. The
+"a little over an hour" in the section above is a cold-build figure; the gates
+themselves are not the cost, rebuilding two ISOs and two disk images is.
+
+`make ssh-check` and `make storage-check` each rebuilt `sata-disk.img` as a
+prerequisite, and each rebuild ran `scripts/edos-vm stop` under the new rule
+that refuses while a gate holds the slot. Both went through, because a make
+rule's prerequisites run before the gate script that claims the slot. That
+ordering is what makes the strict `stop` safe to depend on: the refusal is for
+a *second* gate, not for the one whose own prerequisites are still building.
