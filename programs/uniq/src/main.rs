@@ -19,9 +19,9 @@ where
         };
         if print {
             if count {
-                let _ = write!(out, "{:>7} {}\n", n, line);
+                let _ = writeln!(out, "{:>7} {}", n, line);
             } else {
-                let _ = write!(out, "{}\n", line);
+                let _ = writeln!(out, "{}", line);
             }
         }
     };

@@ -49,6 +49,18 @@ fn nvme_err_to_block(e: NvmeError) -> BlockError {
     }
 }
 
+/// What one read or write command transfers. Bundled because the four travel
+/// together through the split loop and back, and separating them from the
+/// buffer and the completion is what keeps `issue_transfer` readable at its
+/// call sites.
+#[derive(Clone, Copy)]
+struct Transfer {
+    lba: u64,
+    sectors: u32,
+    direction: Direction,
+    fua: bool,
+}
+
 pub struct NvmeNamespace {
     controller: Arc<NvmeController>,
     nsid: u32,
@@ -209,13 +221,16 @@ impl NvmeNamespace {
     fn issue_transfer(
         &self,
         queue: &NvmeQueue,
-        lba: u64,
-        sectors: u32,
+        xfer: Transfer,
         buffer: BlockBuffer,
-        direction: Direction,
-        fua: bool,
         completion: Completion,
     ) -> Result<(), BlockError> {
+        let Transfer {
+            lba,
+            sectors,
+            direction,
+            fua,
+        } = xfer;
         let len = sectors as usize * 512;
         let (prp1, prp2, bounce, prp_list) = Self::build_transfer(&buffer, len, direction)?;
 
@@ -287,12 +302,14 @@ impl NvmeNamespace {
 
         if sectors <= max_sectors {
             self.issue_transfer(
-                &queue,
-                lba,
-                sectors,
+                queue,
+                Transfer {
+                    lba,
+                    sectors,
+                    direction,
+                    fua,
+                },
                 buffer,
-                direction,
-                fua,
                 Completion::Whole(Arc::clone(&handle)),
             )?;
             return Ok(handle);
@@ -307,12 +324,14 @@ impl NvmeNamespace {
             let part_sectors = max_sectors.min(sectors - first);
             let part_buffer = buffer.subrange(first as usize * 512, part_sectors as usize * 512);
             if let Err(e) = self.issue_transfer(
-                &queue,
-                lba + u64::from(first),
-                part_sectors,
+                queue,
+                Transfer {
+                    lba: lba + u64::from(first),
+                    sectors: part_sectors,
+                    direction,
+                    fua,
+                },
                 part_buffer,
-                direction,
-                fua,
                 Completion::Part(Arc::clone(&split)),
             ) {
                 // The parts already issued still complete and reclaim
@@ -396,7 +415,7 @@ impl AsyncBlockDevice for NvmeNamespace {
             cdw14: 0,
             cdw15: 0,
         };
-        self.issue(&queue, &op, &sqe);
+        self.issue(queue, &op, &sqe);
         stats::bump(&stats::FLUSHES, 1);
         Ok(handle)
     }

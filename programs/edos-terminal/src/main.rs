@@ -152,8 +152,8 @@ fn main() {
                         match event.code {
                             0 => {
                                 terminal.on_mouse_button(
-                                    event.x as i32,
-                                    event.y as i32,
+                                    event.x,
+                                    event.y,
                                     event.data != 0,
                                 );
                             }
@@ -165,7 +165,7 @@ fn main() {
                         // Only a selection drag changes the picture; the
                         // pointer merely crossing the window does not.
                         if terminal.is_selecting() {
-                            terminal.on_mouse_move(event.x as i32, event.y as i32);
+                            terminal.on_mouse_move(event.x, event.y);
                             content_changed = true;
                         }
                     }

@@ -217,7 +217,7 @@ pub fn for_path(path: &str) -> &'static Lang {
     {
         return lang;
     }
-    if let Some(lang) = LANGS.iter().find(|l| l.names.iter().any(|n| *n == name)) {
+    if let Some(lang) = LANGS.iter().find(|l| l.names.contains(&name)) {
         return lang;
     }
     LANGS
@@ -649,7 +649,7 @@ fn tokenize_markdown(line: &str) -> Vec<Token> {
             let marker = c;
             let double = chars.get(i + 1) == Some(&marker);
             let marker_len = if double { 2 } else { 1 };
-            let needle: String = std::iter::repeat(marker).take(marker_len).collect();
+            let needle: String = std::iter::repeat_n(marker, marker_len).collect();
             if let Some(close) = find_at(&chars, i + marker_len, &needle)
                 && close > i + marker_len
             {

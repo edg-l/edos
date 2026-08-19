@@ -387,11 +387,10 @@ fn install_boot_files(root_guid: &str) {
         format!("{ESP_MOUNT}/boot"),
         limine_dir.clone(),
     ] {
-        if let Err(e) = std::fs::create_dir(&dir) {
-            if e.kind() != std::io::ErrorKind::AlreadyExists {
+        if let Err(e) = std::fs::create_dir(&dir)
+            && e.kind() != std::io::ErrorKind::AlreadyExists {
                 fail(&format!("cannot create {dir}: {e}"));
             }
-        }
     }
 
     for (from, to) in [

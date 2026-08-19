@@ -18,7 +18,7 @@ fn main() {
         }
         3 => {
             let m: u32 = match args[1].parse() {
-                Ok(m) if m >= 1 && m <= 12 => m,
+                Ok(m) if (1..=12).contains(&m) => m,
                 _ => {
                     eprintln!("cal: invalid month: {}", args[1]);
                     std::process::exit(1);
@@ -47,7 +47,7 @@ fn main() {
 }
 
 fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 fn month_lengths(y: u32) -> [u32; 12] {
@@ -123,11 +123,11 @@ fn print_month_calendar(month: u32, year: u32, now: &(u32, u32, u32)) {
         } else {
             print!("{:2} ", day);
         }
-        if (start_dow + day as usize) % 7 == 0 {
+        if (start_dow + day as usize).is_multiple_of(7) {
             println!();
         }
     }
-    if (start_dow + days_in_month as usize) % 7 != 0 {
+    if !(start_dow + days_in_month as usize).is_multiple_of(7) {
         println!();
     }
 }
@@ -142,7 +142,7 @@ fn print_year_calendar(year: u32, now: &(u32, u32, u32)) {
         for col in 0..3 {
             let month = (row * 3 + col + 1) as u32;
             let name = MONTH_NAMES[(month - 1) as usize];
-            let header = format!("{}", name);
+            let header = name.to_string();
             let pad = (20usize.saturating_sub(header.len())) / 2;
             lines[0].push_str(&format!("{:>pad$}{}", "", header));
             lines[0].push_str("   ");

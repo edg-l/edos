@@ -19,11 +19,10 @@ fn main() {
             delim_set = true;
         } else if let Some(f) = arg.strip_prefix("-f") {
             for part in f.split(',') {
-                if let Ok(n) = part.parse::<usize>() {
-                    if n > 0 {
+                if let Ok(n) = part.parse::<usize>()
+                    && n > 0 {
                         fields.push(n - 1);
                     }
-                }
             }
         } else {
             files.push(arg.clone());

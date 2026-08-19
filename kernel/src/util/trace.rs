@@ -157,8 +157,7 @@ mod inner {
 
         emergency_println!("\n=== TRACE DUMP ===");
 
-        for cpu in 0..MAX_CPUS {
-            let buf = &TRACE_BUFFERS[cpu];
+        for (cpu, buf) in TRACE_BUFFERS.iter().enumerate().take(MAX_CPUS) {
             let total = buf.written.load(Ordering::Relaxed);
             if total == 0 {
                 continue;

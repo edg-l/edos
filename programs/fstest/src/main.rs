@@ -49,12 +49,11 @@ fn main() {
 
     match args[1].as_str() {
         "write" => {
-            if let Err(e) = fs::create_dir(&dir) {
-                if e.kind() != std::io::ErrorKind::AlreadyExists {
+            if let Err(e) = fs::create_dir(&dir)
+                && e.kind() != std::io::ErrorKind::AlreadyExists {
                     report(&format!("FSTEST FAIL: mkdir {dir}: {e}"));
                     std::process::exit(1);
                 }
-            }
             for (n, &len) in SIZES.iter().enumerate() {
                 let path = format!("{dir}/f{n}");
                 if let Err(e) = fs::write(&path, content(n, len)) {

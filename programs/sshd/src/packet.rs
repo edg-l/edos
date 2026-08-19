@@ -126,14 +126,14 @@ impl Transport {
             match net::recv(self.fd, &mut buf[off..]) {
                 Ok(0) => return Err(Error::Io("peer closed")),
                 Ok(n) => off += n,
-                Err(()) => return Err(Error::Io("socket read failed")),
+                Err(_) => return Err(Error::Io("socket read failed")),
             }
         }
         Ok(())
     }
 
     fn write_all(&self, buf: &[u8]) -> Result<()> {
-        net::send_all(self.fd, buf).map_err(|()| Error::Io("socket write failed"))
+        net::send_all(self.fd, buf).map_err(|_| Error::Io("socket write failed"))
     }
 
     /// Send one line of the version exchange, or any other pre-protocol text.
@@ -227,7 +227,7 @@ impl Transport {
             dir.cipher.apply_keystream(&mut head);
 
             let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
-            if len < 12 || len > MAX_PACKET || (len + 4) % AES_BLOCK != 0 {
+            if !(12..=MAX_PACKET).contains(&len) || !(len + 4).is_multiple_of(AES_BLOCK) {
                 return Err(Error::Protocol(format!("bad packet length {len}")));
             }
             plain = head.to_vec();
@@ -250,7 +250,7 @@ impl Transport {
             let mut len_bytes = [0u8; 4];
             self.read_exact(&mut len_bytes)?;
             let len = u32::from_be_bytes(len_bytes) as usize;
-            if len < 12 || len > MAX_PACKET || (len + 4) % 8 != 0 {
+            if !(12..=MAX_PACKET).contains(&len) || !(len + 4).is_multiple_of(8) {
                 return Err(Error::Protocol(format!("bad packet length {len}")));
             }
             plain = vec![0u8; 4 + len];

@@ -329,13 +329,13 @@ impl Terminal {
             }
             EscState::Csi => {
                 let b = ch as u8;
-                if b >= 0x30 && b <= 0x3F {
+                if (0x30..=0x3F).contains(&b) {
                     // Parameter byte (digits, semicolons)
                     if self.esc_len < self.esc_buf.len() {
                         self.esc_buf[self.esc_len] = b;
                         self.esc_len += 1;
                     }
-                } else if b >= 0x40 && b <= 0x7E {
+                } else if (0x40..=0x7E).contains(&b) {
                     // Final byte - execute the command
                     self.execute_csi(ch);
                     self.esc_state = EscState::Normal;
@@ -414,34 +414,34 @@ impl Terminal {
         match final_byte {
             'H' | 'f' => {
                 // Cursor position: CSI row ; col H
-                let row = params.get(0).copied().unwrap_or(1).max(1) - 1;
+                let row = params.first().copied().unwrap_or(1).max(1) - 1;
                 let col = params.get(1).copied().unwrap_or(1).max(1) - 1;
                 self.cursor_row = row.min(self.rows - 1);
                 self.cursor_col = col.min(self.cols - 1);
             }
             'A' => {
                 // Cursor up
-                let n = params.get(0).copied().unwrap_or(1).max(1);
+                let n = params.first().copied().unwrap_or(1).max(1);
                 self.cursor_row = self.cursor_row.saturating_sub(n);
             }
             'B' => {
                 // Cursor down
-                let n = params.get(0).copied().unwrap_or(1).max(1);
+                let n = params.first().copied().unwrap_or(1).max(1);
                 self.cursor_row = (self.cursor_row + n).min(self.rows - 1);
             }
             'C' => {
                 // Cursor forward (right)
-                let n = params.get(0).copied().unwrap_or(1).max(1);
+                let n = params.first().copied().unwrap_or(1).max(1);
                 self.cursor_col = (self.cursor_col + n).min(self.cols - 1);
             }
             'D' => {
                 // Cursor back (left)
-                let n = params.get(0).copied().unwrap_or(1).max(1);
+                let n = params.first().copied().unwrap_or(1).max(1);
                 self.cursor_col = self.cursor_col.saturating_sub(n);
             }
             'J' => {
                 // Erase in display
-                let n = params.get(0).copied().unwrap_or(0);
+                let n = params.first().copied().unwrap_or(0);
                 match n {
                     0 => {
                         // Erase from cursor to end of screen
@@ -474,7 +474,7 @@ impl Terminal {
             }
             'K' => {
                 // Erase in line
-                let n = params.get(0).copied().unwrap_or(0);
+                let n = params.first().copied().unwrap_or(0);
                 match n {
                     0 => {
                         // Erase from cursor to end of line
@@ -547,17 +547,16 @@ impl Terminal {
                     }
                 }
             }
-            'h' | 'l' => {
+            'h' | 'l'
                 // DEC private mode set/reset. DECTCEM (?25) is the only mode
                 // the widget implements; anything else is ignored.
-                if self.csi_is_private() && params.first() == Some(&25) {
+                if self.csi_is_private() && params.first() == Some(&25) => {
                     self.cursor_enabled = final_byte == 'h';
                     if self.cursor_enabled {
                         self.cursor_visible = true;
                         self.cursor_blink_counter = 0;
                     }
                 }
-            }
             _ => {
                 // Unknown CSI command, ignore
             }
@@ -653,11 +652,10 @@ impl Terminal {
                     self.clear_selection();
                 } else {
                     for opt in [&mut self.selection_start, &mut self.selection_end] {
-                        if let Some((line_idx, _)) = opt {
-                            if *line_idx < history_len {
+                        if let Some((line_idx, _)) = opt
+                            && *line_idx < history_len {
                                 *line_idx -= 1;
                             }
-                        }
                     }
                 }
             }

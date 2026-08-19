@@ -2,20 +2,17 @@
 
 /// Policy for how a widget should be sized in a layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Default)]
 pub enum SizePolicy {
     /// Use an exact fixed size.
     Fixed(u32),
     /// Use the widget's preferred (natural) size.
+    #[default]
     Preferred,
     /// Expand to fill available space, with relative weight.
     Expand { weight: f32 },
 }
 
-impl Default for SizePolicy {
-    fn default() -> Self {
-        Self::Preferred
-    }
-}
 
 impl SizePolicy {
     /// Create an expand policy with the given weight.

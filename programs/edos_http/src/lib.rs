@@ -169,8 +169,8 @@ pub fn fetch(
     for _ in 0..=opts.max_redirects {
         let (mut reader, head, http11) = request_once(&target, opts)?;
 
-        if is_redirect(head.status) {
-            if let Some(location) = head.header("Location") {
+        if is_redirect(head.status)
+            && let Some(location) = head.header("Location") {
                 let next = target.join(location)?;
                 // The body of a redirect is of no interest, but reading it is
                 // what leaves the connection at the start of the next response
@@ -185,7 +185,6 @@ pub fn fetch(
                 target = next;
                 continue;
             }
-        }
 
         // A gzipped body is inflated on the way to the sink rather than
         // buffered and inflated after: the caller asked for a stream, and a
@@ -383,8 +382,8 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
     let request = request_text(target, opts);
     let key = pool_key(target);
 
-    if opts.keep_alive {
-        if let Some(mut reader) = take_idle(&key) {
+    if opts.keep_alive
+        && let Some(mut reader) = take_idle(&key) {
             // A write to a connection the far end has since closed may well
             // succeed -- the failure arrives as a reset or an empty read on
             // the way back -- so this is not where a stale connection is
@@ -397,7 +396,6 @@ fn send_request(target: &Url, opts: &Options) -> Result<(BufReader<Conn>, String
                 return Ok((reader, request, true));
             }
         }
-    }
 
     let addr = target.authority();
     let tcp = connect(&addr, opts.connect_timeout).map_err(|source| Error::Connect {
@@ -546,13 +544,12 @@ fn read_body(
         .header("Content-Length")
         .and_then(|v| v.trim().parse().ok());
 
-    if let Some(length) = declared {
-        if length > opts.max_body {
+    if let Some(length) = declared
+        && length > opts.max_body {
             return Err(Error::TooLarge {
                 limit: opts.max_body,
             });
         }
-    }
 
     if chunked {
         read_chunked(reader, opts, sink, progress)?;

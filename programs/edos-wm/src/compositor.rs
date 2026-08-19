@@ -311,7 +311,7 @@ pub fn composite(
     }
 
     // Draw windows back-to-front (already sorted by z_order from kernel)
-    for (_i, window) in windows.iter().enumerate() {
+    for window in windows.iter() {
         // A minimized window stays in the list so the taskbar can offer a way
         // back, but it occupies no screen space.
         if window.on_screen() {
@@ -595,8 +595,8 @@ fn draw_window_direct(
     }
 
     // Blit client buffer content with clipping
-    if window.buffer_shm_id != 0 {
-        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(
+    if window.buffer_shm_id != 0
+        && let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(
             window.buffer_shm_id,
             window.buffer_width,
             window.buffer_height,
@@ -656,7 +656,6 @@ fn draw_window_direct(
                 }
             }
         }
-    }
 }
 
 /// Draw a dock window (no decorations, just content).
@@ -673,8 +672,8 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
     }
 
     // Blit client buffer content with clipping
-    if window.buffer_shm_id != 0 {
-        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(
+    if window.buffer_shm_id != 0
+        && let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(
             window.buffer_shm_id,
             window.buffer_width,
             window.buffer_height,
@@ -730,7 +729,6 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
                 }
             }
         }
-    }
 }
 
 /// Draw the cursor.

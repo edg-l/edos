@@ -116,8 +116,8 @@ fn list() -> Result<(), String> {
         .unwrap_or(0)
         .max(7);
     println!(
-        "{:<width$}  {:<8}  {:>6}  {}",
-        "SERVICE", "STATE", "PID", "FAILURES"
+        "{:<width$}  {:<8}  {:>6}  FAILURES",
+        "SERVICE", "STATE", "PID"
     );
     for s in statuses {
         let pid = if s.pid == 0 {

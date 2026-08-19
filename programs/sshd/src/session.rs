@@ -397,11 +397,10 @@ impl<'a> Session<'a> {
                         pty.cols = cols;
                         pty.rows = rows;
                     }
-                    if let Some(child) = c.child.as_ref() {
-                        if child.is_pty {
+                    if let Some(child) = c.child.as_ref()
+                        && child.is_pty {
                             set_winsize(child.write_fd, cols, rows);
                         }
-                    }
                 }
                 // RFC 4254 §6.7: window-change never gets a reply.
                 false

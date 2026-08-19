@@ -312,9 +312,8 @@ impl Window {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, i64> {
         let id = window_create(x, y, width, height)?;
         let buf0 = alloc_buffer(width, height)?;
-        let buf1 = alloc_buffer(width, height).map_err(|e| {
+        let buf1 = alloc_buffer(width, height).inspect_err(|_e| {
             free_buffer(buf0.0, buf0.1);
-            e
         })?;
         // No buffer is published here. A buffer nobody has drawn into is a
         // black rectangle, and the compositor draws the window's ground when a
@@ -430,9 +429,8 @@ impl Window {
         }
 
         let new_buf0 = alloc_buffer(new_width, new_height)?;
-        let new_buf1 = alloc_buffer(new_width, new_height).map_err(|e| {
+        let new_buf1 = alloc_buffer(new_width, new_height).inspect_err(|_e| {
             free_buffer(new_buf0.0, new_buf0.1);
-            e
         })?;
 
         // Point the compositor at the new buffer 0 before destroying the old

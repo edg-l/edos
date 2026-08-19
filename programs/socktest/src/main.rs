@@ -139,7 +139,9 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
     let accepted = if io::poll_readable(listener, 2000) {
         net::accept(listener)
     } else {
-        Err(())
+        // Nothing to accept within the timeout. ETIMEDOUT is the closest
+        // errno to "poll gave up", and no caller here reads it.
+        Err(net::NetError(-110))
     };
     let round_trip = match accepted {
         Ok((peer, _)) => {
@@ -224,11 +226,10 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
         done.is_ok(),
         format!("{done:?}"),
     );
-    if io::poll_readable(listener, 2000) {
-        if let Ok((peer, _)) = net::accept(listener) {
+    if io::poll_readable(listener, 2000)
+        && let Ok((peer, _)) = net::accept(listener) {
             net::close(peer);
         }
-    }
     net::close(blocking);
     net::close(listener);
 }

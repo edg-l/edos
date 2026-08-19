@@ -52,11 +52,10 @@ fn main() {
         }
     }
 
-    if !collected.is_empty() {
-        if run_command(&cmd, &cmd_args, &collected) != 0 {
+    if !collected.is_empty()
+        && run_command(&cmd, &cmd_args, &collected) != 0 {
             exit_code = 1;
         }
-    }
 
     std::process::exit(exit_code);
 }

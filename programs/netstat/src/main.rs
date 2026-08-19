@@ -135,8 +135,8 @@ fn show_sockets(options: &Options) -> Result<(), ExitCode> {
     };
     println!("{title}");
     println!(
-        "{:<5} {:>6} {:>6} {:<17} {:<17} {}",
-        "Proto", "Recv-Q", "Send-Q", "Local Address", "Foreign Address", "State"
+        "{:<5} {:>6} {:>6} {:<17} {:<17} State",
+        "Proto", "Recv-Q", "Send-Q", "Local Address", "Foreign Address"
     );
 
     for socket in sockets {
@@ -191,8 +191,8 @@ fn show_interfaces() -> Result<(), ExitCode> {
     let blocks = parse_interfaces(&read_proc("/proc/net")?);
     println!("Kernel Interface table");
     println!(
-        "{:<8} {:<16} {:<6} {:<20} {}",
-        "Iface", "Address", "Prefix", "HWaddr", "Flags"
+        "{:<8} {:<16} {:<6} {:<20} Flags",
+        "Iface", "Address", "Prefix", "HWaddr"
     );
     for block in blocks {
         let up = field(&block, "link") == "up";
@@ -215,8 +215,8 @@ fn show_routes() -> Result<(), ExitCode> {
     let blocks = parse_interfaces(&read_proc("/proc/net")?);
     println!("Kernel IP routing table");
     println!(
-        "{:<16} {:<16} {:<6} {}",
-        "Destination", "Gateway", "Prefix", "Iface"
+        "{:<16} {:<16} {:<6} Iface",
+        "Destination", "Gateway", "Prefix"
     );
     for block in blocks {
         let iface = field(&block, "interface");

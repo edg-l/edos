@@ -94,6 +94,10 @@ unsafe fn phdr_u64(phdr: u64, i: usize, off: usize) -> u64 {
     unsafe { ((phdr as *const u8).add(i * PHDR_SIZE + off) as *const u64).read_unaligned() }
 }
 
+// `main` is the C entry point: its `argv` comes from the runtime's initial
+// stack, not from an arbitrary Rust caller, and the signature is fixed by the
+// ABI so it cannot be marked `unsafe`. `read_auxv` carries the real contract.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     let mut passed = 0u32;
@@ -125,7 +129,7 @@ pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         &mut passed,
         &mut failed,
         "entry alignment",
-        entry_rsp % 16 == 0,
+        entry_rsp.is_multiple_of(16),
         format!("initial rsp {entry_rsp:#x}, rsp % 16 = {}", entry_rsp % 16),
     );
 

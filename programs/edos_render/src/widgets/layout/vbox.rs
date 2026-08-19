@@ -153,8 +153,8 @@ impl VBoxLayout {
         // Third pass: position widgets
         let mut y = content_y;
         for (i, item) in self.items.iter().enumerate() {
-            if let Some(id) = item.widget_id {
-                if let Some(widget) = container.get_mut(id) {
+            if let Some(id) = item.widget_id
+                && let Some(widget) = container.get_mut(id) {
                     let item_height = actual_heights[i].saturating_sub(item.margin.vertical());
                     let item_y = y + item.margin.top as i32;
 
@@ -203,7 +203,6 @@ impl VBoxLayout {
 
                     widget.set_position(x, final_y);
                 }
-            }
 
             y += actual_heights[i] as i32 + self.spacing as i32;
         }

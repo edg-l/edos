@@ -44,16 +44,14 @@ impl WidgetContainer {
         }));
 
         // Auto-focus first focusable widget
-        if self.focused.is_none() {
-            if let Some(w) = self.widgets.last() {
-                if w.focusable() {
+        if self.focused.is_none()
+            && let Some(w) = self.widgets.last()
+                && w.focusable() {
                     self.focused = Some(id);
                     if let Some(w) = self.widgets.last_mut() {
                         w.set_focused(true);
                     }
                 }
-            }
-        }
 
         id
     }
@@ -103,17 +101,15 @@ impl WidgetContainer {
                     // Update focus if changed
                     if new_focus != self.focused {
                         // Unfocus old widget
-                        if let Some(old_id) = self.focused {
-                            if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
+                        if let Some(old_id) = self.focused
+                            && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
                                 w.set_focused(false);
                             }
-                        }
                         // Focus new widget
-                        if let Some(new_id) = new_focus {
-                            if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == new_id) {
+                        if let Some(new_id) = new_focus
+                            && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == new_id) {
                                 w.set_focused(true);
                             }
-                        }
                         self.focused = new_focus;
                     }
                 }
@@ -128,13 +124,11 @@ impl WidgetContainer {
             Some(WindowEventType::Character) => {
                 if let Some(ch) = event.character() {
                     // Send to focused widget
-                    if let Some(focused_id) = self.focused {
-                        if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id) {
-                            if let Some(evt) = w.on_char(ch) {
+                    if let Some(focused_id) = self.focused
+                        && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id)
+                            && let Some(evt) = w.on_char(ch) {
                                 results.push((focused_id, evt));
                             }
-                        }
-                    }
                 }
             }
             Some(WindowEventType::KeyPress) => {
@@ -156,8 +150,8 @@ impl WidgetContainer {
 
                 if scancode == keycode::TAB {
                     self.focus_next();
-                } else if let Some(focused_id) = self.focused {
-                    if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id) {
+                } else if let Some(focused_id) = self.focused
+                    && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id) {
                         if let Some(evt) = w.on_key(scancode, true) {
                             results.push((focused_id, evt));
                         }
@@ -172,20 +166,17 @@ impl WidgetContainer {
                             results.push((focused_id, evt));
                         }
                     }
-                }
             }
             Some(WindowEventType::KeyRelease) => {
                 let scancode = event.code;
                 if update_modifiers(&mut self.mods, scancode, false) {
                     return results;
                 }
-                if let Some(focused_id) = self.focused {
-                    if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id) {
-                        if let Some(evt) = w.on_key(scancode, false) {
+                if let Some(focused_id) = self.focused
+                    && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id)
+                        && let Some(evt) = w.on_key(scancode, false) {
                             results.push((focused_id, evt));
                         }
-                    }
-                }
             }
             _ => {}
         }
@@ -245,11 +236,10 @@ impl WidgetContainer {
         }
 
         // Unfocus current
-        if let Some(old_id) = self.focused {
-            if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
+        if let Some(old_id) = self.focused
+            && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
                 w.set_focused(false);
             }
-        }
 
         // Find next
         let next_id = if let Some(current_id) = self.focused {
@@ -283,11 +273,10 @@ impl WidgetContainer {
         }
 
         // Unfocus current
-        if let Some(old_id) = self.focused {
-            if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
+        if let Some(old_id) = self.focused
+            && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
                 w.set_focused(false);
             }
-        }
 
         // Find previous
         let prev_id = if let Some(current_id) = self.focused {
@@ -320,28 +309,25 @@ impl WidgetContainer {
     /// Set focus to a specific widget.
     pub fn set_focus(&mut self, id: WidgetId) {
         // Unfocus current
-        if let Some(old_id) = self.focused {
-            if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
+        if let Some(old_id) = self.focused
+            && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
                 w.set_focused(false);
             }
-        }
 
         // Focus new
-        if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == id) {
-            if w.focusable() {
+        if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == id)
+            && w.focusable() {
                 w.set_focused(true);
                 self.focused = Some(id);
             }
-        }
     }
 
     /// Clear focus from all widgets.
     pub fn clear_focus(&mut self) {
-        if let Some(old_id) = self.focused {
-            if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
+        if let Some(old_id) = self.focused
+            && let Some(w) = self.widgets.iter_mut().find(|w| w.id() == old_id) {
                 w.set_focused(false);
             }
-        }
         self.focused = None;
     }
 }

@@ -2204,14 +2204,13 @@ fn parse_attr(body: &str) -> Option<AttrTest> {
     let mut fold = false;
     // The flag sits outside the value, so a quoted value ending in `"` cannot
     // have eaten one.
-    if !value.ends_with(['"', '\'']) {
-        if let Some((head, flag)) = value.rsplit_once(char::is_whitespace)
+    if !value.ends_with(['"', '\''])
+        && let Some((head, flag)) = value.rsplit_once(char::is_whitespace)
             && matches!(flag, "i" | "I" | "s" | "S")
         {
             fold = flag.eq_ignore_ascii_case("i");
             value = head.trim_end();
         }
-    }
     let mut value = value.to_string();
     if value.len() >= 2
         && let Some(quote) = value.chars().next()

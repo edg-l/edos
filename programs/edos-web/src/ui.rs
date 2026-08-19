@@ -496,12 +496,11 @@ impl Browser {
         // Only a fragment short-circuits. A link to the page's own address
         // carrying no fragment is a reload, which is what a browser does with
         // one and what the page that wrote it meant.
-        if let Some(fragment) = fragment {
-            if self.loading.is_none() && (page.is_empty() || page == self.url) {
+        if let Some(fragment) = fragment
+            && self.loading.is_none() && (page.is_empty() || page == self.url) {
                 self.scroll_to(fragment);
                 return;
             }
-        }
         self.begin(page, true, 0, fragment.map(str::to_string));
     }
 

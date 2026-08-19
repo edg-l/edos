@@ -845,12 +845,11 @@ impl Builder<'_> {
                 // inline inside it, so a row came out as its cells' text run
                 // together on one line. `colspan` and `rowspan` are not
                 // honoured, so a table using them misaligns from that row on.
-                if tag == local_name!("table") && self.computed.display.is_none() {
-                    if let Some(columns) = table_columns(node) {
+                if tag == local_name!("table") && self.computed.display.is_none()
+                    && let Some(columns) = table_columns(node) {
                         self.computed.display = Some(Display::Grid);
                         self.computed.grid_columns = Some(columns);
                     }
-                }
 
                 let entered_main = !self.in_main && self.is_main(node);
                 if entered_main {
@@ -1087,8 +1086,7 @@ impl Builder<'_> {
         let interrupted = self.kind;
         self.flush();
         let style = self.style.clone();
-        let runs = (!alt.is_empty())
-            .then(|| {
+        let runs = if !alt.is_empty() { {
                 vec![Run {
                     text: format!("[{}]", alt),
                     link: style.link,
@@ -1099,8 +1097,7 @@ impl Builder<'_> {
                     css: self.computed,
                     boxed: None,
                 }]
-            })
-            .unwrap_or_default();
+            } } else { Default::default() };
         let anchor = self.anchor.take();
         self.push_leaf(Block {
             kind: BlockKind::Image,
@@ -1489,11 +1486,10 @@ fn is_head(node: &Handle) -> bool {
 /// `<main>` is the element the HTML Standard defines as "the dominant contents
 /// of the document", which is exactly the question reader mode asks.
 fn main_path(node: &Handle) -> Option<Vec<Handle>> {
-    if let NodeData::Element { name, .. } = &node.data {
-        if name.local == local_name!("main") {
+    if let NodeData::Element { name, .. } = &node.data
+        && name.local == local_name!("main") {
             return Some(vec![node.clone()]);
         }
-    }
     for child in node.children.borrow().iter() {
         if let Some(mut path) = main_path(child) {
             path.insert(0, node.clone());

@@ -188,7 +188,7 @@ fn main() {
             ));
             net::close(sock);
         }
-        Err(()) => out.line("pollbench: could not create a UDP socket"),
+        Err(_) => out.line("pollbench: could not create a UDP socket"),
     }
 
     // A full pipe is the writable case: `poll` must stop reporting the write

@@ -151,7 +151,7 @@ pub fn decode_jpeg(bytes: &[u8]) -> Result<Image, ImageError> {
         .decode()
         .map_err(|err| ImageError::Raster(err.to_string()))?;
     let (width, height) = decoder.dimensions().ok_or(ImageError::Malformed)?;
-    let channels = data.len() / (width as usize * height as usize).max(1);
+    let channels = data.len() / (width * height).max(1);
     pack(width as u32, height as u32, channels.max(1), &data)
 }
 

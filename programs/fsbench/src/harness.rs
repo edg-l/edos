@@ -213,7 +213,7 @@ pub fn human_bytes(n: u64) -> String {
     ];
     for (suffix, scale) in UNITS {
         if n >= scale {
-            if n % scale == 0 {
+            if n.is_multiple_of(scale) {
                 return format!("{}{}", n / scale, suffix);
             }
             return format!("{:.1}{}", n as f64 / scale as f64, suffix);

@@ -191,7 +191,7 @@ fn test5() {
     // Any plausible boot is well after 2020-01-01 and well before 2100-01-01.
     const Y2020: u64 = 1_577_836_800_000_000_000;
     const Y2100: u64 = 4_102_444_800_000_000_000;
-    if first < Y2020 || first > Y2100 {
+    if !(Y2020..=Y2100).contains(&first) {
         fail(5, &format!("epoch nanos {} is not a plausible date", first));
     }
 
@@ -509,7 +509,7 @@ fn test10(dir: &str) {
 
     // A short buffer truncates rather than failing.
     let mut small = [0u8; 4];
-    if readlink(&link, &mut small) != 4 || &small != &target.as_bytes()[..4] {
+    if readlink(&link, &mut small) != 4 || small != target.as_bytes()[..4] {
         fail(10, "readlink into a short buffer");
     }
 
@@ -625,7 +625,7 @@ fn test10(dir: &str) {
     let via_dir = format!("{}/iotest_t10_via", dir);
     let via_link = format!("{}/iotest_t10_vialink", dir);
     let _ = fs::remove_file(&via_link);
-    let _ = fs::remove_file(&format!("{}/f.dat", via_dir));
+    let _ = fs::remove_file(format!("{}/f.dat", via_dir));
     let _ = fs::remove_dir(&via_dir);
     fs::create_dir(&via_dir).unwrap_or_else(|e| fail(10, &format!("create via dir: {}", e)));
     if symlink(&via_dir, &via_link) != 0 {
@@ -641,7 +641,7 @@ fn test10(dir: &str) {
         );
     }
     // And it really landed in the directory the link names.
-    if fs::read(&format!("{}/f.dat", via_dir)).ok().as_deref()
+    if fs::read(format!("{}/f.dat", via_dir)).ok().as_deref()
         != Some(b"through a linked directory".as_slice())
     {
         fail(10, "the file did not land in the directory the link names");

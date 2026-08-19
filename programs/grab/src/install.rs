@@ -283,7 +283,7 @@ pub fn seed_etc(applied: &Applied, ours: &[String]) -> Result<Vec<Seeded>> {
                 // Both halves are required before this may touch the file at
                 // all: the previous default is what says what the machine
                 // started from, and without it there is nothing to merge over.
-                let mine = ours.iter().any(|p| *p == destination);
+                let mine = ours.contains(&destination);
                 let Some(previous) = applied.superseded.get(relative).filter(|_| mine) else {
                     continue;
                 };

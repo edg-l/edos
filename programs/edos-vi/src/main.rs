@@ -541,9 +541,7 @@ impl Editor {
         let mut col = self.cx;
 
         // Step back one before scanning.
-        if col > 0 {
-            col -= 1;
-        }
+        col = col.saturating_sub(1);
         // Skip whitespace backwards.
         while col > 0 && (bytes[col] == b' ' || bytes[col] == b'\t') {
             col -= 1;

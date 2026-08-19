@@ -7,7 +7,7 @@ use std::{
 use edos_render::graphics::{Color, Screen};
 
 thread_local! {
-    static HELLO: Cell<u64> = Cell::new(2);
+    static HELLO: Cell<u64> = const { Cell::new(2) };
 }
 
 fn main() {

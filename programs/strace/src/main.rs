@@ -317,8 +317,8 @@ fn print_summary(table: &SyscallTable, out: &mut dyn Write, stats: &BTreeMap<u32
 
     let _ = writeln!(
         out,
-        "{:>8} {:>10} {:>8} {:>7} {}",
-        "% time", "usecs", "calls", "errors", "syscall"
+        "{:>8} {:>10} {:>8} {:>7} syscall",
+        "% time", "usecs", "calls", "errors"
     );
     for (nr, stat) in &rows {
         let share = if total_ns == 0 {
@@ -337,12 +337,11 @@ fn print_summary(table: &SyscallTable, out: &mut dyn Write, stats: &BTreeMap<u32
     }
     let _ = writeln!(
         out,
-        "{:>8} {:>10} {:>8} {:>7} {}",
+        "{:>8} {:>10} {:>8} {:>7} total",
         "100.00%",
         total_ns / 1_000,
         total_calls,
-        rows.iter().map(|(_, s)| s.errors).sum::<u64>(),
-        "total"
+        rows.iter().map(|(_, s)| s.errors).sum::<u64>()
     );
 }
 

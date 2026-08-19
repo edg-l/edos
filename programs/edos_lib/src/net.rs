@@ -2,6 +2,22 @@
 
 use crate::{sys, time};
 
+/// The errno a failing socket syscall returned.
+///
+/// The kernel answers a failed syscall with a negative errno and these
+/// wrappers used to throw it away, so a caller could not tell a refused
+/// connection from an unreachable host. It is carried instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetError(pub i64);
+
+impl NetError {
+    /// The errno, positive, as `strace` and `/proc` report it.
+    pub fn errno(self) -> i64 {
+        -self.0
+    }
+}
+
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SockAddrIn {
@@ -22,7 +38,7 @@ impl SockAddrIn {
     }
 }
 
-pub fn create_udp_socket() -> Result<u64, ()> {
+pub fn create_udp_socket() -> Result<u64, NetError> {
     let fd = unsafe {
         sys::syscall3(
             sys::SYS_SOCKET,
@@ -31,10 +47,10 @@ pub fn create_udp_socket() -> Result<u64, ()> {
             0,
         )
     };
-    if sys::is_err(fd) { Err(()) } else { Ok(fd) }
+    if sys::is_err(fd) { Err(NetError(fd as i64)) } else { Ok(fd) }
 }
 
-pub fn create_tcp_socket() -> Result<u64, ()> {
+pub fn create_tcp_socket() -> Result<u64, NetError> {
     let fd = unsafe {
         sys::syscall3(
             sys::SYS_SOCKET,
@@ -43,10 +59,10 @@ pub fn create_tcp_socket() -> Result<u64, ()> {
             0,
         )
     };
-    if sys::is_err(fd) { Err(()) } else { Ok(fd) }
+    if sys::is_err(fd) { Err(NetError(fd as i64)) } else { Ok(fd) }
 }
 
-pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
+pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), NetError> {
     let ret = unsafe {
         sys::syscall3(
             sys::SYS_CONNECT,
@@ -55,14 +71,14 @@ pub fn connect(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
 }
 
 /// `getsockopt(SOL_SOCKET, SO_ERROR)`: the socket's pending error code, and
 /// zero when it has none. This is how a non-blocking `connect` reports whether
 /// the handshake `poll` just called writable succeeded or failed. The code is a
 /// kernel `errno` number; `/proc/syscalls` names them.
-pub fn so_error(fd: u64) -> Result<u32, ()> {
+pub fn so_error(fd: u64) -> Result<u32, NetError> {
     let mut val: i32 = 0;
     let mut len: u32 = core::mem::size_of::<i32>() as u32;
     let ret = unsafe {
@@ -76,13 +92,13 @@ pub fn so_error(fd: u64) -> Result<u32, ()> {
         )
     };
     if sys::is_err(ret) {
-        Err(())
+        Err(NetError(ret as i64))
     } else {
         Ok(val as u32)
     }
 }
 
-pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
+pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), NetError> {
     let ret = unsafe {
         sys::syscall3(
             sys::SYS_BIND,
@@ -91,19 +107,19 @@ pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
 }
 
 /// Mark a bound TCP socket as accepting connections. `backlog` is the number of
 /// completed connections the kernel queues before it answers a SYN with RST.
-pub fn listen(fd: u64, backlog: u32) -> Result<(), ()> {
+pub fn listen(fd: u64, backlog: u32) -> Result<(), NetError> {
     let ret = unsafe { sys::syscall2(sys::SYS_LISTEN, fd, backlog as u64) };
-    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
 }
 
 /// Take the next completed connection off a listening socket, blocking until one
 /// arrives. Returns the new descriptor and the peer address.
-pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), ()> {
+pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), NetError> {
     let mut addr = SockAddrIn::new([0; 4], 0);
     let mut addr_len = core::mem::size_of::<SockAddrIn>() as u32;
     let ret = unsafe {
@@ -115,7 +131,7 @@ pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), ()> {
         )
     };
     if sys::is_err(ret) {
-        Err(())
+        Err(NetError(ret as i64))
     } else {
         Ok((ret, addr))
     }
@@ -126,7 +142,7 @@ pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), ()> {
 /// Zero clears the timeout and restores the blocking-forever default. Without
 /// one, a datagram sent to a host that never answers costs the caller its
 /// thread.
-pub fn set_recv_timeout(fd: u64, millis: u64) -> Result<(), ()> {
+pub fn set_recv_timeout(fd: u64, millis: u64) -> Result<(), NetError> {
     #[repr(C)]
     struct Timeval {
         tv_sec: i64,
@@ -147,10 +163,10 @@ pub fn set_recv_timeout(fd: u64, millis: u64) -> Result<(), ()> {
             core::mem::size_of::<Timeval>() as u64,
         )
     };
-    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
 }
 
-pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, ()> {
+pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, NetError> {
     let (addr_ptr, addr_len) = match addr {
         Some(a) => (
             a as *const SockAddrIn as u64,
@@ -170,7 +186,7 @@ pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, 
         )
     };
     if sys::is_err(ret) {
-        Err(())
+        Err(NetError(ret as i64))
     } else {
         Ok(ret as usize)
     }
@@ -193,7 +209,7 @@ pub fn recvfrom_flags(
     buf: &mut [u8],
     flags: u64,
     addr: Option<(&mut SockAddrIn, &mut u32)>,
-) -> Result<usize, ()> {
+) -> Result<usize, NetError> {
     let (addr_ptr, addr_len_ptr) = match addr {
         Some((a, len)) => (a as *mut SockAddrIn as u64, len as *mut u32 as u64),
         None => (0, 0),
@@ -210,13 +226,13 @@ pub fn recvfrom_flags(
         )
     };
     if sys::is_err(ret) {
-        Err(())
+        Err(NetError(ret as i64))
     } else {
         Ok(ret as usize)
     }
 }
 
-pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
+pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, NetError> {
     let ret = unsafe {
         sys::syscall6(
             sys::SYS_RECVFROM,
@@ -229,27 +245,27 @@ pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
         )
     };
     if sys::is_err(ret) {
-        Err(())
+        Err(NetError(ret as i64))
     } else {
         Ok(ret as usize)
     }
 }
 
-pub fn send(fd: u64, data: &[u8]) -> Result<usize, ()> {
+pub fn send(fd: u64, data: &[u8]) -> Result<usize, NetError> {
     // Use write syscall for connected sockets
     let ret = unsafe { sys::syscall3(sys::SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64) };
     if sys::is_err(ret) {
-        Err(())
+        Err(NetError(ret as i64))
     } else {
         Ok(ret as usize)
     }
 }
 
-pub fn recv(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
+pub fn recv(fd: u64, buf: &mut [u8]) -> Result<usize, NetError> {
     let ret =
         unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) };
     if ret as i64 <= 0 {
-        if ret == 0 { Ok(0) } else { Err(()) }
+        if ret == 0 { Ok(0) } else { Err(NetError(ret as i64)) }
     } else {
         Ok(ret as usize)
     }
@@ -262,7 +278,7 @@ pub fn recv(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
 /// fast as it is written. A millisecond is long enough for the ACK that reopens
 /// the window; a peer that has gone away takes the connection out of
 /// ESTABLISHED instead, and the write then fails outright.
-pub fn send_all(fd: u64, data: &[u8]) -> Result<(), ()> {
+pub fn send_all(fd: u64, data: &[u8]) -> Result<(), NetError> {
     let mut sent = 0;
     while sent < data.len() {
         match send(fd, &data[sent..]) {
@@ -270,7 +286,7 @@ pub fn send_all(fd: u64, data: &[u8]) -> Result<(), ()> {
                 time::nanosleep(0, 1_000_000);
             }
             Ok(n) => sent += n,
-            Err(()) => return Err(()),
+            Err(e) => return Err(e),
         }
     }
     Ok(())
@@ -287,9 +303,9 @@ pub const SHUT_RDWR: u64 = 2;
 /// the connection goes away; the read side keeps working until the peer closes
 /// in turn. Without it a program that has no more to send has only `close`,
 /// which discards the reply along with the connection.
-pub fn shutdown(fd: u64, how: u64) -> Result<(), ()> {
+pub fn shutdown(fd: u64, how: u64) -> Result<(), NetError> {
     let ret = unsafe { sys::syscall2(sys::SYS_SHUTDOWN, fd, how) };
-    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
 }
 
 pub fn close(fd: u64) {
@@ -339,9 +355,9 @@ pub fn get_dns() -> Option<[u8; 4]> {
 /// The override belongs to the calling thread and is revoked when it exits, so
 /// a resolver that dies does not take name resolution with it. `/proc/net`
 /// reports both the override and the DHCP address it displaced.
-pub fn set_dns(addr: [u8; 4]) -> Result<(), ()> {
+pub fn set_dns(addr: [u8; 4]) -> Result<(), NetError> {
     let ret = unsafe { sys::syscall1(sys::SYS_SETDNS, &addr as *const [u8; 4] as u64) };
-    if sys::is_err(ret) { Err(()) } else { Ok(()) }
+    if sys::is_err(ret) { Err(NetError(ret as i64)) } else { Ok(()) }
 }
 
 pub fn ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> Option<u64> {

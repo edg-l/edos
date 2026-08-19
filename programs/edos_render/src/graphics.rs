@@ -531,6 +531,12 @@ impl Framebuffer {
     }
 }
 
+impl Default for Framebuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub type Result<T> = std::result::Result<T, GraphicsError>;
 
 /// Direct VRAM mapping for zero-copy framebuffer access.
@@ -1051,9 +1057,7 @@ impl Texture {
     /// Fill the entire texture with a color
     pub fn fill(&mut self, color: Color) {
         let raw_color = color.raw();
-        for pixel in &mut self.pixels {
-            *pixel = raw_color;
-        }
+        self.pixels.fill(raw_color);
     }
 
     /// Clear the texture (set all pixels to black)
@@ -1288,9 +1292,7 @@ impl DrawRequest {
     /// Fill the entire DrawRequest with a color
     pub fn fill(&mut self, color: Color) {
         let raw_color = color.raw();
-        for pixel in &mut self.pixels {
-            *pixel = raw_color;
-        }
+        self.pixels.fill(raw_color);
     }
 
     /// Clear the DrawRequest (set all pixels to black)

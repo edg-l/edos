@@ -145,7 +145,7 @@ pub fn render() -> alloc::string::String {
     for (index, name) in STAGE_NAMES.iter().enumerate() {
         let calls = COUNTS[index].load(Ordering::Relaxed);
         let nanos = NANOS[index].load(Ordering::Relaxed);
-        let per = if calls == 0 { 0 } else { nanos / calls };
+        let per = nanos.checked_div(calls).unwrap_or(0);
         let _ = writeln!(out, "{name:<14} {calls:>12} {nanos:>12} {per:>10}");
     }
     out

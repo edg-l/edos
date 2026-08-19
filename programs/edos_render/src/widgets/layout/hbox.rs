@@ -180,8 +180,8 @@ impl HBoxLayout {
         // Third pass: position widgets
         let mut x = content_x;
         for (i, item) in self.items.iter().enumerate() {
-            if let Some(id) = item.widget_id {
-                if let Some(widget) = container.get_mut(id) {
+            if let Some(id) = item.widget_id
+                && let Some(widget) = container.get_mut(id) {
                     let item_width = actual_widths[i].saturating_sub(item.margin.horizontal());
                     let item_x = x + item.margin.left as i32;
 
@@ -230,7 +230,6 @@ impl HBoxLayout {
 
                     widget.set_position(final_x, y);
                 }
-            }
 
             x += actual_widths[i] as i32 + self.spacing as i32;
         }

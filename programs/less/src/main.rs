@@ -414,9 +414,7 @@ impl Pager {
             match read_key(key_fd)? {
                 Key::Byte(b'\r') | Key::Byte(b'\n') => return Some(text),
                 Key::Byte(0x7f) | Key::Byte(0x08) => {
-                    if text.pop().is_none() {
-                        return None;
-                    }
+                    text.pop()?;
                 }
                 Key::Escape | Key::Byte(0x03) => return None,
                 Key::Byte(b) if b >= 0x20 => text.push(b as char),

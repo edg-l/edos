@@ -288,13 +288,12 @@ impl Widget for Slider {
                     return Some(WidgetEvent::ValueChanged(self.value));
                 }
             }
-            79 => {
+            79
                 // End
-                if self.value != self.max {
+                if self.value != self.max => {
                     self.value = self.max;
                     return Some(WidgetEvent::ValueChanged(self.value));
                 }
-            }
             _ => {}
         }
 

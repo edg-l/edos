@@ -323,17 +323,29 @@ fn restore() {
 }
 
 /// Act on one keystroke. Returns false to quit.
-fn handle_key(key: u8, options: &mut Options) -> bool {
+/// What a keystroke means to the wait loop.
+enum Key {
+    /// Quit, and restore the terminal on the way out.
+    Quit,
+    /// Changed an option, so the display is stale: redraw now rather than at
+    /// the end of the interval.
+    Command,
+    /// Not a command. Nothing changed, so nothing is worth redrawing and the
+    /// wait resumes with whatever is left of the interval.
+    Ignored,
+}
+
+fn handle_key(key: u8, options: &mut Options) -> Key {
     match key {
-        b'q' | b'Q' | 0x03 => return false,
+        b'q' | b'Q' | 0x03 => return Key::Quit,
         b'c' => options.sort = Sort::Cpu,
         b'm' => options.sort = Sort::Mem,
         b't' => options.sort = Sort::Time,
         b'p' => options.sort = Sort::Pid,
         b'u' => options.show_kernel = !options.show_kernel,
-        _ => {}
+        _ => return Key::Ignored,
     }
-    true
+    Key::Command
 }
 
 fn main() {
@@ -407,12 +419,14 @@ fn main() {
                 restore();
                 return;
             }
-            if !handle_key(buf[0], &mut options) {
-                restore();
-                return;
+            match handle_key(buf[0], &mut options) {
+                Key::Quit => {
+                    restore();
+                    return;
+                }
+                Key::Command => break,
+                Key::Ignored => continue,
             }
-            // A command redraws now rather than at the end of the interval.
-            break;
         }
     }
 

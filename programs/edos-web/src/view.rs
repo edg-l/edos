@@ -500,9 +500,7 @@ impl Layout {
         // a word, so without this a multi-word link has a dead gap between
         // every pair of words, and the reader -- who sees one underlined
         // phrase -- has clicked the link and had nothing happen.
-        let before = shown()
-            .filter(|item| item.x + item.width as i32 <= x)
-            .next_back()?;
+        let before = shown().rfind(|item| item.x + item.width as i32 <= x)?;
         let after = shown().find(|item| item.x > x)?;
         let link = before.link?;
         (after.link == Some(link))

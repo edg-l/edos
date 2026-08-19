@@ -20,8 +20,8 @@ fn format_size(bytes: u64) -> String {
 
 fn print_table(mounts: &[Mount]) {
     println!(
-        "{:<12} {:<8} {:>8} {:>8} {:>8} {:>5} {}",
-        "Filesystem", "Type", "Size", "Used", "Avail", "Use%", "Mounted on"
+        "{:<12} {:<8} {:>8} {:>8} {:>8} {:>5} Mounted on",
+        "Filesystem", "Type", "Size", "Used", "Avail", "Use%"
     );
 
     for mount in mounts {

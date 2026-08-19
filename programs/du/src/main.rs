@@ -109,7 +109,7 @@ fn format_human(bytes: u64) -> String {
 }
 
 fn format_raw(bytes: u64) -> String {
-    let kb = (bytes + 1023) / 1024;
+    let kb = bytes.div_ceil(1024);
     if kb == 0 {
         "0K".to_string()
     } else {

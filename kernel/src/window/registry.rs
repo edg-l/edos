@@ -567,7 +567,7 @@ pub fn read_tracked(site: ReadSite) -> TrackedReadGuard<'static> {
         if slot.is_none() {
             WINDOW_REGISTRY_READER_OVERFLOW.fetch_add(1, Ordering::Relaxed);
         }
-        return TrackedReadGuard { guard, slot };
+        TrackedReadGuard { guard, slot }
     }
 
     #[cfg(not(feature = "window-lock-debug"))]
