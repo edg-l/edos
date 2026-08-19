@@ -67,6 +67,16 @@ pub fn tlb_shootdown(start: VirtAddr, page_count: u64) {
         "tlb_shootdown called with interrupts disabled"
     );
 
+    // Preemption stays off from here to the end of the round, and it goes off
+    // before this CPU's identity is read rather than after: `my_idx` names the
+    // CPU that must not be sent an IPI and whose TLB is flushed directly, so a
+    // caller moved between reading it and acting on it exempts the CPU it left
+    // — which keeps the stale translation — and waits for an acknowledgement
+    // from the one it is running on, which was never asked. The lock below is
+    // the other reason: every other CPU wanting a shootdown spins on that flag,
+    // so a descheduled holder stalls all of them.
+    let _no_preempt = preempt_disable();
+
     // Build the bitmask of target CPUs (all online CPUs except self).
     let my_idx = current_cpu_index();
     let target_mask = online_cpu_mask() & !(1u64 << my_idx);
@@ -78,9 +88,6 @@ pub fn tlb_shootdown(start: VirtAddr, page_count: u64) {
     }
 
     // Acquire the serialization lock (spin until no other shootdown is in flight).
-    // Preemption stays off for the round: every other CPU wanting a shootdown
-    // spins on this flag, so a descheduled holder stalls all of them.
-    let _no_preempt = preempt_disable();
     while FLUSH_REQUEST
         .active
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

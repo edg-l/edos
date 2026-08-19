@@ -116,15 +116,18 @@ path, in orphan reclamation or in `sshd` is visible only in a local run.**
 guest suites, and nothing else boots. `nvme-check` is five boots now rather
 than four: the fifth is the watchdog case, on `edos-nvme-hostile.iso`.
 
-**The `guest suites` job has never passed, and the reason is a kernel bug this
-host cannot see.** Every run fails the same way: `mmaptest` exits 1, the guest
-goes quiet, and the remaining fourteen suites each spend their full budget, so
-the job burns most of its 75 minutes on timeouts. Locally the same gate is
-17/17 green, and stays green with the build and the guest pinned to two host
-CPUs, so it is not the runner's core count. What differs is QEMU: the runner
-image carries 8.2, this host runs 10.0. Under 8.2 the guest panics with
-`thread_park_while with preemption disabled` on the reaper kthread, which is a
-per-CPU preempt count some other thread left non-zero. Reproduce it in one
+**The runner's QEMU is a test instrument, not an obstacle.** The `guest suites`
+job did not pass once before 2026-08-19, and the cause was a kernel race that
+this host's QEMU 10.0 almost never lands in: `preempt_disable` raised a per-CPU
+count through a register holding a GS base read an instruction earlier, so a
+tick in that window put the increment on one CPU and the guard's release on
+another. The runner image carries QEMU 8.2, which hits it inside a single boot.
+Post-mortem in `doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md`.
+
+The lesson for this file is that **upgrading the runner's QEMU would have hidden
+a real kernel bug**, and the older one is the only host in the project that
+reproduces it reliably. Keep it. When a guest misbehaves under 8.2 and not under
+10.0, the guest is the first suspect, not the emulator. Reproduce in one
 command:
 
 ```bash

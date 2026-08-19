@@ -15,24 +15,62 @@
 //! here for everything else.
 
 use core::{
+    arch::asm,
     fmt,
+    mem::offset_of,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::AtomicU32,
 };
 use spin::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::util::per_cpu::get_percpu_data;
+use crate::util::per_cpu::PerCpuData;
+
+/// Byte offset of the count within `PerCpuData`, for the GS-relative accessors.
+const PREEMPT_COUNT_OFF: usize = offset_of!(PerCpuData, preempt_count);
 
 /// Suppress preemption on this CPU until the returned guard is dropped.
 ///
 /// Nesting is counted, so an inner guard does not re-enable preemption for an
 /// outer one.
+///
+/// The increment is a single GS-relative instruction, and that is load-bearing
+/// rather than an optimization: the count belongs to a CPU, not to a thread,
+/// and the caller is still preemptible right up to the moment it lands. Reading
+/// the GS base into a register and incrementing through it afterwards is two
+/// instructions, and a tick landing between them moves the thread to another
+/// CPU — the increment then raises the count of the CPU it left, and the guard
+/// drop lowers the count of the one it arrived on, wrapping that CPU's count
+/// below zero. Both CPUs are wrong from then on, permanently. An instruction
+/// cannot be split by an interrupt, and once the count is raised the thread
+/// cannot be moved, so the pair stays on one CPU.
 #[inline]
 pub fn preempt_disable() -> PreemptGuard {
-    get_percpu_data()
-        .preempt_count
-        .fetch_add(1, Ordering::Acquire);
+    // SAFETY: kernel GS holds this CPU's `PerCpuData`, and the offset names a
+    // field of it. Only this CPU writes the count, so no lock prefix is needed.
+    unsafe {
+        asm!(
+            "add dword ptr gs:[{off}], 1",
+            off = const PREEMPT_COUNT_OFF,
+            options(nostack),
+        );
+    }
     PreemptGuard { _private: () }
+}
+
+/// This CPU's suppression count.
+#[inline]
+fn preempt_count() -> u32 {
+    let count: u32;
+    // SAFETY: as `preempt_disable`, and this one only reads.
+    unsafe {
+        asm!(
+            "mov {count:e}, dword ptr gs:[{off}]",
+            count = out(reg) count,
+            off = const PREEMPT_COUNT_OFF,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    count
 }
 
 /// Whether this CPU may currently be preempted.
@@ -42,7 +80,7 @@ pub fn preempt_disable() -> PreemptGuard {
 /// tick instead of being lost.
 #[inline]
 pub fn preempt_enabled() -> bool {
-    get_percpu_data().preempt_count.load(Ordering::Acquire) == 0
+    preempt_count() == 0
 }
 
 /// RAII counterpart of `preempt_disable`.
@@ -53,9 +91,22 @@ pub struct PreemptGuard {
 impl Drop for PreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        get_percpu_data()
-            .preempt_count
-            .fetch_sub(1, Ordering::Release);
+        // A count that wraps below zero leaves the CPU permanently
+        // non-preemptible, and the thread that trips over it is never the one
+        // that caused it. Name it here instead.
+        debug_assert!(
+            preempt_count() > 0,
+            "preemption count underflow: a guard was released on a CPU that never took one"
+        );
+        // SAFETY: as `preempt_disable`; the count is non-zero here, so this
+        // thread cannot be moved between reading GS and the decrement either.
+        unsafe {
+            asm!(
+                "sub dword ptr gs:[{off}], 1",
+                off = const PREEMPT_COUNT_OFF,
+                options(nostack),
+            );
+        }
     }
 }
 
