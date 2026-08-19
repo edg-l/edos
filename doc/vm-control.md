@@ -29,7 +29,11 @@ scripts/edos-vm stop
 ```
 
 `stop` is a power cut: the guest's filesystems are whatever the last writeback
-left, and the next boot replays the journal. Typing `shutdown` in the guest
+left, and the next boot replays the journal. It refuses while a gate
+(`scripts/fs-regression`, `nvme-check`, `guest-check`, ...) is driving the
+guest, naming the gate, because there is one QEMU here and cutting power under
+a running gate makes it judge an image the guest never finished writing;
+`--force` overrides. `start` refuses on the same grounds. Typing `shutdown` in the guest
 (`-r` to reboot, `-H` to halt) syncs every filesystem first and then powers the
 machine off through ACPI, which is what to use before running `efs-fsck` on the
 disk image.
@@ -441,6 +445,8 @@ on through the log.
 | `Could not access KVM kernel module` | not in the `kvm` group in this session |
 | `Could not set up host forwarding rule 'tcp:127.0.0.1:2323-:23'` | a guest from an earlier run still holds the forward; `stop` finds it even with no pidfile |
 | `already running; stop it first` | exactly that, including a guest whose pidfile an aborted `start` removed |
+| `refusing to start/stop: pid N (...) holds the guest slot` | a gate is driving the guest; wait for it, or `--force` |
+| `no guest on ...; it exited or was stopped` | the QMP socket is gone: the guest exited, or something else stopped it |
 | Viewer disconnects | QEMU exited, since QEMU *is* the VNC server |
 
 ## usb-tablet, not usb-mouse

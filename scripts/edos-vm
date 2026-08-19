@@ -18,6 +18,7 @@ go in as synthetic input, so the guest cannot tell them from a real keyboard.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -30,6 +31,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNDIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "edos-vm")
 SOCK = os.path.join(RUNDIR, "qmp.sock")
 PIDFILE = os.path.join(RUNDIR, "qemu.pid")
+SLOT = os.path.join(RUNDIR, "slot.lock")
 GEOMETRY = os.path.join(RUNDIR, "geometry")
 SERIAL_LOG = os.path.join(REPO, "run_log.txt")
 
@@ -67,11 +69,121 @@ def keystroke(ch):
     return None
 
 
+def _cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return " ".join(a.decode(errors="replace") for a in f.read().split(b"\0") if a)
+    except OSError:
+        return None
+
+
+def _is_ancestor(pid):
+    """True when `pid` is this process or one it is running under."""
+    cur = os.getpid()
+    while cur > 1:
+        if cur == pid:
+            return True
+        try:
+            with open(f"/proc/{cur}/stat") as f:
+                cur = int(f.read().rsplit(") ", 1)[1].split(" ")[1])
+        except (OSError, IndexError, ValueError):
+            return False
+    return False
+
+
+def claim_slot(what):
+    """Take the single guest slot for this process's lifetime.
+
+    There is one QEMU here, and every gate begins by stopping whatever is in
+    it, so two gates running at once end with one of them cutting power under
+    the other. The survivor's next command then fails on a QMP socket that is
+    simply gone, which reads like a guest or driver fault rather than a
+    collision. Gates take this lock (`scripts/vmdrive.py`) so the second one
+    refuses at its own first step instead.
+
+    Returns the open file, which the caller keeps referenced -- closing it, or
+    exiting, releases the lock. Returns None when a gate this process already
+    runs under holds it, since that is the same run.
+    """
+    os.makedirs(RUNDIR, exist_ok=True)
+    f = os.fdopen(os.open(SLOT, os.O_RDWR | os.O_CREAT, 0o644), "r+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        holder = slot_holder(f)
+        f.close()
+        if holder is None:
+            return None
+        raise SystemExit(f"refusing to drive the guest: {_holder_text(holder)}")
+    f.seek(0)
+    f.truncate()
+    f.write(f"{os.getpid()}\n{what}\n")
+    f.flush()
+    return f
+
+
+def slot_holder(f=None):
+    """The gate driving the guest right now, as `(pid, command)`.
+
+    None when the slot is free, when no gate has ever taken it, or when the
+    holder is a gate this process runs under -- a gate's own `edos-vm` calls
+    must go through.
+    """
+    own = f is None
+    if own:
+        try:
+            f = open(SLOT, "r+")
+        except OSError:
+            return None
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            pass
+        else:
+            # Nobody held it, so the recorded pid is a finished gate's.
+            fcntl.flock(f, fcntl.LOCK_UN)
+            return None
+        f.seek(0)
+        try:
+            pid = int(f.readline().strip())
+        except ValueError:
+            return None
+        what = f.readline().strip()
+    finally:
+        if own:
+            f.close()
+    if _is_ancestor(pid):
+        return None
+    return pid, what or _cmdline(pid) or "?"
+
+
+def _holder_text(holder):
+    pid, command = holder
+    return (f"pid {pid} ({command}) holds the guest slot. One gate drives the one "
+            f"QEMU at a time; wait for it to finish, or pass --force to take the "
+            f"guest from it.")
+
+
+class NoGuest(OSError):
+    """No QEMU is listening on the QMP socket."""
+
+
 class Qmp:
     def __init__(self, path=SOCK):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(10)
-        self.sock.connect(path)
+        try:
+            self.sock.connect(path)
+        except (FileNotFoundError, ConnectionRefusedError) as e:
+            # Kept an OSError so `cmd_stop`'s fallback still catches it, but
+            # carrying the reason: the usual cause is that something else --
+            # another gate, or a `make` rule rebuilding a disk image -- stopped
+            # the guest underneath this command.
+            holder = slot_holder()
+            hint = f" Meanwhile {_holder_text(holder)}" if holder else ""
+            raise NoGuest(f"no guest on {path} ({e.strerror}); it exited or was "
+                          f"stopped.{hint}") from e
         self.io = self.sock.makefile("rw")
         self._reply()
         self.cmd("qmp_capabilities")
@@ -218,6 +330,9 @@ def _disk_format(path):
 
 
 def cmd_start(args):
+    holder = slot_holder()
+    if holder and not args.force:
+        raise SystemExit(f"refusing to start: {_holder_text(holder)}")
     if running():
         raise SystemExit("already running; stop it first")
 
@@ -423,6 +538,9 @@ def _quote(s):
 
 
 def cmd_stop(args):
+    holder = slot_holder()
+    if holder and not args.force:
+        raise SystemExit(f"refusing to stop: {_holder_text(holder)}")
     pid = running()
     if not pid:
         print("not running")
@@ -927,9 +1045,14 @@ def main():
                    help="host port forwarded to guest TCP 23")
     s.add_argument("--pcap", metavar="FILE",
                    help="dump every frame on the NIC to FILE (pcap)")
+    s.add_argument("--force", action="store_true",
+                   help="take the guest even while a gate is driving it")
     s.set_defaults(func=cmd_start)
 
-    sub.add_parser("stop", help="shut the VM down").set_defaults(func=cmd_stop)
+    s = sub.add_parser("stop", help="shut the VM down")
+    s.add_argument("--force", action="store_true",
+                   help="stop the guest even while a gate is driving it")
+    s.set_defaults(func=cmd_stop)
     sub.add_parser("status", help="show VM state").set_defaults(func=cmd_status)
 
     s = sub.add_parser("shot", help="write a PNG screenshot")
@@ -1007,7 +1130,10 @@ def main():
     # recorded. An explicit --width/--height still wins.
     if getattr(args, "width", None) is None and hasattr(args, "width"):
         args.width, args.height = screen_size()
-    args.func(args)
+    try:
+        args.func(args)
+    except NoGuest as e:
+        raise SystemExit(str(e)) from None
 
 
 if __name__ == "__main__":

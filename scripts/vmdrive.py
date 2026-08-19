@@ -6,6 +6,8 @@ before it accepts keystrokes, and the serial log is a byte stream carrying ANSI
 escapes rather than text.
 """
 
+import importlib.machinery
+import importlib.util
 import os
 import subprocess
 import sys
@@ -14,6 +16,21 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VM = os.path.join(REPO, "scripts", "edos-vm")
 SERIAL = os.path.join(REPO, "run_log.txt")
+
+# `edos-vm` has no .py suffix, so it is loaded by path rather than imported.
+# Doing so keeps the guest slot's lock file and its ownership rules defined
+# once, on the side that every other caller -- a `make` rule, a shell -- also
+# goes through. Its module body only defines things; `main()` is guarded.
+# The loader is named explicitly because `spec_from_file_location` decides by
+# suffix and returns None for a file that has none.
+_spec = importlib.util.spec_from_loader(
+    "edos_vm", importlib.machinery.SourceFileLoader("edos_vm", VM))
+edos_vm = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(edos_vm)
+
+# Importing this module means driving the guest, and there is one to drive.
+# Held for the lifetime of the gate process; see `edos_vm.claim_slot`.
+_slot = edos_vm.claim_slot(" ".join(sys.argv))
 
 # The desktop takes this long to reach a shell prompt on a warm host.
 BOOT_SECONDS = 26

@@ -9300,6 +9300,18 @@ guest looks abandoned. A stop issued into a live gate's write phase does not fai
 script proceeds to its verify phase and judges an image the guest never
 finished writing.
 
+That is enforced now rather than left to the reader. Importing
+`scripts/vmdrive.py` takes an exclusive `flock` on
+`$XDG_RUNTIME_DIR/edos-vm/slot.lock` and records the gate's pid and command
+line in it, held for the gate process's lifetime, so a second gate refuses at
+its own first step with the name of the one that has the slot. `edos-vm start`
+and `edos-vm stop` refuse for the same reason, and so do the `sata-disk.img`
+and `nvme-disk.img` rules, whose `edos-vm stop` no longer runs under a `-`:
+rebuilding a disk out from under a running gate is worse than a failed make.
+The lock is by open file description, so a killed gate releases it and nothing
+has to be cleaned up. A gate's own `edos-vm` calls are allowed because the
+holder is one of their ancestors, and `--force` takes the guest anyway.
+
 ---
 
 ## The whole gate set, run at `f3212014`
@@ -9610,6 +9622,11 @@ race and the winner's verdict is still sound (`ssh-check` printed all three
 phases with real byte counts and hashes, and re-ran identically with the slot to
 itself), but the traceback reads exactly like a driver bug in the gate that
 lost. Before believing one, check whether a
-second gate was running: the `pgrep` alternation above names them. What would
-remove the confusion is `scripts/edos-vm start` refusing when a live guest
-already holds the pidfile, rather than racing for it.
+second gate was running: the `pgrep` alternation above names them.
+
+The collision is refused rather than raced now, by the slot lock described
+above, and the traceback is gone twice over: the second gate stops before it
+boots anything, and a command that does find the socket missing reports
+`no guest on <sock> ...; it exited or was stopped`, naming the gate holding the
+slot when there is one. `Qmp.__init__` raises that as `NoGuest`, an `OSError`
+subclass, so `cmd_stop`'s existing fallback to `kill` still catches it.

@@ -514,8 +514,11 @@ live-root.img: kernel/kernel limine/limine filesystem/.manifest tools/efs-mkfs/s
 # fails with "Failed to get write lock" and takes the whole build down with it.
 # That reads as a test failure when this runs underneath `test` or
 # `storage-check`, so retire the guest first rather than explain it afterwards.
+# The stop refuses, and so fails this rule, while a gate is driving the guest:
+# rebuilding the disk out from under a running gate is the worse outcome, and
+# the refusal names the gate holding it.
 sata-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
-	-scripts/edos-vm stop >/dev/null 2>&1
+	scripts/edos-vm stop >/dev/null
 	qemu-img create -f raw sata-disk.raw 5G
 	sgdisk sata-disk.raw -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
@@ -532,7 +535,7 @@ sata-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/
 # disk as root means attaching it alone and asking for this GUID instead.
 NVME_UUID := 6e766d65-0000-4000-8000-00000000ed05
 nvme-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
-	-scripts/edos-vm stop >/dev/null 2>&1
+	scripts/edos-vm stop >/dev/null
 	rm -f nvme-disk.img
 	qemu-img create -f raw nvme-disk.img 2G >/dev/null
 	sgdisk nvme-disk.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(NVME_UUID)
