@@ -9891,3 +9891,75 @@ same command passed locally and failed from the root.
 `clippy::too_many_arguments` is allowed globally rather than per site:
 `kernel/src/main.rs` for the kernel, `programs/.cargo/config.toml` for the
 131-member workspace, where the per-crate attribute would mean 131 edits.
+
+## The preemption count was raised on one CPU and lowered on another (2026-08-19)
+
+CI's `guest suites` job had never passed once. `b7702071` fixes the kernel race
+behind it; the post-mortem is
+`doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md` and the
+runner-QEMU angle is in `doc/ci.md`.
+
+The short form, because it is a shape worth recognising elsewhere:
+`preempt_disable` reached a **per-CPU** count in two instructions —
+`get_percpu_data()` reads the GS base into a register, then `fetch_add` goes
+through that register. The caller is still preemptible in between, because the
+count that would stop it has not been raised yet. A tick landing there moves the
+thread, the increment lands on the CPU it left, and the guard's release wraps the
+arriving CPU's count below zero. Both CPUs stop preempting for good, and the
+thread that trips `thread_park_while with preemption disabled` is the first one
+to *park* on the wrecked CPU — the reaper, which holds nothing.
+
+Now one GS-relative instruction each way (`addl $0x1,%gs:0x508`), which an
+interrupt cannot split, plus a `debug_assert` that the release lowers a non-zero
+count. `tlb_shootdown` had the same defect one layer up and was fixed with it: it
+read `current_cpu_index()` before suppressing preemption, so a moved caller
+exempts the CPU that keeps the stale translation and waits on one that was never
+sent an IPI.
+
+**Three things to carry forward.**
+
+- A panic naming a thread that holds nothing is evidence about state it
+  *inherited*. Look for who wrote the state, not for what the victim was doing.
+  The suggested first step at the time — assert on every blocking primitive that
+  can park — would never have found this, because the leaker is the primitive.
+- The sweep for other instances came back clean: every other per-CPU accessor
+  already wraps the whole sequence, e.g. the allocator's `heap_cache` inside
+  `without_interrupts`. `preempt_disable` was the odd one out.
+- **Do not upgrade the runner's QEMU.** 8.2 lands the interrupt in that window
+  inside one boot; this host's 10.0 almost never does, which is why the same gate
+  was green here forever. It is the only host in the project that reproduces this
+  class reliably. The container repro is in `doc/ci.md`, and it is 17/17 across
+  four runs now.
+
+## Reading a page cost six passes over its bytes (2026-08-19)
+
+`ebee0138`. Full write-up in `doc/STORAGE-ROADMAP.md` section 7; `doc/fsbench.md`
+carries the corrected ram0 finding.
+
+`fsbench raw /dev/ram0` is pure path cost, and the path was passing over every
+byte six times: zero the staging buffer, device → staging, staging → cache
+frame, zero the `read_bytes` output, frame → that output, output → user. Two
+were memsets of buffers overwritten whole (the kernel allocator has no
+`alloc_zeroed` override, so `vec![0u8; n]` really is one), and one was a gather
+into an allocation that existed only to be copied out again — which
+`page_cache_read_to_user` had already stopped doing for regular files. Three are
+gone: +5-8% at every request size, +14.8% at 1 MiB, best of four sweeps each
+side.
+
+**Two traps, both cost a build.**
+
+- **`sys_read` has a devfs fast path that bypasses the VFS entirely**
+  (`try_lookup_from_full_path` → `device.read()`, at two call sites in
+  `syscalls/io.rs`). Wiring the new `read_to_user` through `vfs::read_to_user`
+  first was dead code for `/dev/ram0`, and the measured gain at that point was
+  the memsets alone. Check which path a devfs fd actually takes before
+  optimising one.
+- **Measure the old build the same way.** Best-of-four against best-of-four
+  needed the change stashed and the tree rebuilt; single runs on a guest that is
+  also running the desktop have a wide enough tail to invent a result either way.
+
+What the measurement refuted is worth as much as what it found: cache thrash at
+256 pages per request is not the cause (0.99 misses and 0.99 evictions **per
+page** at 64 KiB and 1 MiB alike), and `MAX_RUN_PAGES` is not either (992 KiB is
+one command and has already given up 85% of the loss). `fsbench raw` now sweeps
+densely enough to show that and prints per-size counter deltas under each row.
