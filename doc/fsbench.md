@@ -294,12 +294,38 @@ earlier finding has EFS reading a real AHCI disk at over 1.7 GiB/s through
 p50 of 42 us is 2.6 us per 4 KiB page, where the copy itself is a few hundred
 nanoseconds, so most of it is block-page-cache work rather than moving bytes.
 
-ram0 also *inverts*: 1452 MiB/s at 64 KiB falling to 1170 at 1 MiB, reproduced
-across boots. Neither disk-backed device inverts (NVMe 675 -> 990, AHCI 451 ->
-898), which argues against a cache-footprint explanation -- all three copy into
-the same 1 MiB user buffer, so an L2 effect should hit all three. The device
-with no I/O cost to amortise is the one that gets worse, which points at the
-raw-device read path itself.
+ram0 also *inverts*, and the inversion has a measured cause. It reads 1496
+MiB/s at 128 KiB and 1186 at 1 MiB (best of four sweeps each). An earlier
+reading of this took the disk-backed devices not inverting as an argument
+against a cache-footprint explanation, since all three copy into the same 1 MiB
+user buffer; that was wrong. Device latency amortises with request size and
+masks the same effect, so only the device with no I/O cost to amortise shows it.
+
+**Sweep densely enough to see the shape.** `RAW_SWEEP` in `programs/fsbench`
+brackets 992 KiB from both sides, because that is `MAX_RUN_PAGES` -- a request
+up to it is one command and one staging buffer, and the first byte past it is
+two. The curve settles which of the two candidates it is:
+
+| request | MiB/s | us/page | working set |
+|---|---|---|---|
+| 64 KiB | 1472 | 2.62 | 192 KiB |
+| 128 KiB | 1496 | 2.56 | 384 KiB |
+| 256 KiB | 1466 | 2.67 | 768 KiB |
+| 512 KiB | 1388 | 2.87 | 1.5 MiB |
+| 992 KiB | 1325 | 3.04 | 3 MiB |
+| 1 MiB | 1186 | 3.32 | 3 MiB + a split |
+
+It rolls off smoothly from 128 KiB, so **85% of the loss is already paid before
+any command split happens** and `MAX_RUN_PAGES` is not the cause; raising it is
+worth the last 8% and nothing more. The peak sits where the per-request working
+set stops fitting a 512 KiB per-core L2. The per-size counter deltas printed
+under each row say the rest: misses and evictions are 0.99 per page at *both*
+64 KiB and 1 MiB, so cache thrash at 256 pages per request is not it either.
+
+What the path actually did per page was six passes over every byte, two of them
+zeroing buffers that were then overwritten whole. Three are gone (see
+STORAGE-ROADMAP section 7) and the inversion is 13.8% rather than 20.7%. The
+remaining two removable passes need scatter-gather into the cache frames.
 
 **Two habits this pays for.** Read the `max` column: the finding lived entirely
 there and no throughput average would ever have shown it. And take the best of

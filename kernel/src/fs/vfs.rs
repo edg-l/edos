@@ -848,6 +848,13 @@ pub fn read_to_user(
     let file_size = match file_size_opt {
         Some(s) => s,
         None => {
+            match op
+                .fs
+                .read_bytes_to_user(&op.relative, offset, count, user_ptr)
+            {
+                Err(Error::Unsupported) => {}
+                result => return result,
+            }
             let data = op.fs.read_bytes(&op.relative, offset, count)?;
             let n = data.len();
             if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {

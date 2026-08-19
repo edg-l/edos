@@ -22,7 +22,6 @@
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    vec,
     vec::Vec,
 };
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -378,6 +377,28 @@ fn shard_index(key: Key) -> usize {
 }
 
 /// Build a HHDM slice pointing at a frame's contents.
+/// A staging buffer of `len` bytes, for a transfer that fills all of it.
+///
+/// Zeroing it first is a whole extra pass over the buffer that nothing
+/// observes, because the device overwrites every byte before anything reads
+/// one. At a 992 KiB run that is most of a megabyte of memory traffic per
+/// request, and past 128 KiB the raw read path is bound by that traffic rather
+/// than by the device.
+///
+/// The one caller submits it to the block layer and either gets every byte
+/// written or an error it propagates without looking at the buffer. Any second
+/// caller has to keep that property; where the fill is a copy from another
+/// slice, `Vec::with_capacity` plus `extend_from_slice` gets the same result
+/// with nothing uninitialized, and is what `read_bytes` does.
+#[allow(clippy::uninit_vec)]
+fn staging_buffer(len: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(len);
+    // SAFETY: `u8` has no invalid bit patterns and no drop glue, and
+    // `with_capacity` has just reserved `len` bytes this Vec owns.
+    unsafe { buf.set_len(len) };
+    buf
+}
+
 fn frame_slice(frame: PhysFrame) -> &'static mut [u8] {
     let ptr = get_virt_addr_from_phys_offset(frame.start_address()).as_mut_ptr::<u8>();
     // SAFETY: frame is a valid 4 KiB physical frame mapped via HHDM.
@@ -783,7 +804,7 @@ impl BlockPageCache {
 
         let mut reqs: Vec<(u64, u32, Arc<Vec<u8>>)> = Vec::with_capacity(runs.len());
         for &(first, len) in &runs {
-            let buf = Arc::new(vec![0u8; len * PAGE_SIZE]);
+            let buf = Arc::new(staging_buffer(len * PAGE_SIZE));
             let lba = (start_page + miss_indices[first] as u64) * SECTORS_PER_PAGE as u64;
             reqs.push((lba, (len * SECTORS_PER_PAGE as usize) as u32, buf));
         }
@@ -1066,7 +1087,10 @@ impl BlockPageCache {
         byte_offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, AhciError> {
-        let mut out = alloc::vec![0u8; len];
+        // Grown by `extend_from_slice` rather than sized and zeroed: the bytes
+        // all arrive as copies from cached pages, so reserving the capacity and
+        // appending writes each byte exactly once.
+        let mut out = Vec::with_capacity(len);
         let mut done = 0usize;
         while done < len {
             let pos = byte_offset + done as u64;
@@ -1085,11 +1109,60 @@ impl BlockPageCache {
             {
                 let start = if i == 0 { offset_in_first } else { 0 };
                 let chunk = (PAGE_SIZE - start).min(len - done);
-                out[done..done + chunk].copy_from_slice(&guard.as_slice()[start..start + chunk]);
+                out.extend_from_slice(&guard.as_slice()[start..start + chunk]);
                 done += chunk;
             }
         }
         Ok(out)
+    }
+
+    /// Read `len` bytes straight into a user buffer, without staging them in a
+    /// kernel `Vec` first.
+    ///
+    /// The same shape as `page_cache_read_to_user` for regular files: a cached
+    /// page is already the bytes the caller asked for, so gathering them into
+    /// an intermediate allocation only to copy that to userspace is one pass
+    /// over the whole request that buys nothing. Guards are Arc pins rather
+    /// than locks, so holding them across a user copy that may demand-fault and
+    /// park is safe.
+    pub fn read_to_user(
+        &self,
+        device_id: u64,
+        byte_offset: u64,
+        len: usize,
+        user_ptr: *mut u8,
+    ) -> Result<usize, AhciError> {
+        let mut done = 0usize;
+        while done < len {
+            let pos = byte_offset + done as u64;
+            let first_page = pos / PAGE_SIZE as u64;
+            let offset_in_first = (pos % PAGE_SIZE as u64) as usize;
+            let span = offset_in_first + (len - done);
+            let pages = span.div_ceil(PAGE_SIZE).min(READ_BATCH_PAGES);
+
+            for (i, guard) in self
+                .read_pages(device_id, first_page, pages)?
+                .iter()
+                .enumerate()
+            {
+                let start = if i == 0 { offset_in_first } else { 0 };
+                let chunk = (PAGE_SIZE - start).min(len - done);
+                // SAFETY: `user_ptr` is the caller's buffer, checked by the
+                // syscall layer, and the write stays inside the `len` bytes it
+                // promised. A fault is reported rather than trapped.
+                if !unsafe {
+                    crate::util::uaccess::try_copy_to_user(
+                        user_ptr.wrapping_add(done),
+                        guard.as_slice()[start..].as_ptr(),
+                        chunk,
+                    )
+                } {
+                    return Err(AhciError::IoError);
+                }
+                done += chunk;
+            }
+        }
+        Ok(done)
     }
 
     /// Signal the writeback thread that there is work to do.

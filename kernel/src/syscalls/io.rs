@@ -887,49 +887,49 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             let offset = file.offset as usize;
 
             // Fast path: devfs devices can be read directly without the FS Mailbox.
-            let (bytes_read, ra) = if let Some(device) =
-                crate::fs::devfs::try_lookup_from_full_path(&file.path)
-            {
-                match device.read(offset, count) {
-                    Ok(data) => {
-                        let bytes_to_copy = data.len().min(count);
-                        if bytes_to_copy == 0 {
-                            return 0;
+            let (bytes_read, ra) =
+                if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path) {
+                    // `read_to_user` rather than `read`: a block device's bytes are
+                    // already in cached kernel pages, and gathering them into a Vec
+                    // for this to copy out of is a second pass over the whole
+                    // request. Every other device takes the default, which is the
+                    // gather this replaces.
+                    match device.read_to_user(offset, count, buffer_ptr) {
+                        Ok(n) => {
+                            let bytes_to_copy = n.min(count);
+                            if bytes_to_copy == 0 {
+                                return 0;
+                            }
+                            (bytes_to_copy, ra) // devfs doesn't mutate ra
                         }
-                        if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
-                            info.lock().errno = Errno::EFAULT;
+                        Err(e) => {
+                            info.lock().errno = Errno::from(crate::fs::Error::from(e));
                             return -1;
                         }
-                        (bytes_to_copy, ra) // devfs doesn't mutate ra
                     }
-                    Err(e) => {
-                        info.lock().errno = Errno::from(crate::fs::Error::from(e));
-                        return -1;
-                    }
-                }
-            } else {
-                let fs = match file.fs.as_ref() {
-                    Some(f) => f,
-                    None => {
-                        info.lock().errno = Errno::EINVAL;
-                        return -1;
+                } else {
+                    let fs = match file.fs.as_ref() {
+                        Some(f) => f,
+                        None => {
+                            info.lock().errno = Errno::EINVAL;
+                            return -1;
+                        }
+                    };
+                    let op = vfs::VfsOp::from_open_file(
+                        fs.clone(),
+                        // Invariant: relative is Some iff fs is Some (set together at open time).
+                        file.relative.clone().expect("fs set without relative path"),
+                        file.inode.clone(),
+                        file.mount_id,
+                    );
+                    match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
+                        Ok(n) => (n, ra),
+                        Err(_) => {
+                            info.lock().errno = Errno::EINVAL;
+                            return -1;
+                        }
                     }
                 };
-                let op = vfs::VfsOp::from_open_file(
-                    fs.clone(),
-                    // Invariant: relative is Some iff fs is Some (set together at open time).
-                    file.relative.clone().expect("fs set without relative path"),
-                    file.inode.clone(),
-                    file.mount_id,
-                );
-                match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
-                    Ok(n) => (n, ra),
-                    Err(_) => {
-                        info.lock().errno = Errno::EINVAL;
-                        return -1;
-                    }
-                }
-            };
 
             let new_fd = FileDescriptor::FsFile(FsFile {
                 offset: file.offset + bytes_read as u64,
@@ -1949,18 +1949,8 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
     let offset = offset as usize;
 
     if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path) {
-        return match device.read(offset, count) {
-            Ok(data) => {
-                let bytes_to_copy = data.len().min(count);
-                if bytes_to_copy == 0 {
-                    return 0;
-                }
-                if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return -1;
-                }
-                bytes_to_copy as i64
-            }
+        return match device.read_to_user(offset, count, buffer_ptr) {
+            Ok(n) => n.min(count) as i64,
             Err(e) => {
                 info.lock().errno = Errno::from(crate::fs::Error::from(e));
                 -1

@@ -34,6 +34,25 @@ use crate::harness::{Budget, Report, Rng, Runner, human_bytes};
 /// block, 1 MiB is past the 992 KiB an AHCI command can carry in one go.
 pub const SWEEP: &[usize] = &[512, 4096, 65536, 1 << 20];
 
+/// Sizes swept by the raw device modes, where the request size is the variable
+/// under study rather than a stand-in for how a program reads.
+///
+/// Denser than `SWEEP` between 64 KiB and 1 MiB because that is where the raw
+/// path stops scaling, and it brackets 992 KiB from both sides: a request up to
+/// that is one command and one staging buffer, and the first byte past it is
+/// two. A cost that appears only in the last step is the split; one that grows
+/// smoothly across the middle is the memory the path touches per page.
+pub const RAW_SWEEP: &[usize] = &[
+    512,
+    4096,
+    65536,
+    128 << 10,
+    256 << 10,
+    512 << 10,
+    992 << 10,
+    1 << 20,
+];
+
 /// Files the write phase leaves behind for the read phase, keyed by the buffer
 /// size that produced them. One file per size keeps the read phase honest: it
 /// reads a file it did not just write.

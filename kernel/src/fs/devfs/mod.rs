@@ -64,6 +64,27 @@ pub trait DevFsDevice: Send + Sync {
         Err(DevFsError::Unsupported)
     }
 
+    /// Read into a user buffer directly, where the device can do better than
+    /// building a `Vec` for the caller to copy out of.
+    ///
+    /// The default keeps every device that has nothing to gain on the plain
+    /// `read` path; only a device whose data is already in kernel pages, like a
+    /// block device backed by the block page cache, is worth overriding for.
+    fn read_to_user(
+        &self,
+        offset: usize,
+        count: usize,
+        user_ptr: *mut u8,
+    ) -> Result<usize, DevFsError> {
+        let data = self.read(offset, count)?;
+        // SAFETY: `user_ptr` is the caller's buffer, checked by the syscall
+        // layer, and the copy is bounded by what `read` produced.
+        if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), data.len()) } {
+            return Err(DevFsError::IoError);
+        }
+        Ok(data.len())
+    }
+
     fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, DevFsError> {
         Err(DevFsError::Unsupported)
     }
@@ -261,6 +282,36 @@ impl FileSystem for DevFsHandle {
 
         if let Some(device) = device {
             device.read(offset, count).map_err(fs::Error::from)
+        } else if is_dir {
+            Err(fs::Error::NotAFile)
+        } else {
+            Err(fs::Error::FileNotFound)
+        }
+    }
+
+    fn read_bytes_to_user(
+        &self,
+        path: &Path,
+        offset: usize,
+        count: usize,
+        user_ptr: *mut u8,
+    ) -> Result<usize, fs::Error> {
+        let normalized = path.normalize();
+        let state = ranked_read!(
+            RANK_DEVFS_REGISTRY,
+            "devfs::read_bytes_to_user",
+            self.shared
+        );
+        let device = state.get_device(&normalized).map(|d| d.device.clone());
+        let is_dir = state.is_directory(&normalized);
+        // The registry lock is released before the copy: a user copy can demand
+        // fault and park, and this lock is on the path every device open takes.
+        drop(state);
+
+        if let Some(device) = device {
+            device
+                .read_to_user(offset, count, user_ptr)
+                .map_err(fs::Error::from)
         } else if is_dir {
             Err(fs::Error::NotAFile)
         } else {

@@ -386,6 +386,22 @@ pub trait FileSystem {
     // Drivers that support direct inode access override these to skip path walks.
     // Default returns Unsupported; the VFS falls back to path-based methods.
 
+    /// Read into a user buffer without building a `Vec` first.
+    ///
+    /// `Unsupported` means the caller should fall back to `read_bytes` and copy
+    /// out itself. A filesystem whose data is already in kernel pages saves a
+    /// whole pass over the request by implementing this; one that has to
+    /// materialise the bytes anyway saves nothing and should not.
+    fn read_bytes_to_user(
+        &self,
+        _path: &Path,
+        _offset: usize,
+        _count: usize,
+        _user_ptr: *mut u8,
+    ) -> Result<usize, Error> {
+        Err(Error::Unsupported)
+    }
+
     fn read_bytes_ino(&self, _ino: u64, _offset: usize, _count: usize) -> Result<Vec<u8>, Error> {
         Err(Error::Unsupported)
     }

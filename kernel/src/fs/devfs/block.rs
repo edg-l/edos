@@ -99,6 +99,18 @@ impl DevFsDevice for BlockDevNode {
             .map_err(|_| DevFsError::IoError)
     }
 
+    fn read_to_user(
+        &self,
+        offset: usize,
+        count: usize,
+        user_ptr: *mut u8,
+    ) -> Result<usize, DevFsError> {
+        self.check_range(offset, count)?;
+        BlockPageCache::global()
+            .read_to_user(self.device_id, offset as u64, count, user_ptr)
+            .map_err(|_| DevFsError::IoError)
+    }
+
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, DevFsError> {
         self.check_range(offset, data.len())?;
 

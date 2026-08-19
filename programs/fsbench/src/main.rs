@@ -25,7 +25,7 @@ use edos_lib::sys::{SYS_SYNC, syscall0};
 
 use counters::Counters;
 use harness::{Budget, Report, human_bytes};
-use workloads::SWEEP;
+use workloads::{RAW_SWEEP, SWEEP};
 
 /// Per-benchmark time budget. Every test stops after roughly this long, so the
 /// suite's runtime does not depend on how fast the filesystem is.
@@ -119,6 +119,33 @@ fn header(out: &mut Tee, title: &str) {
 }
 
 /// Print one result. Returns 1 if the benchmark failed, for the exit code.
+/// Counters a single sweep row moved, per 4 KiB page it read or wrote.
+///
+/// The whole-run delta at the end answers "did this reach the disk"; a
+/// per-request-size one answers why the same path costs more per page as the
+/// request grows, which a total cannot show because every size contributes to
+/// it. Normalising by pages is the point: a cost that is flat per page is the
+/// path's, and one that climbs with the request is the request's.
+fn counter_row(out: &mut Tee, mark: &Counters, bytes: u64) {
+    let deltas = mark.delta(&Counters::sample());
+    if deltas.is_empty() {
+        return;
+    }
+    let pages = (bytes / 4096).max(1);
+    let mut cells = Vec::new();
+    for (key, value) in deltas {
+        let per_page = value
+            .strip_prefix('+')
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|n| format!("{:.2}", n as f64 / pages as f64));
+        cells.push(match per_page {
+            Some(pp) => format!("{key}={value} ({pp}/pg)"),
+            None => format!("{key}={value}"),
+        });
+    }
+    out.line(&format!("    {}", cells.join("  ")));
+}
+
 fn report_row(out: &mut Tee, r: &Report) -> u32 {
     let label = format!("{} {}", r.name, r.unit);
     if let Some(error) = &r.error {
@@ -301,16 +328,20 @@ fn main() -> ExitCode {
     match opts.mode {
         Mode::Raw => {
             header(&mut out, "RAW DEVICE READ");
-            for &chunk in SWEEP {
+            for &chunk in RAW_SWEEP {
+                let mark = Counters::sample();
                 let report = workloads::raw_read(&opts.path, chunk, RAW_SKIP, RAW_SPAN, budget);
                 failures += report_row(&mut out, &report);
+                counter_row(&mut out, &mark, report.bytes);
             }
         }
         Mode::RawWrite => {
             header(&mut out, "RAW DEVICE WRITE");
-            for &chunk in SWEEP {
+            for &chunk in RAW_SWEEP {
+                let mark = Counters::sample();
                 let report = workloads::raw_write(&opts.path, chunk, RAW_SKIP, RAW_SPAN, budget);
                 failures += report_row(&mut out, &report);
+                counter_row(&mut out, &mark, report.bytes);
             }
         }
         Mode::RaPrep => match workloads::ra_prepare(&opts.path, opts.ra_bytes()) {

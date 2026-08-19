@@ -531,6 +531,67 @@ let each filesystem report `AlreadyExists` from its own `create_file` — it
 already holds the parent — and delete the VFS pre-check, rather than threading a
 lookup result down through the trait.
 
+## 7. The raw read path touched every byte six times; three passes are gone
+
+`fsbench raw /dev/ram0` is the pure path cost, because a RAM disk has no I/O to
+amortise. Reading one 4 KiB page used to cost six passes over its bytes:
+
+1. zero the staging buffer in `read_pages`
+2. device -> staging buffer
+3. staging buffer -> cache frame (the scatter, because cache frames are not
+   physically adjacent)
+4. zero the `Vec` in `read_bytes`
+5. cache frame -> that `Vec`
+6. `Vec` -> user
+
+Passes 1 and 4 were pure waste: both buffers are overwritten whole before
+anything reads them, and the kernel allocator has no `alloc_zeroed` override, so
+`vec![0u8; n]` really is a memset. Pass 5 was a gather into an intermediate
+allocation that only existed to be copied out again -- which the regular-file
+path had already stopped doing years earlier in `page_cache_read_to_user`.
+
+Three are gone. `staging_buffer` allocates without zeroing (one site, the only
+one where the fill is a device write rather than a copy); `read_bytes` grows its
+output with `extend_from_slice` instead of sizing and zeroing it; and a devfs
+device can now implement `read_to_user`, which `BlockDevNode` does, so a raw
+device read copies from the cached frame straight to the user buffer. Best of
+four sweeps each, `/dev/ram0`:
+
+| request | before | after | gain |
+|---|---|---|---|
+| 4 KiB | 1037 | 1096 | +5.7% |
+| 64 KiB | 1472 | 1567 | +6.5% |
+| 128 KiB | 1496 | 1580 | +5.6% |
+| 512 KiB | 1388 | 1494 | +7.6% |
+| 992 KiB | 1325 | 1395 | +5.3% |
+| 1 MiB | 1186 | 1362 | +14.8% |
+
+The gain grows with request size because that is where the working set stops
+fitting in L2, which is the same reason the inversion exists at all; it falls
+from 20.7% to 13.8%.
+
+**The gain is smaller than "half the passes" predicts, and that is the useful
+part.** A memset is much cheaper per byte than a copy -- write-only, no read
+stream -- and the gather it replaced was usually L2-warm. So the two passes
+still standing are the expensive ones, and both are the staging buffer's: the
+device writes into it and then it is scattered into the frames. Removing them
+means handing the device the frame list instead, which NVMe PRP lists and AHCI
+PRDT both support natively and the NVMe driver already has a discontiguous-
+buffer path for. That is a block-device API change, from
+`(lba, sectors, Arc<Vec<u8>>)` to a frame list, across `AsyncBlockDevice`, AHCI,
+NVMe, USB mass storage and the ramdisk.
+
+**What is refuted, do not re-try.** Cache thrash at 256 pages per request is not
+the cause: per-size counter deltas read 0.99 misses and 0.99 evictions per page
+at 64 KiB and at 1 MiB alike. Raising `MAX_RUN_PAGES` past 248 is not the fix
+either: 992 KiB is a single command and has already given up 85% of the loss.
+
+Per-page bookkeeping is what is left after the copies -- 2.4 us per 4 KiB page
+against a few hundred nanoseconds of memcpy. Per page that is one frame
+allocation under the global frame-allocator lock, two shard-lock acquisitions
+(lookup, then insert), an LRU insert and an eviction. None of it has been
+attributed individually.
+
 ## Correctness items still open
 
 Not performance, but found by this work and unfixed.
