@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Record a tour of the EDOS desktop, for the video on the project site.
+
+One QMP connection drives both halves: frames are dumped on a fixed cadence and
+the tour's actions fire when their scheduled moment arrives, so input and
+capture cannot race for the socket. QMP serves one client at a time, which is
+why this cannot be two threads or two connections.
+
+Frames land as PPM. PNG costs 22x as much inside QEMU and capped capture at
+11fps against 250 for PPM, so the uncompressed format is what makes a real-time
+cadence reachable at all; ffmpeg does the encoding afterwards. That costs about
+3 MB a frame, so `TOUR_DIR` must be disk-backed rather than tmpfs.
+
+    scripts/edos-vm start          # a freshly built root, so the install is real
+    scripts/record-tour
+    ffmpeg -framerate 25 -i $TOUR_DIR/frames/f%05d.ppm \\
+        -c:v libx264 -pix_fmt yuv420p -crf 25 -preset slow \\
+        -movflags +faststart edos-tour.mp4
+
+The pixel coordinates below come from the panel and the applications menu
+publishing their own geometry to the kernel log; `scripts/edos-vm panel` and
+`launch` read the same blocks. They are not measured off a screenshot.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.environ.get("TOUR_DIR", os.path.expanduser("~/.cache/edos-tour")) + "/frames"
+
+spec = importlib.util.spec_from_loader(
+    "edosvm", importlib.machinery.SourceFileLoader("edosvm", f"{REPO}/scripts/edos-vm")
+)
+edosvm = importlib.util.module_from_spec(spec)
+sys.argv = ["edos-vm"]
+spec.loader.exec_module(edosvm)
+
+Qmp = edosvm.Qmp
+keystroke = edosvm.keystroke
+
+
+class Tour:
+    def __init__(self, q):
+        self.q = q
+        self.w, self.h = edosvm.screen_size()
+
+    def key(self, *names):
+        self.q.cmd(
+            "send-key",
+            keys=[{"type": "qcode", "data": n} for n in names],
+        )
+
+    def text(self, s):
+        for ch in s:
+            keys = keystroke(ch)
+            if keys is None:
+                continue
+            self.q.cmd(
+                "send-key", keys=[{"type": "qcode", "data": k} for k in keys]
+            )
+            time.sleep(0.02)
+
+    def move(self, x, y):
+        edosvm.goto(self.q, int(x), int(y), self.w, self.h)
+
+    def click(self, x, y):
+        self.move(x, y)
+        for down in (True, False):
+            self.q.cmd(
+                "input-send-event",
+                events=[{"type": "btn", "data": {"button": "left", "down": down}}],
+            )
+            time.sleep(0.05)
+
+
+def glide(t, x0, y0, x1, y1, steps=10):
+    """Move the pointer in a straight line, so a click is preceded by travel.
+
+    The pointer sits on the GPU's cursor plane and so is not in a screendump,
+    but the hover states it crosses on the way are.
+    """
+    for i in range(1, steps + 1):
+        t.move(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)
+
+
+def main():
+    os.makedirs(OUT, exist_ok=True)
+    for f in os.listdir(OUT):
+        os.unlink(os.path.join(OUT, f))
+
+    q = Qmp()
+    t = Tour(q)
+    script = build(t)
+
+    fps = 25
+    index = open(os.path.join(os.path.dirname(OUT), "frames.txt"), "w")
+    t0 = time.monotonic()
+    n = 0
+    step = 0
+    tail_until = None
+    while True:
+        now = time.monotonic() - t0
+        while step < len(script) and now >= script[step][0]:
+            script[step][1]()
+            step += 1
+            now = time.monotonic() - t0
+        if step >= len(script):
+            if tail_until is None:
+                # A tail, so the last action stays on screen long enough to read.
+                tail_until = now + 3.0
+            elif now >= tail_until:
+                break
+        path = os.path.join(OUT, f"f{n:05d}.ppm")
+        q.cmd("screendump", filename=path, format="ppm")
+        index.write(f"{time.monotonic() - t0:.4f} {path}\n")
+        n += 1
+        slack = (n / fps) - (time.monotonic() - t0)
+        if slack > 0:
+            time.sleep(slack)
+    index.close()
+    span = time.monotonic() - t0
+    print(f"{n} frames over {span:.1f}s ({n / span:.1f} fps)")
+
+
+def build(t):
+    """(offset in seconds, thunk) pairs, in order."""
+    s = []
+
+    def at(sec, fn):
+        s.append((sec, fn))
+
+    # A shell, and what the machine is.
+    at(0.6, lambda: t.click(400, 300))
+    at(1.2, lambda: t.text("uname -a"))
+    at(2.6, lambda: t.key("ret"))
+    at(3.6, lambda: t.text("free"))
+    at(4.6, lambda: t.key("ret"))
+
+    # The applications menu: what is installed.
+    at(6.5, lambda: glide(t, 400, 300, 26, 780))
+    at(7.2, lambda: t.click(26, 780))
+
+    # The file manager.
+    at(9.5, lambda: glide(t, 26, 780, 63, 405))
+    at(10.2, lambda: t.click(63, 405))
+    at(13.5, lambda: t.click(171, 250))
+    at(15.5, lambda: t.click(342, 210))
+    at(16.2, lambda: t.key("ret"))
+
+    # The package manager, installing the editor.
+    at(20.0, lambda: glide(t, 342, 210, 26, 780))
+    at(20.6, lambda: t.click(26, 780))
+    at(21.6, lambda: glide(t, 26, 780, 77, 597))
+    at(22.2, lambda: t.click(77, 597))
+    at(26.0, lambda: glide(t, 77, 597, 687, 644))
+    at(26.6, lambda: t.click(687, 644))
+
+    # The browser, on this very site.
+    at(33.0, lambda: glide(t, 687, 644, 26, 780))
+    at(33.6, lambda: t.click(26, 780))
+    at(34.6, lambda: glide(t, 26, 780, 64, 469))
+    at(35.2, lambda: t.click(64, 469))
+    at(43.0, lambda: t.key("ctrl", "l"))
+    at(43.6, lambda: t.text("edos.edgl.dev/software/"))
+    at(46.5, lambda: t.key("ret"))
+
+    return s
+
+
+if __name__ == "__main__":
+    main()

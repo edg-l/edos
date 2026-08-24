@@ -310,6 +310,37 @@ window is frontmost; `scripts/edos-vm focus <title>` picks the one you mean.
 
 ---
 
+## Recording the tour video
+
+`scripts/record-tour` drives a scripted session and dumps every frame, for the
+video on the project site. It holds one QMP connection and interleaves capture
+with input, because QMP serves one client at a time.
+
+```bash
+scripts/edos-vm start            # on a freshly built root, so the install is real
+scripts/record-tour              # ~50s, writes PPM frames under $TOUR_DIR
+ffmpeg -framerate 25 -i ~/.cache/edos-tour/frames/f%05d.ppm \
+    -c:v libx264 -pix_fmt yuv420p -crf 25 -preset slow \
+    -movflags +faststart edos-tour.mp4
+```
+
+**Capture format decides the frame rate, and PNG is the wrong one.** QEMU's
+`screendump` encodes PNG inline, which held capture to 11fps; the same loop
+writing PPM reaches 250fps, so the cadence is a `sleep` rather than a ceiling.
+The cost is ~3 MB a frame, so `TOUR_DIR` must be disk-backed — `/tmp` is tmpfs
+here and a 50-second run is 3.6 GB.
+
+The pointer coordinates in the script come from the panel and the applications
+menu publishing their own geometry to the kernel log, the same blocks `panel`
+and `launch` read. Nothing in it is measured off a screenshot, so a layout
+change moves the script's targets with it.
+
+**The video and the site's screenshots go stale silently.** Neither is checked
+by anything, and the first tour survived from 0.1.0 to 0.8.0 — through a new
+window chrome, a new panel, outline fonts and four new programs — while every
+page around it stayed current. Re-record when the desktop's appearance changes,
+not when someone notices.
+
 ## Addressing the panel by name
 
 The panel's buttons are not windows, so nothing in `/proc/windows` accounts for
