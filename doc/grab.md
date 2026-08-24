@@ -444,6 +444,17 @@ Three things about this are load-bearing:
 - **Exact-match (`=`) beats `^~`**, which is what lets the two index rules
   override the surrounding block.
 
+Immutability has a consequence for republishing: **a package rebuilt against a
+changed ABI needs its version bumped, not just a re-run of `make publish`.**
+Nothing in the tree owes an older artefact compatibility, so a syscall
+convention that moves leaves every already-published tarball stale — it is a
+binary built against a kernel that no longer exists, and it faults rather than
+failing cleanly. Republishing under the same version writes new bytes behind a
+filename the edge may hold for a week, so a client can fetch the cached old
+tarball and reject it against the new index's SHA-256. Bump the version in the
+program's `Cargo.toml`, which is where `grab-repo` reads it from, and the new
+filename carries the new bytes.
+
 Plain HTTP is not an option without new configuration: there is no port-80
 server block for this host, so `http://edos.edgl.dev/pkg/index` reaches nginx's
 *default* server and answers 404 rather than redirecting.
