@@ -1,0 +1,153 @@
+#!/usr/bin/env -S python3 -u
+"""Prove the sampling profiler actually profiles.
+
+A profiler is the one instrument that cannot be checked by reading it: every
+failure mode -- a timer that never fires on three of four CPUs, a frame walk
+that stops at depth one, a ring that silently drops everything -- produces
+output that looks like a profile. So this runs a program whose hot function is
+known in advance and asserts the profile names it.
+
+    make profile-check
+
+The workload is `sha256sum` over a several-megabyte binary, which spends
+essentially all of its time in one compression loop. Three things are checked,
+and each one is a different half of the machinery:
+
+  1. Samples arrive at roughly the rate asked for, on every CPU. A timer clamp
+     that failed to reach the idle loop shows up here as a count far under the
+     expected one.
+  2. The walk produces real stacks, not single frames. Depth is what separates
+     a profiler from a program counter histogram.
+  3. Resolved on the host, the heaviest user symbol belongs to sha256sum.
+     This is the end-to-end one: it fails if the addresses are wrong, if the
+     load base is wrong, or if the samples were charged to the wrong thread.
+
+Exits 0 only when all three hold.
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import vmdrive
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESOLVE = os.path.join(REPO, "scripts", "profile-resolve")
+
+HZ = 999
+# The file eight times over, not once: one pass takes about 60 ms, which is
+# too short to say anything about a sampling rate. Repeating the argument keeps
+# the workload one process with one hot function while making it long enough to
+# measure.
+BIG = "/bin/edos-web"
+WORKLOAD = "sha256sum " + " ".join([BIG] * 8)
+
+# The guest samples every CPU, so a run of T seconds yields about T * HZ * CPUS
+# samples. The workload takes a second or two and the bound only has to catch a
+# profiler that is barely sampling at all, so it is deliberately loose.
+MIN_SAMPLES = 400
+
+# A stack of one frame is a walk that failed. Some are expected -- a leaf
+# interrupted in its prologue has no caller to find -- but they cannot be most
+# of the profile.
+MAX_SINGLE_FRAME_SHARE = 0.35
+
+
+
+def wait_until_quiet(since, quiet_for=3, timeout=60):
+    """Read the log once it has stopped growing.
+
+    The profile has no terminator, so the only honest signal that the guest has
+    finished writing one is that it has stopped writing.
+    """
+    deadline = time.time() + timeout
+    last = -1
+    still = 0
+    while time.time() < deadline:
+        size = vmdrive.serial_mark()
+        still = still + 1 if size == last else 0
+        if still >= quiet_for:
+            break
+        last = size
+        time.sleep(1)
+    # The serial log is CRLF and `serial_tail` decodes bytes without
+    # translating newlines, so a row ends in "\r\n" and a regex anchored with
+    # `$` matches nothing at all. The resolver never sees this because it opens
+    # the file in text mode.
+    return vmdrive.serial_tail(since).replace("\r\n", "\n")
+
+
+def fail(message):
+    print(f"FAIL: {message}")
+    sys.exit(1)
+
+
+def main():
+    vmdrive.boot()
+
+    since = vmdrive.serial_mark()
+    vmdrive.type_line(f"profile -f {HZ} {WORKLOAD} > /dev/klog 2>&1", settle=2)
+    out = vmdrive.wait_for(since, "# edos-profile", timeout=90)
+    if out is None:
+        vmdrive.vm("stop")
+        fail("no profile appeared on the serial log within 90s")
+
+    # The header appears first and the folded rows stream out after it, so the
+    # marker above says the profile has *started*, not that it is complete.
+    # There is no end marker to wait for -- the last row is just the lightest
+    # one -- so wait for the log to stop growing instead.
+    out = wait_until_quiet(since)
+    vmdrive.vm("stop")
+
+    taken = re.search(r"# taken (\d+)", out)
+    dropped = re.search(r"# dropped (\d+)", out)
+    if not taken:
+        fail("profile block has no sample count")
+    taken = int(taken.group(1))
+    dropped = int(dropped.group(1)) if dropped else 0
+
+    print(f"samples: {taken} taken, {dropped} dropped")
+    if taken < MIN_SAMPLES:
+        fail(f"only {taken} samples at {HZ} Hz; the timer clamp is not reaching every CPU")
+
+    rows = re.findall(
+        r"(?:^|\s)([kui]) (\d+) ((?:0x[0-9a-f]+|\[unknown\])(?:;(?:0x[0-9a-f]+|\[unknown\]))*) (\d+)$",
+        out,
+        re.MULTILINE,
+    )
+    if not rows:
+        fail("profile block has no folded rows")
+
+    total = sum(int(count) for _, _, _, count in rows)
+    shallow = sum(
+        int(count)
+        for _, _, stack, count in rows
+        if len([f for f in stack.split(";") if f != "[unknown]"]) < 2
+    )
+    share = shallow / total if total else 1.0
+    print(f"stacks: {len(rows)} distinct, {share:.0%} of samples are a single frame")
+    if share > MAX_SINGLE_FRAME_SHARE:
+        fail(f"{share:.0%} of samples walked no further than one frame")
+
+    # The serial log is the profile's own transport, so resolve it in place.
+    resolved = subprocess.run(
+        [RESOLVE, vmdrive.SERIAL, "-n", "40"],
+        capture_output=True,
+        text=True,
+    )
+    if resolved.returncode != 0:
+        fail(f"profile-resolve failed: {resolved.stderr.strip()}")
+    print(resolved.stdout)
+
+    if "sha256sum::Sha256" not in resolved.stdout:
+        fail("no sha256sum symbol in the resolved profile of a sha256sum run")
+
+    print("PASS: profile-check")
+
+
+if __name__ == "__main__":
+    main()

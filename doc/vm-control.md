@@ -28,6 +28,19 @@ scripts/edos-vm log -n 40          # tail the guest serial log
 scripts/edos-vm stop
 ```
 
+`start` brings the images it is about to boot up to date first. The guest runs
+its programs off a disk image, not off `filesystem/bin`, and building a program
+does not put it in that image — so `make programs` followed by a bare `start`
+used to boot the *previous* binary, which from inside the guest is
+indistinguishable from the change having had no effect. Any attached image older
+than `filesystem/.manifest` is rebuilt through its own make target before QEMU
+starts; `--no-rebuild` boots what is on disk. The trigger is narrow on purpose:
+the manifest changes when a program is built and at no other time, so a gate
+that crashes a guest and reboots it to test journal replay never has its image
+rebuilt underneath it. File mtimes cannot answer this question on their own,
+because a running guest writes to its own image and so leaves it *newer* than
+the binary missing from it.
+
 `stop` is a power cut: the guest's filesystems are whatever the last writeback
 left, and the next boot replays the journal. It refuses while a gate
 (`scripts/fs-regression`, `nvme-check`, `guest-check`, ...) is driving the

@@ -1,0 +1,258 @@
+#!/usr/bin/env -S python3 -u
+"""Turn a guest profile into symbols, on the host, where the DWARF is.
+
+`profile` in the guest emits raw addresses on purpose: the kernel and every
+program are ordinary ELF files sitting in this tree with their debug info
+intact, and `addr2line` already reads them. Resolving in the guest would mean
+carrying a symbol table into a `no_std` kernel to answer a question the build
+machine can answer for free.
+
+    scripts/edos-vm type 'profile -d 10 > /dev/klog 2>&1' --enter
+    scripts/profile-resolve run_log.txt
+    scripts/profile-resolve run_log.txt --folded | flamegraph.pl > profile.svg
+
+Input is anything containing the profile block; the serial log is the usual
+source, so lines before `# edos-profile` and after the last folded row are
+ignored rather than being an error.
+
+Two things about the numbers, both of them properties of how the samples were
+taken rather than of this script:
+
+  - A profile counts where the CPU *was*, so a symbol's share is its share of
+    CPU time, not of wall-clock time. A program blocked on I/O contributes
+    nothing at all and does not appear.
+  - Nothing running with interrupts disabled can be sampled, because the sample
+    is taken by an interrupt. Those regions are charged to whatever ran next.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections import defaultdict
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+KERNEL_ELF = os.path.join(
+    REPO, "kernel", "target", "x86_64-unknown-none", "debug", "edos-kernel"
+)
+PROGRAM_DIR = os.path.join(REPO, "programs", "target", "x86_64-unknown-edos", "debug")
+
+# Where the loader puts a static-PIE image; see kernel/src/loader/mod.rs. An
+# ET_EXEC image is linked at its final addresses and needs no adjustment.
+PIE_LOAD_BASE = 0x400000
+
+KERNEL_MIN = 0xFFFF800000000000
+
+# Both allow anything ahead of them: the usual source is the serial log, where
+# every line carries a timestamp and the writing thread. The row pattern spells
+# out the stack rather than accepting \S+ so a log line that merely ends in
+# three numbers cannot be mistaken for a sample.
+FRAME = r"(?:0x[0-9a-fA-F]+|\[unknown\])"
+HEADER = re.compile(r"# (\w+) (.*)$")
+ROW = re.compile(rf"(?:^|\s)([kui]) (\d+) ({FRAME}(?:;{FRAME})*) (\d+)$")
+
+
+def die(message):
+    print(f"profile-resolve: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse(path):
+    """Pull the profile block out of whatever the file is."""
+    threads = {}
+    meta = {}
+    rows = []
+    with open(path, "r", errors="replace") as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            # Serial output interleaves, so a row may carry a prefix from
+            # another writer. Anchor on the profile's own shapes.
+            header = HEADER.search(line)
+            if header:
+                key, value = header.groups()
+                if key == "thread":
+                    tid, _, name = value.partition(" ")
+                    threads[int(tid)] = name.strip()
+                else:
+                    meta[key] = value.strip()
+                continue
+            row = ROW.search(line)
+            if row:
+                mode, tid, stack, count = row.groups()
+                rows.append((mode, int(tid), stack.split(";"), int(count)))
+    return meta, threads, rows
+
+
+def is_pie(elf):
+    try:
+        out = subprocess.run(
+            ["readelf", "-h", elf], capture_output=True, text=True, check=True
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return "DYN (" in out
+
+
+def binary_for(name):
+    """The host-side ELF for a guest command line, or None."""
+    if not name or name == "?":
+        return None
+    argv0 = name.split()[0]
+    candidate = os.path.join(PROGRAM_DIR, os.path.basename(argv0))
+    return candidate if os.path.exists(candidate) else None
+
+
+def resolve_batch(elf, addresses, offset):
+    """Symbolize every address for one ELF in a single addr2line run.
+
+    One call rather than one per address: `addr2line` re-reads the DWARF on
+    each invocation, and a kernel binary's is large enough that per-address
+    calls take minutes where this takes a second.
+    """
+    if not addresses:
+        return {}
+    payload = "\n".join(f"{addr - offset:#x}" for addr in addresses)
+    try:
+        out = subprocess.run(
+            ["addr2line", "-e", elf, "-f", "-C", "-i", "-a"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as err:
+        die(f"addr2line failed on {elf}: {err}")
+
+    # With -a each address introduces its own block: "0xADDR" then alternating
+    # function and file:line lines, several pairs when a call was inlined.
+    resolved = {}
+    current = None
+    pending = []
+    for line in out.splitlines():
+        if line.startswith("0x"):
+            if current is not None:
+                resolved[current] = pending
+            current = int(line.split()[0], 16)
+            pending = []
+        elif current is not None:
+            pending.append(line.strip())
+    if current is not None:
+        resolved[current] = pending
+
+    # Keep the innermost frame's function name, and the whole inline chain when
+    # asked for it later.
+    names = {}
+    for addr in addresses:
+        block = resolved.get(addr - offset, [])
+        funcs = [block[i] for i in range(0, len(block), 2)]
+        funcs = [f for f in funcs if f and f != "??"]
+        names[addr] = funcs if funcs else [f"{addr:#x}"]
+    return names
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", help="file containing the profile block")
+    parser.add_argument(
+        "--folded",
+        action="store_true",
+        help="emit folded stacks for flamegraph.pl instead of a summary",
+    )
+    parser.add_argument(
+        "-n",
+        type=int,
+        default=25,
+        help="rows in the summary (default 25)",
+    )
+    parser.add_argument(
+        "--inline",
+        action="store_true",
+        help="keep inlined frames as separate stack entries",
+    )
+    args = parser.parse_args()
+
+    if not shutil.which("addr2line"):
+        die("addr2line is not on PATH")
+
+    meta, threads, rows = parse(args.input)
+    if not rows:
+        die(f"no profile rows found in {args.input}")
+
+    if not os.path.exists(KERNEL_ELF):
+        die(f"{KERNEL_ELF} is missing; build the kernel first")
+
+    # Group every address by the ELF that explains it, so each binary is one
+    # addr2line run.
+    wanted = defaultdict(set)
+    for mode, tid, stack, _count in rows:
+        for frame in stack:
+            if frame == "[unknown]":
+                continue
+            addr = int(frame, 16)
+            if mode == "u":
+                elf = binary_for(threads.get(tid, ""))
+                if elf:
+                    wanted[elf].add(addr)
+            elif addr >= KERNEL_MIN:
+                wanted[KERNEL_ELF].add(addr)
+
+    names = {}
+    for elf, addresses in wanted.items():
+        offset = PIE_LOAD_BASE if elf != KERNEL_ELF and is_pie(elf) else 0
+        for addr, funcs in resolve_batch(elf, sorted(addresses), offset).items():
+            names[(elf, addr)] = funcs
+
+    def symbols_for(mode, tid, frame):
+        if frame == "[unknown]":
+            return ["[unknown]"]
+        addr = int(frame, 16)
+        elf = binary_for(threads.get(tid, "")) if mode == "u" else KERNEL_ELF
+        if elf is None or (elf, addr) not in names:
+            return [f"{frame}"]
+        funcs = names[(elf, addr)]
+        # addr2line lists the innermost inlined frame first; a stack reads
+        # outermost first, so the chain goes in reversed.
+        return list(reversed(funcs)) if args.inline else [funcs[-1]]
+
+    folded = defaultdict(int)
+    for mode, tid, stack, count in rows:
+        label = threads.get(tid, "kernel" if mode != "u" else "?")
+        prefix = {"i": "[idle]", "k": f"{label} [kernel]", "u": label}[mode]
+        frames = [prefix]
+        for frame in stack:
+            frames.extend(symbols_for(mode, tid, frame))
+        folded[";".join(frames)] += count
+
+    if args.folded:
+        for stack, count in sorted(folded.items(), key=lambda kv: -kv[1]):
+            print(f"{stack} {count}")
+        return
+
+    total = sum(folded.values())
+    period = int(meta.get("period_ns", "0") or 0)
+    print(f"{total} samples", end="")
+    if period:
+        print(f" at {1_000_000_000 // period} Hz", end="")
+    print(f" ({meta.get('taken', '?')} taken, {meta.get('dropped', '?')} dropped)")
+
+    # Self time: the leaf of each stack is where the CPU actually was. This is
+    # the column that says which function to look at; a stack's own weight says
+    # which path led there and is what --folded is for.
+    leaves = defaultdict(int)
+    for stack, count in folded.items():
+        leaves[stack.rsplit(";", 1)[-1]] += count
+
+    width = max((len(name) for name in leaves), default=0)
+    width = min(width, 70)
+    print()
+    print(f"{'self':>7}  {'%':>6}  symbol")
+    for name, count in sorted(leaves.items(), key=lambda kv: -kv[1])[: args.n]:
+        share = 100.0 * count / total
+        print(f"{count:>7}  {share:>5.1f}%  {name[:width]}")
+
+
+if __name__ == "__main__":
+    main()

@@ -73,6 +73,7 @@ pub(crate) mod io;
 mod ioctl;
 pub mod memory;
 mod net;
+mod profile;
 mod shm;
 mod sigframe;
 mod sync;
@@ -422,6 +423,10 @@ const SYS_TCGETPGRP: u64 = 238;
 const SYS_TRACE_CTL: u64 = 235;
 /// Drain trace records into the tracer's buffer.
 const SYS_TRACE_READ: u64 = 236;
+/// Claim, release and interrogate the sampling profiler; see `profile.rs`.
+const SYS_PROFILE_CTL: u64 = 318;
+/// Drain profile samples into the profiler's buffer.
+const SYS_PROFILE_READ: u64 = 319;
 const SYS_CLOCK_GETTIME: u64 = 226;
 const SYS_OPENPTY: u64 = 227;
 const SYS_SPAWN2: u64 = 228;
@@ -1257,6 +1262,17 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let max = ctx.rsi;
             let timeout_ms = ctx.rdx;
             ctx.rax = trace::sys_trace_read(buf, max, timeout_ms);
+        }
+        SYS_PROFILE_CTL => {
+            let op = ctx.rdi;
+            let arg = ctx.rsi;
+            ctx.rax = profile::sys_profile_ctl(op, arg);
+        }
+        SYS_PROFILE_READ => {
+            let buf = ctx.rdi as *mut edos_profile_abi::Sample;
+            let max = ctx.rsi;
+            let timeout_ms = ctx.rdx;
+            ctx.rax = profile::sys_profile_read(buf, max, timeout_ms);
         }
         _ => {
             current_thread_info().lock().errno = Errno::ENOSYS;

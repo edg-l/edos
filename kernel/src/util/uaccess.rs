@@ -24,13 +24,24 @@ pub struct UAccessState {
     /// Resume label for page faults during user access
     /// If non-zero, page faults will resume execution at this address
     pub fault_resume: AtomicU64,
+    /// Nesting depth of [`NoFaultGuard`]. While non-zero, a ring-0 fault on a
+    /// user address takes the resume path immediately instead of being
+    /// demand-paged.
+    pub nofault: AtomicU64,
 }
 
 impl UAccessState {
     pub const fn new() -> Self {
         Self {
             fault_resume: AtomicU64::new(0),
+            nofault: AtomicU64::new(0),
         }
+    }
+
+    /// Whether faults on this CPU must fail rather than be serviced.
+    #[inline]
+    pub fn is_nofault(&self) -> bool {
+        self.nofault.load(Ordering::Relaxed) != 0
     }
 
     /// Check if we're currently in a user access operation
@@ -50,6 +61,68 @@ impl UAccessState {
 #[inline]
 pub fn current_cpu_uaccess() -> &'static UAccessState {
     &get_percpu_data().uaccess
+}
+
+/// Makes a user access on this CPU *fail* on a missing page instead of
+/// servicing it.
+///
+/// A ring-0 fault on a user address is normally demand-paged, and
+/// [`crate::interrupts::idt`] re-enables interrupts to do it because filling a
+/// page legitimately blocks. That is the right answer on a syscall path and
+/// the wrong one anywhere blocking is forbidden: an interrupt handler reading
+/// a user stack would park inside the tick.
+///
+/// While this guard is held such a fault takes the `fault_resume` path at
+/// once, so the copy reports a fault and the caller decides what a missing
+/// page means. This is `pagefault_disable()` under another name; it applies to
+/// the CPU rather than the thread, so nothing may sleep or migrate while it is
+/// held. Take it with interrupts already off.
+pub struct NoFaultGuard {
+    _private: (),
+}
+
+impl NoFaultGuard {
+    pub fn new() -> Self {
+        current_cpu_uaccess()
+            .nofault
+            .fetch_add(1, Ordering::Relaxed);
+        Self { _private: () }
+    }
+}
+
+impl Default for NoFaultGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for NoFaultGuard {
+    fn drop(&mut self) {
+        current_cpu_uaccess()
+            .nofault
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Read one `u64` from user memory, failing rather than faulting a page in.
+///
+/// Returns `None` when the address is outside the user half, is misaligned, or
+/// is not currently mapped. Safe to call from an interrupt handler; see
+/// [`NoFaultGuard`].
+pub fn read_u64_nofault(addr: u64) -> Option<u64> {
+    if !addr.is_multiple_of(8) || !access_ok(addr, 8) {
+        return None;
+    }
+    let mut out: u64 = 0;
+    let _nofault = NoFaultGuard::new();
+    let ok = unsafe {
+        do_user_copy(
+            core::ptr::addr_of_mut!(out).cast::<u8>(),
+            addr as *const u8,
+            8,
+        )
+    };
+    ok.then_some(out)
 }
 
 /// True when a caller-supplied range lies entirely in the user half of the

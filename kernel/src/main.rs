@@ -53,6 +53,7 @@ mod logs;
 mod memory;
 mod net;
 mod power;
+mod profile;
 mod serial;
 mod smp;
 mod syscalls;

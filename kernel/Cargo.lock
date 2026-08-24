@@ -115,6 +115,7 @@ dependencies = [
  "buddy_system_allocator",
  "bytemuck",
  "crossbeam-queue",
+ "edos-profile-abi",
  "edos-trace-abi",
  "efs-common",
  "heapless",
@@ -131,6 +132,10 @@ dependencies = [
  "x2apic",
  "x86_64",
 ]
+
+[[package]]
+name = "edos-profile-abi"
+version = "0.1.0"
 
 [[package]]
 name = "edos-trace-abi"

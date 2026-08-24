@@ -305,6 +305,15 @@ test-headless:
 guest-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	scripts/guest-check
 
+# The sampling profiler, end to end: the guest samples itself, the host
+# resolves the addresses, and the workload's known hot function has to come out
+# on top. Every way this can break -- a timer that reaches one CPU, a frame
+# walk that stops at depth one, a load base off by a page -- still produces
+# something shaped like a profile, so nothing but the symbol names catches it.
+.PHONY: profile-check
+profile-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
+	scripts/profile-check
+
 # Storage regressions, both halves. `fs-regression` reboots between writing and
 # verifying, so it catches data that never reached the disk; `fsbench-run`
 # verifies every pattern it writes and reports throughput. Both drive a real

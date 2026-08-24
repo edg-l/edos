@@ -7,6 +7,7 @@ pub mod mounts;
 pub mod net;
 pub mod process;
 pub mod procinfo;
+pub mod profile;
 pub mod shm;
 pub mod sync;
 pub mod sys;

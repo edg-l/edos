@@ -209,8 +209,14 @@ extern "x86-interrupt" fn page_fault_handler(
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         // Demand-fault lazy user pages accessed from kernel (e.g., copy_to_user via HHDM).
         // Must be checked BEFORE uaccess so the page gets mapped and the access succeeds.
+        //
+        // A `NoFaultGuard` holder is the exception, and it is why the guard
+        // exists: filling a page blocks, so a caller that cannot block — the
+        // profiler walking a user stack from the timer interrupt — needs the
+        // miss reported instead of serviced.
         if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
             && address.as_u64() < 0x0000_8000_0000_0000
+            && !current_cpu_uaccess().is_nofault()
         {
             // Re-enable interrupts: handle_demand_fault legitimately blocks
             // (NCQ I/O wait, BlockPageCache shard mutex contention on EFS

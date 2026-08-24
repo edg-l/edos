@@ -29,7 +29,7 @@ use crate::{
     memory::{
         KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, mapper::memory_mapper, valloc::vmalloc,
     },
-    println, smp,
+    println, profile, smp,
     thread::{
         UserThreadInfo,
         context::CpuContext,
@@ -244,6 +244,10 @@ pub struct Scheduler {
     /// atomic is for the shared-reference API, not for sharing.
     armed_expiry: AtomicU64,
 
+    /// When this CPU owes the profiler its next sample, or 0 for "at the next
+    /// opportunity". Same ownership as `armed_expiry`: this CPU only.
+    next_sample: AtomicU64,
+
     /// How many threads this CPU's runqueue holds, republished from the queue
     /// itself every time it is touched. See [`Scheduler::load`].
     queued: AtomicU64,
@@ -386,6 +390,7 @@ impl Scheduler {
             queued: AtomicU64::new(0),
             earliest_deadline: AtomicU64::new(u64::MAX),
             armed_expiry: AtomicU64::new(0),
+            next_sample: AtomicU64::new(0),
             has_work: AtomicBool::new(false),
             steal_count: AtomicU64::new(0),
             rebalance_count: AtomicU64::new(0),
@@ -496,6 +501,11 @@ impl Scheduler {
     /// on the scheduler stack, and no thread owns that.
     pub fn tick_prepare(&self, context: *mut CpuContext) -> u64 {
         without_interrupts(|| {
+            // Before anything else this tick does, so the frame the sample
+            // reads is the interrupted one and no scheduler frame has been
+            // pushed on top of it.
+            self.maybe_sample(context);
+
             // The one-shot counted down to zero and stopped, so whatever this
             // CPU last armed is gone and the next request must reach the
             // hardware rather than trusting the record of it.
@@ -812,6 +822,7 @@ impl Scheduler {
     /// layer does, and why Linux ships `HRTICK` — an hrtimer armed at the exact
     /// slice end — turned off.
     fn arm_timer_until(&self, now: Instant, deadline: Instant) {
+        let deadline = self.clamp_to_sample(now, deadline);
         let armed = self.armed_expiry.load(Ordering::Relaxed);
         if armed > now.as_nanos() && armed <= deadline.as_nanos() {
             return;
@@ -830,6 +841,44 @@ impl Scheduler {
     /// next request programs the hardware rather than trusting a dead timer.
     fn timer_fired(&self) {
         self.armed_expiry.store(0, Ordering::Relaxed);
+    }
+
+    /// Bring `deadline` forward to this CPU's next profile sample.
+    ///
+    /// The profiler needs the tick to arrive on *its* period, and this kernel
+    /// has one timer per CPU already spoken for. Rather than a second clock
+    /// source, a sample deadline is simply another thing the one-shot must not
+    /// fire after — which is what this function already exists to express, so
+    /// the skip-the-write rule above keeps working unchanged.
+    fn clamp_to_sample(&self, now: Instant, deadline: Instant) -> Instant {
+        if !profile::enabled() {
+            return deadline;
+        }
+        let due = self.next_sample.load(Ordering::Relaxed).max(now.as_nanos());
+        if due < deadline.as_nanos() {
+            Instant::from_nanos(due)
+        } else {
+            deadline
+        }
+    }
+
+    /// Take a profile sample if this CPU's period has elapsed.
+    ///
+    /// The next deadline is measured from now rather than advanced by a
+    /// period: a CPU halted through several periods owes one sample, not the
+    /// backlog, and charging it the backlog would spend the whole ring on a
+    /// machine that was idle.
+    fn maybe_sample(&self, context: *mut CpuContext) {
+        if !profile::enabled() {
+            return;
+        }
+        let now = Instant::now().as_nanos();
+        if now < self.next_sample.load(Ordering::Relaxed) {
+            return;
+        }
+        profile::take_sample(context);
+        self.next_sample
+            .store(now.saturating_add(profile::period_ns()), Ordering::Relaxed);
     }
 
     /// Request a reschedule once the running thread has used its timeslice.
@@ -1708,6 +1757,10 @@ pub fn thread_exit(code: i32) -> ! {
         // Publishes the death to a tracer and, if this thread was the tracer,
         // ends the session so nothing keeps writing into an undrained ring.
         crate::syscalls::trace::on_thread_exit(&t, code);
+
+        // Same for a profiler that died holding the session: nothing else
+        // would ever free the ring or stop the sampling.
+        profile::release_if_owner(tid.0);
 
         // Tell the creator a child is gone. Sent here rather than from
         // `record_thread_exit`, which runs with interrupts possibly disabled

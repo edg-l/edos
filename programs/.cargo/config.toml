@@ -5,4 +5,15 @@ target = "x86_64-unknown-edos"
 # layout function into argument structs to satisfy a count is churn that makes
 # the call sites harder to read; where a bundle genuinely clarifies it is worth
 # doing on its own merits, not to silence a lint.
-rustflags = ["-A", "clippy::too_many_arguments"]
+#
+# Frame pointers are kept for the same reason the kernel keeps them: `rbp` is
+# how the profiler walks a stack. LLVM omits them in optimized code, and only
+# about half the functions in an optimized Rust binary leave one behind, so a
+# walk without this reads whatever a function happened to put there and invents
+# callers. The cost is one register and a two-instruction prologue.
+rustflags = [
+    "-A",
+    "clippy::too_many_arguments",
+    "-C",
+    "force-frame-pointers=yes",
+]

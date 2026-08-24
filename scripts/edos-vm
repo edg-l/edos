@@ -329,6 +329,69 @@ def _disk_format(path):
         return "qcow2" if f.read(4) == b"QFI\xfb" else "raw"
 
 
+
+def refresh_stale_images(required):
+    """Rebuild any attached image that predates the userspace in `filesystem/`.
+
+    The guest runs its programs off a disk image, not off `filesystem/bin`, and
+    building a program does not put it in that image. So `make programs` and
+    then `edos-vm start` boots the PREVIOUS binary, and from inside the guest
+    that is indistinguishable from the change having had no effect: the program
+    is there, it runs, it behaves as it did before. This has cost whole
+    debugging sessions more than once, and a printed warning did not stop it —
+    the warning named `sata-disk.img` while the root moved to NVMe, and nobody
+    reads a warning that scrolls past a boot.
+
+    So the image is brought up to date rather than complained about. `make` is
+    the authority on what is stale; this only decides *when* to ask it, and the
+    trigger is deliberately narrow: an image older than `filesystem/.manifest`,
+    which moves when the tree is rebuilt and at no other time. A gate that
+    crashes a guest and reboots it to test journal replay does not rebuild the
+    tree, so its image is never rebuilt underneath it.
+
+    File mtimes cannot answer this on their own: a running guest writes to its
+    own image, so the image is usually *newer* than the binary missing from it.
+    The manifest is the comparison that works, because it is stamped when the
+    tree is populated rather than when the guest last wrote a block.
+
+One `make` invocation covering every buildable image, not a target per
+    image. Populating `filesystem/` re-stamps the manifest even when nothing
+    changed -- the artifact directory re-copies the binaries and the manifest
+    records their mtimes -- so anything built outside this round trails the new
+    stamp and looks stale again immediately. Handing make the whole set lets it
+    stamp the manifest once, as the prerequisite it is, and build everything
+    after it.
+    """
+    manifest = os.path.join(REPO, "filesystem", ".manifest")
+    if not os.path.exists(manifest):
+        return
+    stamp = os.path.getmtime(manifest)
+
+    buildable = [(p, t) for p, t in required if t.startswith("make ")]
+    stale = [os.path.basename(p) for p, _ in buildable if os.path.getmtime(p) < stamp]
+    if not stale:
+        return
+
+    # Every buildable image goes in, not only the stale ones. Populating the
+    # tree re-stamps the manifest, so an image left out of this round would be
+    # older than the new stamp and stale again on the next start -- and since
+    # each round leaves a different image behind, every start would rebuild
+    # something, forever. Rebuilding all of them once puts them all after the
+    # one stamp this invocation writes.
+    targets = []
+    for _, target in buildable:
+        for word in target.split()[1:]:
+            if word not in targets:
+                targets.append(word)
+
+    print(
+        f"{', '.join(stale)} predate filesystem/; running `make {' '.join(targets)}`",
+        file=sys.stderr,
+    )
+    if subprocess.run(["make", *targets], cwd=REPO).returncode != 0:
+        raise SystemExit(f"`make {' '.join(targets)}` failed; the images are still stale")
+
+
 def cmd_start(args):
     holder = slot_holder()
     if holder and not args.force:
@@ -338,7 +401,7 @@ def cmd_start(args):
 
     iso = args.iso if os.path.isabs(args.iso) else os.path.join(REPO, args.iso)
     disk = args.disk if os.path.isabs(args.disk) else os.path.join(REPO, args.disk)
-    required = [] if args.no_sata else [(disk, f"create {args.disk}")]
+    required = [] if args.no_sata else [(disk, f"make {args.disk}")]
     if not args.no_cdrom:
         required.append((iso, "make all" if args.iso == "edos-x86_64.iso" else f"make {os.path.basename(iso)}"))
     usb_disk = None
@@ -360,20 +423,8 @@ def cmd_start(args):
         if not os.path.exists(path):
             raise SystemExit(f"missing {os.path.basename(path)}; run `{target}` first")
 
-    # The root the guest actually runs from is this disk, not the ISO. It is a
-    # persistent development image and `make all` deliberately leaves it alone
-    # (a 5 GB rebuild per kernel edit, and it would discard whatever the guest
-    # has written), so a freshly built program can sit in filesystem/bin/ while
-    # the guest still runs the previous one. Nothing about that looks like a
-    # stale binary from inside the guest: it looks like the change not working.
-    manifest = os.path.join(REPO, "filesystem", ".manifest")
-    if os.path.exists(manifest) and os.path.getmtime(disk) < os.path.getmtime(manifest):
-        print(
-            f"warning: {os.path.basename(disk)} is older than filesystem/ — the guest "
-            f"will boot stale userspace.\n"
-            f"         run `make {os.path.basename(disk)}` to rebuild it first.",
-            file=sys.stderr,
-        )
+    if not args.no_rebuild:
+        refresh_stale_images(required)
 
     disk_format = None if args.no_sata else _disk_format(disk)
 
@@ -1056,6 +1107,9 @@ def main():
                    help="host port forwarded to guest TCP 23")
     s.add_argument("--pcap", metavar="FILE",
                    help="dump every frame on the NIC to FILE (pcap)")
+    s.add_argument("--no-rebuild", action="store_true",
+                   help="boot the images as they are, even if `filesystem/` is "
+                        "newer; without this a stale image is rebuilt first")
     s.add_argument("--force", action="store_true",
                    help="take the guest even while a gate is driving it")
     s.set_defaults(func=cmd_start)
