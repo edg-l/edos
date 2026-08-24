@@ -41,11 +41,11 @@ in advance and fails unless the profile names it.
 1137 samples at 999 Hz (1137 taken, 0 dropped)
 
    self       %  symbol
-    734   64.6%  <edos_kernel::thread::scheduler::Scheduler>::pick_and_run
-    280   24.6%  <sha256sum::Sha256>::compress
-     32    2.8%  edos_kernel::util::uaccess::do_user_copy
-     26    2.3%  memcpy
+    758   66.0%  [idle] <edos_kernel::thread::scheduler::Scheduler>::pick_and_run
+    267   23.3%  <sha256sum::Sha256>::compress
+     40    3.5%  edos_kernel::util::uaccess::do_user_copy
      17    1.5%  <edos_kernel::drivers::nvme::queue::NvmeQueue>::write_sqe_and_ring
+     14    1.2%  memcpy
 ```
 
 That is a single-threaded `sha256sum` on a four-CPU guest, and every line of it
@@ -56,6 +56,12 @@ which is the part nobody would have thought to instrument.
 
 The `self` column is the leaf of each stack — where the CPU actually was. Use
 `--folded` when the question is which *path* led there.
+
+**`[idle]` is not the scheduler being slow.** A halted CPU is halted *inside*
+`run_idle`, which `pick_and_run` calls, so an idle machine reports almost all of
+its time under that symbol — 99.9% of samples on an idle desktop, in one stack.
+The tag is what separates it from the scheduler doing real work, and a row
+without the tag is the only one worth reading as scheduler cost.
 
 ## Reading one honestly
 

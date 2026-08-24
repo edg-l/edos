@@ -241,9 +241,17 @@ def main():
     # Self time: the leaf of each stack is where the CPU actually was. This is
     # the column that says which function to look at; a stack's own weight says
     # which path led there and is what --folded is for.
+    #
+    # An idle sample keeps its tag. Collapsing to the leaf alone puts a halted
+    # CPU and a busy one in the same row -- and since a halted CPU is halted
+    # *inside* `pick_and_run`, an idle four-core box reports two thirds of its
+    # time in the scheduler, which reads like a defect and is not one.
     leaves = defaultdict(int)
     for stack, count in folded.items():
-        leaves[stack.rsplit(";", 1)[-1]] += count
+        leaf = stack.rsplit(";", 1)[-1]
+        if stack.startswith("[idle]"):
+            leaf = f"[idle] {leaf}"
+        leaves[leaf] += count
 
     width = max((len(name) for name in leaves), default=0)
     width = min(width, 70)
