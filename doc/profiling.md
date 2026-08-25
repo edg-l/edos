@@ -91,15 +91,97 @@ interrupted one. Every `without_interrupts` body and every `IrqSpinlock` holder
 is therefore under-reported, and its time is charged to whatever ran next. This
 matters here more than it would in most kernels: the frame allocator's global
 lock, the per-CPU heap cache and the page-table edits all live under exactly
-that protection. The fix is an NMI-based sampler, which needs a performance
-counter; the `qemu64` model this tree boots (`GNUmakefile`) exposes none, so it
-would mean changing the CPU model to `host` and only working under KVM.
+that protection. Seeing into it needs a sampler an interrupt flag cannot hold
+off, and one already exists outside the guest: `scripts/perf-kvm` below.
 
 **A thread inside a syscall gives its kernel stack and no user frames.** A
 sample lands in ring 3 or in ring 0 and reports the stack it interrupted, with
 no attempt to stitch the two halves together. So a user-mode profile shows where
 a program computes, not which of its call sites entered the kernel. The kernel
 half is still attributed to the right thread, which is usually the question.
+
+## Sampling from the host, where an NMI can reach
+
+`scripts/perf-kvm` profiles a running guest from outside it, and it exists for
+exactly one reason: it sees the interrupts-off code the guest's own sampler
+structurally cannot. A cycles overflow on the host PMU arrives as an NMI, an
+NMI leaves the guest whatever `RFLAGS.IF` says, and KVM records the interrupted
+guest RIP. The guest's CPU model is irrelevant — nothing here needs a
+performance counter *inside* the guest.
+
+```bash
+scripts/edos-vm start
+scripts/perf-kvm -d 10          # while a workload runs in the guest
+```
+
+Symbols come from `nm` over the kernel ELF in this tree, written out in
+/proc/kallsyms format. **The synthesized file must carry a `_text` symbol**:
+`perf record` places the guest kernel map from a reference relocation symbol it
+looks up by that name, and without it the recording contains no guest map at
+all — every guest sample stays a bare address, and `report` cannot repair it
+afterwards however good the kallsyms file is.
+
+### What it found
+
+`fsbench raw /dev/nvme0n1` under both instruments at once, three runs:
+
+| symbol | in-guest `profile` | `perf-kvm` |
+|---|---|---|
+| `<buddy_system_allocator::Heap<32>>::dealloc` | 0 samples | 3.9 / 5.7 / 7.0% |
+| `Allocator::try_percpu_dealloc::{closure#0}` | 0 samples | 0.5 – 0.6% |
+| `Allocator::try_percpu_alloc::{closure#0}` | 0 samples | 0.5 – 0.7% |
+| `BitmapFrameAllocator` (three symbols) | 0 samples | 0.5 – 0.6% |
+| `Allocator as GlobalAlloc::alloc` | 1.2% | 0.9 – 1.0% |
+
+The split is not approximate, and it is not noise. The kernel heap's `Heap<32>`
+lives inside an `IrqSpinlock` and `try_percpu_alloc`/`dealloc` run inside
+`without_interrupts` (`kernel/src/allocator.rs`), so the rows that appear only
+under `perf-kvm` are precisely the code the compiler placed in the shadow. The
+outer `GlobalAlloc` wrappers, which run with interrupts on, agree between the
+two to within a fraction of a percent. The allocator is 6–8% of guest cycles on
+that workload and the guest's own profiler reports none of it.
+
+### What it cannot do
+
+**No stacks.** Every guest sample is one frame deep. The host kernel does not
+walk a guest stack, and `--call-graph fp` changes nothing about that;
+`--guest-code` (which asks perf to find guest code in the hypervisor process)
+does not help either and loses symbol resolution outright. Use the in-guest
+profiler when the question is which path led somewhere.
+
+**No thread identity.** perf sees vCPU threads, not guest threads, so nothing
+distinguishes two guest programs running on one CPU. Boot `--smp 1` and run one
+workload at a time when the attribution has to be trusted.
+
+**Guest userspace is sampled but not resolved.** The user RIPs are there and
+they are real — `--user` lists them — but with no thread identity nothing can
+say which program an address belongs to. Given the program, the same
+`addr2line` the guest profiler uses will name it, at the PIE load base:
+`addr2line -e programs/target/x86_64-unknown-edos/debug/<prog> -f -C -i
+$((addr - 0x400000))`.
+
+### The two denominators are different, so do not compare shares across them
+
+The in-guest profiler counts guest *wall-clock* time per CPU, halted CPUs
+included — which is why an idle machine reports 99.9% in `pick_and_run`.
+`perf-kvm` counts cycles the guest actually executed, so a halted CPU
+contributes nothing at all and idle never appears.
+
+Time spent in VM exits splits the same way and in the opposite direction. A
+port or MMIO access the guest thinks is an instruction is *host* time to perf,
+so the guest's own numbers carry an emulation bill that never appears in the
+guest half of a `perf-kvm` capture. It is in the host half, which the recording
+keeps and the script's report filters out; save it with `-o` and read it with
+
+```bash
+perf report -i out.data --stdio -s sym --comms qemu-system-x86
+```
+
+On the `fsbench raw` capture that is `svm_vcpu_run` at 3.1% of all machine
+cycles plus `kvm_io_bus_*` and `emulator_pio_in_out` under it, and on an idle
+guest it is the one-shot timer being re-armed, `kvm_lapic_reg_write` into
+`set_target_expiration`. Neither is guest overhead and neither is the guest's
+to fix; both are what the guest costs to run here.
 
 ## How it works
 

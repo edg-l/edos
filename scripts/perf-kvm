@@ -1,0 +1,191 @@
+#!/usr/bin/env -S python3 -u
+"""Profile a running guest from the host, where an NMI can reach it.
+
+The guest's own `profile` is driven by the timer interrupt, so it can never
+sample an instruction executed with interrupts off: every `without_interrupts`
+body and every `IrqSpinlock` holder is charged to whatever ran next. That is
+not a small corner here. The kernel heap's buddy allocator lives under an
+`IrqSpinlock` and the per-CPU heap cache runs inside `without_interrupts`, so
+the whole allocator is in the shadow.
+
+The host's PMU is not. A cycles overflow arrives as an NMI, an NMI leaves the
+guest whatever RFLAGS.IF says, and KVM records the interrupted guest RIP. So
+`perf kvm --guest` sees precisely the code the in-guest sampler cannot.
+
+    scripts/edos-vm start
+    scripts/perf-kvm -d 10
+
+Symbols come from the kernel ELF in this tree via `nm`, in /proc/kallsyms
+format. Guest userspace is sampled too but is not resolved: a sample carries no
+thread identity, so nothing here can say which program an address at the PIE
+load base belongs to. Pass --user to list those addresses; resolve them against
+a program's ELF with `addr2line -e <elf> $((addr - 0x400000))`.
+
+What this cannot do, and the guest's own profiler still can: stacks (the host
+kernel does not walk a guest stack, so every guest sample is one frame deep),
+per-thread attribution, and anything about a halted CPU. See doc/profiling.md.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+KERNEL_ELF = os.path.join(
+    REPO, "kernel", "target", "x86_64-unknown-none", "debug", "edos-kernel"
+)
+
+# Where the loader puts a static-PIE image; see kernel/src/loader/mod.rs.
+PIE_LOAD_BASE = 0x400000
+
+# perf record synthesizes the guest kernel map from a reference relocation
+# symbol, and it looks for `_text` by name. `nm` over the kernel emits no such
+# symbol, and without it record prints "Couldn't record guest kernel [0]'s
+# reference relocation symbol" and writes a perf.data with no guest map at all.
+# report cannot repair that afterwards, however good the kallsyms file is, so
+# the synthesized entry has to be in place before the recording starts.
+REFERENCE_SYMBOLS = ("_text", "_stext")
+
+
+def die(message):
+    print(f"perf-kvm: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def write_kallsyms(path):
+    """Turn the kernel ELF's symbol table into /proc/kallsyms format."""
+    try:
+        out = subprocess.check_output(
+            ["nm", "--defined-only", KERNEL_ELF], text=True
+        )
+    except subprocess.CalledProcessError as err:
+        die(f"nm failed on {KERNEL_ELF}: {err}")
+
+    rows = []
+    for line in out.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) == 3 and re.fullmatch(r"[0-9a-f]+", parts[0]):
+            rows.append((parts[0], parts[1], parts[2]))
+    if not rows:
+        die(f"no symbols in {KERNEL_ELF}")
+
+    base = min(addr for addr, kind, _ in rows if kind in "TtWw")
+    with open(path, "w") as f:
+        for name in REFERENCE_SYMBOLS:
+            f.write(f"{base} T {name}\n")
+        for addr, kind, name in sorted(rows):
+            f.write(f"{addr} {kind} {name}\n")
+    return len(rows)
+
+
+def demangle(text):
+    """Rust v0 names, which perf does not decode itself."""
+    if not shutil.which("rustfilt"):
+        return text
+    return subprocess.run(
+        ["rustfilt"], input=text, capture_output=True, text=True
+    ).stdout
+
+
+def perf(args, kallsyms, modules):
+    return [
+        "perf",
+        "kvm",
+        "--guest",
+        f"--guestkallsyms={kallsyms}",
+        f"--guestmodules={modules}",
+    ] + args
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("-d", "--duration", type=float, default=10.0, help="seconds")
+    ap.add_argument("-o", "--output", help="keep the perf.data here")
+    ap.add_argument(
+        "-l",
+        "--limit",
+        type=float,
+        default=0.3,
+        help="hide rows under this percent (default 0.3)",
+    )
+    ap.add_argument(
+        "--user",
+        action="store_true",
+        help="list unresolved guest-userspace addresses too",
+    )
+    args = ap.parse_args()
+
+    if not shutil.which("perf"):
+        die("perf is not on PATH")
+    if not os.path.exists(KERNEL_ELF):
+        die(f"{KERNEL_ELF} is missing; build the kernel first")
+    if not os.path.exists("/dev/kvm"):
+        die("/dev/kvm is missing; this samples a KVM guest")
+    with open("/proc/sys/kernel/perf_event_paranoid") as f:
+        if int(f.read().strip()) > 0:
+            die(
+                "perf_event_paranoid > 0 refuses machine-wide sampling; "
+                "run as root or set it to 0"
+            )
+    # -f, not -x: the comm field is truncated to 15 characters, so the process
+    # this matches is named `qemu-system-x86`.
+    if subprocess.run(
+        ["pgrep", "-f", "qemu-system-x86_64"], capture_output=True
+    ).returncode != 0:
+        die("no qemu is running; boot one with scripts/edos-vm start")
+
+    with tempfile.TemporaryDirectory(prefix="perf-kvm-") as tmp:
+        kallsyms = os.path.join(tmp, "kallsyms")
+        modules = os.path.join(tmp, "modules")
+        open(modules, "w").close()
+        count = write_kallsyms(kallsyms)
+        data = args.output or os.path.join(tmp, "perf.data")
+
+        print(f"sampling for {args.duration:g}s against {count} guest symbols")
+        record = subprocess.run(
+            perf(["record", "-a", "-o", data], kallsyms, modules)
+            + ["--", "python3", "-c", f"import time; time.sleep({args.duration})"],
+            capture_output=True,
+            text=True,
+        )
+        # perf 7.1 double-frees on exit after writing the file; the data is
+        # complete, so the file's existence is the success test, not the code.
+        if not os.path.exists(data):
+            die(f"perf record wrote nothing:\n{record.stderr}")
+        if "reference relocation symbol" in record.stderr:
+            die("perf could not place the guest kernel map; see REFERENCE_SYMBOLS")
+
+        report = subprocess.run(
+            perf(["report", "-i", data], kallsyms, modules)
+            + ["--stdio", "--percent-limit", str(args.limit), "-s", "sym"],
+            capture_output=True,
+            text=True,
+        )
+        if report.returncode != 0:
+            die(f"perf report failed:\n{report.stderr}")
+
+    for line in demangle(report.stdout).splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        if not args.user and "[u] 0x" in line:
+            continue
+        print(line.rstrip())
+
+    if args.output:
+        print(f"\nperf.data kept at {args.output}")
+    if args.user:
+        print(
+            f"\n[u] rows are guest userspace at the PIE base "
+            f"0x{PIE_LOAD_BASE:x}; resolve one with\n"
+            f"    addr2line -e programs/target/x86_64-unknown-edos/debug/<prog> "
+            f"-f -C -i $((<addr> - 0x{PIE_LOAD_BASE:x}))"
+        )
+
+
+if __name__ == "__main__":
+    main()
