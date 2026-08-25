@@ -10434,3 +10434,11 @@ per-pixel test was pretending to be.
 
 Nothing on screen moved, which is the point: no current caller passes a
 negative-past-the-edge rect. It was a trap waiting for one that does.
+
+## No gate formats `programs/`
+
+`make fmt` and the charter's fast gate both run `cargo fmt` inside `kernel/`
+only. Userspace has its own workspace and its own toolchain, so a `use` block
+left unsorted there survives every gate and lands. Five `edos_render` widget
+files reached trunk that way before anyone ran `cargo +edos fmt -- --check` by
+hand. Run it in `programs/` alongside the kernel's, or add it to `make fmt`.

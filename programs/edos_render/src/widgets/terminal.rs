@@ -4,7 +4,9 @@ use std::collections::VecDeque;
 
 use edos_lib::clipboard::{self, Buffer};
 
-use super::{FocusState, Rect, Widget, WidgetEvent, char_width, draw_rect, draw_text_styled, text_height};
+use super::{
+    FocusState, Rect, Widget, WidgetEvent, char_width, draw_rect, draw_text_styled, text_height,
+};
 use crate::text::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -3,8 +3,8 @@
 use edos_lib::keymap::keycode;
 
 use super::{
-    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
-    text_height, text_width,
+    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+    draw_text, text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, TEXT_PAD_X};
 

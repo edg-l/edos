@@ -1,8 +1,8 @@
 //! Checkbox widget with label.
 
 use super::{
-    Rect, FocusState, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
-    text_height, text_width,
+    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+    draw_text, text_height, text_width,
 };
 use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
 use edos_lib::keymap::keycode;

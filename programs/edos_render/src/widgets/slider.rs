@@ -1,6 +1,8 @@
 //! Horizontal slider widget.
 
-use super::{FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline};
+use super::{
+    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+};
 use crate::metrics::{
     CONTROL_HEIGHT, SLIDER_THUMB_HEIGHT, SLIDER_THUMB_WIDTH, SLIDER_TRACK_HEIGHT,
 };
