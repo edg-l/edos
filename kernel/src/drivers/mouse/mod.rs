@@ -55,21 +55,6 @@ pub struct MouseEvent {
     _padding: [u8; 2],
 }
 
-impl MouseEvent {
-    #[allow(dead_code)]
-    pub const fn new() -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            dx: 0,
-            dy: 0,
-            buttons: 0,
-            scroll: 0,
-            _padding: [0; 2],
-        }
-    }
-}
-
 /// Broadcaster for mouse events
 pub static MOUSE_BROADCAST: Broadcaster<MouseEvent> = Broadcaster::new();
 /// Set to true when xHCI has configured a USB HID pointing device.

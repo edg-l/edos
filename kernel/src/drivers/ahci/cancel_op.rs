@@ -88,10 +88,6 @@ impl CancellableOp for AhciSlotOp {
             Err(_) => unreachable!("unexpected AhciSlotOp state"),
         }
     }
-
-    fn id(&self) -> (&'static str, u64) {
-        ("ahci", self.slot as u64)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +111,6 @@ pub enum SlotCompletion {
 
 /// In-flight NCQ command tracker for the async submit/complete path.
 pub struct AhciNcqOp {
-    pub slot: usize,
     pub submitter: Weak<Thread>,
     pub state: AtomicU8,
     pub start_gen: u32,
@@ -139,7 +134,6 @@ pub struct AhciNcqOp {
 
 impl AhciNcqOp {
     pub fn new(
-        slot: usize,
         submitter: Weak<Thread>,
         start_gen: u32,
         handle: Arc<BlockIoHandle>,
@@ -147,7 +141,6 @@ impl AhciNcqOp {
         completion: SlotCompletion,
     ) -> Self {
         Self {
-            slot,
             submitter,
             state: AtomicU8::new(SLOT_PENDING),
             start_gen,
@@ -180,9 +173,5 @@ impl CancellableOp for AhciNcqOp {
             Err(SLOT_COMPLETED) | Err(SLOT_CANCELLED) => {}
             Err(_) => unreachable!("unexpected AhciNcqOp state"),
         }
-    }
-
-    fn id(&self) -> (&'static str, u64) {
-        ("ahci-ncq", self.slot as u64)
     }
 }

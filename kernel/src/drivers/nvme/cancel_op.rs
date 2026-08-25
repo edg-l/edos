@@ -216,8 +216,4 @@ impl CancellableOp for NvmeOp {
             Err(_) => unreachable!("unexpected NvmeOp state"),
         }
     }
-
-    fn id(&self) -> (&'static str, u64) {
-        ("nvme", self.cid as u64)
-    }
 }

@@ -290,73 +290,11 @@ with an inert `#[cfg_attr(any(), allow(dead_code))]` and the kernel compiled
 under the default, `sched-test`, `trace` and `sched-prof` feature sets. The tree
 was restored afterwards.
 
-### E1. 21 items are dead under every feature combination (S2, E2)
-
-Identical output for all four builds:
-
-```
-drivers/ahci/cancel_op.rs:118   field `slot` never read
-drivers/block_io.rs:127         variant `Static` never constructed
-drivers/mouse/mod.rs:60         fn `new` never used
-drivers/usb/xhci/mod.rs:97      fields `scratch_array`, `scratch_pages` never read
-drivers/usb/xhci/device.rs:207  field `output_ctx` never read
-fs/fat32/mod.rs:59              fn `split_fat_ino` never used
-fs/inode.rs:51                  field `kind` never read
-fs/journal/mod.rs:524           method `is_safe_to_flush` never used
-memory/fault.rs:82              fields `page_idx`, `file_size` never read
-memory/fault.rs:84              field `page_idx` never read
-syscalls/memory.rs:71           const `MAP_FIXED` never used
-syscalls/memory.rs:81           const `MS_INVALIDATE` never used
-thread/mod.rs:66                fields `data_base`, `data_size`, `tcb_base`, `tcb_size` never read
-thread/broadcast.rs:42          methods `len`, `recv_timeout` never used
-thread/cancel.rs:47             method `id` never used
-thread/mailbox.rs:172           fn `reply` never used
-thread/poll.rs:35               method `is_pending` never used
-thread/scheduler.rs:660         method `dump_all_threads` never used
-window/input.rs:99              method `len` never used
-window/registry.rs:181          method `contains` never used
-window/registry.rs:415          method `all_window_ids` never used
-```
-
-Three of these are not "delete it" cases and want a judgement instead:
-
-- `syscalls/memory.rs:71` `MAP_FIXED` is a flag userspace can pass and `sys_mmap`
-  never honours. That is a missing implementation, not dead code.
-- `drivers/usb/xhci/mod.rs:97` `scratch_array`/`scratch_pages` are DMA
-  allocations held so the controller's scratchpad is not freed. If so the field
-  is doing its job by existing; say that in the allow and keep it.
-- `memory/fault.rs:82` `file_size` unread in a file-backed fault descriptor is
-  worth a second look before deleting.
-
-**Done when** each of the 21 is deleted, wired up, or carries an allow with a
-reason.
-
-### E2. Two blanket allows cover whole `impl` blocks (S2, E1)
-
-`kernel/src/window/registry.rs:142` and `:222` put `#[allow(dead_code)]` on
-`impl WindowInfo` and `impl WindowRegistry` entire. That suppresses the lint for
-every method in the block, present and future. Two methods inside are in fact
-dead (`contains`, `all_window_ids`) and nobody would have been told about the
-third.
-
-**Fix.** Delete both, take the per-item allows the compiler then asks for.
-
-### E3. About five allows suppress nothing (S3, E1)
-
-The experiment fired no warning for, among others,
-`kernel/src/thread/irqlock.rs:62` (`lock_ranked`),
-`kernel/src/thread/thread.rs:309` (`lock_ranks`),
-`kernel/src/thread/thread.rs:1441` and `:1450` (`owned_ops_push`,
-`owned_ops_remove`, which have 18 call sites between AHCI, NVMe and
-`fs/page_fill.rs`). They are leftovers from when the code really was unused.
-
-### E4. Only 2 of 26 kernel allows carry a reason (S2, E1)
-
-`CLAUDE.md`: "where the code must stay, say why in an `#[allow(dead_code)]` with
-a comment". `kernel/src/util/ring.rs:36` and
-`kernel/src/thread/sched_prof.rs:27` do it right, with `cfg_attr` naming the
-feature that makes the item live. That is the model. Everything else is a bare
-attribute.
+E1 through E4 are closed. Ten bare `#[allow(dead_code)]` survive in the kernel,
+each on a single item and each with a doc comment saying why it stays, plus
+three `cfg_attr(not(feature = ...))` naming the feature that makes the item
+live. There are no blanket allows over a struct or an `impl` block and no
+`allow(unused)` anywhere in `kernel/src`.
 
 ### E5. 12 `todo!()` / `unimplemented!()` in the kernel (S2, E2)
 

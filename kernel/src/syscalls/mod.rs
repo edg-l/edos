@@ -193,7 +193,6 @@ pub unsafe fn setup_syscall() {
     println!("SYSCALL/SYSRET enabled");
 }
 
-#[allow(unused)]
 #[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
     /*
@@ -342,7 +341,6 @@ const SYS_FSYNC: u64 = 14;
 const SYS_RENAME: u64 = 82;
 const SYS_ISATTY: u64 = 15;
 const SYS_IOCTL: u64 = 16;
-#[allow(unused)]
 const SYS_PIPE: u64 = 22;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
@@ -1404,7 +1402,7 @@ fn sys_clock_settime(buf_ptr: *const u8) -> u64 {
 macro_rules! errnos {
     ($($(#[$attr:meta])* $name:ident = $value:expr,)*) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[allow(clippy::upper_case_acronyms, unused)]
+        #[allow(clippy::upper_case_acronyms)]
         #[repr(u64)]
         pub enum Errno {
             $($(#[$attr])* $name = $value,)*

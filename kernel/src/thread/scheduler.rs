@@ -656,63 +656,6 @@ impl Scheduler {
         }
     }
 
-    #[allow(dead_code)]
-    fn dump_all_threads(&self) {
-        let threads = THREADS.list();
-        let now = Instant::now();
-        println!("=== Thread dump ({} threads) ===", threads.len());
-        for t in &threads {
-            let state = t.state();
-            let cpu = t.cpu.load(Ordering::Relaxed);
-            let is_user = if t.user.is_some() { "user" } else { "kern" };
-            let sleep_dl = t.sleep_deadline.load(Ordering::Relaxed);
-            if state == State::Sleeping && sleep_dl != 0 {
-                let dl = Instant::from_nanos(sleep_dl);
-                let overdue = if now.as_nanos() > sleep_dl {
-                    let elapsed = now.duration_since(dl);
-                    alloc::format!(
-                        " OVERDUE {}.{:03}s",
-                        elapsed.as_secs(),
-                        elapsed.subsec_millis()
-                    )
-                } else {
-                    let remaining = dl.duration_since(now);
-                    alloc::format!(" due in {}ms", remaining.as_millis())
-                };
-                println!(
-                    "  tid={:<4} cpu={} {:4} {:?} {}",
-                    t.id.0, cpu, is_user, state, overdue
-                );
-            } else {
-                println!(
-                    "  tid={:<4} cpu={} {:4} {:?} name={}",
-                    t.id.0, cpu, is_user, state, t.name
-                );
-            }
-        }
-        // Dump ALL CPUs' sleepers heap stats and earliest_deadline.
-        let schedulers = SCHEDULERS.read();
-        for (&cpu_id, &sched) in schedulers.iter() {
-            let sl = sched.sleepers.lock();
-            let ed = sched.earliest_deadline.load(Ordering::Relaxed);
-            let current = sched.current.load(Ordering::Relaxed);
-            let has_work = sched.has_work.load(Ordering::Relaxed);
-            println!(
-                "  cpu {} sleepers={}, earliest_deadline={}, current={}, has_work={}",
-                cpu_id,
-                sl.len(),
-                if ed == u64::MAX {
-                    "NONE".into()
-                } else {
-                    alloc::format!("{}", ed)
-                },
-                current,
-                has_work
-            );
-        }
-        println!("=== End thread dump ===");
-    }
-
     fn get_thread_by_id(&self, id: ThreadId) -> Option<Arc<Thread>> {
         get_thread_by_id(id)
     }

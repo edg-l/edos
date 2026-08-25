@@ -60,13 +60,8 @@ pub struct UserThread {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct UserThreadTls {
     pub template: Arc<TlsTemplate>,
-    pub data_base: VirtAddr,
-    pub data_size: u64,
-    pub tcb_base: VirtAddr,
-    pub tcb_size: u64,
     pub mapping_base: VirtAddr,
     pub mapping_size: u64,
 }
@@ -268,6 +263,3 @@ pub fn setup_user_stack(
 
     Ok((sp, argv_ptr, argc, envp_ptr))
 }
-
-#[allow(unused_imports)]
-pub use cancel::{ArcCancellableOp, CancellableOp, OWNED_OPS_CAP};

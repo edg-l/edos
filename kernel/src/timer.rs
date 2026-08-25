@@ -16,11 +16,8 @@ use crate::{
 
 // TODO: Fallback to pit if HPET not found.
 
-#[allow(unused)]
 pub struct TimerCalibration {
-    pub apic_frequency_hz: u64,
     pub ticks_per_microsecond: u64,
-    pub tsc_frequency_hz: u64,
 }
 
 impl TimerCalibration {
@@ -80,9 +77,7 @@ impl TimerCalibration {
         println!("  Ticks per microsecond: {}", ticks_per_microsecond);
 
         TimerCalibration {
-            apic_frequency_hz,
             ticks_per_microsecond,
-            tsc_frequency_hz,
         }
     }
 

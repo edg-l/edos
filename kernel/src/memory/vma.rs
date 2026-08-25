@@ -34,10 +34,7 @@ pub enum VmaBacking {
     /// Zero-fill on demand
     Anonymous,
     /// Physical/MMIO mapping (frames not owned by allocator)
-    Physical {
-        #[allow(dead_code)]
-        phys_base: u64,
-    },
+    Physical { phys_base: u64 },
     /// Shared memory region
     SharedMemory { shm_id: u64 },
     /// TLS region

@@ -1181,7 +1181,7 @@ impl AhciPort {
         let slot = self.allocate_slot_blocking();
         let submitter = current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciNcqOp::new(
-            slot, submitter, start_gen, handle, buffer, completion,
+            submitter, start_gen, handle, buffer, completion,
         ));
         **ranked_lock!(
             RANK_AHCI_SLOT,

@@ -515,28 +515,6 @@ impl Journal {
         self.committed_seq_pub.store(seq, Ordering::Release);
     }
 
-    // ---- Writeback gating --------------------------------------------------
-
-    /// Returns true if the page at `(dev, block)` may be flushed to its home
-    /// location.  A page must not be flushed until the tx that enrolled it has
-    /// been committed (its journal copy is safe for replay before home copy).
-    #[allow(dead_code)]
-    pub fn is_safe_to_flush(&self, dev: u64, block: u64) -> bool {
-        // Hoist committed_seq() read before taking checkpoint_tracker to avoid
-        // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
-        // Task 0.0 of Foundation #4).
-        let committed = self.committed_seq();
-        let tracker = ranked_lock!(
-            RANK_JOURNAL_TRACKER,
-            "Journal.checkpoint_tracker",
-            self.checkpoint_tracker
-        );
-        match tracker.get(&(dev, block)) {
-            Some(&seq) => seq <= committed,
-            None => true,
-        }
-    }
-
     /// Drop tracker entries for blocks that are no longer dirty in the block
     /// page cache.
     ///

@@ -90,11 +90,12 @@ pub struct XhciController {
     regs: XhciRegisters,
     context_size: usize, // 32 or 64 bytes per context entry (HCCPARAMS1.CSZ)
     dcbaa: DmaBuffer,    // Device Context Base Address Array
-    /// Owns the scratchpad array the controller reads through DCBAA[0], and the pages it
-    /// points at. The hardware reaches them by physical address, so nothing reads these
-    /// again; holding them is what keeps the allocations alive for the controller's life.
+    /// The scratchpad array the controller reads through DCBAA[0]. The hardware reaches
+    /// it by physical address, so nothing reads the field again; holding it is what keeps
+    /// the allocation alive for the controller's life.
     #[allow(dead_code)]
     scratch_array: Option<DmaBuffer>,
+    /// The pages that array points at, held for the same reason.
     #[allow(dead_code)]
     scratch_pages: Vec<DmaBuffer>,
     command_ring: CommandRing,

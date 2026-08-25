@@ -289,10 +289,6 @@ impl CancellableOp for PageFillHandle {
         // wake_all hits an empty queue (no-op) harmlessly.
         self.waiters.wake_all();
     }
-
-    fn id(&self) -> (&'static str, u64) {
-        ("fill", self.page_idx)
-    }
 }
 
 // ---------------------------------------------------------------------------

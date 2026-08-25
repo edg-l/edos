@@ -53,15 +53,6 @@ pub fn fat_ino_from_pos(dir_cluster: u32, entry_offset: usize) -> u64 {
     ((dir_cluster as u64) << 32) | (entry_offset as u64)
 }
 
-/// Decode a FAT32 inode number back into (dir_cluster, entry_offset).
-#[inline]
-#[allow(dead_code)]
-pub fn split_fat_ino(ino: u64) -> (u32, u32) {
-    let dir_cluster = (ino >> 32) as u32;
-    let entry_offset = (ino & 0xFFFF_FFFF) as u32;
-    (dir_cluster, entry_offset)
-}
-
 /// Sectors that must be held at once to cover `size` bytes at offset `within`
 /// inside a sector.
 ///

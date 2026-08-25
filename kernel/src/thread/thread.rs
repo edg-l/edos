@@ -306,7 +306,6 @@ pub struct Thread {
     ///
     /// Absent in release builds; carries zero size and zero runtime overhead.
     #[cfg(debug_assertions)]
-    #[allow(dead_code)]
     pub lock_ranks: core::cell::UnsafeCell<
         heapless::Vec<(u16, &'static str), { crate::debug::lock_order::LOCK_RANK_DEPTH }>,
     >,
@@ -820,10 +819,6 @@ pub(crate) fn allocate_tls_region(
 
     let runtime = UserThreadTls {
         template: Arc::clone(template),
-        data_base: tls_data_base,
-        data_size,
-        tcb_base,
-        tcb_size: tls_region_top.as_u64() - tcb_base.as_u64(),
         mapping_base,
         mapping_size: map_size,
     };
@@ -1438,7 +1433,6 @@ impl Thread {
     /// Returns `Err(op)` if the registry is full (`OWNED_OPS_CAP` reached).
     /// On overflow the caller falls back to the pre-Foundation-#2 behaviour
     /// (no cancel hookup for that op).
-    #[allow(dead_code)] // used by AHCI cancel wiring (Phase 3b, Session B)
     pub fn owned_ops_push(&self, op: ArcCancellableOp) -> Result<(), ArcCancellableOp> {
         self.owned_ops.lock().push(op)
     }
@@ -1447,7 +1441,6 @@ impl Thread {
     ///
     /// Called by the driver or the submitter after wake-after-completion.
     /// O(N) scan with N ≤ `OWNED_OPS_CAP` (≤ 32); cheap.
-    #[allow(dead_code)] // used by AHCI cancel wiring (Phase 3b, Session B)
     pub fn owned_ops_remove(&self, op_ptr: *const ()) {
         let mut guard = self.owned_ops.lock();
         if let Some(pos) = guard

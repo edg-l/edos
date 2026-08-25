@@ -10146,3 +10146,62 @@ activates the right button, typed text reaches the focused field, Tab steps
 focus, Space toggles a checkbox, arrows move a slider 50% → 52%, and Ctrl+C /
 Ctrl+V round-trip through the field ("Ada" → "AdaAda") — the three clipboard
 methods being exactly the ones the wrapper forwarded by hand.
+
+## Kernel dead code: the whole sweep, and what a blanket allow hides
+
+`ROADMAP-CLEANUP.md` E1–E4 are closed together, because they are one question
+asked four ways: which suppressions are load-bearing.
+
+The recipe, which is worth repeating whenever the count creeps back up:
+
+```
+sed -i 's/#\[allow(dead_code)\]/#[cfg_attr(any(), allow(dead_code))]/g; \
+        s/#\[allow(unused)\]/#[cfg_attr(any(), allow(unused))]/g' <files>
+cd kernel && for f in "" "--features sched-test" "--features trace" \
+                      "--features sched-prof"; do
+  touch src/main.rs; cargo check $f --message-format=short; done
+```
+
+`cfg_attr(any(), ...)` is inert but still an attribute, so it survives in
+positions a bare deletion would not parse — `TransferError(#[allow(dead_code)] u8)`
+is the one that matters. **`touch src/main.rs` between feature sets is not
+optional**: without it cargo replays the previous build's cached diagnostics and
+every feature after the first appears to have no warnings at all.
+
+The sweep found 29 items dead under all four feature sets, one more (`TraceEvent`
+variants `StealSkip` and `StateChange`) dead only under `trace`. 19 were
+deleted, 10 kept with a reason. What went, beyond the obvious unused methods:
+`TimerCalibration` now holds only `ticks_per_microsecond`, the field anything
+reads — the APIC and TSC frequencies are still printed at calibration, just not
+stored afterwards; `UserThreadTls` keeps only `mapping_base`/`mapping_size`, the
+pair the unmap path uses; and `AhciNcqOp::slot` is gone, since the op lives in
+`ncq_waiters[slot]` and a second copy of an index is a way for the two to
+disagree.
+
+**The trap: a blanket allow over an `impl` block hides its own consequences.**
+`window/registry.rs` had `#[allow(dead_code)]` on `impl WindowInfo` and
+`impl WindowRegistry` entire, so it covered every method in them, present and
+future; `thread/fd.rs` and `thread/pty.rs` each had one on both the struct and
+its `impl`. Four dead methods were sitting under those four attributes and
+nobody would have been told about a fifth.
+
+The sharper version is a **trait default method**. `CancellableOp::id` carried an
+allow and no callers, but four types override it (AHCI, AHCI NCQ, NVMe,
+page-fill). Deleting the trait method is what surfaces them, and only then does
+`AhciNcqOp::slot` — the field the `ahci` override read — show up as never read.
+A lint that stops at the first attribute reports one dead method where there
+were six dead items.
+
+Five allows suppressed nothing at all and are gone: `irqlock::lock_ranked`,
+`thread::lock_ranks`, `owned_ops_push`/`owned_ops_remove` (18 call sites between
+AHCI, NVMe and `fs/page_fill.rs`), and the `unused` allows in `thread/pipe.rs`
+and `syscalls/mod.rs`. Two of those also carried "Phase 3b, Session B", so a
+slice of G1 went with them.
+
+Judgement calls kept, each now saying why in its own doc comment: `MAP_FIXED`
+and `MS_INVALIDATE` (flags userspace may pass that the kernel does not honour,
+a missing implementation rather than dead code), the xHCI scratchpad array and
+its pages plus `output_ctx` (DMA the controller reaches by physical address, so
+holding the field *is* the job), `FaultReject`'s payloads and `XhciError::
+TransferError` (read only through a derived `Debug`, which the lint does not
+count), `BufferOwner::{Owned,Static}`, and `VfsInode::kind`.

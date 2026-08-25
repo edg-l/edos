@@ -168,20 +168,6 @@ impl<T, R> Mailbox<T, R> {
         ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::try_recv", self.queue).pop_front()
     }
 
-    #[allow(dead_code)]
-    pub fn reply(req: Request<T, R>, val: R) {
-        {
-            let mut slot = ranked_lock!(RANK_MAILBOX_RESPONSE, "Mailbox::reply", req.resp.value);
-            **slot = Some(val);
-        }
-        // Fence ensures the value write is globally visible before ready flag.
-        // The BlockingMutex release and ready store are on different atomics,
-        // so without this fence they are not ordered with respect to each other.
-        core::sync::atomic::fence(Ordering::Release);
-        req.resp.ready.store(true, Ordering::Relaxed);
-        req.resp.waitq.wake_one();
-    }
-
     #[expect(unused)]
     pub fn forward<U>(&self, req: Request<U, R>, payload: T) {
         let new_req = Request {

@@ -17,9 +17,7 @@ use alloc::{sync::Arc, vec::Vec};
 #[derive(Debug, Clone)]
 pub enum FileDescriptor {
     StandardStream(StandardStream),
-    #[allow(unused)]
     PipeRead(Arc<BlockingMutex<Pipe>>),
-    #[allow(unused)]
     PipeWrite(Arc<BlockingMutex<Pipe>>),
     /// Both ends of one pipe on a single descriptor.
     ///
@@ -90,7 +88,6 @@ pub const PIPE_CAPACITY: usize = 64 * 1024;
 /// interleave a single small message. Larger writes may be split.
 pub const PIPE_BUF: usize = 4096;
 
-#[allow(unused)]
 #[derive(Debug)]
 pub struct Pipe {
     pub buffer: ByteRing,
@@ -106,7 +103,6 @@ pub struct Pipe {
     pub writer_wq: Arc<WaitQueue>,
 }
 
-#[allow(unused)]
 impl Pipe {
     pub fn new() -> Self {
         Self {

@@ -22,13 +22,11 @@ struct FdEntry {
     nonblock: bool,
 }
 
-#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct FileDescriptorTable {
     fds: BTreeMap<u64, FdEntry>,
 }
 
-#[allow(unused)]
 impl FileDescriptorTable {
     pub fn new() -> Self {
         let mut table = Self {
@@ -41,13 +39,6 @@ impl FileDescriptorTable {
         table.insert_fd(2, FileDescriptor::StandardStream(StandardStream::Stderr));
 
         table
-    }
-
-    /// Create an empty table with no pre-inserted file descriptors.
-    pub fn new_empty() -> Self {
-        Self {
-            fds: BTreeMap::new(),
-        }
     }
 
     /// Iterate over all entries as (fd_number, &FileDescriptor).

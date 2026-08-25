@@ -53,9 +53,6 @@ pub mod readahead;
 pub mod vfs;
 pub mod writeback;
 
-#[allow(unused_imports)]
-pub use page_fill::PageFillHandle;
-
 pub use devfs::{DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device_str};
 
 pub fn init() {

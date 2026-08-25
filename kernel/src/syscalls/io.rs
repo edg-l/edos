@@ -33,7 +33,6 @@ use crate::{
         mutex::BlockingMutex,
         pipe::{FileDescriptor, FsFile, OpenMode, StandardStream},
         pty::Pty,
-        scheduler::sched,
     },
     timer::Instant,
 };
@@ -593,9 +592,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     }
 }
 
-#[allow(unused)]
 pub fn sys_close(fd: u64) -> i32 {
-    let sched = sched();
     let info = current_thread_info();
     let fd_table = {
         let mut guard = info.lock();

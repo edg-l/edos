@@ -711,9 +711,6 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
 /// `timeout` elapses.  Returns the round-trip time in microseconds, or `None`
 /// on timeout / ARP failure.
 pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Option<u64> {
-    #[allow(unused_imports)]
-    use crate::thread::scheduler::sched;
-
     let wq = Arc::new(WaitQueue::new());
     let sent_at = Instant::now();
 

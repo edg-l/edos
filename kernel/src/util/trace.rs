@@ -34,7 +34,6 @@ mod inner {
     pub const RING_SIZE: usize = 256;
 
     #[derive(Clone, Copy)]
-    #[allow(dead_code)]
     pub enum TraceEvent {
         Switch {
             cpu: u32,
@@ -52,10 +51,6 @@ mod inner {
             victim_cpu: u32,
             tid: u64,
         },
-        StealSkip {
-            cpu: u32,
-            tid: u64,
-        },
         Rebalance {
             thief_cpu: u32,
             victim_cpu: u32,
@@ -64,11 +59,6 @@ mod inner {
         Enqueue {
             cpu: u32,
             tid: u64,
-        },
-        StateChange {
-            tid: u64,
-            old: u8,
-            new: u8,
         },
     }
 
@@ -89,18 +79,12 @@ mod inner {
                     victim_cpu,
                     tid,
                 } => write!(f, "Steal {victim_cpu}->{thief_cpu} tid={tid}"),
-                TraceEvent::StealSkip { cpu, tid } => {
-                    write!(f, "StealSkip cpu={cpu} tid={tid}")
-                }
                 TraceEvent::Rebalance {
                     thief_cpu,
                     victim_cpu,
                     tid,
                 } => write!(f, "Rebalance {victim_cpu}->{thief_cpu} tid={tid}"),
                 TraceEvent::Enqueue { cpu, tid } => write!(f, "Enqueue cpu={cpu} tid={tid}"),
-                TraceEvent::StateChange { tid, old, new } => {
-                    write!(f, "State tid={tid} {old}->{new}")
-                }
             }
         }
     }

@@ -264,7 +264,6 @@ impl LineDiscipline {
 }
 
 #[derive(Debug)]
-#[allow(unused)]
 pub struct Pty {
     /// Data written by master (keyboard input), consumed by slave readers.
     pub input_buf: ByteRing,
@@ -301,7 +300,6 @@ pub struct Pty {
     rows: u16,
 }
 
-#[allow(unused)]
 impl Pty {
     pub fn new() -> Self {
         Self {
@@ -322,10 +320,6 @@ impl Pty {
             cols: 80,
             rows: 30,
         }
-    }
-
-    pub fn ioctl(&mut self, request: u64) -> Result<u64, ()> {
-        self.ioctl_with(request, 0)
     }
 
     pub fn ioctl_with(&mut self, request: u64, arg: u64) -> Result<u64, ()> {

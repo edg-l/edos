@@ -41,12 +41,6 @@ pub trait CancellableOp: Send + Sync {
     /// teardown (release AHCI slot, detach mailbox response, …).  May race
     /// with normal completion; must be idempotent.
     fn cancel(&self);
-
-    /// Stable identifier for debug / dedup.  Returns `(driver-tag, resource-id)`.
-    #[allow(dead_code)]
-    fn id(&self) -> (&'static str, u64) {
-        ("anon", 0)
-    }
 }
 
 /// Type alias for a heap-allocated, reference-counted cancellable op.

@@ -70,7 +70,6 @@ pub struct WindowEventQueue {
     pub waiters: WaitQueue,
 }
 
-#[allow(dead_code)]
 impl WindowEventQueue {
     /// Create a new event queue.
     pub fn new() -> Self {
@@ -93,11 +92,6 @@ impl WindowEventQueue {
     /// Check if the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
-    }
-
-    /// Get the number of events in the queue.
-    pub fn len(&self) -> usize {
-        self.queue.len()
     }
 }
 

@@ -1,5 +1,4 @@
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-use core::time::Duration;
 
 use alloc::{
     collections::btree_map::BTreeMap,
@@ -9,9 +8,7 @@ use crossbeam_queue::ArrayQueue;
 
 use crate::debug::lock_order::RANK_INPUT_SUBS;
 use crate::thread::preempt::PreemptRwLock;
-use crate::thread::scheduler::{
-    current_thread_id, current_thread_weak, thread_park_while, thread_sleep,
-};
+use crate::thread::scheduler::{current_thread_id, current_thread_weak, thread_park_while};
 use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::{State, Thread, ThreadId},
@@ -38,11 +35,6 @@ impl<T> Subscriber<T> {
         self.queue.pop()
     }
 
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -59,22 +51,6 @@ impl<T> Subscriber<T> {
             }
             thread_park_while(|| self.queue.is_empty());
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
-        debug_assert_eq!(
-            current_thread_id(),
-            Some(self.owner_tid),
-            "Subscriber::recv_timeout called from non-owner thread"
-        );
-
-        if let Some(msg) = self.queue.pop() {
-            return Some(msg);
-        }
-        // Sleep until either wake or timeout, then re-check.
-        thread_sleep(dur);
-        self.queue.pop()
     }
 }
 

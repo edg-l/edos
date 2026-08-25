@@ -139,7 +139,6 @@ impl DamageBox {
     }
 }
 
-#[allow(dead_code)]
 impl WindowInfo {
     /// Create a new window with the given parameters.
     pub fn new(pid: u64, x: i32, y: i32, width: u32, height: u32) -> Self {
@@ -175,11 +174,6 @@ impl WindowInfo {
     /// client and not put away by the user.
     pub fn on_screen(&self) -> bool {
         self.visible && !self.minimized
-    }
-
-    /// Check if a point is inside this window (client area only, excluding decorations).
-    pub fn contains(&self, px: i32, py: i32) -> bool {
-        self.contains_client(px, py)
     }
 
     /// Check if a point is within the window's CLIENT area (excluding decorations).
@@ -219,7 +213,6 @@ pub struct WindowRegistry {
     focused_window: Option<WindowId>,
 }
 
-#[allow(dead_code)]
 impl WindowRegistry {
     /// Create a new empty registry.
     pub const fn new() -> Self {
@@ -411,12 +404,6 @@ impl WindowRegistry {
             .collect()
     }
 
-    /// Get a list of all window IDs.
-    pub fn all_window_ids(&self) -> Vec<WindowId> {
-        self.windows.keys().copied().collect()
-    }
-
-    /// Destroy all windows owned by a process.
     /// Destroy every window owned by `pid`.
     ///
     /// Returns the window left holding keyboard focus, if focus moved. A
