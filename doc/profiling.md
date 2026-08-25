@@ -131,15 +131,16 @@ afterwards however good the kallsyms file is.
 | `Allocator::try_percpu_dealloc::{closure#0}` | 0 samples | 0.5 – 0.6% |
 | `Allocator::try_percpu_alloc::{closure#0}` | 0 samples | 0.5 – 0.7% |
 | `BitmapFrameAllocator` (three symbols) | 0 samples | 0.5 – 0.6% |
-| `Allocator as GlobalAlloc::alloc` | 1.2% | 0.9 – 1.0% |
+| `Allocator as GlobalAlloc::{alloc,dealloc}` | 1.8% | 1.6 – 1.7% |
 
 The split is not approximate, and it is not noise. The kernel heap's `Heap<32>`
 lives inside an `IrqSpinlock` and `try_percpu_alloc`/`dealloc` run inside
 `without_interrupts` (`kernel/src/allocator.rs`), so the rows that appear only
 under `perf-kvm` are precisely the code the compiler placed in the shadow. The
-outer `GlobalAlloc` wrappers, which run with interrupts on, agree between the
-two to within a fraction of a percent. The allocator is 6–8% of guest cycles on
-that workload and the guest's own profiler reports none of it.
+outer `GlobalAlloc` wrappers, which run with interrupts on, are the control:
+they agree between the two to within a fraction of a percent. The allocator is
+6–8% of guest cycles on that workload and the guest's own profiler reports none
+of it.
 
 ### What it cannot do
 
