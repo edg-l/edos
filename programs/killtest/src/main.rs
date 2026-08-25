@@ -47,14 +47,14 @@ fn spawn_ready(test: &str, mode: &str) -> u64 {
     };
     let child = process::spawn(SELF_PATH, &[mode], 0, write_fd, 2);
     process::close(write_fd);
-    if child == u64::MAX {
+    let Ok(child) = child else {
         fail(test, "spawn failed");
-    }
+    };
 
     let mut buf = [0u8; 8];
     let n = process::read(read_fd, &mut buf);
     process::close(read_fd);
-    if n <= 0 {
+    if !matches!(n, Ok(n) if n > 0) {
         fail(test, "child never reported ready");
     }
     // The child wrote from inside a syscall; give it time to return to user
@@ -65,8 +65,8 @@ fn spawn_ready(test: &str, mode: &str) -> u64 {
 
 /// Signal `child` and collect its status, or report how long it survived.
 fn kill_and_reap(test: &str, child: u64) -> i32 {
-    if process::sys_kill(child, SIGINT) != 0 {
-        fail(test, "sys_kill reported failure");
+    if process::kill(child, SIGINT).is_err() {
+        fail(test, "kill reported failure");
     }
     for _ in 0..POLL_ATTEMPTS {
         if let Some(code) = waitpid_nonblocking(child) {
@@ -94,7 +94,7 @@ fn check(test: &str, mode: &str, detail: &str) {
 }
 
 fn ready() {
-    process::write(1, b"ready\n");
+    let _ = process::write(1, b"ready\n");
 }
 
 fn main() {

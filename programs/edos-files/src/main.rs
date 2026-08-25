@@ -273,13 +273,13 @@ impl App {
             return;
         }
         if entry.opens_in_viewer() {
-            if spawn(IMAGE_VIEWER, &[&path], 0, 1, 2) == u64::MAX {
+            if spawn(IMAGE_VIEWER, &[&path], 0, 1, 2).is_err() {
                 self.note = Note::Warning(format!("Couldn't start {IMAGE_VIEWER}."));
             }
             return;
         }
         if entry.opens_in_editor() {
-            if spawn(EDITOR, &[&path], 0, 1, 2) == u64::MAX {
+            if spawn(EDITOR, &[&path], 0, 1, 2).is_err() {
                 self.note = Note::Warning(format!("Couldn't start {EDITOR}."));
             }
             return;

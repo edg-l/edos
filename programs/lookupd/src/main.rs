@@ -213,7 +213,7 @@ fn main() {
         log("could not install the resolver override");
         std::process::exit(1);
     }
-    process::signal(SIGHUP, on_hup);
+    let _ = process::signal(SIGHUP, on_hup);
 
     let [a, b, c, d] = upstream_ip;
     log(&format!(

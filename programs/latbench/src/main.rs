@@ -121,7 +121,7 @@ fn set_slice(slice_ns: u64) {
         return;
     };
     attr.slice_ns = slice_ns;
-    sched_setattr(0, &attr);
+    let _ = sched_setattr(0, &attr);
 }
 
 /// One reading: how late the measuring thread's sleeps returned, what the hogs
@@ -333,7 +333,7 @@ fn clamp(out: &mut Tee) {
             ..original
         };
         assert!(
-            sched_setattr(0, &attr) == 0,
+            sched_setattr(0, &attr).is_ok(),
             "latbench: sched_setattr({asked}) failed"
         );
         let granted = sched_getattr(0).expect("latbench: sched_getattr").slice_ns;
@@ -346,9 +346,9 @@ fn clamp(out: &mut Tee) {
         );
     }
     assert!(
-        sched_setattr(u64::MAX, &original) < 0,
+        sched_setattr(u64::MAX, &original).is_err(),
         "latbench: sched_setattr on a thread that does not exist reported success"
     );
-    sched_setattr(0, &original);
+    let _ = sched_setattr(0, &original);
     out.line("latbench clamp: ok");
 }

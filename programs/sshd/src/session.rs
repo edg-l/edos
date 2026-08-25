@@ -56,8 +56,8 @@ const OPEN_RESOURCE_SHORTAGE: u32 = 4;
 /// server's own connection handler. Dispositions and process groups are both
 /// per thread in this kernel, so neither reaches the accept loop.
 fn session_group() {
-    process::sys_sigaction(process::SIGHUP, process::SIG_IGN as u64);
-    process::setpgid(0, 0);
+    let _ = process::sys_sigaction(process::SIGHUP, process::SIG_IGN as u64);
+    let _ = process::setpgid(0, 0);
 }
 
 /// A terminal dimension the client asked for, clamped to what the winsize
@@ -121,13 +121,13 @@ impl Drop for Child {
         // usually what is running: `sh -c 'sleep 3600'` waits on `sleep`, and
         // killing only the shell leaves the sleep reparented to init.
         let reaped = process::waitpid_nonblocking(self.pid).is_some();
-        process::kill_group(self.pgid, process::SIGHUP);
+        let _ = process::kill_group(self.pgid, process::SIGHUP);
         // An interactive shell takes a process group of its own so that Ctrl+C
         // reaches a job and not the shell, which puts it and everything it runs
         // outside the session group above. That group is led by the shell, so
         // its pid names it.
         if self.pid != self.pgid {
-            process::kill_group(self.pid, process::SIGHUP);
+            let _ = process::kill_group(self.pid, process::SIGHUP);
         }
         if reaped {
             return;
@@ -143,7 +143,7 @@ impl Drop for Child {
         // The escalation names the shell alone. `SIGKILL` cannot be ignored,
         // so aiming it at the group would take this thread with it, and the
         // socket would never be closed.
-        process::sys_kill(self.pid, process::SIGKILL);
+        let _ = process::kill(self.pid, process::SIGKILL);
         process::waitpid_nonblocking(self.pid);
     }
 }
@@ -503,18 +503,17 @@ impl<'a> Session<'a> {
             process::close(child_out);
         }
 
-        if pid == u64::MAX {
+        let Ok(pid) = pid else {
             process::close(read_fd);
             if !is_pty {
                 process::close(write_fd);
             }
             eprintln!("sshd: cannot start {}", self.cfg.shell);
             return Ok(false);
-        }
-        let pgid = process::getpgid(0);
+        };
         channel.child = Some(Child {
             pid,
-            pgid: if pgid > 0 { pgid as u64 } else { pid },
+            pgid: process::getpgid(0).ok().filter(|&g| g > 0).unwrap_or(pid),
             read_fd,
             write_fd,
             is_pty,
@@ -545,15 +544,14 @@ impl<'a> Session<'a> {
         if let Some(child) = channel.child.as_ref().filter(|c| c.input_open) {
             let mut written = 0;
             while written < data.len() {
-                let n = process::write(child.write_fd, &data[written..]);
-                if n < 0 {
+                let Ok(n) = process::write(child.write_fd, &data[written..]) else {
                     input_gone = true;
                     break;
-                }
+                };
                 if n == 0 {
                     break;
                 }
-                written += n as usize;
+                written += n;
             }
         }
         if input_gone && let Some(child) = channel.child.as_mut() {
@@ -591,11 +589,12 @@ impl<'a> Session<'a> {
             return Ok(Output::WindowShut);
         }
         let mut buf = vec![0u8; room];
-        let n = process::read(child.read_fd, &mut buf);
-        if n <= 0 {
+        let Some(n) = process::read(child.read_fd, &mut buf)
+            .ok()
+            .filter(|&n| n > 0)
+        else {
             return Ok(Output::Drained);
-        }
-        let n = n as usize;
+        };
         channel.remote_window -= n as u32;
         let remote_id = channel.remote_id;
 

@@ -306,7 +306,7 @@ pub fn cmd_kill(args: &[String]) -> i32 {
             status = 1;
             continue;
         };
-        if edos_lib::process::sys_kill(pid, signal) < 0 {
+        if edos_lib::process::kill(pid, signal).is_err() {
             eprintln!("kill: no such process: {}", pid);
             status = 1;
         }

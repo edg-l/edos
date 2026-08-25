@@ -134,24 +134,23 @@ fn spawn_traced(command: &[String]) -> u64 {
         format!("/bin/{}", command[0])
     };
 
-    let pid = process::fork();
-    if pid < 0 {
+    let Ok(pid) = process::fork() else {
         trace::release();
         eprintln!("strace: fork failed");
         std::process::exit(1);
-    }
+    };
 
     if pid == 0 {
         trace::mark(0);
         let args: Vec<&str> = command[1..].iter().map(|s| s.as_str()).collect();
         let env: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
         let env_refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
-        process::execve(&path, &args, &env_refs);
-        eprintln!("strace: cannot run {path}");
+        let e = process::execve(&path, &args, &env_refs);
+        eprintln!("strace: cannot run {path}: {e:?}");
         std::process::exit(127);
     }
 
-    pid as u64
+    pid
 }
 
 /// Drain records until every traced thread has died.

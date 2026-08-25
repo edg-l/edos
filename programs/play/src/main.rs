@@ -162,17 +162,16 @@ fn main() {
     let mut offset = 0;
     while offset < pcm_data.len() {
         let chunk = &pcm_data[offset..];
-        let written = eproc::write(dsp_fd, chunk);
-        if written < 0 {
+        let Ok(written) = eproc::write(dsp_fd, chunk) else {
             eprintln!("play: write error");
             process::exit(1);
-        }
+        };
         if written == 0 {
             // Ring buffer full, yield and retry
             std::thread::yield_now();
             continue;
         }
-        offset += written as usize;
+        offset += written;
     }
 
     // Wait for playback to complete

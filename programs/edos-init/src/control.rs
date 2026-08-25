@@ -314,7 +314,7 @@ fn apply(control: &Control, command: Command, name: &str) {
     match acted {
         None => eprintln!("init: control: no service named {name:?}"),
         Some(Some(pid)) => {
-            edos_lib::process::kill(pid, edos_lib::process::SIGTERM);
+            let _ = edos_lib::process::kill(pid, edos_lib::process::SIGTERM);
         }
         Some(None) => {}
     }

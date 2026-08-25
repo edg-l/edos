@@ -109,12 +109,11 @@ fn capture_command_output(cmd: &str) -> String {
         Some(child_pid) => {
             let mut buf = Vec::new();
             let mut chunk = [0u8; 512];
-            loop {
-                let n = edos_lib::process::read(read_fd, &mut chunk);
-                if n <= 0 {
+            while let Ok(n) = edos_lib::process::read(read_fd, &mut chunk) {
+                if n == 0 {
                     break;
                 }
-                buf.extend_from_slice(&chunk[..n as usize]);
+                buf.extend_from_slice(&chunk[..n]);
             }
             edos_lib::process::close(read_fd);
             edos_lib::process::waitpid(child_pid);

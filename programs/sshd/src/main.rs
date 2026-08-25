@@ -182,7 +182,7 @@ fn main() {
             // exited kills this thread outright: the pipe has no reader, the
             // kernel sends SIGPIPE, and its default action is to terminate.
             // The socket would then never be closed, since nothing unwinds.
-            process::sys_sigaction(process::SIGPIPE, process::SIG_IGN as u64);
+            let _ = process::sys_sigaction(process::SIGPIPE, process::SIG_IGN as u64);
 
             if cfg.verbose {
                 println!(

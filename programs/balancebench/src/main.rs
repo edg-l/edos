@@ -233,7 +233,7 @@ fn wake_worker(req_read: u64, ack_write: u64, rounds: u32, seed: u64) {
     // makes each round do the work, and it has to stay.
     let mut state = seed;
     for _ in 0..rounds {
-        if read(req_read, &mut byte) != 1 {
+        if read(req_read, &mut byte) != Ok(1) {
             return;
         }
         let t0 = Instant::now();
@@ -255,8 +255,8 @@ fn await_ack(ack_read: u64, worker: usize) -> u32 {
     let mut buf = [0u8; 4];
     let n = read(ack_read, &mut buf);
     assert!(
-        n == 4,
-        "balancebench wake: worker {worker} answered {n} bytes, not 4"
+        n == Ok(4),
+        "balancebench wake: worker {worker} answered {n:?} bytes, not 4"
     );
     u32::from_le_bytes(buf)
 }
@@ -323,7 +323,10 @@ fn wake_burst(out: &mut Tee, workers_arg: Option<u64>) {
         let burst = Instant::now();
         for &req_write in &req_writes {
             let n = write(req_write, &[1u8]);
-            assert!(n == 1, "balancebench wake: request write returned {n}");
+            assert!(
+                n == Ok(1),
+                "balancebench wake: request write returned {n:?}"
+            );
         }
         let mut slowest_worker = 0u32;
         for (worker, &ack_read) in ack_reads.iter().enumerate() {
@@ -381,7 +384,7 @@ fn sleep_worker(req_read: u64, ack_write: u64, rounds: u32, seed: u64) {
     // Loop-carried, for the reason spelled out in `wake_worker`.
     let mut state = seed;
     for _ in 0..rounds {
-        if read(req_read, &mut byte) != 1 {
+        if read(req_read, &mut byte) != Ok(1) {
             return;
         }
         thread::sleep(SLEEP_DELAY);
@@ -440,7 +443,10 @@ fn sleep_burst(out: &mut Tee, workers_arg: Option<u64>) {
         let burst = Instant::now();
         for &req_write in &req_writes {
             let n = write(req_write, &[1u8]);
-            assert!(n == 1, "balancebench sleep: request write returned {n}");
+            assert!(
+                n == Ok(1),
+                "balancebench sleep: request write returned {n:?}"
+            );
         }
         let mut slowest_worker = 0u32;
         for (worker, &ack_read) in ack_reads.iter().enumerate() {
@@ -561,7 +567,10 @@ fn crowd_burst(out: &mut Tee, workers_arg: Option<u64>) {
         let burst = Instant::now();
         for &req_write in &req_writes {
             let n = write(req_write, &[1u8]);
-            assert!(n == 1, "balancebench crowd: request write returned {n}");
+            assert!(
+                n == Ok(1),
+                "balancebench crowd: request write returned {n:?}"
+            );
         }
         let mut slowest_worker = 0u32;
         for (worker, &ack_read) in ack_reads.iter().enumerate() {

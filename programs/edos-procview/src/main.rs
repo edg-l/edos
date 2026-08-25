@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use edos_lib::keymap::keycode;
-use edos_lib::process::sys_kill;
+use edos_lib::process::kill;
 use edos_lib::procinfo::{Details, Memory, Process, Table};
 use edos_render::metrics::{TEXT_CELL_HEIGHT, space};
 use edos_render::text::{self, Style};
@@ -448,15 +448,12 @@ impl App {
         let Some(confirm) = self.confirm.take() else {
             return;
         };
-        let result = sys_kill(confirm.pid, SIGTERM);
+        let result = kill(confirm.pid, SIGTERM);
         // The thread leaves the table on its own once it dies, so refresh
         // rather than leave a row the reader can act on again.
         self.refresh();
-        if result != 0 {
-            self.notice = Some(format!(
-                "cannot signal pid {}: kill returned {result}",
-                confirm.pid
-            ));
+        if let Err(e) = result {
+            self.notice = Some(format!("cannot signal pid {}: {e:?}", confirm.pid));
         }
     }
 

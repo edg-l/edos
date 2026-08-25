@@ -660,8 +660,9 @@ fn test10(dir: &str) {
     if symlink("/bin/true", &exec_link) != 0 {
         fail(10, "symlink to a binary failed");
     }
-    let pid = process::spawn(&exec_link, &[], 0, 1, 2);
-    if pid == u64::MAX || pid == 0 {
+    let pid = process::spawn(&exec_link, &[], 0, 1, 2)
+        .unwrap_or_else(|e| fail(10, &format!("spawn through a symbolic link failed: {e:?}")));
+    if pid == 0 {
         fail(10, "spawning a program through a symbolic link failed");
     }
     if process::waitpid(pid) != 0 {
@@ -730,57 +731,56 @@ fn test10(dir: &str) {
 // -----------------------------------------------------------------------
 fn test11() {
     use edos_lib::process::{
-        SIG_BLOCK, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGINT, SIGKILL, sigmask, sigprocmask,
-        sys_kill, sys_sigaction,
+        SIG_BLOCK, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGINT, SIGKILL, kill, sigmask, sigprocmask,
+        sys_sigaction,
     };
 
-    let original = sigprocmask(SIG_BLOCK, 0);
-    if original < 0 {
+    let Ok(original) = sigprocmask(SIG_BLOCK, 0) else {
         fail(11, "sigprocmask query failed");
-    }
+    };
 
     // Blocking returns the mask that was in force, and a query sees the new one.
-    if sigprocmask(SIG_BLOCK, sigmask(SIGINT)) != original {
+    if sigprocmask(SIG_BLOCK, sigmask(SIGINT)) != Ok(original) {
         fail(11, "SIG_BLOCK did not return the previous mask");
     }
-    if sigprocmask(SIG_BLOCK, 0) != original | sigmask(SIGINT) as i64 {
+    if sigprocmask(SIG_BLOCK, 0) != Ok(original | sigmask(SIGINT)) {
         fail(11, "SIGINT is not in the mask after SIG_BLOCK");
     }
 
     // A blocked SIGINT is accepted and held: the default action would have
     // killed this process, so reaching the next line is the assertion.
-    if sys_kill(process::getpid(), SIGINT) != 0 {
+    if kill(process::getpid(), SIGINT).is_err() {
         fail(11, "kill with a blocked signal failed");
     }
-    if sigprocmask(SIG_BLOCK, 0) != original | sigmask(SIGINT) as i64 {
+    if sigprocmask(SIG_BLOCK, 0) != Ok(original | sigmask(SIGINT)) {
         fail(11, "the mask changed under a blocked kill");
     }
 
     // Unblocking delivers what was held, so the disposition has to be SIG_IGN
     // first or this process dies here.
-    if sys_sigaction(SIGINT, SIG_IGN as u64) < 0 {
+    if sys_sigaction(SIGINT, SIG_IGN as u64).is_err() {
         fail(11, "sigaction SIG_IGN failed");
     }
-    if sigprocmask(SIG_UNBLOCK, sigmask(SIGINT)) != original | sigmask(SIGINT) as i64 {
+    if sigprocmask(SIG_UNBLOCK, sigmask(SIGINT)) != Ok(original | sigmask(SIGINT)) {
         fail(11, "SIG_UNBLOCK did not return the previous mask");
     }
-    if sigprocmask(SIG_BLOCK, 0) != original {
+    if sigprocmask(SIG_BLOCK, 0) != Ok(original) {
         fail(11, "SIGINT is still in the mask after SIG_UNBLOCK");
     }
 
     // SIGKILL is silently dropped from the mask rather than refused.
-    if sigprocmask(SIG_SETMASK, sigmask(SIGKILL) | sigmask(SIGINT)) != original {
+    if sigprocmask(SIG_SETMASK, sigmask(SIGKILL) | sigmask(SIGINT)) != Ok(original) {
         fail(11, "SIG_SETMASK did not return the previous mask");
     }
-    if sigprocmask(SIG_BLOCK, 0) != sigmask(SIGINT) as i64 {
+    if sigprocmask(SIG_BLOCK, 0) != Ok(sigmask(SIGINT)) {
         fail(11, "SIGKILL was accepted into the mask");
     }
 
     // An unknown operation is refused and leaves the mask alone.
-    if !failed(sigprocmask(99, 0) as i64) {
+    if sigprocmask(99, 0).is_ok() {
         fail(11, "an unknown how was accepted");
     }
-    if sigprocmask(SIG_SETMASK, original as u32) != sigmask(SIGINT) as i64 {
+    if sigprocmask(SIG_SETMASK, original) != Ok(sigmask(SIGINT)) {
         fail(11, "the mask changed under a rejected sigprocmask");
     }
 
@@ -1540,7 +1540,7 @@ fn test20(dir: &str) {
 
     let cases: [(&str, isize); 6] = [
         ("read", edos_lib::io::sys_read(CLOSED, &mut empty_out)),
-        ("write", process::write(CLOSED, &empty)),
+        ("write", to_isize(process::write(CLOSED, &empty))),
         ("pread", pread(CLOSED, &mut empty_out, 0)),
         ("pwrite", pwrite(CLOSED, &empty, 0)),
         ("readv", edos_lib::io::readv(CLOSED, &mut [])),
@@ -1572,7 +1572,7 @@ fn test20(dir: &str) {
 
     let cases: [(&str, isize); 6] = [
         ("read", edos_lib::io::sys_read(fd, &mut empty_out)),
-        ("write", process::write(fd, &empty)),
+        ("write", to_isize(process::write(fd, &empty))),
         ("pread", pread(fd, &mut empty_out, 0)),
         ("pwrite", pwrite(fd, &empty, 0)),
         ("readv", edos_lib::io::readv(fd, &mut [])),
@@ -1633,10 +1633,10 @@ fn test21() {
             break;
         }
         let n = process::write(slave, &chunk);
-        if n <= 0 {
-            fail(21, &format!("write to the slave returned {}", n));
+        if !matches!(n, Ok(n) if n > 0) {
+            fail(21, &format!("write to the slave returned {n:?}"));
         }
-        accepted += n as usize;
+        accepted += n.unwrap_or(0);
     }
 
     if accepted >= CAP {
@@ -1699,7 +1699,7 @@ fn test22(dir: &str) {
         if fd < 0 {
             return -1i64;
         }
-        let n = process::write(fd as u64, MESSAGE);
+        let n = to_isize(process::write(fd as u64, MESSAGE));
         close(fd as u64);
         n as i64
     });
@@ -1780,10 +1780,10 @@ fn test23(dir: &str) {
     // The open reported the flag, so a program that inherited the descriptor
     // can find out how it behaves rather than having to be told.
     let flags = process::fcntl(fd, process::F_GETFL, 0);
-    if flags < 0 || flags as u64 & edos_lib::io::O_NONBLOCK == 0 {
+    if !matches!(flags, Ok(f) if f & edos_lib::io::O_NONBLOCK != 0) {
         fail(
             23,
-            &format!("F_GETFL reported {} after a non-blocking open", flags),
+            &format!("F_GETFL reported {flags:?} after a non-blocking open"),
         );
     }
 
@@ -1808,7 +1808,7 @@ fn test23(dir: &str) {
     // With something in it the same read succeeds, so EAGAIN above was about
     // the pipe being empty and not about the descriptor being unusable.
     const MESSAGE: &[u8] = b"not waiting\n";
-    if process::write(fd, MESSAGE) != MESSAGE.len() as isize {
+    if process::write(fd, MESSAGE) != Ok(MESSAGE.len()) {
         fail(23, "the non-blocking write of a short message was short");
     }
     let n = edos_lib::io::sys_read(fd, &mut buf);
@@ -1824,12 +1824,8 @@ fn test23(dir: &str) {
     const PIPE_CAPACITY: usize = 64 * 1024;
     let block = [b'x'; 4096];
     let mut filled = 0usize;
-    loop {
-        let written = process::write(fd, &block);
-        if written < 0 {
-            break;
-        }
-        filled += written as usize;
+    while let Ok(written) = process::write(fd, &block) {
+        filled += written;
         if filled > 4 * PIPE_CAPACITY {
             fail(
                 23,
@@ -1855,14 +1851,14 @@ fn test23(dir: &str) {
 
     // Clearing the flag has to take effect on the descriptor already open, or
     // it is only an open-time argument under another name.
-    if process::set_nonblocking(fd, false) < 0 {
+    if process::set_nonblocking(fd, false).is_err() {
         fail(23, "F_SETFL could not clear O_NONBLOCK");
     }
     let flags = process::fcntl(fd, process::F_GETFL, 0);
-    if flags < 0 || flags as u64 & edos_lib::io::O_NONBLOCK != 0 {
+    if !matches!(flags, Ok(f) if f & edos_lib::io::O_NONBLOCK == 0) {
         fail(
             23,
-            &format!("F_GETFL still reports {} after clearing", flags),
+            &format!("F_GETFL still reports {flags:?} after clearing"),
         );
     }
     // Blocking again, and there are 64 KiB waiting, so this cannot park.
@@ -1883,6 +1879,15 @@ fn test23(dir: &str) {
 ///
 /// A failing call returns a negated errno, so the whole `[-4095, -1]` window is
 /// a failure and not only the legacy `-1`.
+/// A `Result` return read back as the raw convention, so a table of syscalls
+/// that report failure differently can still be checked in one loop.
+fn to_isize(r: Result<usize, edos_lib::sys::Errno>) -> isize {
+    match r {
+        Ok(n) => n as isize,
+        Err(e) => -(e as i64) as isize,
+    }
+}
+
 fn failed(ret: i64) -> bool {
     edos_lib::sys::is_err(ret as u64)
 }

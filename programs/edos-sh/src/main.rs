@@ -44,7 +44,7 @@ fn group_job(pids: &[u64]) {
         return;
     };
     for &pid in pids {
-        edos_lib::process::setpgid(pid, leader);
+        let _ = edos_lib::process::setpgid(pid, leader);
     }
 }
 
@@ -56,10 +56,11 @@ fn group_job(pids: &[u64]) {
 /// would reach the shell along with the job.
 fn claim_terminal() {
     JOB_CONTROL.store(true, std::sync::atomic::Ordering::Relaxed);
-    edos_lib::process::setpgid(0, 0);
-    let pgid = edos_lib::process::getpgid(0);
-    if pgid > 0 {
-        SHELL_PGID.store(pgid as u64, std::sync::atomic::Ordering::Relaxed);
+    let _ = edos_lib::process::setpgid(0, 0);
+    if let Ok(pgid) = edos_lib::process::getpgid(0)
+        && pgid > 0
+    {
+        SHELL_PGID.store(pgid, std::sync::atomic::Ordering::Relaxed);
     }
     reclaim_terminal();
 }
@@ -71,7 +72,7 @@ fn claim_terminal() {
 fn reclaim_terminal() {
     let pgid = SHELL_PGID.load(std::sync::atomic::Ordering::Relaxed);
     if pgid != 0 {
-        edos_lib::process::tcsetpgrp(0, pgid);
+        let _ = edos_lib::process::tcsetpgrp(0, pgid);
     }
 }
 
@@ -237,7 +238,7 @@ fn run_foreground(
     }
 
     if job_control() {
-        edos_lib::process::tcsetpgrp(0, pids[0]);
+        let _ = edos_lib::process::tcsetpgrp(0, pids[0]);
     }
     let outcome = jobs::wait_foreground(&pids);
     reclaim_terminal();
@@ -269,13 +270,13 @@ fn run_background(segment: &str) -> i32 {
         Prepared::Failed => return 1,
         Prepared::Builtin { cmd, args, open } => {
             let pid = edos_lib::process::fork();
-            if pid == 0 {
+            if pid == Ok(0) {
                 // Under job control, lead a group of its own: a background job
                 // must not be in the shell's group, where Ctrl+C would reach
                 // it. A non-interactive shell has no job control and leaves it
                 // where it is, so a hangup aimed at the session reaches it.
                 if job_control() {
-                    edos_lib::process::setpgid(0, 0);
+                    let _ = edos_lib::process::setpgid(0, 0);
                 }
                 let fds = resolve_slots(&open.slots, [0, 1, 2]);
                 let result = if open.is_default() {
@@ -291,11 +292,11 @@ fn run_background(segment: &str) -> i32 {
                 std::process::exit(code);
             }
             open.close();
-            if pid < 0 {
+            let Ok(pid) = pid else {
                 eprintln!("{}: fork failed", command);
                 return 1;
-            }
-            vec![pid as u64]
+            };
+            vec![pid]
         }
         Prepared::External { stages, opened } => {
             let pids = spawn::spawn_pipeline(&stages);
@@ -334,8 +335,8 @@ pub fn cmd_fg(args: &[String]) -> i32 {
 
     println!("{}", job.command);
     edos_lib::io::pty_set_canonical(0);
-    edos_lib::process::tcsetpgrp(0, job.pgid);
-    edos_lib::process::kill_group(job.pgid, edos_lib::process::SIGCONT);
+    let _ = edos_lib::process::tcsetpgrp(0, job.pgid);
+    let _ = edos_lib::process::kill_group(job.pgid, edos_lib::process::SIGCONT);
     let outcome = jobs::wait_foreground(&job.pids);
     reclaim_terminal();
     edos_lib::io::pty_set_raw(0);
@@ -362,7 +363,7 @@ pub fn cmd_bg(args: &[String]) -> i32 {
         eprintln!("bg: no such job: {}", id);
         return 1;
     };
-    edos_lib::process::kill_group(job.pgid, edos_lib::process::SIGCONT);
+    let _ = edos_lib::process::kill_group(job.pgid, edos_lib::process::SIGCONT);
     println!("[{}]+ {} &", job.id, job.command);
     0
 }
@@ -407,12 +408,12 @@ fn run_builtin_redirected(cmd: &str, args: &[String], fds: [u64; 3]) -> command:
     let mut saved: [Option<u64>; 3] = [None; 3];
     for (i, &fd) in fds.iter().enumerate() {
         if fd != i as u64 {
-            saved[i] = Some(edos_lib::process::dup(i as u64) as u64);
+            saved[i] = edos_lib::process::dup(i as u64).ok();
         }
     }
     for (i, &fd) in fds.iter().enumerate() {
         if fd != i as u64 {
-            edos_lib::process::dup2(fd, i as u64);
+            let _ = edos_lib::process::dup2(fd, i as u64);
         }
     }
 
@@ -421,7 +422,7 @@ fn run_builtin_redirected(cmd: &str, args: &[String], fds: [u64; 3]) -> command:
 
     for (i, restore) in saved.iter().enumerate() {
         if let Some(restore) = *restore {
-            edos_lib::process::dup2(restore, i as u64);
+            let _ = edos_lib::process::dup2(restore, i as u64);
             edos_lib::process::close(restore);
         }
     }
@@ -448,11 +449,13 @@ pub fn heredoc_pipe(content: &str) -> Option<u64> {
     std::thread::spawn(move || {
         let mut sent = 0;
         while sent < bytes.len() {
-            let n = edos_lib::process::write(write_fd, &bytes[sent..]);
-            if n <= 0 {
+            let Ok(n) = edos_lib::process::write(write_fd, &bytes[sent..]) else {
+                break; // the reader went away; it will not miss what is left
+            };
+            if n == 0 {
                 break; // the reader went away; it will not miss what is left
             }
-            sent += n as usize;
+            sent += n;
         }
         edos_lib::process::close(write_fd);
     });
@@ -573,26 +576,28 @@ pub fn run_chain(input: &str) -> SegmentResult {
         // Subshell: run the inner commands in a forked child.
         if let Some(inner) = extract_subshell(segment) {
             let pid = edos_lib::process::fork();
-            if pid == 0 {
+            if pid == Ok(0) {
                 // A subshell is a process, so `exit` in it ends the subshell
                 // with that status rather than the shell that forked it.
                 let code = match run_chain(inner) {
                     SegmentResult::Done(code) | SegmentResult::Exit(code) => code,
                 };
                 std::process::exit(code);
-            } else if pid > 0 {
+            } else if let Ok(pid) = pid
+                && pid > 0
+            {
                 if background {
                     let job_id = JOB_LIST.lock().unwrap().add(
-                        vec![pid as u64],
+                        vec![pid],
                         segment.to_string(),
                         jobs::JobStatus::Running,
                     );
-                    command::set_last_bg_pid(pid as u64);
+                    command::set_last_bg_pid(pid);
                     println!("[{}] {}", job_id, pid);
                     last_exit = 0;
                     command::set_last_exit_code(0);
                 } else {
-                    let code = edos_lib::process::waitpid(pid as u64);
+                    let code = edos_lib::process::waitpid(pid);
                     last_exit = code;
                     command::set_last_exit_code(code);
                 }
@@ -1033,7 +1038,7 @@ fn main() {
 
     // Ignore SIGINT so the shell doesn't die on Ctrl+C
     // (the foreground child process gets killed instead)
-    edos_lib::process::sys_sigaction(2, 1); // SIGINT=2, SIG_IGN=1
+    let _ = edos_lib::process::sys_sigaction(2, 1); // SIGINT=2, SIG_IGN=1
 
     // The system's release, not the shell's own: `/proc/version` is rendered
     // from the kernel's `CARGO_PKG_VERSION`, which is the one place it is set.

@@ -115,19 +115,21 @@ fn main() -> ExitCode {
 
     // Spawn N_CHILDREN readers concurrently via fork().
     let start = Instant::now();
-    let mut child_pids: Vec<i64> = Vec::with_capacity(N_CHILDREN);
+    let mut child_pids: Vec<u64> = Vec::with_capacity(N_CHILDREN);
 
     for i in 0..N_CHILDREN {
-        let pid = process::fork();
-        if pid < 0 {
-            println!("inflighttest: FAIL fork {i}: {pid}");
-            // Wait for any already-forked children before returning.
-            for &cpid in &child_pids {
-                process::waitpid(cpid as u64);
+        let pid = match process::fork() {
+            Ok(pid) => pid,
+            Err(e) => {
+                println!("inflighttest: FAIL fork {i}: {e:?}");
+                // Wait for any already-forked children before returning.
+                for &cpid in &child_pids {
+                    process::waitpid(cpid);
+                }
+                let _ = fs::remove_file(FILE_PATH);
+                return ExitCode::from(1);
             }
-            let _ = fs::remove_file(FILE_PATH);
-            return ExitCode::from(1);
-        }
+        };
 
         if pid == 0 {
             // Child: read the file and exit.
@@ -150,7 +152,7 @@ fn main() -> ExitCode {
     // Wait for all children.
     let mut child_failed = false;
     for cpid in child_pids {
-        let code = process::waitpid(cpid as u64);
+        let code = process::waitpid(cpid);
         if code != 0 {
             println!("inflighttest: child pid={cpid} exited with code {code}");
             child_failed = true;

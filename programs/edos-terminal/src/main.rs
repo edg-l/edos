@@ -193,7 +193,7 @@ fn main() {
             if let Some(ref child) = child {
                 // Send input to shell (shell handles its own echo via stdout)
                 let input_str: String = input_chars.iter().collect();
-                child.write_str(&input_str);
+                let _ = child.write_str(&input_str);
             } else {
                 // Echo mode (no shell) - display typed characters
                 for ch in &input_chars {
@@ -209,11 +209,11 @@ fn main() {
         // Read output from shell and display
         let mut output_len = 0usize;
         if let Some(ref child) = child {
-            let n = child.read(&mut read_buf);
-            if n > 0 {
-                output_len = n as usize;
-                let output = String::from_utf8_lossy(&read_buf[..n as usize]);
-                terminal.write_str(&output);
+            if let Ok(n) = child.read(&mut read_buf) {
+                if n > 0 {
+                    output_len = n;
+                    terminal.write_str(&String::from_utf8_lossy(&read_buf[..n]));
+                }
             }
             // A terminal is a window onto its child. When the shell exits --
             // `exit`, a signal, an EOF on its stdin -- there is nothing left to

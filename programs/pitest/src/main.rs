@@ -84,7 +84,7 @@ fn set_priority(priority: u32) {
         slice_ns,
     };
     assert!(
-        sched_setattr(0, &attr) == 0,
+        sched_setattr(0, &attr).is_ok(),
         "pitest: sched_setattr(priority {priority}) failed"
     );
 }

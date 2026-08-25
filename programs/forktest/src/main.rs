@@ -116,10 +116,7 @@ fn test2() {
     let x = 42u64;
     let v: Vec<u64> = (0..10).collect();
 
-    let pid = process::fork();
-    if pid < 0 {
-        fail(2, &format!("fork failed: {pid}"));
-    }
+    let pid = process::fork().unwrap_or_else(|e| fail(2, &format!("fork failed: {e:?}")));
 
     if pid == 0 {
         let mut mine = x;
@@ -133,7 +130,7 @@ fn test2() {
         });
     }
 
-    let code = process::waitpid(pid as u64);
+    let code = process::waitpid(pid);
     if code != 0 {
         fail(2, "the child could not write to its own copy");
     }
@@ -149,24 +146,20 @@ fn test2() {
 /// A child may fork in turn, and each generation's exit code reaches the one
 /// that waited for it.
 fn test3() {
-    let pid = process::fork();
-    if pid < 0 {
-        fail(3, &format!("fork failed: {pid}"));
-    }
+    let pid = process::fork().unwrap_or_else(|e| fail(3, &format!("fork failed: {e:?}")));
 
     if pid == 0 {
-        let grandchild = process::fork();
-        if grandchild < 0 {
+        let Ok(grandchild) = process::fork() else {
             std::process::exit(1);
-        }
+        };
         if grandchild == 0 {
             std::process::exit(7);
         }
-        let code = process::waitpid(grandchild as u64);
+        let code = process::waitpid(grandchild);
         std::process::exit(if code == 7 { 0 } else { 1 });
     }
 
-    let code = process::waitpid(pid as u64);
+    let code = process::waitpid(pid);
     if code != 0 {
         fail(3, "a grandchild's exit code did not reach the child");
     }

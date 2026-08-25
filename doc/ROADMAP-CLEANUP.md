@@ -169,19 +169,25 @@ fix is to make both safe.
 
 ### C1. Give every `edos_lib` entry point a typed failure (S1, E2)
 
-**Fix.** `i64` and `isize` returns become `Result<usize, Errno>`; `u64` sentinel
-returns become `Option<u64>`. `programs/edos_lib/src/process.rs:299` and
-`io.rs:587` currently convert a real `is_err` check *back into* `u64::MAX`, so
-the information exists and is being thrown away at the boundary; those two are
-one-line changes.
+`process.rs` is done: every entry point there answers `Result<T, Errno>`, except
+`execve` and `reboot`, which return only on failure and so answer the `Errno`
+itself, and `getpid`, which cannot fail. `sys_kill` is gone; it was `kill` under
+another name. The `CLAUDE.md` paragraph naming which of the two spawns is safe
+is gone with it.
 
-Callers then cannot skip the check. `programs/edos-files/src/main.rs:276,282`
-and `programs/edos-init/src/main.rs:116` are the current sentinel comparisons and
-become `if let Some(pid)`.
+**Still open.** `io.rs` (30 raw returns, the largest), then `mounts.rs` (3),
+`net.rs`, `procinfo.rs`, `profile.rs`, `time.rs`, `trace.rs` (1 each), and C3's
+`mem.rs`. `io.rs:587` still converts a real `is_err` check back into
+`u64::MAX`. Two shapes are not covered by the rule and were left alone in
+`process.rs`: `close` answers `i32` and `waitpid` answers `-1` for a failed
+wait, neither of which is `i64`, `isize` or a sentinel `u64`.
+
+**Fix.** `i64` and `isize` returns become `Result<usize, Errno>`; `u64` sentinel
+returns become `Option<u64>` or, where the code is available, `Result<u64,
+Errno>`.
 
 **Done when** no `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a
-sentinel `u64`, and the `CLAUDE.md` paragraph about which spawn to prefer can be
-deleted.
+sentinel `u64`.
 
 ### C2. There is no argument parser, so 110 programs each wrote one (S2, E2)
 

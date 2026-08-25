@@ -344,11 +344,10 @@ fn test5(dir: &str) {
 
     // Fork a child; the child accesses the second page (past EOF), which must
     // trigger a kill (exit code 11 in EDOS).
-    let child_pid = process::fork();
-    if child_pid < 0 {
+    let child_pid = process::fork().unwrap_or_else(|e| {
         munmap(ptr, PAGE * 2);
-        fail(5, dir, "fork failed");
-    }
+        fail(5, dir, &format!("fork failed: {e:?}"))
+    });
 
     if child_pid == 0 {
         // Child: touch the past-EOF page -- kernel must kill us.
@@ -361,7 +360,7 @@ fn test5(dir: &str) {
     }
 
     // Parent: wait for the child
-    let exit_code = process::waitpid(child_pid as u64);
+    let exit_code = process::waitpid(child_pid);
     munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
@@ -418,11 +417,10 @@ fn test6(dir: &str) {
         .unwrap_or_else(|e| fail(6, dir, &format!("set_len: {}", e)));
 
     // Fork a child to access the now-truncated second page
-    let child_pid = process::fork();
-    if child_pid < 0 {
+    let child_pid = process::fork().unwrap_or_else(|e| {
         munmap(ptr, PAGE * 2);
-        fail(6, dir, "fork failed");
-    }
+        fail(6, dir, &format!("fork failed: {e:?}"))
+    });
 
     if child_pid == 0 {
         // Child: access byte 4096 (past truncated end) -- should be killed.
@@ -433,7 +431,7 @@ fn test6(dir: &str) {
         std::process::exit(0);
     }
 
-    let exit_code = process::waitpid(child_pid as u64);
+    let exit_code = process::waitpid(child_pid);
     munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
@@ -539,11 +537,10 @@ fn test8(dir: &str) {
         fail(8, dir, "mmap returned null/MAP_FAILED");
     }
 
-    let child_pid = process::fork();
-    if child_pid < 0 {
+    let child_pid = process::fork().unwrap_or_else(|e| {
         munmap(ptr, PAGE);
-        fail(8, dir, "fork failed");
-    }
+        fail(8, dir, &format!("fork failed: {e:?}"))
+    });
 
     if child_pid == 0 {
         // Child: write to its private mapping. COW should isolate the
@@ -558,7 +555,7 @@ fn test8(dir: &str) {
         std::process::exit(0);
     }
 
-    let exit_code = process::waitpid(child_pid as u64);
+    let exit_code = process::waitpid(child_pid);
     if exit_code != 0 {
         munmap(ptr, PAGE);
         // The child is not supposed to fault here at all, so say which address
@@ -737,11 +734,10 @@ fn test10(dir: &str) {
 
     // Spawn the copy and wait for it to exit cleanly.
     let pid = timed(10, dir, "spawn+wait", || {
-        let pid = process::spawn(&dst, &["hello from test10"], 0, 1, 2);
-        if pid == u64::MAX {
+        let pid = process::spawn(&dst, &["hello from test10"], 0, 1, 2).unwrap_or_else(|e| {
             let _ = fs::remove_file(&dst);
-            fail(10, dir, &format!("spawn {} returned MAX (not found?)", dst));
-        }
+            fail(10, dir, &format!("spawn {dst}: {e:?}"))
+        });
         let exit_code = process::waitpid(pid);
         (pid, exit_code)
     });
@@ -817,14 +813,14 @@ fn test11(dir: &str) {
 /// apart from inside the process that performed it.
 fn child_survives_write(ptr: *mut u8) -> bool {
     let pid = process::fork();
-    if pid == 0 {
+    if pid == Ok(0) {
         unsafe { core::ptr::write_volatile(ptr, 0x5a) };
         std::process::exit(0);
     }
-    if pid < 0 {
+    let Ok(pid) = pid else {
         return false;
-    }
-    process::waitpid(pid as u64) == 0
+    };
+    process::waitpid(pid) == 0
 }
 
 // -----------------------------------------------------------------------

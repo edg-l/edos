@@ -37,13 +37,13 @@ fn fail(name: &str, detail: &str) -> ! {
 /// detour, because the kernel saves and restores the whole context and not
 /// just the instruction pointer.
 fn handler_runs() {
-    if process::signal(SIGINT, record) < 0 {
+    if process::signal(SIGINT, record).is_err() {
         fail("handler", "sigaction rejected a handler");
     }
 
     let me = process::getpid();
     let before = process::getpid();
-    if process::kill(me, SIGINT) < 0 {
+    if process::kill(me, SIGINT).is_err() {
         fail("handler", "kill of self failed");
     }
 
@@ -69,7 +69,7 @@ fn handler_runs() {
 /// the signal blocked forever.
 fn handler_repeats() {
     let me = process::getpid();
-    process::kill(me, SIGINT);
+    let _ = process::kill(me, SIGINT);
     let _ = process::getpid();
 
     if CAUGHT.load(Ordering::SeqCst) != 2 {
@@ -80,9 +80,9 @@ fn handler_repeats() {
 
 /// An ignored signal does not run the handler and does not kill.
 fn ignore_works() {
-    process::sys_sigaction(SIGTERM, process::SIG_IGN as u64);
+    let _ = process::sys_sigaction(SIGTERM, process::SIG_IGN as u64);
     let me = process::getpid();
-    process::kill(me, SIGTERM);
+    let _ = process::kill(me, SIGTERM);
     let _ = process::getpid();
     pass(
         "ignore",
@@ -94,20 +94,19 @@ fn ignore_works() {
 /// runs to completion.
 fn stop_and_continue() {
     let pid = process::fork();
-    if pid < 0 {
-        fail("stop", "fork failed");
-    }
-    if pid == 0 {
+    if pid == Ok(0) {
         // Long enough that the parent's stop lands while this is running.
         for _ in 0..400 {
             sleep_ms(5);
         }
         std::process::exit(7);
     }
-    let child = pid as u64;
+    let Ok(child) = pid else {
+        fail("stop", "fork failed");
+    };
 
     sleep_ms(50);
-    if process::kill(child, SIGTSTP) < 0 {
+    if process::kill(child, SIGTSTP).is_err() {
         fail("stop", "could not send SIGTSTP");
     }
 
@@ -132,7 +131,7 @@ fn stop_and_continue() {
         fail("stop", "child resumed on its own");
     }
 
-    if process::kill(child, SIGCONT) < 0 {
+    if process::kill(child, SIGCONT).is_err() {
         fail("cont", "could not send SIGCONT");
     }
     if process::waitpid(child) != 7 {
@@ -148,28 +147,27 @@ fn group_delivery() {
 
     for _ in 0..3 {
         let pid = process::fork();
-        if pid < 0 {
-            fail("group", "fork failed");
-        }
-        if pid == 0 {
+        if pid == Ok(0) {
             for _ in 0..400 {
                 sleep_ms(5);
             }
             std::process::exit(0);
         }
-        let child = pid as u64;
+        let Ok(child) = pid else {
+            fail("group", "fork failed");
+        };
         // The first child leads the group; the rest join it. This is exactly
         // what a shell does for a pipeline.
         if group == 0 {
             group = child;
         }
-        process::setpgid(child, group);
+        let _ = process::setpgid(child, group);
         children.push(child);
     }
 
     sleep_ms(60);
     // Negative pid: the group named by its magnitude.
-    if process::kill_group(group, SIGTERM) < 0 {
+    if process::kill_group(group, SIGTERM).is_err() {
         fail("group", "kill of the group failed");
     }
 
@@ -190,22 +188,22 @@ fn sigpipe_terminates() {
     };
 
     let pid = process::fork();
-    if pid < 0 {
-        fail("sigpipe", "fork failed");
-    }
-    if pid == 0 {
+    if pid == Ok(0) {
         process::close(read_fd);
         // Without SIGPIPE this never ends and grows the kernel heap.
         let buf = [b'x'; 4096];
         loop {
-            process::write(write_fd, &buf);
+            let _ = process::write(write_fd, &buf);
         }
     }
+    let Ok(pid) = pid else {
+        fail("sigpipe", "fork failed");
+    };
 
     process::close(read_fd);
     process::close(write_fd);
 
-    let status = process::waitpid(pid as u64);
+    let status = process::waitpid(pid);
     if status != 128 + 13 {
         fail("sigpipe", "writer was not killed by SIGPIPE");
     }

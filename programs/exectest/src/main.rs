@@ -11,6 +11,7 @@ use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 
 use edos_lib::process::{self, F_GETFD};
+use edos_lib::sys::Errno;
 
 const SELF_PATH: &str = "/bin/exectest";
 const DATA_PATH: &str = "/tmp/exectest_data";
@@ -102,7 +103,7 @@ fn stage1() -> ! {
     let inherited_fd = inherited.as_raw_fd() as u64;
     let cloexec_fd = cloexec.as_raw_fd() as u64;
 
-    if process::set_cloexec(cloexec_fd, true) < 0 {
+    if process::set_cloexec(cloexec_fd, true).is_err() {
         std::process::exit(CLOEXEC_FD_SURVIVED);
     }
 
@@ -154,7 +155,7 @@ fn stage2(args: &[String]) -> ! {
     }
 
     // A close-on-exec descriptor is gone.
-    if process::fcntl(cloexec_fd, F_GETFD, 0) >= 0 {
+    if process::fcntl(cloexec_fd, F_GETFD, 0).is_ok() {
         std::process::exit(CLOEXEC_FD_SURVIVED);
     }
 
@@ -221,10 +222,10 @@ fn main() {
     // -------------------------------------------------------------------
     // Test 1: a failed exec returns, and leaves this process running
     // -------------------------------------------------------------------
-    if process::execve("/bin/definitely_not_here", &["x"], &[]) >= 0 {
+    if process::execve("/bin/definitely_not_here", &["x"], &[]) == Errno::UNKNOWN {
         fail("test 1", "execve of a missing file reported success");
     }
-    if process::execve("/etc", &["x"], &[]) >= 0 {
+    if process::execve("/etc", &["x"], &[]) == Errno::UNKNOWN {
         fail("test 1", "execve of a directory reported success");
     }
     let pid_before = process::getpid();
@@ -239,10 +240,8 @@ fn main() {
     fs::write(DATA_PATH, b"hello world")
         .unwrap_or_else(|e| fail("test 2", &format!("write {}: {}", DATA_PATH, e)));
 
-    let child = process::spawn(SELF_PATH, &["stage1"], 0, 1, 2);
-    if child == u64::MAX {
-        fail("test 2", "spawn of stage 1 failed");
-    }
+    let child = process::spawn(SELF_PATH, &["stage1"], 0, 1, 2)
+        .unwrap_or_else(|e| fail("test 2", &format!("spawn of stage 1 failed: {e:?}")));
     let code = process::waitpid(child);
     if code != OK {
         fail(
@@ -258,10 +257,8 @@ fn main() {
     // -------------------------------------------------------------------
     // Test 3: the exec'd image's exit status is the process's exit status
     // -------------------------------------------------------------------
-    let child = process::spawn(SELF_PATH, &["stage3"], 0, 1, 2);
-    if child == u64::MAX {
-        fail("test 3", "spawn failed");
-    }
+    let child = process::spawn(SELF_PATH, &["stage3"], 0, 1, 2)
+        .unwrap_or_else(|e| fail("test 3", &format!("spawn failed: {e:?}")));
     let code = process::waitpid(child);
     if code != 0 {
         fail(
@@ -274,10 +271,8 @@ fn main() {
     // -------------------------------------------------------------------
     // Test 4: exec from a multithreaded process
     // -------------------------------------------------------------------
-    let child = process::spawn(SELF_PATH, &["stage4"], 0, 1, 2);
-    if child == u64::MAX {
-        fail("test 4", "spawn failed");
-    }
+    let child = process::spawn(SELF_PATH, &["stage4"], 0, 1, 2)
+        .unwrap_or_else(|e| fail("test 4", &format!("spawn failed: {e:?}")));
     let code = process::waitpid(child);
     if code != 0 {
         fail(
@@ -297,10 +292,8 @@ fn main() {
     // -------------------------------------------------------------------
     // Test 5: exec from a process whose siblings never enter the kernel
     // -------------------------------------------------------------------
-    let child = process::spawn(SELF_PATH, &["stage5"], 0, 1, 2);
-    if child == u64::MAX {
-        fail("test 5", "spawn failed");
-    }
+    let child = process::spawn(SELF_PATH, &["stage5"], 0, 1, 2)
+        .unwrap_or_else(|e| fail("test 5", &format!("spawn failed: {e:?}")));
     let code = process::waitpid(child);
     if code != 0 {
         fail(
@@ -337,7 +330,7 @@ fn main() {
         let path = "/var/exectest_badelf";
         fs::write(path, &image)
             .unwrap_or_else(|e| fail("test 6", &format!("write {}: {}", path, e)));
-        if process::execve(path, &["badelf"], &[]) >= 0 {
+        if process::execve(path, &["badelf"], &[]) == Errno::UNKNOWN {
             fail("test 6", &format!("execve of a {} reported success", name));
         }
         if process::getpid() != pid_before {

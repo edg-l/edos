@@ -166,15 +166,14 @@ fn case_repeat_is_a_hit() {
 /// without a query on the wire.
 fn case_another_process_gets_the_hit() {
     let before = stat("hits");
-    let pid = process::spawn("/bin/dns", &[NAME], 0, 1, 2);
-    if pid == u64::MAX {
+    let Ok(pid) = process::spawn("/bin/dns", &[NAME], 0, 1, 2) else {
         check(
             "cross-process-hit",
             false,
             "could not spawn /bin/dns".into(),
         );
         return;
-    }
+    };
     let code = process::waitpid(pid);
     let counted = wait_for(STATS_BUDGET, || stat("hits") > before);
 
@@ -197,7 +196,7 @@ fn case_hup_flushes() {
     };
     let hits_before = stat("hits");
 
-    process::kill(pid, SIGHUP);
+    let _ = process::kill(pid, SIGHUP);
     let emptied = wait_for(Duration::from_secs(3), || stat("entries") == Some(0));
     let hits_after = stat("hits");
 
@@ -218,15 +217,14 @@ fn case_hup_flushes() {
 /// `doc/design/lookupd.md`: nothing listens on `NOWHERE`, and this kernel sends
 /// no ICMP port unreachable, so the client would wait out every attempt.
 fn case_a_dead_owner_does_not_hold_the_override() {
-    let pid = process::spawn("/bin/lookuptest", &["--steal"], 0, 1, 2);
-    if pid == u64::MAX {
+    let Ok(pid) = process::spawn("/bin/lookuptest", &["--steal"], 0, 1, 2) else {
         check(
             "revocation",
             false,
             "could not spawn the stealing child".into(),
         );
         return;
-    }
+    };
     if process::waitpid(pid) != 0 {
         check(
             "revocation",

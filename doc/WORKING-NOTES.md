@@ -10442,3 +10442,36 @@ only. Userspace has its own workspace and its own toolchain, so a `use` block
 left unsorted there survives every gate and lands. Five `edos_render` widget
 files reached trunk that way before anyone ran `cargo +edos fmt -- --check` by
 hand. Run it in `programs/` alongside the kernel's, or add it to `make fmt`.
+
+## `edos_lib::process` answers `Result`, and the traps that came out of it
+
+Every entry point in `programs/edos_lib/src/process.rs` now returns
+`Result<T, Errno>`, built on `sys::sys_result`, which was already there and
+already knew both of the kernel's failure conventions. Three shapes did not fit
+the rule and were decided rather than mechanically converted:
+
+- `execve` and `reboot` return **only** on failure, so they answer `Errno`, not
+  `Result`. A kernel that answered success without replacing the image (or
+  without stopping) is reported as `Errno::UNKNOWN`, a code it never sends of
+  its own accord. `exectest` tests exactly that, and its old `>= 0` check maps
+  onto `== Errno::UNKNOWN` one for one.
+- `fork` answers `Result<u64, Errno>` where `Ok(0)` is the child. Callers that
+  branch before knowing whether the fork succeeded read `if pid == Ok(0)`,
+  which is why the `PartialEq` on the result is load-bearing.
+- `close` (`i32`) and `waitpid` (`-1` for a failed wait) are untouched: neither
+  is an `i64`, an `isize` or a sentinel `u64`, so neither is in C1's scope.
+
+`sys_kill` was deleted. It was `kill` with a different name and one extra hop.
+
+Two traps this converting run hit, both worth knowing before doing `io.rs`:
+
+- **`Errno` has no `Display`.** It lives in `edos_rt`, which this repo does not
+  own, so every `{e}` in a message the conversion touched has to become `{e:?}`.
+- **`#[must_use]` arrives with `Result`.** 28 call sites that ignored a raw
+  `i64` became warnings the moment the return type changed, and the userspace
+  build is warning-free. `let _ =` is right where the failure genuinely has no
+  handling (a signal to a process that is already gone, restoring a saved
+  `sched_setattr`); it is not right anywhere else, and each one was read.
+- **`clippy::while_let_loop` fires on the rewrite.** `loop { let Ok(n) = f()
+  else { break }; ... }` is a clippy error under `-D warnings`; write
+  `while let Ok(n) = f()` instead. Four sites.

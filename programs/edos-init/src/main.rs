@@ -113,19 +113,11 @@ fn supervise(service: Arc<Service>, control: Arc<Control>) {
 
         let started = Instant::now();
         let pid = process::spawn_with_env(&service.command, &args, 0, 1, 2);
-        if pid == u64::MAX {
-            control.update(name, |e| {
-                e.failures += 1;
-                e.pid = 0;
-                e.state = RunState::Backoff;
-            });
-            let failures = control.with(name, |e| e.failures).unwrap_or(0);
-            eprintln!("init: {name}: spawn failed (attempt {failures})");
-        } else {
+        if let Ok(pid) = pid {
             if service.shell
                 && let Err(e) = grant_shell(pid)
             {
-                eprintln!("init: {name}: could not grant shell privilege: {e}");
+                eprintln!("init: {name}: could not grant shell privilege: {e:?}");
             }
             control.update(name, |e| {
                 e.pid = pid;
@@ -190,6 +182,14 @@ fn supervise(service: Arc<Service>, control: Arc<Control>) {
             eprintln!(
                 "init: {name} exited with {code} after only {ran_for:?} (failure {failures})"
             );
+        } else {
+            control.update(name, |e| {
+                e.failures += 1;
+                e.pid = 0;
+                e.state = RunState::Backoff;
+            });
+            let failures = control.with(name, |e| e.failures).unwrap_or(0);
+            eprintln!("init: {name}: spawn failed (attempt {failures})");
         }
 
         let failures = control.with(name, |e| e.failures).unwrap_or(0);

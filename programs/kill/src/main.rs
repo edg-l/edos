@@ -1,6 +1,6 @@
 use std::env;
 
-use edos_lib::process::{SIGTERM, signal_by_name, sys_kill};
+use edos_lib::process::{SIGTERM, kill, signal_by_name};
 
 /// `kill [-SIGNAL] PID...`, the same form the shell builtin takes. Both exist
 /// because the builtin shadows this binary only when the shell runs it as a
@@ -37,7 +37,7 @@ fn main() {
             status = 1;
             continue;
         };
-        if sys_kill(pid, signal) != 0 {
+        if kill(pid, signal).is_err() {
             eprintln!("kill: failed to send signal {} to pid {}", signal, pid);
             status = 1;
         }

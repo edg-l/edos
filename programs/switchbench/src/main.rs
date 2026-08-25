@@ -134,22 +134,22 @@ fn main() {
 
     // The same handover with an address space switch on top.
     let child = fork();
-    if child == 0 {
+    if child == Ok(0) {
         loop {
             sched_yield();
         }
     }
-    if child < 0 {
-        out.line("switchbench: fork failed, skipping the cross-process case");
-    } else {
+    if let Ok(child) = child {
         let cross = time_yield(iters) / 2.0;
-        edos_lib::process::kill(child as u64, edos_lib::process::SIGKILL);
-        edos_lib::process::waitpid(child as u64);
+        let _ = edos_lib::process::kill(child, edos_lib::process::SIGKILL);
+        edos_lib::process::waitpid(child);
         out.line(&format!(
             "switchbench yield process {cross:.0} ns per handover, {:.0} ns over a shared \
              address space",
             cross - pair
         ));
+    } else {
+        out.line("switchbench: fork failed, skipping the cross-process case");
     }
 
     // A blocking round trip: each side parks in `read` and is woken by the
@@ -184,7 +184,7 @@ fn syscall_floor(out: &mut Tee, iters: u64) {
 
     let mut byte = [0u8; 1];
     let badfd = best_ns(iters, || {
-        read(9999, &mut byte);
+        let _ = read(9999, &mut byte);
     });
     out.line(&format!(
         "switchbench read of a bad fd {badfd:.0} ns, so the fd table costs {:.0} ns",
@@ -209,7 +209,7 @@ fn pipe_no_block(out: &mut Tee, iters: u64) {
     let mut byte = [0u8; 1];
     let mut failed = false;
     let each = best_ns(iters, || {
-        if write(w, b"x") != 1 || read(r, &mut byte) != 1 {
+        if write(w, b"x") != Ok(1) || read(r, &mut byte) != Ok(1) {
             failed = true;
         }
     });
@@ -319,11 +319,11 @@ fn pipe_round_trip_threads(out: &mut Tee, iters: u64, touch: usize) {
     let peer = thread::spawn(move || {
         let mut byte = [0u8; 1];
         let mut set = WorkingSet::new(touch);
-        while read(up_r, &mut byte) == 1 {
+        while read(up_r, &mut byte) == Ok(1) {
             if touch > 0 {
                 set.walk();
             }
-            if write(down_w, &byte) != 1 {
+            if write(down_w, &byte) != Ok(1) {
                 return;
             }
         }
@@ -333,7 +333,7 @@ fn pipe_round_trip_threads(out: &mut Tee, iters: u64, touch: usize) {
     let mut failed = false;
     let mut set = WorkingSet::new(touch);
     let each = best_ns(iters, || {
-        if write(up_w, b"x") != 1 || read(down_r, &mut byte) != 1 {
+        if write(up_w, b"x") != Ok(1) || read(down_r, &mut byte) != Ok(1) {
             failed = true;
         }
         if touch > 0 {
@@ -365,27 +365,27 @@ fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
     };
 
     let child = fork();
-    if child == 0 {
+    if child == Ok(0) {
         close(up_w);
         close(down_r);
         let mut byte = [0u8; 1];
         let mut set = WorkingSet::new(touch);
         loop {
-            if read(up_r, &mut byte) != 1 {
+            if read(up_r, &mut byte) != Ok(1) {
                 std::process::exit(0);
             }
             if touch > 0 {
                 set.walk();
             }
-            if write(down_w, &byte) != 1 {
+            if write(down_w, &byte) != Ok(1) {
                 std::process::exit(0);
             }
         }
     }
-    if child < 0 {
+    let Ok(child) = child else {
         out.line("switchbench: fork failed, skipping the pipe case");
         return;
-    }
+    };
     close(up_r);
     close(down_w);
 
@@ -400,7 +400,7 @@ fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
     let mut failed = false;
     let mut set = WorkingSet::new(touch);
     let each = best_ns(iters, || {
-        if write(up_w, b"x") != 1 || read(down_r, &mut byte) != 1 {
+        if write(up_w, b"x") != Ok(1) || read(down_r, &mut byte) != Ok(1) {
             failed = true;
         }
         if touch > 0 {
@@ -410,8 +410,8 @@ fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
 
     close(up_w);
     close(down_r);
-    edos_lib::process::kill(child as u64, edos_lib::process::SIGKILL);
-    edos_lib::process::waitpid(child as u64);
+    let _ = edos_lib::process::kill(child, edos_lib::process::SIGKILL);
+    edos_lib::process::waitpid(child);
 
     if failed {
         out.line("switchbench: pipe round trip failed");

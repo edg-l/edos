@@ -93,7 +93,7 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
         return;
     }
 
-    set_nonblocking(fd, true);
+    let _ = set_nonblocking(fd, true);
     let started = net::connect(fd, &local(LISTEN_PORT));
     let code = io::last_errno_raw();
     check(
@@ -135,7 +135,7 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
     // The connection is real: the listener has it, and a byte crosses it. The
     // listener is non-blocking so a handshake that never landed fails the check
     // instead of hanging the test.
-    set_nonblocking(listener, true);
+    let _ = set_nonblocking(listener, true);
     let accepted = if io::poll_readable(listener, 2000) {
         net::accept(listener)
     } else {
@@ -168,7 +168,7 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
         net::close(listener);
         return;
     };
-    set_nonblocking(dead, true);
+    let _ = set_nonblocking(dead, true);
     let refused = net::connect(dead, &local(DEAD_PORT));
     let refused_code = io::last_errno_raw();
     let outcome = if refused.is_err() && refused_code == econnrefused {
@@ -196,7 +196,7 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
         net::close(listener);
         return;
     };
-    set_nonblocking(pending, true);
+    let _ = set_nonblocking(pending, true);
     let started = net::connect(pending, &SockAddrIn::new([10, 0, 2, 99], 9));
     let started_code = io::last_errno_raw();
     let stalled = wait_writable(pending, 500);

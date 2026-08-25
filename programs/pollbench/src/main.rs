@@ -201,18 +201,14 @@ fn main() {
     // forever against a reader that is this same thread.
     {
         let (r, w) = pipe().expect("pipe");
-        if set_nonblocking(w, true) < 0 {
+        if set_nonblocking(w, true).is_err() {
             out.line("pollbench: could not set O_NONBLOCK on a pipe write end");
             std::process::exit(1);
         }
         let block = [b'x'; 4096];
         let mut filled = 0usize;
-        loop {
-            let n = write(w, &block);
-            if n < 0 {
-                break;
-            }
-            filled += n as usize;
+        while let Ok(n) = write(w, &block) {
+            filled += n;
             if filled > 1 << 20 {
                 out.line("pollbench: a pipe took more than a megabyte, so it is unbounded");
                 std::process::exit(1);
@@ -240,7 +236,7 @@ fn main() {
         ));
 
         let mut drain = [0u8; 4096];
-        if read(r, &mut drain) <= 0 {
+        if !matches!(read(r, &mut drain), Ok(n) if n > 0) {
             out.line("pollbench: could not drain a full pipe");
             std::process::exit(1);
         }
@@ -264,7 +260,7 @@ fn main() {
     let mut idle_pairs = Vec::new();
     for _ in 0..max {
         let (r, w) = pipe().expect("pipe");
-        write(w, b"x");
+        let _ = write(w, b"x");
         ready_pairs.push((r, w));
         idle_pairs.push(pipe().expect("pipe"));
     }

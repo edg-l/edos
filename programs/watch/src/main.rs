@@ -146,12 +146,11 @@ fn run_command(command: &[String], exec: bool) -> Result<Run, String> {
 
     let mut output: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
-    loop {
-        let n = read(read_fd, &mut buf);
-        if n <= 0 {
+    while let Ok(n) = read(read_fd, &mut buf) {
+        if n == 0 {
             break;
         }
-        output.extend_from_slice(&buf[..n as usize]);
+        output.extend_from_slice(&buf[..n]);
     }
     close(read_fd);
 
