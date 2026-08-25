@@ -65,11 +65,12 @@ without the tag is the only one worth reading as scheduler cost.
 
 ## Reading one honestly
 
-**A profile is CPU time, not wall-clock time.** A program blocked on I/O
+**A profile is on-CPU time, not wall-clock time.** A program blocked on I/O
 contributes nothing and does not appear. A program that takes ten seconds and
 spends nine of them waiting shows up as one second of work. If the question is
 "why is this slow" and the answer is not in the profile, that is itself the
-answer: it was not running.
+answer: it was not running. On-CPU is not the same as executing, though — see
+the MMIO paragraph below.
 
 **Idle is data.** A four-CPU guest running one thread is 75% idle by
 construction, and `pick_and_run` dominating the profile means exactly that. It
@@ -79,6 +80,23 @@ actually parallelised.
 **A single sample means nothing.** The instrument is the distribution of
 thousands. Anything under a few hundred samples is noise with symbol names
 attached.
+
+**Under a hypervisor, an MMIO write is charged to the guest as if it ran.** The
+guest's clock keeps time across a VM exit, so a tick expiring while QEMU
+emulates a device register fires the moment the guest resumes and lands on the
+instruction that trapped. The cost of the emulation is then attributed to the
+guest function holding it. This is not small and it is not evenly spread: on
+`fsbench raw` the profile above puts 9% of non-idle time in
+`<NvmeQueue>::write_sqe_and_ring`, and `scripts/perf-kvm` — which counts only
+instructions the guest actually executed — puts **0.04%** there, with the
+missing time visible in the host half as `kvm_io_bus_*`, `kvm_fast_pio` and
+`x86_emulate_instruction`. The 1.5% row in the example above is the same
+artifact.
+
+So a driver's doorbell, register poll or descriptor-ring write reads as compute
+here and would not on hardware. Before optimising anything that touches MMIO on
+the strength of a guest profile, check the same workload under `scripts/perf-kvm`
+and see whether the guest is executing there at all.
 
 ## Two things it cannot see
 
