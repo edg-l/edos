@@ -1,5 +1,5 @@
 use crate::{
-    drivers::{ahci, block_io},
+    drivers::block_io::{self, BlockError},
     fs::fat32::structures::Fat32BootSector,
     fs::gpt::{FilesystemType, Partition, PartitionType},
     log,
@@ -10,10 +10,10 @@ fn read_sectors_vec(
     lba: u64,
     sectors: u16,
     _buf: Vec<u8>,
-) -> Result<Vec<u8>, ahci::AhciError> {
+) -> Result<Vec<u8>, BlockError> {
     let byte_count = sectors as usize * 512;
     let mut buf = alloc::vec![0u8; byte_count];
-    let dev = block_io::lookup(device_id).ok_or(ahci::AhciError::InvalidDevice)?;
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::read_blocking(&dev, lba, &mut buf)?;
     Ok(buf)
 }

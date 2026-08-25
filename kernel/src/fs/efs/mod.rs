@@ -25,25 +25,22 @@ use super::gpt::Partition;
 use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::{CachedPage, PageCacheOps};
 use super::page_fill::{PrefetchPlan, PrefetchRun};
-use crate::drivers::ahci::AhciError;
-use crate::drivers::block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags};
+use crate::drivers::block_io::{self, BlockBuffer, BlockError, BlockIoHandle, WriteFlags};
 
-/// Submit a sector-level read and park on the handle. Returns an `AhciError`
-/// so existing call sites can `?`-propagate without further mapping.
 /// Blocks one AHCI command may carry, from the 248-entry PRDT (992 KiB).
 /// A device whose maximum transfer is smaller splits the request itself --
 /// NVMe chops at MDTS in `drivers::nvme::namespace` -- so this stays the
 /// fs-layer batch size rather than the minimum any device can accept.
 const MAX_RUN_BLOCKS: usize = 248;
 
-fn block_read(device_id: u64, lba: u64, buf: &mut [u8]) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_read(device_id: u64, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::read_blocking(&dev, lba, buf)?;
     Ok(())
 }
 
-fn block_write(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_write(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::write_blocking(&dev, lba, buf, WriteFlags::NONE)?;
     Ok(())
 }
@@ -56,8 +53,8 @@ fn submit_block_write(
     lba: u64,
     sectors: u16,
     buf: Arc<Vec<u8>>,
-) -> Result<Arc<BlockIoHandle>, AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+) -> Result<Arc<BlockIoHandle>, BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     let handle = dev.submit_write(
         lba,
         sectors as u32,
@@ -83,9 +80,9 @@ struct InflightWrite {
 /// range it overwrote behind the cache's back. The invalidation happens on
 /// failure too: a command that reported an error may still have landed in
 /// part, so a cached page for that range cannot be trusted either way.
-fn reap_write(device_id: u64, mut write: InflightWrite) -> Result<(), AhciError> {
+fn reap_write(device_id: u64, mut write: InflightWrite) -> Result<(), BlockError> {
     let started = crate::timer::Instant::now();
-    let result: Result<(), AhciError> = loop {
+    let result: Result<(), BlockError> = loop {
         match write.handle.wait() {
             Ok(()) => break Ok(()),
             Err(e) if block_io::retry_after(e, started) => {
@@ -95,7 +92,7 @@ fn reap_write(device_id: u64, mut write: InflightWrite) -> Result<(), AhciError>
                     Err(e) => break Err(e),
                 }
             }
-            Err(e) => break Err(e.into()),
+            Err(e) => break Err(e),
         }
     };
     // The device is only done reading the staging buffer now.
@@ -105,8 +102,8 @@ fn reap_write(device_id: u64, mut write: InflightWrite) -> Result<(), AhciError>
     Ok(())
 }
 
-fn block_write_fua(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_write_fua(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::write_blocking(&dev, lba, buf, WriteFlags::FUA)?;
     Ok(())
 }
@@ -621,7 +618,7 @@ impl EfsDriver {
         // INVARIANT: file-data reads bypass BlockDevice to avoid shredding bulk
         // AHCI commands into per-page cache ops. The per-inode page cache owns
         // file data — do not route through BlockPageCache.
-        let dev = block_io::lookup(self.device.device_id).ok_or(AhciError::InvalidDevice)?;
+        let dev = block_io::lookup(self.device.device_id).ok_or(BlockError::DeviceGone)?;
         if !runs.is_empty() {
             EFS_EXTENT_READS.fetch_add(1, Ordering::Relaxed);
             EFS_EXTENT_RUNS.fetch_add(runs.len() as u64, Ordering::Relaxed);
@@ -651,7 +648,7 @@ impl EfsDriver {
                 .collect();
 
             EFS_EXTENT_BATCHES.fetch_add(1, Ordering::Relaxed);
-            block_io::read_batch_blocking(&dev, &reqs).map_err(AhciError::from)?;
+            block_io::read_batch_blocking(&dev, &reqs)?;
 
             for (r, buf) in batch.iter().zip(staging.iter()) {
                 result[r.dest..r.dest + r.len].copy_from_slice(&buf[r.skew..r.skew + r.len]);

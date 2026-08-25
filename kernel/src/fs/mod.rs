@@ -11,8 +11,8 @@ use thiserror::Error;
 use crate::thread::scheduler::current_thread;
 use crate::{
     drivers::{
-        ahci::{AhciError, api::list_devices},
-        block_io,
+        ahci::api::list_devices,
+        block_io::{self, BlockError},
     },
     fs::{
         efs::EfsDriver,
@@ -75,7 +75,7 @@ pub enum Error {
     #[error("missing critical sectors, like basic fs info")]
     MissingCriticalSectors,
     #[error(transparent)]
-    AhciError(#[from] AhciError),
+    Block(#[from] BlockError),
     #[error("Invalid filesystem, mismatch in verification.")]
     InvalidFs,
     #[error("corrupted filesystem")]

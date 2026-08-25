@@ -35,10 +35,7 @@ use crate::{
         LOCK_RANK_DEPTH, RANK_BPC_JOURNALS, RANK_BPC_SHARD, RANK_JOURNAL_TRACKER,
         RANK_PAGE_WRITE_LOCK,
     },
-    drivers::{
-        ahci::AhciError,
-        block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags},
-    },
+    drivers::block_io::{self, BlockBuffer, BlockError, BlockIoHandle, WriteFlags},
     log,
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
     ranked_lock, ranked_lock_same,
@@ -406,20 +403,20 @@ fn frame_slice(frame: PhysFrame) -> &'static mut [u8] {
 }
 
 /// Issue a single-page read via the block-io trait.
-fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), AhciError> {
+fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), BlockError> {
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::read_blocking(&dev, lba, buf)?;
     Ok(())
 }
 
 /// Issue one write covering `data`, which spans consecutive pages starting at
 /// `first_page`. `data.len()` must be a whole number of pages.
-fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), AhciError> {
+fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), BlockError> {
     debug_assert!(!data.is_empty() && data.len().is_multiple_of(PAGE_SIZE));
     let lba = first_page * SECTORS_PER_PAGE as u64;
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::write_blocking(&dev, lba, data, WriteFlags::NONE)?;
     Ok(())
 }
@@ -445,24 +442,23 @@ const MAX_INFLIGHT_PAGES: usize = LOCK_RANK_DEPTH / 2;
 /// caller can keep further commands outstanding behind it. The op co-owns
 /// `page` via the `Arc` clone inside `BlockBuffer::owned`, which is what
 /// keeps the frame valid if the caller's own reap is cut short.
-fn submit_write_frame(page: &Arc<CachedBlockPage>) -> Result<Arc<BlockIoHandle>, AhciError> {
+fn submit_write_frame(page: &Arc<CachedBlockPage>) -> Result<Arc<BlockIoHandle>, BlockError> {
     let (device_id, page_block_idx) = page.key;
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(page.frame);
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     // SAFETY: `buf` is the HHDM view of `page.frame`, and `page` is cloned
     // into the returned buffer's owner, so the frame stays allocated to this
     // page for as long as the operation holds it.
     let buffer = unsafe { BlockBuffer::owned(page.clone(), buf.as_mut_ptr(), PAGE_SIZE) };
     dev.submit_write(lba, SECTORS_PER_PAGE as u32, buffer, WriteFlags::NONE)
-        .map_err(Into::into)
 }
 
 /// Issue a single-page write via the block-io trait.
-fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), AhciError> {
+fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), BlockError> {
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::write_blocking(&dev, lba, buf, WriteFlags::NONE)?;
     Ok(())
 }
@@ -599,7 +595,7 @@ impl BlockPageCache {
         &self,
         device_id: u64,
         page_block_idx: u64,
-    ) -> Result<BlockPageGuard, AhciError> {
+    ) -> Result<BlockPageGuard, BlockError> {
         Ok(self.read_page_tracked(device_id, page_block_idx)?.0)
     }
 
@@ -619,7 +615,7 @@ impl BlockPageCache {
         device_id: u64,
         page_block_idx: u64,
         fill: Fill,
-    ) -> Result<(BlockPageGuard, bool), AhciError> {
+    ) -> Result<(BlockPageGuard, bool), BlockError> {
         for attempt in 0..WRITE_PAGE_ATTEMPTS {
             let got = self.acquire_page(device_id, page_block_idx, fill)?;
             if got.1 || attempt + 1 == WRITE_PAGE_ATTEMPTS {
@@ -646,7 +642,7 @@ impl BlockPageCache {
         &self,
         device_id: u64,
         page_block_idx: u64,
-    ) -> Result<(BlockPageGuard, bool), AhciError> {
+    ) -> Result<(BlockPageGuard, bool), BlockError> {
         self.acquire_page(device_id, page_block_idx, Fill::FromDisk)
     }
 
@@ -662,7 +658,7 @@ impl BlockPageCache {
         device_id: u64,
         page_block_idx: u64,
         fill: Fill,
-    ) -> Result<(BlockPageGuard, bool), AhciError> {
+    ) -> Result<(BlockPageGuard, bool), BlockError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::read_page called before init()"
@@ -682,9 +678,7 @@ impl BlockPageCache {
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
 
         // Slow path: allocate a frame (no shard lock held).
-        let frame = frame_allocator()
-            .allocate_frame()
-            .ok_or(AhciError::IoError)?;
+        let frame = frame_allocator().allocate_frame().ok_or(BlockError::Io)?;
         debug_assert_eq!(
             frame.start_address().as_u64() & (PAGE_SIZE as u64 - 1),
             0,
@@ -713,7 +707,7 @@ impl BlockPageCache {
         device_id: u64,
         start_page: u64,
         count: usize,
-    ) -> Result<Vec<BlockPageGuard>, AhciError> {
+    ) -> Result<Vec<BlockPageGuard>, BlockError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::read_pages called before init()"
@@ -764,7 +758,7 @@ impl BlockPageCache {
                     for prev in &frames {
                         unsafe { frame_allocator().deallocate_frame(*prev) };
                     }
-                    return Err(AhciError::IoError);
+                    return Err(BlockError::Io);
                 }
             }
         }
@@ -778,7 +772,7 @@ impl BlockPageCache {
                 for f in &frames {
                     unsafe { frame_allocator().deallocate_frame(*f) };
                 }
-                return Err(AhciError::InvalidDevice);
+                return Err(BlockError::DeviceGone);
             }
         };
         // Consecutive misses become one command rather than one per page.
@@ -813,7 +807,7 @@ impl BlockPageCache {
             for f in &frames {
                 unsafe { frame_allocator().deallocate_frame(*f) };
             }
-            return Err(e.into());
+            return Err(e);
         }
 
         for (&(first, len), (_, _, buf)) in runs.iter().zip(reqs.iter()) {
@@ -881,7 +875,7 @@ impl BlockPageCache {
         key: Key,
         page: &CachedBlockPage,
         cached: bool,
-    ) -> Result<(), AhciError> {
+    ) -> Result<(), BlockError> {
         if !cached {
             if self.device_is_journalled(key.0) {
                 let n = self
@@ -935,7 +929,7 @@ impl BlockPageCache {
         device_id: u64,
         page_block_idx: u64,
         data: &[u8; PAGE_SIZE],
-    ) -> Result<BlockPageGuard, AhciError> {
+    ) -> Result<BlockPageGuard, BlockError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::write_page called before init()"
@@ -975,7 +969,7 @@ impl BlockPageCache {
         lba: u64,
         sectors: u16,
         data: &[u8],
-    ) -> Result<(), AhciError> {
+    ) -> Result<(), BlockError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::write_partial_page called before init()"
@@ -1028,7 +1022,7 @@ impl BlockPageCache {
         device_id: u64,
         byte_offset: u64,
         data: &[u8],
-    ) -> Result<(), AhciError> {
+    ) -> Result<(), BlockError> {
         let mut written = 0usize;
         while written < data.len() {
             let pos = byte_offset + written as u64;
@@ -1086,7 +1080,7 @@ impl BlockPageCache {
         device_id: u64,
         byte_offset: u64,
         len: usize,
-    ) -> Result<Vec<u8>, AhciError> {
+    ) -> Result<Vec<u8>, BlockError> {
         // Grown by `extend_from_slice` rather than sized and zeroed: the bytes
         // all arrive as copies from cached pages, so reserving the capacity and
         // appending writes each byte exactly once.
@@ -1131,7 +1125,7 @@ impl BlockPageCache {
         byte_offset: u64,
         len: usize,
         user_ptr: *mut u8,
-    ) -> Result<usize, AhciError> {
+    ) -> Result<usize, BlockError> {
         let mut done = 0usize;
         while done < len {
             let pos = byte_offset + done as u64;
@@ -1157,7 +1151,7 @@ impl BlockPageCache {
                         chunk,
                     )
                 } {
-                    return Err(AhciError::IoError);
+                    return Err(BlockError::Io);
                 }
                 done += chunk;
             }
@@ -1178,14 +1172,14 @@ impl BlockPageCache {
     /// Flush dirty pages to disk. If `force` is false, only pages that have
     /// been dirty for at least `DIRTY_EXPIRE_MS` are flushed (periodic writeback).
     /// If `force` is true, all dirty pages are flushed immediately (sync/fsync).
-    pub fn flush_dirty_once(&self, force: bool) -> Result<u64, AhciError> {
+    pub fn flush_dirty_once(&self, force: bool) -> Result<u64, BlockError> {
         let mut bytes_written: u64 = 0;
         // A failing batch is reported, not propagated on the spot. Returning
         // early abandons every shard after the one that failed, so a single
         // bad write silently shrinks a *forced* pass to a prefix of itself and
         // `sync` still returns: the caller is told its data is durable when
         // most of it was never attempted.
-        let mut failure: Option<AhciError> = None;
+        let mut failure: Option<BlockError> = None;
 
         for shard_lock in self.shards.iter() {
             // Snapshot the dirty set without holding the lock during I/O.
@@ -1300,11 +1294,11 @@ impl BlockPageCache {
         &self,
         shard_lock: &BlockingMutex<ShardInner>,
         batch: &mut Vec<PendingFlush>,
-    ) -> Result<u64, AhciError> {
+    ) -> Result<u64, BlockError> {
         batch.sort_unstable_by_key(|p| p.page.key);
 
         let mut inflight = Vec::new();
-        let mut failure: Option<AhciError> = None;
+        let mut failure: Option<BlockError> = None;
 
         for (i, pending) in batch.iter().enumerate() {
             let page = &pending.page;
@@ -1337,7 +1331,7 @@ impl BlockPageCache {
                     written.push(i);
                 }
                 Err(e) => {
-                    failure.get_or_insert(e.into());
+                    failure.get_or_insert(e);
                 }
             }
             drop(guard);
@@ -1394,7 +1388,7 @@ impl BlockPageCache {
     ///
     /// Uses the writeback sequencing protocol: kicks the thread, waits for the
     /// pass to complete, then issues the hardware flush command.
-    pub fn flush_device(&self, device_id: u64) -> Result<(), AhciError> {
+    pub fn flush_device(&self, device_id: u64) -> Result<(), BlockError> {
         let t0 = crate::timer::Instant::now();
         let req = self.flush_requested.fetch_add(1, Ordering::Release) + 1;
         self.writeback_wq.wake_all();
@@ -1403,7 +1397,7 @@ impl BlockPageCache {
 
         // submit_flush is a no-op on devices without a hardware write cache
         // (USB MSC today), and issues FLUSH CACHE EXT on AHCI.
-        let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+        let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
         block_io::flush_blocking(&dev)?;
         let t2 = crate::timer::Instant::now();
         if t2.duration_since(t0).as_millis() >= 1_000 {

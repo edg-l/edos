@@ -23,10 +23,7 @@ use efs_common::{
 
 use crate::{
     debug::lock_order::{RANK_JOURNAL_STATE, RANK_JOURNAL_TRACKER},
-    drivers::{
-        ahci::AhciError,
-        block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags},
-    },
+    drivers::block_io::{self, BlockBuffer, BlockError, BlockIoHandle, WriteFlags},
     ranked_lock,
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
@@ -43,14 +40,13 @@ fn submit_block_write(
     owner: &Arc<Vec<u8>>,
     offset: usize,
     len: usize,
-) -> Result<Arc<BlockIoHandle>, AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+) -> Result<Arc<BlockIoHandle>, BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     // SAFETY: ptr..ptr+len is within owner's allocation, which the returned
     // BlockBuffer keeps alive via the cloned Arc for as long as the op lives.
     let ptr = unsafe { owner.as_ptr().add(offset) as *mut u8 };
     let buffer = unsafe { BlockBuffer::owned(owner.clone(), ptr, len) };
     dev.submit_write(lba, sectors as u32, buffer, WriteFlags::NONE)
-        .map_err(Into::into)
 }
 
 /// Ring commands a transaction has issued but not waited on yet.
@@ -64,7 +60,7 @@ fn submit_block_write(
 struct RingWrites {
     device_id: u64,
     inflight: VecDeque<RingCommand>,
-    failure: Option<AhciError>,
+    failure: Option<BlockError>,
     /// Commands issued, counted so `/proc/journal_stats` can show how many
     /// ring blocks one command carries.
     commands: u64,
@@ -87,7 +83,7 @@ struct RingCommand {
 impl RingCommand {
     /// Wait for this command, re-issuing it while the failure is one a reset
     /// explains and the block layer's retry window has not run out.
-    fn wait(mut self, device_id: u64) -> Result<(), AhciError> {
+    fn wait(mut self, device_id: u64) -> Result<(), BlockError> {
         let started = crate::timer::Instant::now();
         loop {
             match self.handle.wait() {
@@ -104,7 +100,7 @@ impl RingCommand {
                 }
                 Err(e) => {
                     crate::log!("journal: ring write lba={} failed: {:?}", self.lba, e);
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
         }
@@ -166,7 +162,7 @@ impl RingWrites {
     }
 
     /// Wait for every outstanding command.
-    fn drain(&mut self) -> Result<(), AhciError> {
+    fn drain(&mut self) -> Result<(), BlockError> {
         while let Some(done) = self.inflight.pop_front() {
             if let Err(e) = done.wait(self.device_id) {
                 self.failure.get_or_insert(e);
@@ -179,14 +175,14 @@ impl RingWrites {
     }
 }
 
-fn block_write_fua(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_write_fua(device_id: u64, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::write_blocking(&dev, lba, buf, WriteFlags::FUA)?;
     Ok(())
 }
 
-fn block_flush(device_id: u64) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_flush(device_id: u64) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::flush_blocking(&dev)?;
     Ok(())
 }
@@ -444,7 +440,7 @@ impl Journal {
         &self,
         journal_block_idx: u64,
         data: &[u8],
-    ) -> Result<(), AhciError> {
+    ) -> Result<(), BlockError> {
         let lba = self.journal_block_lba(journal_block_idx);
         block_write_fua(self.device_id, lba, data)
     }
@@ -453,7 +449,7 @@ impl Journal {
 
     /// Rebuild the `JournalSuperblock` from current state and write it to disk
     /// with FUA so it survives power loss.
-    pub fn write_journal_sb(&self) -> Result<(), AhciError> {
+    pub fn write_journal_sb(&self) -> Result<(), BlockError> {
         let (head_seq, tail_seq, head_block, tail_block) = {
             let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
             (s.head_seq, s.tail_seq, s.head_block, s.tail_block)
@@ -685,7 +681,7 @@ impl Journal {
     /// Advance the journal tail past transactions that have been both committed
     /// and checkpointed (all enrolled blocks flushed to their home locations).
     /// Persists the new tail to the journal superblock.
-    pub fn advance_tail(&self) -> Result<(), AhciError> {
+    pub fn advance_tail(&self) -> Result<(), BlockError> {
         self.prune_checkpointed();
 
         // The oldest sequence that still has a block waiting to reach its home
@@ -751,7 +747,7 @@ impl Journal {
 
     /// Seal the active transaction (if non-empty) and block until it is fully
     /// committed to the journal ring.  Used by sys_sync and sys_fsync.
-    pub fn force_commit_and_wait(&self) -> Result<(), AhciError> {
+    pub fn force_commit_and_wait(&self) -> Result<(), BlockError> {
         // The target is the highest sequence that will actually be committed,
         // which is not always the active one: `seal_active` leaves an empty
         // active transaction in place, so its sequence is never sealed and
@@ -788,7 +784,7 @@ impl Journal {
                     "journal: force_commit_and_wait timed out waiting for seq {}",
                     target_seq
                 );
-                return Err(AhciError::IoError);
+                return Err(BlockError::Io);
             }
             let remaining = deadline.duration_since(now);
             self.commit_wq
@@ -806,7 +802,7 @@ impl Journal {
     /// Write enrolled blocks back to their home locations and advance the tail
     /// past whatever that freed. This is the only thing that reclaims ring
     /// space, so the commit path calls it when the ring is full.
-    fn checkpoint_and_advance(&self) -> Result<(), AhciError> {
+    fn checkpoint_and_advance(&self) -> Result<(), BlockError> {
         // Flush inline rather than waiting for the writeback kthread: this can
         // run *on* that thread (writeback -> filesystem flush -> journal), and
         // waiting for a pass to finish from inside one deadlocks.
@@ -863,7 +859,7 @@ impl Journal {
         sealed
     }
 
-    pub fn seal_and_commit(&self) -> Result<(), AhciError> {
+    pub fn seal_and_commit(&self) -> Result<(), BlockError> {
         // Step 1: move active tx to sealed queue if non-empty.
         {
             let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
@@ -976,7 +972,7 @@ impl Journal {
                     head,
                     tail
                 );
-                return Err(AhciError::IoError);
+                return Err(BlockError::Io);
             };
 
             let mut ring_pos = ring_pos_start;
@@ -1072,7 +1068,7 @@ impl Journal {
     }
 
     /// Commit only if there is pending work; used by the committer kthread.
-    pub fn seal_and_commit_if_needed(&self) -> Result<(), AhciError> {
+    pub fn seal_and_commit_if_needed(&self) -> Result<(), BlockError> {
         if self.has_pending_work() {
             self.seal_and_commit()
         } else {

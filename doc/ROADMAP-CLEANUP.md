@@ -103,43 +103,45 @@ table, which is the failure the table's own doc comment warns about.
 **Done when** adding a syscall touches one table and `syscall_handler` is under
 150 lines.
 
-### B4. `fs::Error` names one storage driver (S2, E1)
+### B4. ~~`fs::Error` names one storage driver~~ (done)
 
-`kernel/src/fs/mod.rs:81`:
+`AhciError` was not one variant of `fs::Error`; it was the block-error type the
+whole VFS layer was written in, at 91 sites across nine files under `fs/`. So an
+NVMe failure was converted into a SATA controller's vocabulary on its way up
+(`From<BlockError> for AhciError` collapsed `Cancelled`, `InvalidArg` and
+`NoMemory` into `IoError`) and then flattened again to `Errno::EIO`.
 
-```rust
-#[error(transparent)]
-AhciError(#[from] AhciError),
-```
+`BlockError` is now that type end to end. It gained `thiserror` messages,
+`fs::Error::Block(#[from] BlockError)` replaces the AHCI variant, and the
+lossy driver conversion is gone along with `fat32`'s `ahci_to_fs`. A block
+failure keeps its cause all the way to userspace, where `From<BlockError> for
+Errno` gives each one its own number: `ETIMEDOUT`, `EINTR`, `EINVAL`, `ENODEV`,
+`ENOMEM`. `AhciError` no longer leaves `drivers/ahci`.
 
-A VFS-layer error type with a variant for AHCI specifically. `NvmeError` exists
-(`kernel/src/drivers/nvme/mod.rs:58`) and never leaves the driver, so an NVMe
-failure flattens to `Error::IoError` while the equivalent SATA failure keeps its
-cause. NVMe is now the default root.
+Two AHCI-specific *calls* survive under `fs/`, both device enumeration rather
+than error handling: `scan_device` asks `ahci::is_atapi` before parsing a
+partition table (`fs/mod.rs:628`), and `devfs/block.rs` names nodes from
+`ahci::api::list_devices` beside the NVMe and ramdisk id ranges. Neither is a
+type; both want an `AsyncBlockDevice` method instead, which is its own item.
 
-**Fix.** `drivers/block_io.rs` already defines the layer-appropriate
-`BlockError`. Replace the variant with `Block(BlockError)` and convert in the
-drivers.
+### B5. `Error::IoError` is the catch-all for 136 sites (S2, E2)
 
-**Done when** no type under `fs/` names a specific storage driver.
-
-### B5. `Error::IoError` is the catch-all for 144 sites (S2, E2)
-
-`grep -rc 'Error::IoError' kernel/src` gives 144. Combined with 72
+`grep -rc 'Error::IoError' kernel/src` gives 136. Combined with 71
 `map_err(|_| ...)` in the kernel, most filesystem failures arrive at the syscall
 layer with the cause discarded, which is why a failed mount or a failed read is
 hard to diagnose without a serial log.
 
-**Fix.** Not a rewrite. Walk the 72 `map_err(|_|` sites and, wherever the source
+**Fix.** Not a rewrite. Walk the 71 `map_err(|_|` sites and, wherever the source
 error is already a `fs::Error` or a `BlockError`, keep it. Add `From` impls
 rather than closures: the kernel has 15 error enums and 3 `From` impls between
 them.
 
-### B6. `BlockError::from_code` silently invents a variant (S3, E1)
+### B6. ~~`BlockError::from_code` silently invents a variant~~ (done)
 
-`kernel/src/drivers/block_io.rs:66`: `_ => Self::Io`. An unrecognised code
-becomes a plain I/O error with nothing logged. The tree's own rule is
-`unreachable!()` in that arm.
+The wildcard arm is `panic!` (not `unreachable!`, which is not const-callable).
+It is only ever fed a value `BlockIoHandle::complete` wrote with `e as u32` on
+this same enum, so an unrecognised code means the atomic was corrupted, and the
+`Ok` path stores 0 while every discriminant is >= 1, so 0 cannot reach it either.
 
 ---
 

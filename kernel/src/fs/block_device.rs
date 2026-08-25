@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::drivers::ahci::AhciError;
+use crate::drivers::block_io::BlockError;
 
 use super::block_page_cache::{BlockPageCache, BlockPageGuard};
 
@@ -20,7 +20,7 @@ impl BlockDevice {
     // ---- Page-level API (used by EFS) ------------------------------------
 
     /// Fetch a 4 KiB page from the block cache (fills from disk on miss).
-    pub fn read_page(&self, page_block_idx: u64) -> Result<BlockPageGuard, AhciError> {
+    pub fn read_page(&self, page_block_idx: u64) -> Result<BlockPageGuard, BlockError> {
         BlockPageCache::global().read_page(self.device_id, page_block_idx)
     }
 
@@ -29,7 +29,7 @@ impl BlockDevice {
         &self,
         start_page: u64,
         count: usize,
-    ) -> Result<Vec<BlockPageGuard>, AhciError> {
+    ) -> Result<Vec<BlockPageGuard>, BlockError> {
         BlockPageCache::global().read_pages(self.device_id, start_page, count)
     }
 
@@ -39,7 +39,7 @@ impl BlockDevice {
         &self,
         page_block_idx: u64,
         data: &[u8; PAGE_SIZE],
-    ) -> Result<BlockPageGuard, AhciError> {
+    ) -> Result<BlockPageGuard, BlockError> {
         BlockPageCache::global().write_page(self.device_id, page_block_idx, data)
     }
 
@@ -49,14 +49,14 @@ impl BlockDevice {
         lba: u64,
         sectors: u16,
         data: &[u8],
-    ) -> Result<(), AhciError> {
+    ) -> Result<(), BlockError> {
         BlockPageCache::global().write_partial_page(self.device_id, lba, sectors, data)
     }
 
     /// Flush all dirty cached pages for this device, then issue the hardware
     /// cache flush via the block-io trait. `submit_flush` is a no-op on
     /// devices without a write cache.
-    pub fn flush(&self) -> Result<(), AhciError> {
+    pub fn flush(&self) -> Result<(), BlockError> {
         BlockPageCache::global().flush_device(self.device_id)
     }
 }

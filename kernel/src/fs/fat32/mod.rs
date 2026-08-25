@@ -2,7 +2,6 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
-    drivers::ahci::AhciError,
     fs::{
         Error, File, FileSystem, FileTime,
         block_device::BlockDevice,
@@ -180,7 +179,7 @@ impl Fatfs {
 
         let mut buf_pos = 0usize;
         for page_idx in first_page..=last_page {
-            let guard = self.device.read_page(page_idx).map_err(ahci_to_fs)?;
+            let guard = self.device.read_page(page_idx)?;
             let page_start_lba = page_idx * SECTORS_PER_PAGE;
             let sec_start = lba.max(page_start_lba) - page_start_lba;
             let sec_end =
@@ -226,7 +225,7 @@ impl Fatfs {
                 let page: &[u8; PAGE_SIZE] = data[data_pos..data_pos + PAGE_SIZE]
                     .try_into()
                     .expect("exact 4 KiB slice");
-                self.device.write_page(page_idx, page).map_err(ahci_to_fs)?;
+                self.device.write_page(page_idx, page)?;
                 cur_lba += SECTORS_PER_PAGE;
                 remaining -= SECTORS_PER_PAGE;
                 data_pos += PAGE_SIZE;
@@ -234,22 +233,17 @@ impl Fatfs {
                 // Partial range within one page: RMW.
                 let take = (SECTORS_PER_PAGE - sector_in_page).min(remaining);
                 let bytes = take as usize * SECTOR_SIZE;
-                self.device
-                    .write_partial_sectors(cur_lba, take as u16, &data[data_pos..data_pos + bytes])
-                    .map_err(ahci_to_fs)?;
+                self.device.write_partial_sectors(
+                    cur_lba,
+                    take as u16,
+                    &data[data_pos..data_pos + bytes],
+                )?;
                 cur_lba += take;
                 remaining -= take;
                 data_pos += bytes;
             }
         }
         Ok(())
-    }
-}
-
-fn ahci_to_fs(e: AhciError) -> Error {
-    match e {
-        AhciError::IoError => Error::IoError,
-        _ => Error::IoError,
     }
 }
 

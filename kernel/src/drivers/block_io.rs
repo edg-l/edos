@@ -42,6 +42,7 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, sync::Weak, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use thiserror::Error;
 
 use crate::thread::preempt::PreemptRwLock as RwLock;
 use crate::thread::scheduler::current_thread_weak;
@@ -52,26 +53,40 @@ use crate::thread::waitqueue::WaitQueue;
 // Error
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a block request failed, in terms the layers above storage share.
+/// Drivers map their own status registers onto this; nothing above
+/// `drivers/` names a particular controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[repr(u32)]
 pub enum BlockError {
+    #[error("i/o error")]
     Io = 1,
+    #[error("command timeout")]
     Timeout = 2,
+    #[error("request cancelled")]
     Cancelled = 3,
+    #[error("invalid argument")]
     InvalidArg = 4,
+    #[error("device gone")]
     DeviceGone = 5,
+    #[error("out of memory")]
     NoMemory = 6,
 }
 
 impl BlockError {
+    /// Decode a discriminant published by [`BlockIoHandle::complete`]. Only
+    /// ever fed a value written by `e as u32` on this same enum, so an
+    /// unknown code means the atomic was corrupted, not that a new variant
+    /// needs handling.
     pub(crate) const fn from_code(c: u32) -> Self {
         match c {
+            1 => Self::Io,
             2 => Self::Timeout,
             3 => Self::Cancelled,
             4 => Self::InvalidArg,
             5 => Self::DeviceGone,
             6 => Self::NoMemory,
-            _ => Self::Io,
+            _ => panic!("block error code outside BlockError discriminants"),
         }
     }
 }

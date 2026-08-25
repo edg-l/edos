@@ -17,15 +17,12 @@ use alloc::{vec, vec::Vec};
 use efs_common::{ScanStop, replay_write, scan_committed};
 
 use crate::{
-    drivers::{
-        ahci::AhciError,
-        block_io::{self, BlockBuffer, WriteFlags},
-    },
+    drivers::block_io::{self, BlockBuffer, BlockError, WriteFlags},
     log,
 };
 
-fn block_read(device_id: u64, lba: u64, buf: &mut [u8]) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_read(device_id: u64, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::read_blocking(&dev, lba, buf)?;
     Ok(())
 }
@@ -50,7 +47,7 @@ fn submit_block_write(
     lba: u64,
     sectors: u16,
     data: Vec<u8>,
-) -> Result<InflightReplay, AhciError> {
+) -> Result<InflightReplay, BlockError> {
     let data = alloc::sync::Arc::new(data);
     let handle = submit_owned(device_id, lba, sectors, &data)?;
     Ok(InflightReplay {
@@ -67,20 +64,19 @@ fn submit_owned(
     lba: u64,
     sectors: u16,
     data: &alloc::sync::Arc<Vec<u8>>,
-) -> Result<alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>, AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+) -> Result<alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>, BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     dev.submit_write(
         lba,
         sectors as u32,
         BlockBuffer::owned_vec(data.clone()),
         WriteFlags::NONE,
     )
-    .map_err(Into::into)
 }
 
 /// Wait for one outstanding replay write, re-issuing it while the failure is
 /// one a controller reset explains.
-fn reap_replay(device_id: u64, mut write: InflightReplay) -> Result<(), AhciError> {
+fn reap_replay(device_id: u64, mut write: InflightReplay) -> Result<(), BlockError> {
     let started = crate::timer::Instant::now();
     loop {
         match write.handle.wait() {
@@ -88,13 +84,13 @@ fn reap_replay(device_id: u64, mut write: InflightReplay) -> Result<(), AhciErro
             Err(e) if block_io::retry_after(e, started) => {
                 write.handle = submit_owned(device_id, write.lba, write.sectors, &write.data)?;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         }
     }
 }
 
-fn block_flush(device_id: u64) -> Result<(), AhciError> {
-    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+fn block_flush(device_id: u64) -> Result<(), BlockError> {
+    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
     block_io::flush_blocking(&dev)?;
     Ok(())
 }
@@ -141,7 +137,7 @@ pub fn replay(
     partition_start_lba: u64,
     tail_seq: u64,
     tail_block: u64,
-) -> Result<ReplayResult, AhciError> {
+) -> Result<ReplayResult, BlockError> {
     log!(
         "efs journal: replay scan start tail_seq={} tail_block={}",
         tail_seq,
@@ -162,7 +158,7 @@ pub fn replay(
         tail_block,
         block_count as u64 - 1, // block 0 of the region is the JSB
         BLOCK_SIZE,
-        |region_block: u64| -> Result<Vec<u8>, AhciError> {
+        |region_block: u64| -> Result<Vec<u8>, BlockError> {
             let lba = partition_start_lba + (first_block + region_block) * SECTORS_PER_BLOCK as u64;
             let mut buf = vec![0u8; BLOCK_SIZE];
             block_read(device_id, lba, &mut buf)?;
@@ -222,7 +218,7 @@ pub fn replay(
     let mut applied = 0u64;
     let mut inflight: alloc::collections::VecDeque<InflightReplay> =
         alloc::collections::VecDeque::new();
-    let mut failure: Option<AhciError> = None;
+    let mut failure: Option<BlockError> = None;
 
     'outer: for tx in &scan.txs {
         for i in 0..tx.entries.len() {

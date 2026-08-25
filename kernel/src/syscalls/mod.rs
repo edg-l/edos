@@ -24,6 +24,7 @@ use x86_64::{
 use crate::{
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
     debug::lock_order::{RANK_NET_STACK, RANK_PIPE, RANK_PTY, RANK_SOCKET, RANK_TCP_CONN},
+    drivers::block_io::BlockError,
     fs::Error as FsError,
     gdt::selectors,
     loader::TlsTemplate,
@@ -1542,6 +1543,19 @@ errnos! {
     UNKNOWN = 4095,
 }
 
+impl From<BlockError> for Errno {
+    fn from(err: BlockError) -> Self {
+        match err {
+            BlockError::Io => Errno::EIO,
+            BlockError::Timeout => Errno::ETIMEDOUT,
+            BlockError::Cancelled => Errno::EINTR,
+            BlockError::InvalidArg => Errno::EINVAL,
+            BlockError::DeviceGone => Errno::ENODEV,
+            BlockError::NoMemory => Errno::ENOMEM,
+        }
+    }
+}
+
 impl From<FsError> for Errno {
     fn from(err: FsError) -> Self {
         match err {
@@ -1550,7 +1564,7 @@ impl From<FsError> for Errno {
             FsError::NotADir => Errno::ENOTDIR,
             FsError::IoError => Errno::EIO,
             FsError::MissingCriticalSectors => Errno::EIO,
-            FsError::AhciError(_) => Errno::EIO,
+            FsError::Block(e) => e.into(),
             FsError::InvalidFs => Errno::EINVAL,
             FsError::Corrupted => Errno::EIO,
             FsError::Unsupported => Errno::EIO,

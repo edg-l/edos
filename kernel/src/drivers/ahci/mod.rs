@@ -67,20 +67,6 @@ pub enum AhciError {
     ReadOnly,
 }
 
-impl From<crate::drivers::block_io::BlockError> for AhciError {
-    fn from(e: crate::drivers::block_io::BlockError) -> Self {
-        use crate::drivers::block_io::BlockError;
-        match e {
-            BlockError::Timeout => AhciError::CommandTimeout,
-            BlockError::DeviceGone => AhciError::InvalidDevice,
-            BlockError::Io
-            | BlockError::Cancelled
-            | BlockError::InvalidArg
-            | BlockError::NoMemory => AhciError::IoError,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceType {
     Ata,

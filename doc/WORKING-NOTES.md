@@ -10382,3 +10382,37 @@ the rule that disabling drops focus is still stated once.
 Verified in a guest: `wintest` auto-focuses "Say Hello", Space fires it, Tab
 walks Count, Reset, the text input and on to the first checkbox while skipping
 the disabled "Greet" button, and Space there toggles it.
+
+## The block-error type above `drivers/` is `BlockError`, not `AhciError`
+
+`AhciError` was never one variant of `fs::Error`. It was the type the whole VFS
+layer wrote its block failures in: 91 mentions across nine files under `fs/`,
+including every `block_io::lookup` miss and every `submit_*` result. So the
+async block layer's own `BlockError` had to be converted *into* a SATA
+controller's vocabulary to travel upward, and `From<BlockError> for AhciError`
+collapsed `Cancelled`, `InvalidArg` and `NoMemory` into a single `IoError`.
+With NVMe the default root, that meant a cancelled or out-of-memory NVMe
+request reached userspace as a plain `EIO` with the cause thrown away twice:
+once at the driver boundary and again in `fat32`'s `ahci_to_fs`.
+
+`BlockError` is now that type end to end. The mapping was mechanical --
+`AhciError::InvalidDevice` is `BlockError::DeviceGone`, `AhciError::IoError` is
+`BlockError::Io`, and no other variant ever reached `fs/` -- and the conversions
+that existed only to cross the old boundary deleted themselves: nine
+`Into::into`/`map_err` calls became `?`, and `ahci_to_fs` became nothing.
+`AhciError` no longer leaves `drivers/ahci`.
+
+Two things fall out of it. `fs::Error::Block(#[from] BlockError)` means a block
+failure now propagates with `?` from anywhere in `fs/` that returns a
+`fs::Error`, where before it needed a closure. And `From<BlockError> for Errno`
+in `syscalls/mod.rs` gives each cause its own number -- `ETIMEDOUT`, `EINTR`,
+`EINVAL`, `ENODEV`, `ENOMEM` -- so a storage failure is diagnosable from
+`strace` without a serial log.
+
+**`unreachable!` is not callable from a `const fn`.** `BlockError::from_code`
+is `const`, and `unreachable!("msg")` expands to a `panic!` carrying a
+`format_args!`, which is a non-const formatting macro (E0015). A bare
+`panic!("literal")` is const-callable and is what the wildcard arm uses. The
+arm is genuinely unreachable: `complete` writes `e as u32` from this same enum,
+every discriminant is >= 1, and the success path writes 0 with a state the
+decoder never reads.
