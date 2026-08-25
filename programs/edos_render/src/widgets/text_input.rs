@@ -3,14 +3,13 @@
 use edos_lib::keymap::keycode;
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-    draw_text, text_height, text_width,
+    Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
+    text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, TEXT_PAD_X};
 
 /// A single-line text input field.
 pub struct TextInput {
-    id: WidgetId,
     x: i32,
     y: i32,
     width: u32,
@@ -31,9 +30,8 @@ pub struct TextInput {
 
 impl TextInput {
     /// Create a new text input.
-    pub fn new(id: WidgetId, x: i32, y: i32, width: u32) -> Self {
+    pub fn new(x: i32, y: i32, width: u32) -> Self {
         Self {
-            id,
             x,
             y,
             width,
@@ -48,9 +46,8 @@ impl TextInput {
     }
 
     /// Create a text input with placeholder text.
-    pub fn with_placeholder(id: WidgetId, x: i32, y: i32, width: u32, placeholder: &str) -> Self {
+    pub fn with_placeholder(x: i32, y: i32, width: u32, placeholder: &str) -> Self {
         Self {
-            id,
             x,
             y,
             width,
@@ -175,10 +172,6 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
     fn bounds(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, CONTROL_HEIGHT)
     }

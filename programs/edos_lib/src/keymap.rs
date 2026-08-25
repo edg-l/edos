@@ -23,7 +23,7 @@ use crate::{config, procinfo::boot_param};
 pub const CONFIG_PATH: &str = config::KEYMAP;
 
 /// Modifier state tracked from KeyPress/KeyRelease events.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct Modifiers {
     pub shift: bool,
     pub altgr: bool,

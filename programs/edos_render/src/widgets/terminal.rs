@@ -4,9 +4,7 @@ use std::collections::VecDeque;
 
 use edos_lib::clipboard::{self, Buffer};
 
-use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_text_styled, text_height,
-};
+use super::{Rect, Widget, WidgetEvent, char_width, draw_rect, draw_text_styled, text_height};
 use crate::text::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,7 +142,6 @@ impl Default for Cell {
 /// A terminal widget that displays a text buffer with cursor.
 #[allow(dead_code)]
 pub struct Terminal {
-    id: WidgetId,
     x: i32,
     y: i32,
     width: u32,
@@ -215,7 +212,7 @@ pub struct Terminal {
 
 impl Terminal {
     /// Create a new terminal with the given character dimensions.
-    pub fn new(id: WidgetId, x: i32, y: i32, cols: usize, rows: usize) -> Self {
+    pub fn new(x: i32, y: i32, cols: usize, rows: usize) -> Self {
         let char_w = char_width();
         let char_h = text_height();
         let width = (cols as u32) * char_w + 2 * MIN_PADDING_X;
@@ -225,7 +222,6 @@ impl Terminal {
         let buffer: VecDeque<Vec<Cell>> = (0..rows).map(|_| vec![Cell::default(); cols]).collect();
 
         Self {
-            id,
             x,
             y,
             width,
@@ -266,10 +262,10 @@ impl Terminal {
     }
 
     /// Create a terminal with explicit pixel dimensions (calculates cols/rows).
-    pub fn with_size(id: WidgetId, x: i32, y: i32, width: u32, height: u32) -> Self {
+    pub fn with_size(x: i32, y: i32, width: u32, height: u32) -> Self {
         let (cols, rows) = Self::grid_for_pixels(width, height);
 
-        let mut term = Self::new(id, x, y, cols.max(1), rows.max(1));
+        let mut term = Self::new(x, y, cols.max(1), rows.max(1));
         term.width = width;
         term.height = height;
         term
@@ -1332,10 +1328,6 @@ impl Terminal {
 }
 
 impl Widget for Terminal {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
     fn bounds(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, self.height)
     }

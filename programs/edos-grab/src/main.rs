@@ -224,7 +224,6 @@ impl App {
 
         let mut widgets = WidgetContainer::new();
         let search = widgets.add(TextInput::with_placeholder(
-            0,
             layout.search.x,
             layout.search.y,
             layout.search.width,

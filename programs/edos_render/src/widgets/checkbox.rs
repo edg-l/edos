@@ -1,15 +1,14 @@
 //! Checkbox widget with label.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-    draw_text, text_height, text_width,
+    Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
+    text_height, text_width,
 };
 use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
 use edos_lib::keymap::keycode;
 
 /// A toggleable checkbox with a label.
 pub struct Checkbox {
-    id: WidgetId,
     x: i32,
     y: i32,
     label: String,
@@ -21,9 +20,8 @@ pub struct Checkbox {
 
 impl Checkbox {
     /// Create a new checkbox.
-    pub fn new(id: WidgetId, x: i32, y: i32, label: &str) -> Self {
+    pub fn new(x: i32, y: i32, label: &str) -> Self {
         Self {
-            id,
             x,
             y,
             label: label.to_string(),
@@ -35,9 +33,8 @@ impl Checkbox {
     }
 
     /// Create a checkbox with initial checked state.
-    pub fn with_checked(id: WidgetId, x: i32, y: i32, label: &str, checked: bool) -> Self {
+    pub fn with_checked(x: i32, y: i32, label: &str, checked: bool) -> Self {
         Self {
-            id,
             x,
             y,
             label: label.to_string(),
@@ -81,10 +78,6 @@ impl Checkbox {
 }
 
 impl Widget for Checkbox {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
     fn bounds(&self) -> Rect {
         let label_width = text_width(&self.label);
         let total_width = CHECKBOX_BOX + LABEL_GAP + label_width;

@@ -1,8 +1,6 @@
 //! Horizontal slider widget.
 
-use super::{
-    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-};
+use super::{Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline};
 use crate::metrics::{
     CONTROL_HEIGHT, SLIDER_THUMB_HEIGHT, SLIDER_THUMB_WIDTH, SLIDER_TRACK_HEIGHT,
 };
@@ -10,7 +8,6 @@ use crate::theme::Theme;
 
 /// A horizontal value slider.
 pub struct Slider {
-    id: WidgetId,
     x: i32,
     y: i32,
     width: u32,
@@ -25,9 +22,8 @@ pub struct Slider {
 
 impl Slider {
     /// Create a new slider.
-    pub fn new(id: WidgetId, x: i32, y: i32, width: u32, min: i32, max: i32) -> Self {
+    pub fn new(x: i32, y: i32, width: u32, min: i32, max: i32) -> Self {
         Self {
-            id,
             x,
             y,
             width,
@@ -42,18 +38,9 @@ impl Slider {
     }
 
     /// Create a slider with an initial value.
-    pub fn with_value(
-        id: WidgetId,
-        x: i32,
-        y: i32,
-        width: u32,
-        min: i32,
-        max: i32,
-        value: i32,
-    ) -> Self {
+    pub fn with_value(x: i32, y: i32, width: u32, min: i32, max: i32, value: i32) -> Self {
         let clamped = value.clamp(min, max);
         Self {
-            id,
             x,
             y,
             width,
@@ -130,10 +117,6 @@ impl Slider {
 }
 
 impl Widget for Slider {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
     fn bounds(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, CONTROL_HEIGHT)
     }

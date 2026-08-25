@@ -333,7 +333,7 @@ impl App {
         let row = view::row_rect(self.layout.list, self.selected, self.scroll);
 
         let mut widgets = WidgetContainer::new();
-        let mut field = TextInput::new(0, columns.name_x - space(1) as i32, row.y, columns.name_w);
+        let mut field = TextInput::new(columns.name_x - space(1) as i32, row.y, columns.name_w);
         if prefill {
             field.set_text(&original);
         } else {

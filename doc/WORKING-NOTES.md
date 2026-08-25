@@ -10107,3 +10107,42 @@ at all; adding it to a workspace is not an option.
 Host-test count moves 138 → 164: intrusive-list 23, efs-common 3, window-abi 0.
 `window-abi` has no tests and is in the loop anyway, so that it is at least
 compiled for the host on every run.
+
+## A widget had two identities, and a wrapper existed to hide one of them
+
+`WidgetContainer::add` handed back an id, and every widget *also* carried an
+`id: WidgetId` field taken by its constructor. The two never agreed: all 27 call
+sites in the tree passed `0`, and the container discarded that value, boxed the
+widget inside a private `WidgetWrapper` and answered `Widget::id()` from the
+wrapper instead. The wrapper therefore had to forward all fifteen trait methods
+by hand, which is a silent failure every time the trait grows a defaulted method
+— the wrapper inherits the default and the real widget never hears about it.
+Both `CLAUDE.md` and the trait's own doc comment described that hazard rather
+than removing it.
+
+The container now stores `(WidgetId, Box<dyn Widget>)` and `Widget` has no
+`id()`: identity belongs to the container, which is the only thing that ever
+knew it. The `id` field, the constructor parameter and the `fn id` impl are gone
+from all six widgets, so `Widget::new(0, x, y, ..)` is now `Widget::new(x, y, ..)`.
+
+Two things fell out of it:
+
+- `get_mut` has to be spelled `Option<&mut (dyn Widget + 'static)>`. The box is
+  `Box<dyn Widget + 'static>`, a `&mut` to a trait object is invariant in the
+  object's lifetime, and the elided return type would ask it to shrink to the
+  borrow. The shared `get` needs no such thing, `&` being covariant.
+- `edos_lib::keymap::Modifiers` is now `Copy`. `handle_event` used to hold
+  `&self.mods` and `&mut self.widgets` at once through disjoint field borrows;
+  going through `self.get_mut()` borrows all of `self`, so the modifier state is
+  copied out first.
+
+`focus_next` and `focus_prev` were two near-identical 30-line blocks and are now
+`focus_step(±1)` over `focusable_ids()`. `set_focus` on a non-focusable widget
+used to unfocus the current widget and leave `self.focused` pointing at it; it
+is now a no-op.
+
+Verified in a live guest, not just by the gates: `wintest` renders, a click
+activates the right button, typed text reaches the focused field, Tab steps
+focus, Space toggles a checkbox, arrows move a slider 50% → 52%, and Ctrl+C /
+Ctrl+V round-trip through the field ("Ada" → "AdaAda") — the three clipboard
+methods being exactly the ones the wrapper forwarded by hand.

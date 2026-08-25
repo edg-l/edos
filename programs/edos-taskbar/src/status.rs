@@ -62,7 +62,6 @@ impl StatusPopups {
         Self {
             popup: None,
             volume: Slider::with_value(
-                1,
                 PAD,
                 PAD + text_height() as i32 + space(2) as i32,
                 WIDTH - PAD as u32 * 2,

@@ -114,13 +114,8 @@ impl Browser {
         let window = Window::new(80, 60, WIN_W, WIN_H)?;
         let toolbar_h = CONTROL_HEIGHT + space(2) * 2 + 1;
         let layout = Layout::build(&document, WIN_W);
-        let mut address = TextInput::with_placeholder(
-            0,
-            address_x(),
-            space(2) as i32,
-            address_w(WIN_W),
-            "address",
-        );
+        let mut address =
+            TextInput::with_placeholder(address_x(), space(2) as i32, address_w(WIN_W), "address");
         address.set_text(&url);
         let mut browser = Browser {
             window,

@@ -1,10 +1,9 @@
 //! Simple text label widget.
 
-use super::{Rect, Widget, WidgetEvent, WidgetId, colors, draw_text};
+use super::{Rect, Widget, WidgetEvent, colors, draw_text};
 
 /// A simple text display widget.
 pub struct Label {
-    id: WidgetId,
     x: i32,
     y: i32,
     text: String,
@@ -13,9 +12,8 @@ pub struct Label {
 
 impl Label {
     /// Create a new label.
-    pub fn new(id: WidgetId, x: i32, y: i32, text: &str) -> Self {
+    pub fn new(x: i32, y: i32, text: &str) -> Self {
         Self {
-            id,
             x,
             y,
             text: text.to_string(),
@@ -24,9 +22,8 @@ impl Label {
     }
 
     /// Create a new label with custom color.
-    pub fn with_color(id: WidgetId, x: i32, y: i32, text: &str, color: u32) -> Self {
+    pub fn with_color(x: i32, y: i32, text: &str, color: u32) -> Self {
         Self {
-            id,
             x,
             y,
             text: text.to_string(),
@@ -51,10 +48,6 @@ impl Label {
 }
 
 impl Widget for Label {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
     fn bounds(&self) -> Rect {
         let width = super::text_width(&self.text);
         Rect::new(self.x, self.y, width.max(1), super::text_height())

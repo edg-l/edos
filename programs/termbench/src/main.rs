@@ -138,7 +138,7 @@ fn main() {
 }
 
 fn new_terminal() -> Terminal {
-    let mut term = Terminal::with_size(1, 0, 0, WIDTH, HEIGHT);
+    let mut term = Terminal::with_size(0, 0, WIDTH, HEIGHT);
     term.set_focused(true);
     term
 }

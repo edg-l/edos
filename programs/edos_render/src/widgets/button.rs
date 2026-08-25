@@ -1,15 +1,14 @@
 //! Clickable button widget.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-    draw_text, text_height, text_width,
+    Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
+    text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, CONTROL_PAD_X};
 use edos_lib::keymap::keycode;
 
 /// A clickable button with a label.
 pub struct Button {
-    id: WidgetId,
     x: i32,
     y: i32,
     width: u32,
@@ -23,11 +22,10 @@ pub struct Button {
 
 impl Button {
     /// Create a new button that auto-sizes based on text.
-    pub fn new(id: WidgetId, x: i32, y: i32, label: &str) -> Self {
+    pub fn new(x: i32, y: i32, label: &str) -> Self {
         let width = text_width(label) + CONTROL_PAD_X * 2;
 
         Self {
-            id,
             x,
             y,
             width,
@@ -41,9 +39,8 @@ impl Button {
     }
 
     /// Create a new button with explicit size.
-    pub fn with_size(id: WidgetId, x: i32, y: i32, width: u32, height: u32, label: &str) -> Self {
+    pub fn with_size(x: i32, y: i32, width: u32, height: u32, label: &str) -> Self {
         Self {
-            id,
             x,
             y,
             width,
@@ -68,10 +65,6 @@ impl Button {
 }
 
 impl Widget for Button {
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
     fn bounds(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, self.height)
     }

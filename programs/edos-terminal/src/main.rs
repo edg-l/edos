@@ -50,7 +50,7 @@ fn main() {
     }
 
     // Create terminal widget directly (not through WidgetContainer)
-    let mut terminal = Terminal::with_size(1, 0, 0, TERMINAL_WIDTH, TERMINAL_HEIGHT);
+    let mut terminal = Terminal::with_size(0, 0, TERMINAL_WIDTH, TERMINAL_HEIGHT);
     terminal.set_focused(true);
 
     // Pre-render before showing window to avoid black frame. `show` publishes

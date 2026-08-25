@@ -16,8 +16,8 @@
 //! use edos_render::widgets::layout::{VBoxLayout, Insets, Rect};
 //!
 //! let mut widgets = WidgetContainer::new();
-//! let label = widgets.add(Label::new(0, 0, 0, "Hello"));
-//! let button = widgets.add(Button::new(0, 0, 0, "Click"));
+//! let label = widgets.add(Label::new(0, 0, "Hello"));
+//! let button = widgets.add(Button::new(0, 0, "Click"));
 //!
 //! let mut layout = VBoxLayout::new();
 //! layout.set_padding(Insets::all(10));

@@ -538,7 +538,7 @@ impl App {
             PromptKind::Open => root_dir(self.buffer()),
         };
 
-        let mut field = TextInput::new(0, field_rect.x, field_rect.y, field_rect.width);
+        let mut field = TextInput::new(field_rect.x, field_rect.y, field_rect.width);
         field.set_text(&seed);
         let mut widgets = WidgetContainer::new();
         let field = widgets.add(field);

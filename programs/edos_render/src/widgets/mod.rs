@@ -66,14 +66,10 @@ pub enum WidgetEvent {
 
 /// Trait that all widgets must implement.
 ///
-/// `WidgetContainer` wraps every widget to assign it an id, and that wrapper
-/// forwards each method by hand. A method added here with a default body is
-/// inherited by the wrapper and never reaches the real widget, so add the
-/// forwarding there in the same change.
+/// A widget has no identity of its own: `WidgetContainer::add` returns the id
+/// the widget answers to from then on, and the container is the only thing that
+/// knows it.
 pub trait Widget {
-    /// Get the widget's unique identifier.
-    fn id(&self) -> WidgetId;
-
     /// Get the widget's bounding rectangle.
     fn bounds(&self) -> Rect;
 

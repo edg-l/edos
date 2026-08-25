@@ -125,41 +125,40 @@ fn main() {
     let title_label = widgets.add(Label::with_color(
         0,
         0,
-        0,
         "Widget Toolkit Demo",
         edos_render::widgets::colors::FOCUS_RING,
     ));
 
     // Button section
-    let btn_label = widgets.add(Label::new(0, 0, 0, "Buttons:"));
-    let btn_hello = widgets.add(Button::new(0, 0, 0, "Say Hello"));
-    let btn_count = widgets.add(Button::new(0, 0, 0, "Count"));
-    let btn_reset = widgets.add(Button::with_size(0, 0, 0, space(20), ROW_H, "Reset"));
+    let btn_label = widgets.add(Label::new(0, 0, "Buttons:"));
+    let btn_hello = widgets.add(Button::new(0, 0, "Say Hello"));
+    let btn_count = widgets.add(Button::new(0, 0, "Count"));
+    let btn_reset = widgets.add(Button::with_size(0, 0, space(20), ROW_H, "Reset"));
 
     // Text input section
-    let input_label = widgets.add(Label::new(0, 0, 0, "Text Input:"));
-    let input_name = widgets.add(TextInput::with_placeholder(0, 0, 0, 180, "Ada Lovelace"));
-    let btn_greet = widgets.add(Button::new(0, 0, 0, "Greet"));
+    let input_label = widgets.add(Label::new(0, 0, "Text Input:"));
+    let input_name = widgets.add(TextInput::with_placeholder(0, 0, 180, "Ada Lovelace"));
+    let btn_greet = widgets.add(Button::new(0, 0, "Greet"));
 
     // Checkbox section
-    let chk_label = widgets.add(Label::new(0, 0, 0, "Options:"));
-    let chk_sound = widgets.add(Checkbox::new(0, 0, 0, "Enable sound"));
-    let chk_dark = widgets.add(Checkbox::new(0, 0, 0, "Dark mode"));
-    let chk_auto = widgets.add(Checkbox::new(0, 0, 0, "Auto-save"));
-    let chk_notify = widgets.add(Checkbox::new(0, 0, 0, "Notifications"));
+    let chk_label = widgets.add(Label::new(0, 0, "Options:"));
+    let chk_sound = widgets.add(Checkbox::new(0, 0, "Enable sound"));
+    let chk_dark = widgets.add(Checkbox::new(0, 0, "Dark mode"));
+    let chk_auto = widgets.add(Checkbox::new(0, 0, "Auto-save"));
+    let chk_notify = widgets.add(Checkbox::new(0, 0, "Notifications"));
 
     // Slider section
-    let vol_label = widgets.add(Label::new(0, 0, 0, "Volume:"));
-    let slider_vol = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 100, 50));
+    let vol_label = widgets.add(Label::new(0, 0, "Volume:"));
+    let slider_vol = widgets.add(Slider::with_value(0, 0, 180, 0, 100, 50));
 
-    let bright_label = widgets.add(Label::new(0, 0, 0, "Brightness:"));
-    let slider_bright = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 100, 50));
+    let bright_label = widgets.add(Label::new(0, 0, "Brightness:"));
+    let slider_bright = widgets.add(Slider::with_value(0, 0, 180, 0, 100, 50));
 
-    let speed_label = widgets.add(Label::new(0, 0, 0, "Speed:"));
-    let slider_speed = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 100, 25));
+    let speed_label = widgets.add(Label::new(0, 0, "Speed:"));
+    let slider_speed = widgets.add(Slider::with_value(0, 0, 180, 0, 100, 25));
 
     // Status section
-    let status_label = widgets.add(Label::new(0, 0, 0, "Status:"));
+    let status_label = widgets.add(Label::new(0, 0, "Status:"));
 
     // Create main vertical layout
     let mut main_layout = VBoxLayout::new();
@@ -404,17 +403,16 @@ fn main() {
             // Draw dynamic labels for slider values
             let value_x = CONTENT_X + SLIDER_ROW_W as i32 + GROUP_GAP as i32;
             let vol_text = format!("{}%", volume);
-            Label::new(0, value_x, row_text_y(ROW_VOLUME), &vol_text).draw(buf, w, h);
+            Label::new(value_x, row_text_y(ROW_VOLUME), &vol_text).draw(buf, w, h);
 
             let bright_text = format!("{}%", brightness);
-            Label::new(0, value_x, row_text_y(ROW_BRIGHTNESS), &bright_text).draw(buf, w, h);
+            Label::new(value_x, row_text_y(ROW_BRIGHTNESS), &bright_text).draw(buf, w, h);
 
             let speed_text = format!("{}%", speed);
-            Label::new(0, value_x, row_text_y(ROW_SPEED), &speed_text).draw(buf, w, h);
+            Label::new(value_x, row_text_y(ROW_SPEED), &speed_text).draw(buf, w, h);
 
             // Draw status message
             Label::with_color(
-                0,
                 INDENT_X,
                 row_text_y(ROW_STATUS),
                 &status_message,
@@ -448,7 +446,6 @@ fn main() {
             // its place in a toolkit demo, so it gets contrast to match.
             let hint_color = edos_render::widgets::colors::LABEL_TEXT;
             Label::with_color(
-                0,
                 CONTENT_X,
                 row_text_y(ROW_FOOTER),
                 "Tab: focus | Enter: submit | Arrows: adjust slider",

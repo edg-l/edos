@@ -281,7 +281,6 @@ fn main() {
         if let Some(buf) = window.buffer_mut() {
             blit_centred(buf, w, h, &scaled, w, view_h);
             Label::with_color(
-                0,
                 space(1) as i32,
                 (view_h + FOOTER_PAD) as i32,
                 &footer,

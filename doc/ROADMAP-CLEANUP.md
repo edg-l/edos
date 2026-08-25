@@ -274,23 +274,6 @@ tests `if idx < buffer.len()` on every pixel anyway. Either the clamp is right
 and the test is dead, or the clamp is wrong and the test is hiding it. Decide,
 then write the row with `fill` on a slice instead of a per-pixel loop.
 
-### D4. `WidgetWrapper` forwards 15 trait methods by hand (S1, E1)
-
-`programs/edos_render/src/widgets/container.rs:353`. Its own comment names the
-hazard:
-
-> a defaulted trait method left off this wrapper takes the default silently, so
-> the wrapped widget loses the capability with nothing to show for it at compile
-> time.
-
-`CLAUDE.md` repeats it. The comment is the workaround; the wrapper is the
-problem. It exists only to attach a `WidgetId` to a `Box<dyn Widget>`.
-
-**Fix.** Store `(WidgetId, Box<dyn Widget>)` in the container's vector and delete
-`WidgetWrapper`. 68 lines go, and so does the whole class of bug.
-
-**Done when** no type in `edos_render` implements `Widget` by delegation.
-
 ### D6. The ANSI palette is 16 literals in the terminal widget (S3, E1)
 
 `programs/edos_render/src/widgets/terminal.rs` carries 16 `0xFF......`
@@ -429,8 +412,7 @@ Two implementations of an on-disk format's allocation rule is how an image that
 `button.rs:224-244`, `checkbox.rs:218-238`, `slider.rs:300-319`: the
 `focusable` / `set_focused` / `enabled` / `set_enabled` quartet with the same
 comment. A `FocusState` struct with a `focus_state()` accessor on the trait, or a
-small derive-style macro, removes three copies. Do this after D4, which changes
-the same file.
+small derive-style macro, removes three copies.
 
 ---
 
@@ -623,8 +605,9 @@ memory of writing it.
    layer learned a detail it has no business knowing. The test is **if this had
    always existed, would the code look like this?** If not, name the structural
    change that would make it look right, then decide deliberately and write down
-   which you chose. `WidgetWrapper` (D4) is the worked example: the comment
-   describing the hazard was written instead of removing it.
+   which you chose. `WidgetWrapper` was the worked example: a wrapper existed
+   only to attach an id, and the comment describing the hazard that created was
+   written instead of removing the wrapper.
 
 ## K. Rules worth moving into `CLAUDE.md`
 
