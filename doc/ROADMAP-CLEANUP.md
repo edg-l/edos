@@ -308,11 +308,13 @@ one.
 **Fix.** One `LinearLayout` parameterised by `Axis`, with `HBox` and `VBox` as
 constructors. Fixing a layout bug currently means remembering to fix it twice.
 
-### F4. `mbr.rs` and `gpt.rs` share 43 lines (S3, E1)
+### F4. ~~`mbr.rs` and `gpt.rs` share 43 lines~~ (done)
 
-`kernel/src/fs/mbr.rs:472-487` and `gpt.rs:379-394` (16 identical lines), plus
-the header block and a 12-line span. Partition-table scanning boilerplate;
-extract the shared walk.
+The shared span was two partition listings naming the same two enums. Naming
+now lives on the enums: `Display for PartitionType` (through `Formatter::pad`,
+so the `{:<20}` column still lines up) and `FilesystemType::name`. The MBR
+listing had its own, shorter table of names for the same variants and fell back
+to `"Other"`; both listings read the one table now.
 
 ### F5. `efs-mkfs` re-implements the kernel's extent logic (S2, E2)
 

@@ -10285,3 +10285,20 @@ is `kernel/src/syscalls/mod.rs`; userspace reads `edos_rt::sys::Errno`, and
 `edos_rt` is published from the Rust fork. Making it depend on a path in this
 repository means the full publish loop, so the two lists are still kept in step
 by hand. That is what remains of roadmap item A1.
+
+## Two partition listings, one set of names
+
+`gpt::print_partitions` and `mbr::print_partitions` each carried their own
+`match` over `PartitionType` and `FilesystemType`, which are both declared in
+`gpt.rs` and used by both. The MBR table was the shorter of the two and ended
+in `_ => "Other"`, so a GPT-only variant printed as "Other" there and by name
+in the other listing.
+
+The names are on the enums now: `Display for PartitionType`, and
+`FilesystemType::name`. `Display` goes through `Formatter::pad` rather than
+`write_str`, because a `Display` impl that writes directly ignores the format
+width, and both listings put the type in a `{:<20}` column.
+
+Neither listing runs in the `make test` boot -- they are called from
+`fs::mod.rs` only when a partition scan finds a table -- so this is compile-
+and boot-verified, not output-verified.

@@ -83,6 +83,28 @@ pub enum PartitionType {
     MbrUnknown(u8),
 }
 
+impl core::fmt::Display for PartitionType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Through `pad` so the `{:<20}` a partition listing uses still lines
+        // the column up; a bare `write_str` ignores the width.
+        match self {
+            Self::EfiSystem => f.pad("EFI System"),
+            Self::MicrosoftBasicData => f.pad("MS Basic Data"),
+            Self::LinuxFilesystem => f.pad("Linux FS"),
+            Self::LinuxSwap => f.pad("Linux Swap"),
+            Self::Unknown(_) => f.pad("Unknown"),
+            Self::Fat12 => f.pad("FAT12"),
+            Self::Fat16Small => f.pad("FAT16 Small"),
+            Self::Fat16 => f.pad("FAT16"),
+            Self::Fat32 => f.pad("FAT32"),
+            Self::Ntfs => f.pad("NTFS"),
+            Self::Extended => f.pad("Extended"),
+            Self::EfiSystemMbr => f.pad("EFI System (MBR)"),
+            Self::MbrUnknown(id) => f.pad(&alloc::format!("Unknown (0x{id:02X})")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilesystemType {
     Fat12,
@@ -98,6 +120,23 @@ pub enum FilesystemType {
 }
 
 impl FilesystemType {
+    /// What this filesystem is called in a partition listing. `None` has no
+    /// name of its own, so a caller with an `Option` writes "None" for it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Fat12 => "FAT12",
+            Self::Fat16 => "FAT16",
+            Self::Fat32 => "FAT32",
+            Self::Efs => "EFS",
+            Self::Ntfs => "NTFS",
+            Self::Iso9660 => "ISO9660",
+            Self::Memfs => "MEMFS",
+            Self::Devfs => "DEVFS",
+            Self::Procfs => "PROCFS",
+            Self::Unknown => "Unknown",
+        }
+    }
+
     /// True for filesystems that live on a block device, so `device_id` on a
     /// mount actually names one. Memfs, devfs and procfs all mount with
     /// device 0 and would otherwise look like they occupy the first disk.
@@ -362,34 +401,10 @@ pub fn print_partitions(partitions: &[Partition]) {
 
     for partition in partitions {
         let size_mb = (partition.size_sectors * 512) / (1024 * 1024);
-        let type_str = match &partition.partition_type {
-            PartitionType::EfiSystem => "EFI System",
-            PartitionType::MicrosoftBasicData => "MS Basic Data",
-            PartitionType::LinuxFilesystem => "Linux FS",
-            PartitionType::LinuxSwap => "Linux Swap",
-            PartitionType::Unknown(_) => "Unknown",
-            PartitionType::Fat12 => "FAT12",
-            PartitionType::Fat16Small => "FAT16 Small",
-            PartitionType::Fat16 => "FAT16",
-            PartitionType::Fat32 => "FAT32",
-            PartitionType::Ntfs => "NTFS",
-            PartitionType::Extended => "Extended",
-            PartitionType::EfiSystemMbr => "EFI System (MBR)",
-            PartitionType::MbrUnknown(_) => "MBR Unknown",
-        };
-        let fs_str = match &partition.filesystem {
-            Some(FilesystemType::Fat12) => "FAT12",
-            Some(FilesystemType::Fat16) => "FAT16",
-            Some(FilesystemType::Fat32) => "FAT32",
-            Some(FilesystemType::Efs) => "EFS",
-            Some(FilesystemType::Ntfs) => "NTFS",
-            Some(FilesystemType::Iso9660) => "ISO9660",
-            Some(FilesystemType::Memfs) => "MEMFS",
-            Some(FilesystemType::Devfs) => "DEVFS",
-            Some(FilesystemType::Procfs) => "PROCFS",
-            Some(FilesystemType::Unknown) => "Unknown",
-            None => "None",
-        };
+        let fs_str = partition
+            .filesystem
+            .as_ref()
+            .map_or("None", FilesystemType::name);
 
         log!(
             "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {} {}",
@@ -397,7 +412,7 @@ pub fn print_partitions(partitions: &[Partition]) {
             partition.starting_lba,
             partition.ending_lba,
             size_mb,
-            type_str,
+            partition.partition_type,
             fs_str,
             partition.name,
             format_uuid(&partition.unique_partition_guid)

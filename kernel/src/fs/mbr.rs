@@ -17,11 +17,7 @@ fn read_sectors_vec(
     block_io::read_blocking(&dev, lba, &mut buf)?;
     Ok(buf)
 }
-use alloc::{
-    format,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{format, string::String, vec::Vec};
 use bytemuck::{Pod, Zeroable, try_from_bytes};
 
 /// MBR structure (sector 0)
@@ -457,32 +453,10 @@ pub fn print_partitions(partitions: &[Partition]) {
 
     for partition in partitions {
         let size_mb = (partition.size_sectors * 512) / (1024 * 1024);
-        let type_str = match &partition.partition_type {
-            PartitionType::Fat32 => "FAT32".to_string(),
-            PartitionType::Fat16 => "FAT16".to_string(),
-            PartitionType::Fat16Small => "FAT16 Small".to_string(),
-            PartitionType::Fat12 => "FAT12".to_string(),
-            PartitionType::Ntfs => "NTFS".to_string(),
-            PartitionType::LinuxFilesystem => "Linux FS".to_string(),
-            PartitionType::LinuxSwap => "Linux Swap".to_string(),
-            PartitionType::Extended => "Extended".to_string(),
-            PartitionType::EfiSystemMbr => "EFI System".to_string(),
-            PartitionType::MbrUnknown(id) => format!("Unknown (0x{:02X})", id),
-            _ => "Other".to_string(),
-        };
-        let fs_str = match &partition.filesystem {
-            Some(FilesystemType::Fat12) => "FAT12",
-            Some(FilesystemType::Fat16) => "FAT16",
-            Some(FilesystemType::Fat32) => "FAT32",
-            Some(FilesystemType::Efs) => "EFS",
-            Some(FilesystemType::Ntfs) => "NTFS",
-            Some(FilesystemType::Iso9660) => "ISO9660",
-            Some(FilesystemType::Memfs) => "MEMFS",
-            Some(FilesystemType::Devfs) => "DEVFS",
-            Some(FilesystemType::Procfs) => "PROCFS",
-            Some(FilesystemType::Unknown) => "Unknown",
-            None => "None",
-        };
+        let fs_str = partition
+            .filesystem
+            .as_ref()
+            .map_or("None", FilesystemType::name);
 
         log!(
             "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
@@ -490,7 +464,7 @@ pub fn print_partitions(partitions: &[Partition]) {
             partition.starting_lba,
             partition.ending_lba,
             size_mb,
-            type_str,
+            partition.partition_type,
             fs_str,
             partition.name
         );
