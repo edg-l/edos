@@ -57,46 +57,10 @@ pub fn add_serial_log(text: &str) {
         .expect("write_str failed in serial");
 }
 
-/// How long an emergency writer tries for the serial lock before giving up and
-/// printing without it.
-///
-/// It has to exceed one maximal write by the ordinary path, because that is
-/// what it waits behind: `_emergency_print` formats into 512 bytes, and 512
-/// bytes at the 115200 baud this port is configured for is about 44 ms. Below
-/// that the wait expires mid-line and buys nothing — measured, a 10_000-spin
-/// bound recovered one page fault in eight where this recovers all eight.
-///
-/// It is a bound and not a wait, which is the other half of the design: this
-/// runs where another CPU may be wedged holding the lock, or where *this* CPU
-/// already holds it and faulted inside the serial writer. A shredded line
-/// beats a crash path that hangs, so the wait expires and writes anyway, which
-/// is what this function did unconditionally before.
-const EMERGENCY_SPIN_LIMIT: u32 = 20_000_000;
-
-/// Emergency serial output for crash paths, which takes the serial lock only if
-/// it can get it. Use from double-fault, page-fault-kill and panic handlers,
-/// where the lock may already be held. Writes the 0x3F8 UART data port directly.
-///
-/// Taking the lock at all is new: without it the byte loop interleaved with
-/// whatever else was writing, and a page fault during a busy `guest-check` run
-/// reached the serial log as a line shredded character-by-character with the
-/// klog drain's, carrying neither message. Three faults in one run were logged
-/// as one, which is how a CI failure went a week without being read.
+/// Emergency serial output that bypasses all locks. Use only in double fault
+/// or other unrecoverable handlers where the serial lock may already be held.
+/// Writes directly to the 0x3F8 UART data port.
 pub fn emergency_write(msg: &[u8]) {
-    let mut spins = 0;
-    let _guard = loop {
-        if let Some(port) = SERIAL_DBG.get().and_then(|s| s.try_lock()) {
-            break Some(port);
-        }
-        spins += 1;
-        if spins >= EMERGENCY_SPIN_LIMIT {
-            break None;
-        }
-        core::hint::spin_loop();
-    };
-
-    // Written through the port directly rather than the guard's writer: the
-    // point of this path is that it works when the driver's state does not.
     for &byte in msg {
         unsafe {
             // Spin-wait for transmit buffer empty (LSR bit 5)

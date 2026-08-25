@@ -313,13 +313,17 @@ extern "x86-interrupt" fn page_fault_handler(
             None => (0, "<no current thread>"),
         };
 
-        // Use emergency_println (bypasses SERIAL_DBG lock) so that if the
-        // faulting code itself held the serial lock, we still get output
-        // instead of deadlocking.
-        crate::emergency_println!(
+        // The ordinary lock, not the crash-path bypass. This branch is a
+        // USER-mode fault: the faulting code was in ring 3 and so cannot be
+        // holding the kernel's serial lock, which is the only thing the bypass
+        // buys. The ring-0 branch above, where that risk is real, already
+        // prints this way. Bypassing here cost more than it bought — an
+        // unlocked byte loop interleaved with the klog drain and shredded the
+        // line, and killing a user process is routine enough that the
+        // interrupts-off window of a serial write does not belong on it.
+        println!(
             "KILL: PF {name}:{tid} addr={:p} rip={:p} err={error_code:?} ({error_desc}) reject={reject:?}",
-            address,
-            stack_frame.instruction_pointer
+            address, stack_frame.instruction_pointer
         );
         // Walk the page tables and dump flags at each level so that
         // permission/intermediate-level issues are visible in the log.
@@ -339,21 +343,21 @@ extern "x86-interrupt" fn page_fault_handler(
             };
             let p4 = pt(cr3_frame);
             let p4e = &p4[i4];
-            crate::emergency_println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
+            println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
             if p4e.flags().contains(PageTableFlags::PRESENT) {
                 let p3 = pt(PhysFrame::containing_address(p4e.addr()));
                 let p3e = &p3[i3];
-                crate::emergency_println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
+                println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
                 if p3e.flags().contains(PageTableFlags::PRESENT) {
                     let p2 = pt(PhysFrame::containing_address(p3e.addr()));
                     let p2e = &p2[i2];
-                    crate::emergency_println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
+                    println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
                     if p2e.flags().contains(PageTableFlags::PRESENT)
                         && !p2e.flags().contains(PageTableFlags::HUGE_PAGE)
                     {
                         let p1 = pt(PhysFrame::containing_address(p2e.addr()));
                         let e = &p1[i1];
-                        crate::emergency_println!(
+                        println!(
                             "PF-walk: pml1[{i1}] flags={:?} phys={:#x}",
                             e.flags(),
                             e.addr().as_u64()
