@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-use super::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path};
+use super::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path, copy_user_path_len};
 use crate::thread::scheduler::current_thread_info;
 
 fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
@@ -40,20 +40,8 @@ pub(super) fn read_user_path_with_len(
     path_len: usize,
     cwd: &Path,
 ) -> Result<Path, Errno> {
-    if path_ptr.is_null() {
-        return Err(Errno::EFAULT);
-    }
-
-    if path_len == 0 || path_len > MAX_PATH_LEN {
-        return Err(Errno::EINVAL);
-    }
-
     let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
-    if !unsafe { try_copy_from_user(buf.as_mut_ptr(), path_ptr, path_len) } {
-        return Err(Errno::EFAULT);
-    }
-
-    let path_str = core::str::from_utf8(&buf[..path_len]).map_err(|_| Errno::EINVAL)?;
+    let path_str = copy_user_path_len(&mut buf, path_ptr, path_len)?;
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
 }
 
@@ -72,18 +60,8 @@ pub(super) fn read_user_path_at(
     path_ptr: *const u8,
     path_len: usize,
 ) -> Result<Path, Errno> {
-    if path_ptr.is_null() {
-        return Err(Errno::EFAULT);
-    }
-    if path_len == 0 || path_len > MAX_PATH_LEN {
-        return Err(Errno::EINVAL);
-    }
-
     let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
-    if !unsafe { try_copy_from_user(buf.as_mut_ptr(), path_ptr, path_len) } {
-        return Err(Errno::EFAULT);
-    }
-    let path_str = core::str::from_utf8(&buf[..path_len]).map_err(|_| Errno::EINVAL)?;
+    let path_str = copy_user_path_len(&mut buf, path_ptr, path_len)?;
 
     if path_str.starts_with('/') || dirfd == AT_FDCWD {
         let info = current_thread_info();

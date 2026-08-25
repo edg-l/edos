@@ -64,8 +64,8 @@ use crate::{
         util::{kthread_stack_alloc, kthread_stack_free},
     },
     util::uaccess::{
-        UAccessError, access_ok, try_copy_string_from_user, try_copy_to_user, try_read_user,
-        try_write_user,
+        UAccessError, access_ok, try_copy_from_user, try_copy_string_from_user, try_copy_to_user,
+        try_read_user, try_write_user,
     },
 };
 
@@ -3374,6 +3374,27 @@ pub fn copy_user_path(buf: &mut PathBuf, ptr: *const u8) -> Result<&str, Errno> 
 
     if len == 0 {
         return Err(Errno::EINVAL);
+    }
+
+    core::str::from_utf8(&buf[..len]).map_err(|_| Errno::EINVAL)
+}
+
+/// Copy a counted path out of user memory and validate it as UTF-8.
+///
+/// The `*at` family and everything else that carries an explicit length share
+/// this front end; they differ only in how they pick the base directory the
+/// result is resolved against. Same buffer contract as [`copy_user_path`].
+pub fn copy_user_path_len(buf: &mut PathBuf, ptr: *const u8, len: usize) -> Result<&str, Errno> {
+    if ptr.is_null() {
+        return Err(Errno::EFAULT);
+    }
+
+    if len == 0 || len > MAX_PATH_LEN {
+        return Err(Errno::EINVAL);
+    }
+
+    if !unsafe { try_copy_from_user(buf.as_mut_ptr(), ptr, len) } {
+        return Err(Errno::EFAULT);
     }
 
     core::str::from_utf8(&buf[..len]).map_err(|_| Errno::EINVAL)
