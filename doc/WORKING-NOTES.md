@@ -10062,3 +10062,25 @@ Three counts in `CLAUDE.md` were checked against the run rather than trusted:
 138 host tests, 58 sched-test cases, 18 `guest-check` suites. All three are
 correct.
 
+
+## Button and checkbox took PS/2 set-1 scancodes, not kernel keycodes
+
+`Button::on_key` compared its argument against `28 || 57` with a comment reading
+"28 = Enter, 57 = Space", and `Checkbox::on_key` against `57` with "57 = Space".
+Those are AT set-1 make codes. The value that actually reaches `on_key` is a
+`pc_keyboard` `KeyCode` discriminant, the same space `container.rs` compares
+against `keycode::TAB`, and there 28 is `OEM_MINUS`, 57 is `NUMPAD8`, `RETURN`
+is 72, `NUMPAD_ENTER` is 92 and `SPACEBAR` is 96. So a focused button fired on
+minus and on numpad 8, and Enter and Space did nothing; a focused checkbox never
+toggled from the keyboard at all.
+
+The trap is that the comment was self-consistent and cited a real table, so
+reading the code confirms it. Only running it disagrees. Watched in a guest
+(`wintest`, whose Status line shows a click counter): with the fix, minus and
+numpad 8 leave the count alone, and Enter, Space and numpad Enter each raise it
+by one; clicking `Enable sound` turns it ON and Space turns it OFF.
+
+Every other widget already used `keycode::`. After this there are no numeric
+scancode comparisons left in `programs/`: `grep -rn 'scancode ==' programs/ |
+grep -v 'keycode::'` returns nothing, which is the check to re-run before
+trusting a new widget's key handling.

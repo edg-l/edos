@@ -5,6 +5,7 @@ use super::{
     draw_text, text_height, text_width,
 };
 use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
+use edos_lib::keymap::keycode;
 
 /// A toggleable checkbox with a label.
 pub struct Checkbox {
@@ -209,9 +210,8 @@ impl Widget for Checkbox {
         if !self.enabled {
             return None;
         }
-        // Space toggles the checkbox when focused
-        if self.focused && pressed && scancode == 57 {
-            // 57 = Space
+        // Space toggles the checkbox when focused.
+        if self.focused && pressed && scancode == keycode::SPACEBAR {
             self.toggle();
             Some(WidgetEvent::ValueChanged(if self.checked { 1 } else { 0 }))
         } else {

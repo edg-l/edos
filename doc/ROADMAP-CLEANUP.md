@@ -306,30 +306,6 @@ problem. It exists only to attach a `WidgetId` to a `Box<dyn Widget>`.
 
 **Done when** no type in `edos_render` implements `Widget` by delegation.
 
-### D5. Button and checkbox activate on the wrong keys (S1, E1)
-
-`programs/edos_render/src/widgets/button.rs:220`:
-
-```rust
-if self.enabled && self.focused && pressed && (scancode == 28 || scancode == 57) {
-    // 28 = Enter, 57 = Space
-```
-
-`programs/edos_render/src/widgets/checkbox.rs:213` does the same with 57.
-
-The codes reaching `on_key` are kernel keycodes: `container.rs:155` compares the
-same value against `keycode::TAB`. In that space
-(`programs/edos_lib/src/keymap.rs:41`), **28 is `OEM_MINUS`, 57 is `NUMPAD8`,
-`RETURN` is 72 and `SPACEBAR` is 96.** So a focused button is activated by the
-minus key and by numpad 8, and not by Enter or Space; the comment asserting
-otherwise is a PS/2 set-1 table this system does not use.
-
-Slider, text input, terminal and container all use `keycode::` constants
-already, so this is two files out of step with the rest.
-
-**Fix.** `keycode::RETURN | keycode::NUMPAD_ENTER | keycode::SPACEBAR`, no
-literals, and verify in the guest rather than by reading.
-
 ### D6. The ANSI palette is 16 literals in the terminal widget (S3, E1)
 
 `programs/edos_render/src/widgets/terminal.rs` carries 16 `0xFF......`
@@ -668,9 +644,10 @@ memory of writing it.
 1. **Justify every hunk.** Name the requirement that forces it. A hunk that
    exists only because an earlier version of the change needed it comes out.
 2. **Audit every claim.** Each comment you added is a claim. Name the
-   measurement, the spec section, or the code path behind it, or delete it. D5
-   above is what an unaudited comment costs: two widgets bound to the wrong keys
-   behind a confident comment naming a scancode table this system does not use.
+   measurement, the spec section, or the code path behind it, or delete it. The
+   button and checkbox key bug is what an unaudited comment costs: two widgets
+   bound to the wrong keys behind a confident comment naming a scancode table
+   this system does not use.
 3. **Question every piece of work the change adds.** For each new loop, buffer,
    allocation or periodic call: what breaks without it?
 4. **Name what became reachable.** Code that was dead and now runs brings its own

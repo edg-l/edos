@@ -5,6 +5,7 @@ use super::{
     draw_text, text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, CONTROL_PAD_X};
+use edos_lib::keymap::keycode;
 
 /// A clickable button with a label.
 pub struct Button {
@@ -216,9 +217,15 @@ impl Widget for Button {
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
-        // Space or Enter activates the button when focused
-        if self.enabled && self.focused && pressed && (scancode == 28 || scancode == 57) {
-            // 28 = Enter, 57 = Space
+        // Space or Enter activates the button when focused.
+        if self.enabled
+            && self.focused
+            && pressed
+            && matches!(
+                scancode,
+                keycode::RETURN | keycode::NUMPAD_ENTER | keycode::SPACEBAR
+            )
+        {
             Some(WidgetEvent::Clicked)
         } else {
             None
