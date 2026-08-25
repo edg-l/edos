@@ -175,12 +175,21 @@ itself, and `getpid`, which cannot fail. `sys_kill` is gone; it was `kill` under
 another name. The `CLAUDE.md` paragraph naming which of the two spawns is safe
 is gone with it.
 
-**Still open.** `io.rs` (30 raw returns, the largest), then `mounts.rs` (3),
-`net.rs`, `procinfo.rs`, `profile.rs`, `time.rs`, `trace.rs` (1 each), and C3's
-`mem.rs`. `io.rs:587` still converts a real `is_err` check back into
-`u64::MAX`. Two shapes are not covered by the rule and were left alone in
-`process.rs`: `close` answers `i32` and `waitpid` answers `-1` for a failed
-wait, neither of which is `i64`, `isize` or a sentinel `u64`.
+`io.rs`'s path and metadata group is done too: `access`, `faccessat`,
+`truncate`, `utimensat`, `futimens`, `set_file_times`, `symlink`, `symlinkat`,
+`renameat`, `mkdirat`, `mkfifoat`, `mkfifo` and `unlinkat` answer
+`Result<(), Errno>`, and `readlink`, `readlinkat` and `getdents` answer
+`Result<usize, Errno>`. The two shapes those collapse to are
+`sys::sys_ok` and `sys::sys_count`, which `process.rs` now uses as well.
+
+**Still open.** The rest of `io.rs`: the descriptor group (`open`, `openat`,
+`close`, `sys_read`, `sys_write`, `pread`, `pwrite`, `readv`, `writev`,
+`ioctl`, `set_winsize`, `poll`, `mmap`, `munmap`), which is where the call-site
+weight is. Then `mounts.rs` (3), `net.rs`, `procinfo.rs`, `profile.rs`,
+`time.rs`, `trace.rs` (1 each), and C3's `mem.rs`. `io.rs:587` still converts a
+real `is_err` check back into `u64::MAX`. Two shapes are not covered by the rule
+and were left alone in `process.rs`: `close` answers `i32` and `waitpid` answers
+`-1` for a failed wait, neither of which is `i64`, `isize` or a sentinel `u64`.
 
 **Fix.** `i64` and `isize` returns become `Result<usize, Errno>`; `u64` sentinel
 returns become `Option<u64>` or, where the code is available, `Result<u64,

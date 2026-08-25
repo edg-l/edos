@@ -241,7 +241,7 @@ pub fn serve(control: Arc<Control>) {
     // buffer went with the kernel that held it. Remaking it costs nothing and
     // means a stale one of the wrong type cannot wedge control.
     let _ = fs::remove_file(CONTROL_FIFO);
-    if io::mkfifo(CONTROL_FIFO) < 0 {
+    if io::mkfifo(CONTROL_FIFO).is_err() {
         eprintln!(
             "init: {CONTROL_FIFO}: {:?}; no runtime control",
             io::last_errno()

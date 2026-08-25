@@ -239,7 +239,7 @@ fn test6(dir: &str) {
         (W_OK, "W_OK"),
         (R_OK | W_OK, "R_OK|W_OK"),
     ] {
-        if access(&path, mode) != 0 {
+        if access(&path, mode).is_err() {
             fail(
                 6,
                 &format!("access({}, {}) denied an existing file", path, name),
@@ -248,26 +248,26 @@ fn test6(dir: &str) {
     }
 
     // A directory is searchable, and the root always exists.
-    if access(dir, X_OK) != 0 {
+    if access(dir, X_OK).is_err() {
         fail(6, &format!("access({}, X_OK) denied a directory", dir));
     }
-    if access("/", F_OK) != 0 {
+    if access("/", F_OK).is_err() {
         fail(6, "access(/, F_OK) says the root does not exist");
     }
 
     let missing = format!("{}/iotest_t6_missing.dat", dir);
-    if access(&missing, F_OK) == 0 {
+    if access(&missing, F_OK).is_ok() {
         fail(6, "access reported a nonexistent path as present");
     }
 
     // The file has to be gone the moment it is unlinked, not at the next sync.
     fs::remove_file(&path).unwrap_or_else(|e| fail(6, &format!("remove: {}", e)));
-    if access(&path, F_OK) == 0 {
+    if access(&path, F_OK).is_ok() {
         fail(6, "access still sees a file that was unlinked");
     }
 
     // Bits outside R_OK|W_OK|X_OK are not a mode.
-    if access("/", 0x40) == 0 {
+    if access("/", 0x40).is_ok() {
         fail(6, "access accepted an undefined mode bit");
     }
 
@@ -335,7 +335,7 @@ fn test8(dir: &str) {
     fs::write(&path, vec![0xCDu8; CHUNK]).unwrap_or_else(|e| fail(8, &format!("create: {}", e)));
 
     for size in [100u64, 300, 0] {
-        if truncate(&path, size) != 0 {
+        if truncate(&path, size).is_err() {
             fail(8, &format!("truncate to {} failed", size));
         }
         let got = fs::metadata(&path).unwrap_or_else(|e| fail(8, &format!("stat: {}", e)));
@@ -348,7 +348,7 @@ fn test8(dir: &str) {
     // zero. Written after the size checks so the file starts from a known
     // length rather than whatever the loop left.
     fs::write(&path, vec![0xCDu8; CHUNK]).unwrap_or_else(|e| fail(8, &format!("rewrite: {}", e)));
-    if truncate(&path, 100) != 0 {
+    if truncate(&path, 100).is_err() {
         fail(8, "truncate to 100 failed");
     }
     let kept = fs::read(&path).unwrap_or_else(|e| fail(8, &format!("read after shrink: {}", e)));
@@ -362,7 +362,7 @@ fn test8(dir: &str) {
             ),
         );
     }
-    if truncate(&path, 300) != 0 {
+    if truncate(&path, 300).is_err() {
         fail(8, "truncate to 300 failed");
     }
     let grown = fs::read(&path).unwrap_or_else(|e| fail(8, &format!("read after grow: {}", e)));
@@ -370,11 +370,11 @@ fn test8(dir: &str) {
         fail(8, "grow after shrink did not zero-fill");
     }
 
-    if truncate(dir, 0) == 0 {
+    if truncate(dir, 0).is_ok() {
         fail(8, "truncate resized a directory");
     }
     let missing = format!("{}/iotest_t8_missing.dat", dir);
-    if truncate(&missing, 0) == 0 {
+    if truncate(&missing, 0).is_ok() {
         fail(8, "truncate accepted a nonexistent path");
     }
 
@@ -396,7 +396,7 @@ fn test9(dir: &str) {
     // second would not survive the round trip.
     const ATIME: i64 = 1_000_000_000;
     const MTIME: i64 = 1_100_000_000;
-    if set_file_times(&path, ATIME, MTIME) != 0 {
+    if set_file_times(&path, ATIME, MTIME).is_err() {
         fail(9, "set_file_times failed");
     }
     let got = stat(&path).unwrap_or_else(|| fail(9, "stat after set_file_times"));
@@ -421,7 +421,7 @@ fn test9(dir: &str) {
             tv_nsec: UTIME_OMIT,
         },
     ];
-    if utimensat(AT_FDCWD, &path, Some(&times), 0) != 0 {
+    if utimensat(AT_FDCWD, &path, Some(&times), 0).is_err() {
         fail(9, "utimensat with UTIME_NOW/UTIME_OMIT failed");
     }
     let got = stat(&path).unwrap_or_else(|| fail(9, "stat after UTIME_NOW"));
@@ -435,14 +435,14 @@ fn test9(dir: &str) {
     // A bad dirfd, an undefined flag and a missing path are all refused. An
     // absolute path ignores dirfd, so the bad one has to be paired with a
     // relative name to be reached at all.
-    if utimensat(4242, "iotest_t9.dat", None, 0) == 0 {
+    if utimensat(4242, "iotest_t9.dat", None, 0).is_ok() {
         fail(9, "utimensat accepted a closed dirfd");
     }
-    if utimensat(AT_FDCWD, &path, None, 0x4000) == 0 {
+    if utimensat(AT_FDCWD, &path, None, 0x4000).is_ok() {
         fail(9, "utimensat accepted an undefined flag");
     }
     let missing = format!("{}/iotest_t9_missing.dat", dir);
-    if utimensat(AT_FDCWD, &missing, None, 0) == 0 {
+    if utimensat(AT_FDCWD, &missing, None, 0).is_ok() {
         fail(9, "utimensat accepted a nonexistent path");
     }
 
@@ -463,7 +463,7 @@ fn test9(dir: &str) {
             tv_nsec: 0,
         },
     ];
-    if futimens(fd as u64, Some(&times)) != 0 {
+    if futimens(fd as u64, Some(&times)).is_err() {
         fail(9, "futimens failed");
     }
     close(fd as u64);
@@ -493,23 +493,20 @@ fn test10(dir: &str) {
 
     fs::write(&target, b"symlinked").unwrap_or_else(|e| fail(10, &format!("write target: {}", e)));
 
-    if symlink(&target, &link) != 0 {
+    if symlink(&target, &link).is_err() {
         fail(10, "symlink failed");
     }
 
     // readlink reports the target verbatim, without a terminating NUL.
     let mut buf = [0u8; 256];
-    let n = readlink(&link, &mut buf);
-    if n < 0 {
-        fail(10, "readlink failed");
-    }
-    if &buf[..n as usize] != target.as_bytes() {
+    let n = readlink(&link, &mut buf).unwrap_or_else(|e| fail(10, &format!("readlink: {e:?}")));
+    if &buf[..n] != target.as_bytes() {
         fail(10, "readlink returned a different target");
     }
 
     // A short buffer truncates rather than failing.
     let mut small = [0u8; 4];
-    if readlink(&link, &mut small) != 4 || small != target.as_bytes()[..4] {
+    if readlink(&link, &mut small) != Ok(4) || small != target.as_bytes()[..4] {
         fail(10, "readlink into a short buffer");
     }
 
@@ -527,7 +524,7 @@ fn test10(dir: &str) {
     // A relative target resolves against the link's own directory.
     let rel_link = format!("{}/iotest_t10_rel.dat", dir);
     let _ = fs::remove_file(&rel_link);
-    if symlink("iotest_t10_target.dat", &rel_link) != 0 {
+    if symlink("iotest_t10_target.dat", &rel_link).is_err() {
         fail(10, "symlink with a relative target failed");
     }
     if fs::read(&rel_link).ok().as_deref() != Some(b"symlinked".as_slice()) {
@@ -547,7 +544,7 @@ fn test10(dir: &str) {
         let _ = fs::remove_file(cross);
         fs::write(cross, b"across")
             .unwrap_or_else(|e| fail(10, &format!("write {}: {}", cross, e)));
-        if symlink(cross, &cross_link) != 0 {
+        if symlink(cross, &cross_link).is_err() {
             fail(10, "symlink to another mount failed");
         }
         if fs::read(&cross_link).ok().as_deref() != Some(b"across".as_slice()) {
@@ -571,7 +568,7 @@ fn test10(dir: &str) {
     let _ = fs::remove_file(&up_link);
     fs::write(&up_file, b"upwards")
         .unwrap_or_else(|e| fail(10, &format!("write up target: {}", e)));
-    if symlink(&format!("..{}/iotest_t10_up.dat", up_target), &up_link) != 0 {
+    if symlink(&format!("..{}/iotest_t10_up.dat", up_target), &up_link).is_err() {
         fail(10, "symlink with a target above the mount failed");
     }
     if fs::read(&up_link).ok().as_deref() != Some(b"upwards".as_slice()) {
@@ -595,7 +592,7 @@ fn test10(dir: &str) {
     let _ = fs::remove_file(&moved_link);
     let _ = fs::remove_dir(&dir_target);
     fs::create_dir(&dir_target).unwrap_or_else(|e| fail(10, &format!("create dir: {}", e)));
-    if symlink(&dir_target, &dir_link) != 0 {
+    if symlink(&dir_target, &dir_link).is_err() {
         fail(10, "symlink to a directory failed");
     }
     if fs::remove_dir(&dir_link).is_ok() {
@@ -608,7 +605,7 @@ fn test10(dir: &str) {
     // moved name still reads as a link to it.
     fs::rename(&dir_link, &moved_link)
         .unwrap_or_else(|e| fail(10, &format!("rename a link: {}", e)));
-    if readlink(&moved_link, &mut buf) != dir_target.len() as i64 {
+    if readlink(&moved_link, &mut buf) != Ok(dir_target.len()) {
         fail(10, "the renamed link no longer names its target");
     }
     if !fs::metadata(&dir_target).is_ok() {
@@ -628,7 +625,7 @@ fn test10(dir: &str) {
     let _ = fs::remove_file(format!("{}/f.dat", via_dir));
     let _ = fs::remove_dir(&via_dir);
     fs::create_dir(&via_dir).unwrap_or_else(|e| fail(10, &format!("create via dir: {}", e)));
-    if symlink(&via_dir, &via_link) != 0 {
+    if symlink(&via_dir, &via_link).is_err() {
         fail(10, "symlink to the containing directory failed");
     }
     let through = format!("{}/f.dat", via_link);
@@ -657,7 +654,7 @@ fn test10(dir: &str) {
     // looks like.
     let exec_link = format!("{}/iotest_t10_true", dir);
     let _ = fs::remove_file(&exec_link);
-    if symlink("/bin/true", &exec_link) != 0 {
+    if symlink("/bin/true", &exec_link).is_err() {
         fail(10, "symlink to a binary failed");
     }
     let pid = process::spawn(&exec_link, &[], 0, 1, 2)
@@ -681,7 +678,7 @@ fn test10(dir: &str) {
     let loop_b = format!("{}/iotest_t10_loop_b.dat", dir);
     let _ = fs::remove_file(&loop_a);
     let _ = fs::remove_file(&loop_b);
-    if symlink(&loop_b, &loop_a) != 0 || symlink(&loop_a, &loop_b) != 0 {
+    if symlink(&loop_b, &loop_a).is_err() || symlink(&loop_a, &loop_b).is_err() {
         fail(10, "could not build a symlink loop");
     }
     if fs::read(&loop_a).is_ok() {
@@ -691,17 +688,17 @@ fn test10(dir: &str) {
         fail(10, "stat through a symlink loop succeeded");
     }
     // The link itself is still readable: only following it is refused.
-    if readlink(&loop_a, &mut buf) != loop_b.len() as i64 {
+    if readlink(&loop_a, &mut buf) != Ok(loop_b.len()) {
         fail(10, "readlink of a looping link");
     }
     fs::remove_file(&loop_a).unwrap_or_else(|e| fail(10, &format!("unlink a looping link: {}", e)));
     let _ = fs::remove_file(&loop_b);
 
     // A dangling link is legal to create and readable, but not to open.
-    if symlink("/iotest_t10_nowhere", &dangling) != 0 {
+    if symlink("/iotest_t10_nowhere", &dangling).is_err() {
         fail(10, "symlink to a nonexistent target was refused");
     }
-    if readlink(&dangling, &mut buf) != "/iotest_t10_nowhere".len() as i64 {
+    if readlink(&dangling, &mut buf) != Ok("/iotest_t10_nowhere".len()) {
         fail(10, "readlink of a dangling link");
     }
     if fs::read(&dangling).is_ok() {
@@ -709,7 +706,7 @@ fn test10(dir: &str) {
     }
 
     // readlink refuses a plain file, and unlinking a link leaves the target.
-    if readlink(&target, &mut buf) >= 0 {
+    if readlink(&target, &mut buf).is_ok() {
         fail(10, "readlink accepted a regular file");
     }
     fs::remove_file(&link).unwrap_or_else(|e| fail(10, &format!("unlink the link: {}", e)));
@@ -814,14 +811,12 @@ fn test12(dir: &str) {
     let mut start = 0usize;
     let mut calls = 0;
     loop {
-        let n = getdents(&base, &mut buf, start);
-        if n < 0 {
-            fail(12, "getdents failed");
-        }
+        let n = getdents(&base, &mut buf, start)
+            .unwrap_or_else(|e| fail(12, &format!("getdents: {e:?}")));
         if n == 0 {
             break;
         }
-        let entries = parse_dents(&buf, n as usize);
+        let entries = parse_dents(&buf, n);
         if entries.is_empty() {
             fail(12, "a non-empty result decoded to no entries");
         }
@@ -852,7 +847,7 @@ fn test12(dir: &str) {
     }
 
     // Past the last entry is end of directory, not an error.
-    if getdents(&base, &mut buf, COUNT) != 0 {
+    if getdents(&base, &mut buf, COUNT) != Ok(0) {
         fail(
             12,
             "reading past the last entry did not report end of directory",
@@ -861,7 +856,7 @@ fn test12(dir: &str) {
     // A buffer too small for the next entry is refused, so a caller cannot
     // mistake it for the end and lose the tail.
     let mut tiny = [0u8; 8];
-    if !failed(getdents(&base, &mut tiny, 0) as i64) {
+    if getdents(&base, &mut tiny, 0).is_ok() {
         fail(12, "a buffer too small for one entry was accepted");
     }
 
@@ -923,7 +918,7 @@ fn test13(dir: &str) {
     }
     close(fd as u64);
 
-    if mkdirat(dirfd as i64, "sub") != 0 {
+    if mkdirat(dirfd as i64, "sub").is_err() {
         fail(13, "mkdirat failed");
     }
     match fstatat(dirfd as i64, "sub", 0) {
@@ -933,13 +928,13 @@ fn test13(dir: &str) {
 
     // AT_REMOVEDIR is the rmdir/unlink switch, and each refuses the other's
     // kind rather than removing it.
-    if unlinkat(dirfd as i64, "sub", 0) == 0 {
+    if unlinkat(dirfd as i64, "sub", 0).is_ok() {
         fail(13, "unlinkat without AT_REMOVEDIR removed a directory");
     }
-    if unlinkat(dirfd as i64, "sub", AT_REMOVEDIR) != 0 {
+    if unlinkat(dirfd as i64, "sub", AT_REMOVEDIR).is_err() {
         fail(13, "unlinkat with AT_REMOVEDIR failed");
     }
-    if unlinkat(dirfd as i64, "made", 0) != 0 {
+    if unlinkat(dirfd as i64, "made", 0).is_err() {
         fail(13, "unlinkat failed to remove a file");
     }
     if fstatat(dirfd as i64, "made", 0).is_some() {
@@ -970,7 +965,7 @@ fn test13(dir: &str) {
     }
     let target = format!("{}/plain", base);
     let link = format!("{}/alias", base);
-    if symlink(&target, &link) != 0 {
+    if symlink(&target, &link).is_err() {
         fail(13, "cannot create a symbolic link");
     }
     match (
@@ -1022,7 +1017,7 @@ fn test14(dir: &str) {
     fs::write(format!("{}/file", base), b"x")
         .unwrap_or_else(|e| fail(14, &format!("create file: {}", e)));
     // A dangling link still takes the name.
-    if symlink("nowhere", &format!("{}/link", base)) != 0 {
+    if symlink("nowhere", &format!("{}/link", base)).is_err() {
         fail(14, "symlink failed");
     }
 
@@ -1040,10 +1035,10 @@ fn test14(dir: &str) {
                 ),
             ),
         }
-        if symlink("nowhere", &format!("{}/{}", base, name)) == 0 {
+        if symlink("nowhere", &format!("{}/{}", base, name)).is_ok() {
             fail(14, &format!("symlink over an existing {} succeeded", name));
         }
-        if mkdirat(AT_FDCWD, &format!("{}/{}", base, name)) == 0 {
+        if mkdirat(AT_FDCWD, &format!("{}/{}", base, name)).is_ok() {
             fail(14, &format!("mkdirat over an existing {} succeeded", name));
         }
     }
@@ -1127,7 +1122,7 @@ fn test16(dir: &str) {
     let body: Vec<u8> = (0..20).map(pattern).collect();
     fs::write(&path, &body).unwrap_or_else(|e| fail(16, &format!("write: {}", e)));
 
-    if truncate(&path, GROWN as u64) != 0 {
+    if truncate(&path, GROWN as u64).is_err() {
         fail(16, "truncate to grow failed");
     }
 
@@ -1225,25 +1220,25 @@ fn test17(dir: &str) {
 
     // faccessat: a relative name resolves against the descriptor, an absolute
     // one ignores it, and a flag that cannot be honoured is refused.
-    if faccessat(dirfd, "a", F_OK, 0) != 0 {
+    if faccessat(dirfd, "a", F_OK, 0).is_err() {
         fail(17, "faccessat cannot see a file in its own directory");
     }
-    if faccessat(dirfd, "a", W_OK, 0) != 0 {
+    if faccessat(dirfd, "a", W_OK, 0).is_err() {
         fail(17, "faccessat denied write on a writable file");
     }
-    if faccessat(dirfd, "missing", F_OK, 0) == 0 {
+    if faccessat(dirfd, "missing", F_OK, 0).is_ok() {
         fail(17, "faccessat found a file that does not exist");
     }
-    if faccessat(AT_FDCWD, &base, F_OK, 0) != 0 {
+    if faccessat(AT_FDCWD, &base, F_OK, 0).is_err() {
         fail(17, "faccessat with AT_FDCWD cannot see an absolute path");
     }
-    if faccessat(dirfd, "a", F_OK, 0x200) == 0 {
+    if faccessat(dirfd, "a", F_OK, 0x200).is_ok() {
         fail(17, "faccessat accepted a flag it cannot honour");
     }
 
     // symlinkat puts the link where newdirfd says; the target is stored
     // verbatim and so resolves against the link's own directory.
-    if symlinkat("a", dirfd, "link") != 0 {
+    if symlinkat("a", dirfd, "link").is_err() {
         fail(17, "symlinkat failed");
     }
     if fs::read(format!("{}/link", base)).unwrap_or_default() != b"body" {
@@ -1252,36 +1247,36 @@ fn test17(dir: &str) {
             "reading through a symlinkat link gave the wrong contents",
         );
     }
-    if symlinkat("a", dirfd, "link") == 0 {
+    if symlinkat("a", dirfd, "link").is_ok() {
         fail(17, "symlinkat created a second entry for a taken name");
     }
 
     let mut buf = [0u8; 16];
     let n = readlinkat(dirfd, "link", &mut buf);
-    if n != 1 || &buf[..1] != b"a" {
-        fail(17, &format!("readlinkat returned {} bytes, want 1", n));
+    if n != Ok(1) || &buf[..1] != b"a" {
+        fail(17, &format!("readlinkat returned {:?} bytes, want 1", n));
     }
     // A buffer shorter than the target truncates rather than failing.
-    if symlinkat("abcd", dirfd, "long") != 0 {
+    if symlinkat("abcd", dirfd, "long").is_err() {
         fail(17, "symlinkat with a longer target failed");
     }
     let mut small = [0u8; 2];
-    if readlinkat(dirfd, "long", &mut small) != 2 || &small != b"ab" {
+    if readlinkat(dirfd, "long", &mut small) != Ok(2) || &small != b"ab" {
         fail(17, "readlinkat did not truncate into a short buffer");
     }
-    if !failed(readlinkat(dirfd, "a", &mut buf) as i64) {
+    if readlinkat(dirfd, "a", &mut buf).is_ok() {
         fail(17, "readlinkat read a file that is not a link");
     }
 
     // renameat: old and new resolve against their own descriptors.
-    if mkdirat(dirfd, "sub") != 0 {
+    if mkdirat(dirfd, "sub").is_err() {
         fail(17, "mkdirat failed");
     }
     let subfd = open(&format!("{}/sub", base), 0);
     if subfd < 0 {
         fail(17, "cannot open the subdirectory as a descriptor");
     }
-    if renameat(dirfd, "a", subfd, "moved") != 0 {
+    if renameat(dirfd, "a", subfd, "moved").is_err() {
         fail(17, "renameat across two descriptors failed");
     }
     if fstatat(dirfd, "a", 0).is_some() {
@@ -1293,13 +1288,13 @@ fn test17(dir: &str) {
         None => fail(17, "renameat did not create the new name"),
     }
     // An absolute path ignores its descriptor, and a closed one is refused.
-    if renameat(AT_FDCWD, &format!("{}/sub/moved", base), dirfd, "back") != 0 {
+    if renameat(AT_FDCWD, &format!("{}/sub/moved", base), dirfd, "back").is_err() {
         fail(17, "renameat with AT_FDCWD and an absolute path failed");
     }
     if fstatat(dirfd, "back", 0).is_none() {
         fail(17, "renameat back to the parent did not land");
     }
-    if !failed(renameat(4242, "back", dirfd, "nope") as i64) {
+    if renameat(4242, "back", dirfd, "nope").is_ok() {
         fail(17, "renameat accepted a closed descriptor");
     }
 
@@ -1677,7 +1672,7 @@ fn test21() {
 fn test22(dir: &str) {
     let path = format!("{}/iotest_t22.fifo", dir);
     let _ = fs::remove_file(&path);
-    if edos_lib::io::mkfifo(&path) < 0 {
+    if edos_lib::io::mkfifo(&path).is_err() {
         fail(22, &format!("mkfifo: {:?}", edos_lib::io::last_errno()));
     }
 
@@ -1764,7 +1759,7 @@ fn test22(dir: &str) {
 fn test23(dir: &str) {
     let path = format!("{}/iotest_t23.fifo", dir);
     let _ = fs::remove_file(&path);
-    if edos_lib::io::mkfifo(&path) < 0 {
+    if edos_lib::io::mkfifo(&path).is_err() {
         fail(23, &format!("mkfifo: {:?}", edos_lib::io::last_errno()));
     }
 

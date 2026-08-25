@@ -67,3 +67,14 @@ pub const SOCK_DGRAM: u32 = 2;
 pub const SOL_SOCKET: u32 = 1;
 pub const SO_ERROR: u32 = 4;
 pub const SO_RCVTIMEO: u32 = 20;
+
+/// A syscall whose only answer is whether it worked.
+pub fn sys_ok(ret: u64) -> Result<(), Errno> {
+    sys_result(ret).map(|_| ())
+}
+
+/// A syscall answering a count: bytes transferred, entries decoded, descriptors
+/// ready.
+pub fn sys_count(ret: u64) -> Result<usize, Errno> {
+    sys_result(ret).map(|n| n as usize)
+}

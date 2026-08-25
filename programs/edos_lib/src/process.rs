@@ -36,13 +36,13 @@ pub fn close(fd: u64) -> i32 {
 pub fn read(fd: u64, buf: &mut [u8]) -> Result<usize, Errno> {
     let ret =
         unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    sys::sys_result(ret).map(|n| n as usize)
+    sys::sys_count(ret)
 }
 
 /// Write to a file descriptor, answering how many bytes of `buf` were taken.
 pub fn write(fd: u64, buf: &[u8]) -> Result<usize, Errno> {
     let ret = unsafe { sys::syscall3(sys::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) };
-    sys::sys_result(ret).map(|n| n as usize)
+    sys::sys_count(ret)
 }
 
 /// Duplicate a file descriptor, assigning the lowest unused fd.
@@ -399,7 +399,7 @@ fn wait_untraced(pid: u64, flags: u64) -> Option<ChildState> {
 /// uses both: the first process of a job leads a group and the rest join it,
 /// which is what makes one Ctrl+C stop a whole pipeline.
 pub fn setpgid(pid: u64, pgid: u64) -> Result<(), Errno> {
-    sys::sys_result(unsafe { sys::syscall2(sys::SYS_SETPGID, pid, pgid) }).map(|_| ())
+    sys::sys_ok(unsafe { sys::syscall2(sys::SYS_SETPGID, pid, pgid) })
 }
 
 /// The process group of `pid`, or of the caller when `pid` is 0.
@@ -412,7 +412,7 @@ pub fn getpgid(pid: u64) -> Result<u64, Errno> {
 /// The line discipline aims Ctrl+C and Ctrl+Z at whichever group holds the
 /// terminal, so this is what "foreground" means.
 pub fn tcsetpgrp(fd: u64, pgid: u64) -> Result<(), Errno> {
-    sys::sys_result(unsafe { sys::syscall2(sys::SYS_TCSETPGRP, fd, pgid) }).map(|_| ())
+    sys::sys_ok(unsafe { sys::syscall2(sys::SYS_TCSETPGRP, fd, pgid) })
 }
 
 /// The process group currently holding the terminal on `fd`.
@@ -712,7 +712,7 @@ pub struct SchedAttr {
 pub fn sched_setattr(tid: u64, attr: &SchedAttr) -> Result<(), Errno> {
     let ret =
         unsafe { sys::syscall2(sys::SYS_SCHED_SETATTR, tid, attr as *const SchedAttr as u64) };
-    sys::sys_result(ret).map(|_| ())
+    sys::sys_ok(ret)
 }
 
 /// Read a thread's scheduling attributes. `tid` of 0 is the calling thread.
@@ -776,7 +776,7 @@ pub fn signal_by_name(spec: &str) -> Option<u32> {
 
 /// Send a signal to one process.
 pub fn kill(pid: u64, signal: u32) -> Result<(), Errno> {
-    sys::sys_result(unsafe { sys::syscall2(sys::SYS_KILL, pid, signal as u64) }).map(|_| ())
+    sys::sys_ok(unsafe { sys::syscall2(sys::SYS_KILL, pid, signal as u64) })
 }
 
 /// Send a signal to every process in group `pgid`.
@@ -877,5 +877,5 @@ const SYS_WINDOW_GRANT_SHELL: u64 = 234;
 /// The grant is per pid and is dropped when the process exits, so a later
 /// process that reuses the number does not inherit it.
 pub fn grant_shell(pid: u64) -> Result<(), Errno> {
-    sys::sys_result(unsafe { sys::syscall1(SYS_WINDOW_GRANT_SHELL, pid) }).map(|_| ())
+    sys::sys_ok(unsafe { sys::syscall1(SYS_WINDOW_GRANT_SHELL, pid) })
 }

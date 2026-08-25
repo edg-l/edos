@@ -45,7 +45,7 @@ fn link_one(target: &str, link: &str, force: bool, verbose: bool) -> bool {
         }
     }
 
-    if edos_lib::io::symlink(target, link) < 0 {
+    if edos_lib::io::symlink(target, link).is_err() {
         eprintln!("ln: {} -> {}: {}", link, target, Error::last_os_error());
         return false;
     }

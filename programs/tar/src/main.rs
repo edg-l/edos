@@ -446,9 +446,8 @@ fn extract_entry(input: &mut dyn Read, entry: &Entry) -> Result<(), io::Error> {
         Kind::Symlink => {
             make_parents(path)?;
             let _ = fs::remove_file(path);
-            let rc = edos_lib::io::symlink(&entry.link, &name);
-            if rc < 0 {
-                return Err(io::Error::from_raw_os_error(-rc as i32));
+            if let Err(e) = edos_lib::io::symlink(&entry.link, &name) {
+                return Err(io::Error::from_raw_os_error(e as i32));
             }
         }
         Kind::File => {

@@ -18,7 +18,7 @@ fn main() -> ExitCode {
 
     let mut failed = false;
     for path in &paths {
-        if io::mkfifo(path) < 0 {
+        if io::mkfifo(path).is_err() {
             eprintln!("mkfifo: {}: {:?}", path, io::last_errno());
             failed = true;
         }

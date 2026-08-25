@@ -10475,3 +10475,33 @@ Two traps this converting run hit, both worth knowing before doing `io.rs`:
 - **`clippy::while_let_loop` fires on the rewrite.** `loop { let Ok(n) = f()
   else { break }; ... }` is a clippy error under `-D warnings`; write
   `while let Ok(n) = f()` instead. Four sites.
+
+
+## Converting a sentinel wrapper to `Result`: the count/unit split
+
+`edos_lib::io`'s path and metadata calls now answer `Result<(), Errno>` or
+`Result<usize, Errno>` instead of a raw `i64`. Three things about that
+conversion are worth knowing before doing the next batch.
+
+**A blanket `!= 0` → `.is_err()` rewrite is only correct for the unit-returning
+half.** For `readlink`, `readlinkat` and `getdents`, `rc != 0` never meant
+"failed": it meant "returned a nonzero count". `getdents(dir, buf, COUNT) != 0`
+was the assertion that reading past the last entry yields end of directory, and
+rewriting it to `.is_err()` turns it into a test that passes on any successful
+short read. Those three compare against `Ok(n)` instead. Only the calls that
+answer `Result<(), Errno>` translate mechanically, because for them 0 and
+success are the same statement.
+
+**`Errno`'s discriminants are the kernel's own error numbers.** `sys_result`
+builds one with `Errno::from_raw(code)` and `errno()` transmutes the syscall
+return, so `e as i32` is exactly what a negated syscall return carried, and is
+a valid argument to `std::io::Error::from_raw_os_error`.
+
+**Enumerate the call sites with `--keep-going`.** A plain `cargo +edos check
+--all-targets` stops at the first crate that fails, so it reports one call site
+per run; `cargo +edos check --all-targets --keep-going --message-format=short`
+lists all of them at once and turns the conversion into one pass.
+
+The two shapes the wrappers collapse to are `sys::sys_ok` and `sys::sys_count`
+in `programs/edos_lib/src/sys.rs`; use them rather than writing
+`sys_result(ret).map(|_| ())` out again.

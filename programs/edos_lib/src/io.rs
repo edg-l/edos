@@ -1,6 +1,9 @@
 //! Poll and I/O multiplexing utilities.
 
-use crate::{sys, time::Timespec};
+use crate::{
+    sys::{self, Errno},
+    time::Timespec,
+};
 
 pub use syscall_abi::{DirEntry, PollState, SelectFd, Stat};
 
@@ -69,12 +72,12 @@ pub fn close(fd: u64) -> i64 {
 
 /// Read the entries of `path` into `buf`, starting at entry index `start`.
 ///
-/// Returns the number of bytes written, or 0 once `start` is past the last
+/// Answers the number of bytes written, or 0 once `start` is past the last
 /// entry. A directory larger than `buf` is enumerated by calling again with
-/// `start` advanced by the number of entries decoded; -1 with `EINVAL` means
-/// `buf` is too small to hold even the entry at `start`.
-pub fn getdents(path: &str, buf: &mut [u8], start: usize) -> i64 {
-    unsafe {
+/// `start` advanced by the number of entries decoded; `EINVAL` means `buf` is
+/// too small to hold even the entry at `start`.
+pub fn getdents(path: &str, buf: &mut [u8], start: usize) -> Result<usize, Errno> {
+    let ret = unsafe {
         sys::syscall5(
             sys::SYS_GETDENTS,
             path.as_ptr() as u64,
@@ -82,8 +85,9 @@ pub fn getdents(path: &str, buf: &mut [u8], start: usize) -> i64 {
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
             start as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_count(ret)
 }
 
 /// Decode the first `len` bytes of a buffer filled by [`getdents`] into entries
@@ -116,22 +120,22 @@ pub const X_OK: u32 = 1;
 pub const W_OK: u32 = 2;
 pub const R_OK: u32 = 4;
 
-/// Test a path against an access mode. Returns 0 if the access is permitted
-/// and -1 otherwise; `F_OK` is an existence test.
+/// Test a path against an access mode; `F_OK` is an existence test.
 ///
 /// EDOS has no per-file permission bits and every process runs with the same
 /// credentials, so the answer is existence plus the read-only attribute:
 /// `W_OK` on a read-only file is denied, `R_OK` and `X_OK` are granted for
 /// anything that exists.
-pub fn access(path: &str, mode: u32) -> i64 {
-    unsafe {
+pub fn access(path: &str, mode: u32) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall3(
             sys::SYS_ACCESS,
             path.as_ptr() as u64,
             path.len() as u64,
             mode as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// [`access`] relative to the directory descriptor `dirfd`. An absolute path
@@ -140,8 +144,8 @@ pub fn access(path: &str, mode: u32) -> i64 {
 /// `flags` must be 0: `AT_EACCESS` asks about the effective ids, which are the
 /// only ids there are, and the walk always follows symbolic links, so
 /// `AT_SYMLINK_NOFOLLOW` is refused rather than quietly ignored.
-pub fn faccessat(dirfd: i64, path: &str, mode: u32, flags: u64) -> i64 {
-    unsafe {
+pub fn faccessat(dirfd: i64, path: &str, mode: u32, flags: u64) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall5(
             sys::SYS_FACCESSAT,
             dirfd as u64,
@@ -149,22 +153,23 @@ pub fn faccessat(dirfd: i64, path: &str, mode: u32, flags: u64) -> i64 {
             path.len() as u64,
             mode as u64,
             flags,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// Resize the file named by `path` to `size` bytes, extending it with zeros
-/// when it grows. Returns 0 on success and -1 on error; a directory is
-/// refused.
-pub fn truncate(path: &str, size: u64) -> i64 {
-    unsafe {
+/// when it grows. A directory is refused.
+pub fn truncate(path: &str, size: u64) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall3(
             sys::SYS_TRUNCATE,
             path.as_ptr() as u64,
             path.len() as u64,
             size,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// `tv_nsec` values that name a time instead of carrying one: take the current
@@ -177,14 +182,19 @@ pub const AT_FDCWD: i64 = -100;
 
 /// Set the access and modification times of `path`: `times[0]` is the access
 /// time and `times[1]` the modification time, and `None` stamps both with the
-/// current time. Returns 0 on success and -1 on error.
+/// current time.
 ///
 /// A relative path resolves against the directory descriptor `dirfd`, or the
 /// working directory for [`AT_FDCWD`]. Timestamps are stored to whole seconds,
 /// and `flags` must be 0.
-pub fn utimensat(dirfd: i64, path: &str, times: Option<&[Timespec; 2]>, flags: u64) -> i64 {
+pub fn utimensat(
+    dirfd: i64,
+    path: &str,
+    times: Option<&[Timespec; 2]>,
+    flags: u64,
+) -> Result<(), Errno> {
     let times_ptr = times.map(|t| t.as_ptr() as u64).unwrap_or(0);
-    unsafe {
+    let ret = unsafe {
         sys::syscall5(
             sys::SYS_UTIMENSAT,
             dirfd as u64,
@@ -192,8 +202,9 @@ pub fn utimensat(dirfd: i64, path: &str, times: Option<&[Timespec; 2]>, flags: u
             path.len() as u64,
             times_ptr,
             flags,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// Set the times of the file `fd` already names, POSIX `futimens`.
@@ -201,13 +212,13 @@ pub fn utimensat(dirfd: i64, path: &str, times: Option<&[Timespec; 2]>, flags: u
 /// The only way to stamp a file a caller holds open rather than one it can
 /// name: a descriptor is what a language runtime hands out, and the path it was
 /// opened by is not something it keeps.
-pub fn futimens(fd: u64, times: Option<&[Timespec; 2]>) -> i64 {
+pub fn futimens(fd: u64, times: Option<&[Timespec; 2]>) -> Result<(), Errno> {
     let times_ptr = times.map(|t| t.as_ptr() as u64).unwrap_or(0);
-    unsafe { sys::syscall5(sys::SYS_UTIMENSAT, fd, 0, 0, times_ptr, 0) as i64 }
+    sys::sys_ok(unsafe { sys::syscall5(sys::SYS_UTIMENSAT, fd, 0, 0, times_ptr, 0) })
 }
 
 /// Set both timestamps of `path` to whole-second Unix times.
-pub fn set_file_times(path: &str, atime_secs: i64, mtime_secs: i64) -> i64 {
+pub fn set_file_times(path: &str, atime_secs: i64, mtime_secs: i64) -> Result<(), Errno> {
     let times = [
         Timespec {
             tv_sec: atime_secs,
@@ -223,25 +234,25 @@ pub fn set_file_times(path: &str, atime_secs: i64, mtime_secs: i64) -> i64 {
 
 /// Create a symbolic link at `path` holding `target`. The target is stored
 /// verbatim: a relative one resolves against the link's own directory, and a
-/// link to a path that does not exist is legal. Returns 0 on success and -1 on
-/// error.
-pub fn symlink(target: &str, path: &str) -> i64 {
-    unsafe {
+/// link to a path that does not exist is legal.
+pub fn symlink(target: &str, path: &str) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall4(
             sys::SYS_SYMLINK,
             target.as_ptr() as u64,
             target.len() as u64,
             path.as_ptr() as u64,
             path.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// [`symlink`] with the link's own path taken relative to the directory
 /// descriptor `newdirfd`. The target is stored verbatim either way, so
 /// `newdirfd` names where the link goes, never what it points at.
-pub fn symlinkat(target: &str, newdirfd: i64, path: &str) -> i64 {
-    unsafe {
+pub fn symlinkat(target: &str, newdirfd: i64, path: &str) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall5(
             sys::SYS_SYMLINKAT,
             target.as_ptr() as u64,
@@ -249,29 +260,31 @@ pub fn symlinkat(target: &str, newdirfd: i64, path: &str) -> i64 {
             newdirfd as u64,
             path.as_ptr() as u64,
             path.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// Read the target of the symbolic link at `path` into `buf`, without a
-/// terminating NUL. Returns the number of bytes written, which equals
-/// `buf.len()` when the target was truncated, or -1 on error.
-pub fn readlink(path: &str, buf: &mut [u8]) -> i64 {
-    unsafe {
+/// terminating NUL. Answers the number of bytes written, which equals
+/// `buf.len()` when the target was truncated.
+pub fn readlink(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
+    let ret = unsafe {
         sys::syscall4(
             sys::SYS_READLINK,
             path.as_ptr() as u64,
             path.len() as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_count(ret)
 }
 
 /// [`readlink`] relative to the directory descriptor `dirfd`. An absolute path
 /// ignores `dirfd`, and [`AT_FDCWD`] names the working directory.
-pub fn readlinkat(dirfd: i64, path: &str, buf: &mut [u8]) -> i64 {
-    unsafe {
+pub fn readlinkat(dirfd: i64, path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
+    let ret = unsafe {
         sys::syscall5(
             sys::SYS_READLINKAT,
             dirfd as u64,
@@ -279,14 +292,15 @@ pub fn readlinkat(dirfd: i64, path: &str, buf: &mut [u8]) -> i64 {
             path.len() as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_count(ret)
 }
 
 /// Rename `old` to `new`, each resolved against its own directory descriptor,
-/// so one call can name two of them. Returns 0 on success and -1 on error.
-pub fn renameat(olddirfd: i64, old: &str, newdirfd: i64, new: &str) -> i64 {
-    unsafe {
+/// so one call can name two of them.
+pub fn renameat(olddirfd: i64, old: &str, newdirfd: i64, new: &str) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall6(
             sys::SYS_RENAMEAT,
             olddirfd as u64,
@@ -295,8 +309,9 @@ pub fn renameat(olddirfd: i64, old: &str, newdirfd: i64, new: &str) -> i64 {
             newdirfd as u64,
             new.as_ptr() as u64,
             new.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// Stat a path. Returns `None` when it cannot be resolved.
@@ -351,38 +366,39 @@ pub fn openat(dirfd: i64, path: &str, flags: u64) -> i64 {
     }
 }
 
-/// Create a directory relative to the directory descriptor `dirfd`. Returns 0
-/// on success and -1 on error.
-pub fn mkdirat(dirfd: i64, path: &str) -> i64 {
-    unsafe {
+/// Create a directory relative to the directory descriptor `dirfd`.
+pub fn mkdirat(dirfd: i64, path: &str) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall3(
             sys::SYS_MKDIRAT,
             dirfd as u64,
             path.as_ptr() as u64,
             path.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// Create a named pipe at `path`, relative to the directory descriptor
-/// `dirfd`. Returns 0, or -1 on error.
+/// `dirfd`.
 ///
 /// The pipe is not opened here and holds nothing until it is: a FIFO's buffer
 /// exists only while one of its ends is open, and opening one end waits for the
 /// other unless `O_NONBLOCK` is given.
-pub fn mkfifoat(dirfd: i64, path: &str) -> i64 {
-    unsafe {
+pub fn mkfifoat(dirfd: i64, path: &str) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall3(
             sys::SYS_MKFIFOAT,
             dirfd as u64,
             path.as_ptr() as u64,
             path.len() as u64,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// [`mkfifoat`] against the current working directory.
-pub fn mkfifo(path: &str) -> i64 {
+pub fn mkfifo(path: &str) -> Result<(), Errno> {
     mkfifoat(AT_FDCWD, path)
 }
 
@@ -390,17 +406,18 @@ pub fn mkfifo(path: &str) -> i64 {
 pub const AT_REMOVEDIR: u64 = 0x200;
 
 /// Remove a file, or with [`AT_REMOVEDIR`] an empty directory, relative to the
-/// directory descriptor `dirfd`. Returns 0 on success and -1 on error.
-pub fn unlinkat(dirfd: i64, path: &str, flags: u64) -> i64 {
-    unsafe {
+/// directory descriptor `dirfd`.
+pub fn unlinkat(dirfd: i64, path: &str, flags: u64) -> Result<(), Errno> {
+    let ret = unsafe {
         sys::syscall4(
             sys::SYS_UNLINKAT,
             dirfd as u64,
             path.as_ptr() as u64,
             path.len() as u64,
             flags,
-        ) as i64
-    }
+        )
+    };
+    sys::sys_ok(ret)
 }
 
 /// Read from a file descriptor using a raw syscall.
