@@ -16,8 +16,9 @@ pub use block_group::EfsBlockGroupDesc;
 pub use crc32::{checksum_block_group_desc, checksum_inode, checksum_superblock, crc32};
 pub use dir_entry::{DIR_ENTRY_HEADER_SIZE, EfsDirEntryHeader, dir_entry_min_size};
 pub use extent::{
-    EfsExtent, EfsExtentHeader, EfsExtentIndex, MAX_INLINE_EXTENTS, entries_per_node,
-    read_node_entry, read_node_header, write_node_entry, write_node_header,
+    EfsExtent, EfsExtentHeader, EfsExtentIndex, MAX_INLINE_EXTENTS, build_extent_tree,
+    entries_per_node, max_extents, read_node_entry, read_node_header, write_node_entry,
+    write_node_header,
 };
 pub use inode::{EfsInode, INODE_DATA_AREA_SIZE};
 pub use journal::{

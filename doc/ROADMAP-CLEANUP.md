@@ -327,14 +327,14 @@ so the `{:<20}` column still lines up) and `FilesystemType::name`. The MBR
 listing had its own, shorter table of names for the same variants and fell back
 to `"Other"`; both listings read the one table now.
 
-### F5. `efs-mkfs` re-implements the kernel's extent logic (S2, E2)
+### F5. ~~`efs-mkfs` re-implements the kernel's extent logic~~ (done)
 
-`tools/efs-mkfs/src/populate.rs:588-600` matches `kernel/src/fs/efs/extents.rs:320-332`.
-`libs/efs-common` exists exactly to hold what the kernel and the host tools
-share. Move it there.
-
-Two implementations of an on-disk format's allocation rule is how an image that
-`efs-fsck` calls clean fails to mount.
+`efs_common::build_extent_tree` is the one encoder now: it fills the inode's
+`data_area`, and hands each finished leaf node to a caller closure that answers
+with the block it wrote it to. That is the only part the two sides disagreed
+about — the driver reuses the tree blocks the inode already holds, `efs-mkfs`
+allocates fresh ones near the file. `max_extents` moved beside it, so the
+depth-1 ceiling is stated once as well.
 
 ### F6. Button, checkbox and slider share a 21-line block (S3, E1)
 

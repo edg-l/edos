@@ -4,10 +4,9 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use efs_common::{
-    EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent, EfsExtentHeader, EfsExtentIndex,
-    EfsInode, FT_DIR, FT_REG_FILE, FT_SYMLINK, INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA,
-    MAX_INLINE_EXTENTS, S_IFDIR, S_IFLNK, S_IFREG, checksum_inode, entries_per_node,
-    write_node_entry, write_node_header,
+    EFS_ROOT_INO, EfsBlockGroupDesc, EfsExtent, EfsInode, FT_DIR, FT_REG_FILE, FT_SYMLINK,
+    INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, S_IFDIR, S_IFLNK, S_IFREG, build_extent_tree,
+    checksum_inode, max_extents,
 };
 
 use crate::alloc::Allocator;
@@ -519,14 +518,12 @@ pub fn populate(
     Ok(())
 }
 
-/// Encode `runs` into the inode's extent node, spilling into leaf blocks when
-/// there are more runs than fit inline.
+/// Encode `runs` into the inode's extent node, allocating each leaf block near
+/// the file's own blocks.
 ///
-/// A flat inline list holds `MAX_INLINE_EXTENTS` (13) extents. Past that the
-/// node becomes depth 1: the inline entries are `EfsExtentIndex` entries, each
-/// naming an allocated leaf block holding up to `entries_per_node(block_size)`
-/// extents. This mirrors what the kernel driver's `store_extent_map` writes, so
-/// a populated image and a written-to image have the same shape.
+/// The shape itself comes from `efs_common::build_extent_tree`, the same
+/// encoder the kernel driver's `store_extent_map` calls, so a populated image
+/// and a written-to image cannot disagree about it.
 fn write_extent_tree(
     file: &mut File,
     layout: &Layout,
@@ -536,83 +533,22 @@ fn write_extent_tree(
     runs: &[EfsExtent],
 ) -> io::Result<()> {
     let block_size = layout.block_size as usize;
-    let per_leaf = entries_per_node(block_size);
-
-    inode.data_area = [0u8; INODE_DATA_AREA_SIZE];
-
-    if runs.len() <= MAX_INLINE_EXTENTS {
-        write_node_header(
-            &mut inode.data_area,
-            &EfsExtentHeader {
-                magic: EXTENT_MAGIC,
-                entries: runs.len() as u16,
-                max_entries: MAX_INLINE_EXTENTS as u16,
-                depth: 0,
-                reserved: 0,
-            },
-        );
-        for (i, ext) in runs.iter().enumerate() {
-            write_node_entry(&mut inode.data_area, i, ext);
-        }
-        return Ok(());
-    }
-
-    let leaf_count = runs.len().div_ceil(per_leaf);
-    if leaf_count > MAX_INLINE_EXTENTS {
+    if runs.len() > max_extents(block_size) {
         return Err(io::Error::other(format!(
             "file needs {} extents, past the depth-1 ceiling of {}",
             runs.len(),
-            MAX_INLINE_EXTENTS * per_leaf
+            max_extents(block_size)
         )));
     }
 
-    write_node_header(
-        &mut inode.data_area,
-        &EfsExtentHeader {
-            magic: EXTENT_MAGIC,
-            entries: leaf_count as u16,
-            max_entries: MAX_INLINE_EXTENTS as u16,
-            depth: 1,
-            reserved: 0,
-        },
-    );
-
-    for i in 0..leaf_count {
-        let chunk = &runs[i * per_leaf..((i + 1) * per_leaf).min(runs.len())];
-        let (leaf_block, got) = allocator
+    build_extent_tree(&mut inode.data_area, runs, block_size, |_, node| {
+        let (leaf_block, _) = allocator
             .alloc_blocks(1, preferred_group)
             .filter(|&(_, got)| got == 1)
             .ok_or_else(|| io::Error::other("filesystem full allocating an extent leaf"))?;
-        let _ = got;
-
-        let mut node = vec![0u8; block_size];
-        write_node_header(
-            &mut node,
-            &EfsExtentHeader {
-                magic: EXTENT_MAGIC,
-                entries: chunk.len() as u16,
-                max_entries: per_leaf as u16,
-                depth: 0,
-                reserved: 0,
-            },
-        );
-        for (j, ext) in chunk.iter().enumerate() {
-            write_node_entry(&mut node, j, ext);
-        }
-        write_block(file, layout, leaf_block, &node)?;
-
-        write_node_entry(
-            &mut inode.data_area,
-            i,
-            &EfsExtentIndex {
-                logical_block: chunk[0].logical_block,
-                reserved: 0,
-                leaf_hi: (leaf_block >> 32) as u16,
-                leaf_lo: leaf_block as u32,
-            },
-        );
-    }
-
+        write_block(file, layout, leaf_block, node)?;
+        io::Result::Ok(leaf_block)
+    })?;
     Ok(())
 }
 

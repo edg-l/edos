@@ -10338,3 +10338,29 @@ The other user-copy helpers are not this operation and should not be folded in:
 `copy_in`/`copy_out` (`io.rs`) move counted bytes through the heap so a caller
 can copy *before* taking a lock, and `read_user_str` / `copy_user_c_string`
 answer with an owned `CString` / `Vec<u8>` for values that are not paths.
+
+## One extent-tree encoder for the driver and for `efs-mkfs`
+
+`efs_common::build_extent_tree` writes an inode's extent node: a flat inline
+list up to `MAX_INLINE_EXTENTS`, and past that a depth-1 tree whose inline
+entries are `EfsExtentIndex` entries naming leaf blocks. `max_extents` states
+the depth-1 ceiling beside it.
+
+The two callers only ever disagreed about where a leaf block comes from, so
+that is the one thing the encoder asks for: `emit_leaf(index, node)` is handed
+each finished leaf in tree order and answers with the block it now lives on.
+The driver reuses the tree blocks the inode already holds -- a single-page
+`flush_page` on a fragmented file stores the map again, and churning the tree
+every time would allocate and free on every page written -- and frees whatever
+the new shape does not reuse. `efs-mkfs` allocates fresh blocks in the file's
+preferred group.
+
+Two implementations of an on-disk allocation rule is how an image `efs-fsck`
+calls clean fails to mount, which is why this belongs in `efs-common` rather
+than being kept in sync by hand.
+
+**Verifying a change to `efs-mkfs` needs the image rebuilt first.**
+`scripts/edos-vm start` rebuilds an image that is older than
+`filesystem/.manifest`, which a change to the *tool* does not touch. Run `make
+nvme-disk.img sata-disk.img` before the gates when the encoder or the layout
+code changed, or the guest boots an image the old tool wrote.

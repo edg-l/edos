@@ -15,12 +15,11 @@
 //! [`ExtentMap`] is the in-memory form both shapes load into, so the rest of
 //! the driver works with a plain list of extents and never encodes a node.
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 use efs_common::{
-    EXTENT_MAGIC, EfsExtent, EfsExtentHeader, EfsExtentIndex, EfsInode, INODE_DATA_AREA_SIZE,
-    MAX_INLINE_EXTENTS, entries_per_node, read_node_entry, read_node_header, write_node_entry,
-    write_node_header,
+    EXTENT_MAGIC, EfsExtent, EfsExtentIndex, EfsInode, MAX_INLINE_EXTENTS, build_extent_tree,
+    entries_per_node, max_extents, read_node_entry, read_node_header,
 };
 
 use super::EfsDriver;
@@ -198,14 +197,6 @@ impl ExtentMap {
     }
 }
 
-/// Largest map that can be stored at all, for the driver's block size.
-///
-/// Reaching it needs 4420 discontiguous runs in one file at 4 KiB blocks, so
-/// in practice this is a corruption guard rather than a limit.
-pub(super) fn max_extents(block_size: usize) -> usize {
-    MAX_INLINE_EXTENTS * entries_per_node(block_size)
-}
-
 impl EfsDriver {
     /// Load an inode's complete extent list, following a depth-1 tree if there
     /// is one.
@@ -260,7 +251,6 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
-        let per_leaf = entries_per_node(block_size);
         // The ceiling depth 1 cannot pass. Depth 2 is what raises it further;
         // the format has the field for it and nothing writes one yet.
         if map.len() > max_extents(block_size) {
@@ -269,84 +259,28 @@ impl EfsDriver {
 
         // Tree blocks the inode holds today. Whatever the new shape does not
         // reuse is freed at the end, so no path leaks them.
+        //
+        // Reusing them rather than free-then-allocate matters because a
+        // single-page `flush_page` on a heavily fragmented file stores the map
+        // again, and churning the tree every time would allocate and free on
+        // every page written.
         let existing = self.tree_blocks(inode)?;
 
-        let needed_leaves = if map.len() <= MAX_INLINE_EXTENTS {
-            0
-        } else {
-            map.len().div_ceil(per_leaf)
-        };
+        let leaves = build_extent_tree(
+            &mut inode.data_area,
+            map.as_slice(),
+            block_size,
+            |i, node| {
+                let block = match existing.get(i) {
+                    Some(&b) => b,
+                    None => self.alloc_block(tx)?,
+                };
+                self.write_block(block, node, tx)?;
+                Result::<u64, Error>::Ok(block)
+            },
+        )?;
 
-        // Reuse the blocks already held rather than free-then-allocate: a
-        // single-page `flush_page` on a heavily fragmented file stores the map
-        // again, and churning the tree every time would allocate and free on every
-        // page written.
-        let mut leaves = Vec::with_capacity(needed_leaves);
-        for i in 0..needed_leaves {
-            match existing.get(i) {
-                Some(&b) => leaves.push(b),
-                None => leaves.push(self.alloc_block(tx)?),
-            }
-        }
-
-        inode.data_area = [0u8; INODE_DATA_AREA_SIZE];
-        if needed_leaves == 0 {
-            write_node_header(
-                &mut inode.data_area,
-                &EfsExtentHeader {
-                    magic: EXTENT_MAGIC,
-                    entries: map.len() as u16,
-                    max_entries: MAX_INLINE_EXTENTS as u16,
-                    depth: 0,
-                    reserved: 0,
-                },
-            );
-            for (i, ext) in map.as_slice().iter().enumerate() {
-                write_node_entry(&mut inode.data_area, i, ext);
-            }
-        } else {
-            write_node_header(
-                &mut inode.data_area,
-                &EfsExtentHeader {
-                    magic: EXTENT_MAGIC,
-                    entries: needed_leaves as u16,
-                    max_entries: MAX_INLINE_EXTENTS as u16,
-                    depth: 1,
-                    reserved: 0,
-                },
-            );
-            for (i, &leaf_block) in leaves.iter().enumerate() {
-                let chunk = &map.as_slice()[i * per_leaf..((i + 1) * per_leaf).min(map.len())];
-                let mut node = vec![0u8; block_size];
-                write_node_header(
-                    &mut node,
-                    &EfsExtentHeader {
-                        magic: EXTENT_MAGIC,
-                        entries: chunk.len() as u16,
-                        max_entries: per_leaf as u16,
-                        depth: 0,
-                        reserved: 0,
-                    },
-                );
-                for (j, ext) in chunk.iter().enumerate() {
-                    write_node_entry(&mut node, j, ext);
-                }
-                self.write_block(leaf_block, &node, tx)?;
-
-                write_node_entry(
-                    &mut inode.data_area,
-                    i,
-                    &EfsExtentIndex {
-                        logical_block: chunk.first().map(|e| e.logical_block).unwrap_or(0),
-                        reserved: 0,
-                        leaf_hi: (leaf_block >> 32) as u16,
-                        leaf_lo: leaf_block as u32,
-                    },
-                );
-            }
-        }
-
-        for &surplus in existing.iter().skip(needed_leaves) {
+        for &surplus in existing.iter().skip(leaves) {
             self.free_block(surplus, tx)?;
         }
 

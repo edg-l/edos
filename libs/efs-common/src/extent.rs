@@ -1,4 +1,8 @@
-use crate::inode::INODE_DATA_AREA_SIZE;
+extern crate alloc;
+
+use alloc::{vec, vec::Vec};
+
+use crate::{EXTENT_MAGIC, inode::INODE_DATA_AREA_SIZE};
 
 /// Maximum number of extents (or index entries) that fit inline in an inode's
 /// `data_area` after the header.
@@ -137,4 +141,100 @@ pub fn write_node_entry<T: Copy>(node: &mut [u8], index: usize, entry: &T) {
     // SAFETY: `T` is a `repr(C)` plain-data entry type; the copy below bounds-checks.
     let bytes = unsafe { core::slice::from_raw_parts(entry as *const T as *const u8, size) };
     node[off..off + size].copy_from_slice(bytes);
+}
+
+// ---- Tree builder -----------------------------------------------------------
+
+/// Largest map that can be stored at all, for a given block size.
+///
+/// Reaching it needs 4420 discontiguous runs in one file at 4 KiB blocks, so in
+/// practice this is a corruption guard rather than a limit. Depth 2 is what
+/// would raise it; the format has the field for it and nothing writes one.
+pub fn max_extents(block_size: usize) -> usize {
+    MAX_INLINE_EXTENTS * entries_per_node(block_size)
+}
+
+/// Encode `runs` into `data_area`, spilling into leaf blocks when there are
+/// more runs than fit inline, and return how many leaves the shape needs.
+///
+/// A flat inline list holds `MAX_INLINE_EXTENTS` extents. Past that the node
+/// becomes depth 1: the inline entries are `EfsExtentIndex` entries, each
+/// naming a leaf block holding up to `entries_per_node(block_size)` extents.
+///
+/// `emit_leaf(index, node)` is handed each finished leaf node in tree order and
+/// answers with the block it now lives on, so the caller owns both allocation
+/// and the write: the driver reuses the blocks the inode already holds, and
+/// `efs-mkfs` allocates fresh ones near the file. `runs` past
+/// `max_extents(block_size)` is a caller error and panics; both callers reject
+/// it first with an error of their own.
+pub fn build_extent_tree<E>(
+    data_area: &mut [u8; INODE_DATA_AREA_SIZE],
+    runs: &[EfsExtent],
+    block_size: usize,
+    mut emit_leaf: impl FnMut(usize, &[u8]) -> Result<u64, E>,
+) -> Result<usize, E> {
+    assert!(runs.len() <= max_extents(block_size));
+    let per_leaf = entries_per_node(block_size);
+    *data_area = [0u8; INODE_DATA_AREA_SIZE];
+
+    if runs.len() <= MAX_INLINE_EXTENTS {
+        write_node_header(
+            data_area,
+            &EfsExtentHeader {
+                magic: EXTENT_MAGIC,
+                entries: runs.len() as u16,
+                max_entries: MAX_INLINE_EXTENTS as u16,
+                depth: 0,
+                reserved: 0,
+            },
+        );
+        for (i, ext) in runs.iter().enumerate() {
+            write_node_entry(data_area, i, ext);
+        }
+        return Ok(0);
+    }
+
+    let leaf_count = runs.len().div_ceil(per_leaf);
+    write_node_header(
+        data_area,
+        &EfsExtentHeader {
+            magic: EXTENT_MAGIC,
+            entries: leaf_count as u16,
+            max_entries: MAX_INLINE_EXTENTS as u16,
+            depth: 1,
+            reserved: 0,
+        },
+    );
+
+    let mut node: Vec<u8> = vec![0u8; block_size];
+    for (i, chunk) in runs.chunks(per_leaf).enumerate() {
+        node.fill(0);
+        write_node_header(
+            &mut node,
+            &EfsExtentHeader {
+                magic: EXTENT_MAGIC,
+                entries: chunk.len() as u16,
+                max_entries: per_leaf as u16,
+                depth: 0,
+                reserved: 0,
+            },
+        );
+        for (j, ext) in chunk.iter().enumerate() {
+            write_node_entry(&mut node, j, ext);
+        }
+        let leaf_block = emit_leaf(i, &node)?;
+
+        write_node_entry(
+            data_area,
+            i,
+            &EfsExtentIndex {
+                logical_block: chunk[0].logical_block,
+                reserved: 0,
+                leaf_hi: (leaf_block >> 32) as u16,
+                leaf_lo: leaf_block as u32,
+            },
+        );
+    }
+
+    Ok(leaf_count)
 }
