@@ -415,7 +415,7 @@ fn main() {
                 break;
             }
             let mut buf = [0u8; 1];
-            if sys_read(0, &mut buf) <= 0 {
+            if sys_read(0, &mut buf).unwrap_or(0) == 0 {
                 restore();
                 return;
             }

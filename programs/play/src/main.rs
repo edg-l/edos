@@ -136,19 +136,16 @@ fn main() {
     );
 
     // Open /dev/dsp
-    let dsp_fd = eio::open("/dev/dsp", 0);
-    if dsp_fd < 0 {
+    let Ok(dsp_fd) = eio::open("/dev/dsp", 0) else {
         eprintln!("play: cannot open /dev/dsp");
         process::exit(1);
-    }
-    let dsp_fd = dsp_fd as u64;
+    };
 
     // Set format: pack sample_rate | (bits << 16) | (channels << 24)
     let format_arg = wav.sample_rate as u64
         | ((wav.bits_per_sample as u64) << 16)
         | ((wav.channels as u64) << 24);
-    let ret = eio::ioctl(dsp_fd, AUDIO_IOCTL_SET_FORMAT, format_arg);
-    if ret < 0 {
+    if eio::ioctl(dsp_fd, AUDIO_IOCTL_SET_FORMAT, format_arg).is_err() {
         eprintln!(
             "play: unsupported format ({}Hz/{}bit/{}ch)",
             wav.sample_rate, wav.bits_per_sample, wav.channels
@@ -175,7 +172,7 @@ fn main() {
     }
 
     // Wait for playback to complete
-    eio::ioctl(dsp_fd, AUDIO_IOCTL_DRAIN, 0);
+    let _ = eio::ioctl(dsp_fd, AUDIO_IOCTL_DRAIN, 0);
 
     println!("Done.");
 }

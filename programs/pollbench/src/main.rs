@@ -70,11 +70,11 @@ fn time_poll(fds: &mut [SelectFd], iters: u32) -> f64 {
     // Warm the path so the first call's page faults and cache misses do not
     // land in the measurement.
     for _ in 0..64 {
-        poll(fds, 0);
+        let _ = poll(fds, 0);
     }
     let t0 = Instant::now();
     for _ in 0..iters {
-        poll(fds, 0);
+        let _ = poll(fds, 0);
     }
     t0.elapsed().as_nanos() as f64 / iters as f64
 }
@@ -241,15 +241,15 @@ fn main() {
             std::process::exit(1);
         }
         full[0].result = PollState::default();
-        poll(&mut full, 0);
+        let _ = poll(&mut full, 0);
         if !full[0].result.writable {
             out.line("pollbench: a drained pipe did not report writable");
             std::process::exit(1);
         }
         out.line("pollbench pipe POLLOUT ok: full is not writable, drained is");
 
-        close(r);
-        close(w);
+        let _ = close(r);
+        let _ = close(w);
     }
 
     let max = *COUNTS.iter().max().unwrap();
@@ -299,7 +299,7 @@ fn main() {
     out.line("pollbench total done");
 
     for (r, w) in ready_pairs.into_iter().chain(idle_pairs) {
-        close(r);
-        close(w);
+        let _ = close(r);
+        let _ = close(w);
     }
 }

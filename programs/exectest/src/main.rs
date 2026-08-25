@@ -150,7 +150,7 @@ fn stage2(args: &[String]) -> ! {
     // An inheritable descriptor is still open and still refers to the same file.
     let mut buf = [0u8; 5];
     let n = edos_lib::io::pread(inherited_fd, &mut buf, 0);
-    if n != 5 || &buf != b"hello" {
+    if n != Ok(5) || &buf != b"hello" {
         std::process::exit(BAD_INHERITED_FD);
     }
 

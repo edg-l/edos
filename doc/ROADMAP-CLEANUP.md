@@ -189,20 +189,24 @@ genuine values (byte totals, a dropped-record count, an errno a `NetError`
 already carries), not failures in disguise, and those modules already answer
 `Option` or `bool` where they can fail.
 
-**Still open.** The rest of `io.rs`: the descriptor group (`open`, `openat`,
-`close`, `sys_read`, `sys_write`, `pread`, `pwrite`, `readv`, `writev`,
-`ioctl`, `set_winsize`, `poll`, `mmap`, `munmap`), which is where the call-site
-weight is, and C3's `mem.rs`. `io.rs:587` still converts a real `is_err` check
-back into `u64::MAX`. Two shapes are not covered by the rule
-and were left alone in `process.rs`: `close` answers `i32` and `waitpid` answers
-`-1` for a failed wait, neither of which is `i64`, `isize` or a sentinel `u64`.
+`io.rs`'s descriptor group is done as well: `open`, `openat` and `mmap` answer
+`Result<u64, Errno>`, `ioctl` answers the request's own `Result<u64, Errno>`,
+`close`, `munmap` and `set_winsize` answer `Result<(), Errno>`, and `sys_read`,
+`sys_write`, `pread`, `pwrite`, `readv`, `writev` and `poll` answer
+`Result<usize, Errno>`. `mmap` no longer collapses a negated errno to `!0`, so
+the last `u64::MAX` in the module is gone. Two shapes are not covered by the
+rule and were left alone in `process.rs`: `close` there answers `i32` and
+`waitpid` answers `-1` for a failed wait, neither of which is `i64`, `isize` or
+a sentinel `u64`.
 
-**Fix.** `i64` and `isize` returns become `Result<usize, Errno>`; `u64` sentinel
-returns become `Option<u64>` or, where the code is available, `Result<u64,
-Errno>`.
+The `-> i64` and `-> u64` signatures counted here in `mounts.rs`, `net.rs`,
+`procinfo.rs`, `profile.rs` and `trace.rs` are genuine values (byte totals, a
+dropped-record count, an errno a `NetError` already carries), not failures in
+disguise, and those modules already answer `Option` or `bool` where they can
+fail. `mem.rs` returns `i32`, which C3 covers.
 
-**Done when** no `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a
-sentinel `u64`.
+**Done.** No `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a sentinel
+`u64`.
 
 ### C2. There is no argument parser, so 110 programs each wrote one (S2, E2)
 

@@ -494,8 +494,7 @@ pub fn open_redirects(redirects: &Redirects) -> Option<OpenRedirects> {
     for op in &redirects.ops {
         match op {
             RedirOp::File { fd, path, mode } => {
-                let opened = edos_lib::io::open(path, mode.open_flags());
-                if opened < 0 {
+                let Ok(opened) = edos_lib::io::open(path, mode.open_flags()) else {
                     if *mode == RedirMode::Read {
                         eprintln!("{}: cannot open for reading", path);
                     } else {
@@ -503,9 +502,9 @@ pub fn open_redirects(redirects: &Redirects) -> Option<OpenRedirects> {
                     }
                     open.close();
                     return None;
-                }
-                open.opened.push(opened as u64);
-                open.slots[*fd] = StdioSlot::Fd(opened as u64);
+                };
+                open.opened.push(opened);
+                open.slots[*fd] = StdioSlot::Fd(opened);
             }
             RedirOp::Dup { fd, from } => open.slots[*fd] = open.slots[*from],
         }

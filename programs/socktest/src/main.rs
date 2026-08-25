@@ -54,7 +54,7 @@ fn wait_writable(fd: u64, timeout_ms: u64) -> PollState {
         },
         result: PollState::default(),
     }];
-    io::poll(&mut fds, timeout_ms);
+    let _ = io::poll(&mut fds, timeout_ms);
     fds[0].result
 }
 

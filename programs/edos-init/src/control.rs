@@ -249,27 +249,22 @@ pub fn serve(control: Arc<Control>) {
         return;
     }
 
-    let fd = io::open(CONTROL_FIFO, io::O_RDWR);
-    if fd < 0 {
-        eprintln!(
-            "init: {CONTROL_FIFO}: {:?}; no runtime control",
-            io::last_errno()
-        );
+    let Ok(fd) = io::open(CONTROL_FIFO, io::O_RDWR).inspect_err(|e| {
+        eprintln!("init: {CONTROL_FIFO}: {e:?}; no runtime control");
+    }) else {
         return;
-    }
-    let fd = fd as u64;
+    };
 
     let mut pending = String::new();
     let mut buf = [0u8; 512];
     loop {
-        let n = io::sys_read(fd, &mut buf);
-        if n <= 0 {
+        let Some(n) = io::sys_read(fd, &mut buf).ok().filter(|&n| n > 0) else {
             // O_RDWR means end of file cannot happen, so anything here is a
             // real error; backing off beats spinning on it.
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
-        }
-        pending.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+        };
+        pending.push_str(&String::from_utf8_lossy(&buf[..n]));
 
         while let Some(end) = pending.find('\n') {
             let line: String = pending.drain(..=end).collect();

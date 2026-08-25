@@ -52,11 +52,9 @@ enum UndoAction {
 fn read_key() -> Key {
     let mut buf = [0u8; 1];
     loop {
-        let n = sys_read(0, &mut buf);
-        if n <= 0 {
-            continue;
+        if sys_read(0, &mut buf).unwrap_or(0) > 0 {
+            break;
         }
-        break;
     }
 
     let b = buf[0];
@@ -68,16 +66,14 @@ fn read_key() -> Key {
         }
         // Read the bracket or letter.
         let mut seq = [0u8; 4];
-        let n = sys_read(0, &mut seq[..1]);
-        if n <= 0 {
+        if sys_read(0, &mut seq[..1]).unwrap_or(0) == 0 {
             return Key::Escape;
         }
         if seq[0] != b'[' {
             return Key::Escape;
         }
         // Read next byte.
-        let n = sys_read(0, &mut seq[1..2]);
-        if n <= 0 {
+        if sys_read(0, &mut seq[1..2]).unwrap_or(0) == 0 {
             return Key::Escape;
         }
         match seq[1] {
@@ -90,7 +86,7 @@ fn read_key() -> Key {
             b'3' => {
                 // Could be [3~ (Delete)
                 if poll_stdin(50) {
-                    let n = sys_read(0, &mut seq[2..3]);
+                    let n = sys_read(0, &mut seq[2..3]).unwrap_or(0);
                     if n > 0 && seq[2] == b'~' {
                         return Key::Delete;
                     }

@@ -10505,3 +10505,33 @@ lists all of them at once and turns the conversion into one pass.
 The two shapes the wrappers collapse to are `sys::sys_ok` and `sys::sys_count`
 in `programs/edos_lib/src/sys.rs`; use them rather than writing
 `sys_result(ret).map(|_| ())` out again.
+
+## `edos_lib::io`'s descriptor group answers `Result`
+
+The last sentinel returns in `edos_lib` are gone. `open`, `openat` and `mmap`
+answer `Result<u64, Errno>`; `ioctl` answers the request's own value the same
+way; `close`, `munmap` and `set_winsize` answer `Result<(), Errno>`; `sys_read`,
+`sys_write`, `pread`, `pwrite`, `readv`, `writev` and `poll` answer
+`Result<usize, Errno>`. `mmap` used to fold a negated errno into `!0`, which is
+the one case where the sentinel was load-bearing rather than accidental: a
+caller that skipped the check mapped at an address the kernel never gave it.
+
+Two shapes that read like sentinels are not: `sys_read` answering `Ok(0)` means
+end of file (or nothing waiting on a non-blocking descriptor), not failure, so
+`n <= 0` becomes `.unwrap_or(0) == 0` and not `.is_err()`; and `poll` answering
+`Ok(0)` means the timeout expired first. Getting those two backwards turns a
+quiet end-of-input into a spin.
+
+The conversion touched 20 programs and about 180 call sites. `cargo +edos check
+--all-targets --keep-going` is the tool for it: `--keep-going` is what makes one
+pass enumerate every crate instead of stopping at the first, and `--all-targets`
+catches the `unused Result` warnings that a plain check does not, since
+`Result` is `#[must_use]` where a bare `i64` was not. Half a dozen call sites
+were discarding a return value the old signature let them ignore silently.
+
+`iotest` carried 104 of those sites and rewriting it by regex needs two guards:
+`write_vectored`/`read_vectored` are `std`'s and still answer a plain `usize`,
+so a blanket `!= N` → `!= Ok(N)` rewrite corrupts them, and a `let x = open(..)`
+whose guard is folded into `unwrap_or_else` leaves any later `x as i64` reading
+as a cast on the wrong type. Both were caught by the compiler, but only because
+the whole workspace was rechecked rather than the one crate being edited.

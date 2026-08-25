@@ -8,16 +8,18 @@ use crate::{
 pub use syscall_abi::{DirEntry, PollState, SelectFd, Stat};
 
 /// Poll a set of file descriptors with an optional timeout.
-/// Returns the number of ready file descriptors, or a negative error code.
-pub fn poll(fds: &mut [SelectFd], timeout_ms: u64) -> i64 {
-    unsafe {
+///
+/// Answers the number of descriptors that came ready, which is 0 when the
+/// timeout expired first.
+pub fn poll(fds: &mut [SelectFd], timeout_ms: u64) -> Result<usize, Errno> {
+    sys::sys_count(unsafe {
         sys::syscall3(
             sys::SYS_POLL,
             fds.as_mut_ptr() as u64,
             fds.len() as u64,
             timeout_ms,
-        ) as i64
-    }
+        )
+    })
 }
 
 /// Returns true if the file descriptor refers to a terminal.
@@ -43,17 +45,18 @@ pub const O_APPEND: u64 = 0x400;
 /// anywhere else the kernel refuses the open rather than ignoring the flag.
 pub const O_NONBLOCK: u64 = 0x800;
 
-/// Open a file. Returns a file descriptor on success, or negative on error.
+/// Open a file, answering its descriptor.
 ///
 /// Through [`openat`] with [`AT_FDCWD`]: the kernel no longer has a bare
 /// `open` entry point taking a NUL-terminated path, only the pointer+length
 /// form `openat` accepts.
-pub fn open(path: &str, flags: u64) -> i64 {
+pub fn open(path: &str, flags: u64) -> Result<u64, Errno> {
     openat(AT_FDCWD, path, flags)
 }
 
-/// The error code the last failing syscall set, for the wrappers here that
-/// report failure as a negative return rather than as a `Result`.
+/// The error code the last failing syscall set, for the calls that reach the
+/// kernel through `std` rather than through a wrapper here and so have no
+/// `Errno` of their own to report.
 pub fn last_errno() -> edos_rt::sys::Errno {
     edos_rt::sys::errno()
 }
@@ -65,9 +68,9 @@ pub fn last_errno_raw() -> u32 {
     unsafe { sys::syscall0(sys::SYS_ERRNO) as u32 }
 }
 
-/// Close a file descriptor. Returns 0 on success, or negative on error.
-pub fn close(fd: u64) -> i64 {
-    unsafe { sys::syscall1(sys::SYS_CLOSE, fd) as i64 }
+/// Close a file descriptor.
+pub fn close(fd: u64) -> Result<(), Errno> {
+    sys::sys_ok(unsafe { sys::syscall1(sys::SYS_CLOSE, fd) })
 }
 
 /// Read the entries of `path` into `buf`, starting at entry index `start`.
@@ -351,19 +354,19 @@ pub fn fstatat(dirfd: i64, path: &str, flags: u64) -> Option<Stat> {
     if rc == 0 { Some(out) } else { None }
 }
 
-/// Open a file relative to the directory descriptor `dirfd`. An absolute path
-/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory. `flags` are
-/// [`open`]'s. Returns a file descriptor, or negative on error.
-pub fn openat(dirfd: i64, path: &str, flags: u64) -> i64 {
-    unsafe {
+/// Open a file relative to the directory descriptor `dirfd`, answering its
+/// descriptor. An absolute path ignores `dirfd`, and [`AT_FDCWD`] names the
+/// working directory. `flags` are [`open`]'s.
+pub fn openat(dirfd: i64, path: &str, flags: u64) -> Result<u64, Errno> {
+    sys::sys_result(unsafe {
         sys::syscall4(
             sys::SYS_OPENAT,
             dirfd as u64,
             path.as_ptr() as u64,
             path.len() as u64,
             flags,
-        ) as i64
-    }
+        )
+    })
 }
 
 /// Create a directory relative to the directory descriptor `dirfd`.
@@ -421,15 +424,21 @@ pub fn unlinkat(dirfd: i64, path: &str, flags: u64) -> Result<(), Errno> {
 }
 
 /// Read from a file descriptor using a raw syscall.
-/// Returns bytes read, 0 for no data available, or negative for error/EOF.
-pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {
-    unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) as isize }
+///
+/// Answers the number of bytes read, which is 0 at end of file and on a
+/// non-blocking descriptor with nothing waiting.
+pub fn sys_read(fd: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+    sys::sys_count(unsafe {
+        sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64)
+    })
 }
 
-/// Write to a file descriptor using a raw syscall.
-/// Returns bytes written, or negative for error.
-pub fn sys_write(fd: u64, buf: &[u8]) -> isize {
-    unsafe { sys::syscall3(sys::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) as isize }
+/// Write to a file descriptor using a raw syscall, answering the number of
+/// bytes accepted.
+pub fn sys_write(fd: u64, buf: &[u8]) -> Result<usize, Errno> {
+    sys::sys_count(unsafe {
+        sys::syscall3(sys::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64)
+    })
 }
 
 /// Read at an explicit offset without moving the descriptor's own offset.
@@ -437,16 +446,16 @@ pub fn sys_write(fd: u64, buf: &[u8]) -> isize {
 /// Unlike `lseek` + `read`, this is safe to call from several threads sharing
 /// one descriptor: the offset is an argument rather than shared state. Only
 /// regular files support it; pipes, sockets and terminals return ESPIPE.
-pub fn pread(fd: u64, buf: &mut [u8], offset: u64) -> isize {
-    unsafe {
+pub fn pread(fd: u64, buf: &mut [u8], offset: u64) -> Result<usize, Errno> {
+    sys::sys_count(unsafe {
         sys::syscall4(
             sys::SYS_PREAD,
             fd,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
             offset,
-        ) as isize
-    }
+        )
+    })
 }
 
 /// One scatter/gather buffer, laid out as POSIX `struct iovec`.
@@ -465,35 +474,38 @@ fn iovecs(bufs: impl Iterator<Item = (*const u8, usize)>) -> Vec<IoVec> {
 }
 
 /// Read into several buffers with one syscall, filling each completely before
-/// moving to the next. Returns the total bytes read, which is short whenever an
-/// underlying read is, or a negative error code.
-pub fn readv(fd: u64, bufs: &mut [&mut [u8]]) -> isize {
+/// moving to the next. Answers the total bytes read, which is short whenever an
+/// underlying read is.
+pub fn readv(fd: u64, bufs: &mut [&mut [u8]]) -> Result<usize, Errno> {
     let iovs = iovecs(bufs.iter().map(|b| (b.as_ptr(), b.len())));
-    unsafe { sys::syscall3(sys::SYS_READV, fd, iovs.as_ptr() as u64, iovs.len() as u64) as isize }
+    sys::sys_count(unsafe {
+        sys::syscall3(sys::SYS_READV, fd, iovs.as_ptr() as u64, iovs.len() as u64)
+    })
 }
 
-/// Write several buffers in order with one syscall. Returns the total bytes
-/// written, short at the first underlying short write, or a negative error code.
-pub fn writev(fd: u64, bufs: &[&[u8]]) -> isize {
+/// Write several buffers in order with one syscall. Answers the total bytes
+/// written, short at the first underlying short write.
+pub fn writev(fd: u64, bufs: &[&[u8]]) -> Result<usize, Errno> {
     let iovs = iovecs(bufs.iter().map(|b| (b.as_ptr(), b.len())));
-    unsafe { sys::syscall3(sys::SYS_WRITEV, fd, iovs.as_ptr() as u64, iovs.len() as u64) as isize }
+    sys::sys_count(unsafe {
+        sys::syscall3(sys::SYS_WRITEV, fd, iovs.as_ptr() as u64, iovs.len() as u64)
+    })
 }
 
 /// Write at an explicit offset without moving the descriptor's own offset.
-pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> isize {
-    unsafe {
+pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> Result<usize, Errno> {
+    sys::sys_count(unsafe {
         sys::syscall4(
             sys::SYS_PWRITE,
             fd,
             buf.as_ptr() as u64,
             buf.len() as u64,
             offset,
-        ) as isize
-    }
+        )
+    })
 }
 
-/// Perform an ioctl on a file descriptor.
-/// Returns the ioctl result, or a negative error code.
+/// Perform an ioctl on a file descriptor, answering the request's own result.
 /// `ioctl(2)` with no buffer: `arg` is the value itself, not a pointer.
 ///
 /// The syscall takes five arguments, so all five are passed. A `syscall3` here
@@ -501,8 +513,8 @@ pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> isize {
 /// from whatever the caller happened to leave in them, and a stray
 /// `IOCTL_FLAG_READ` bit with a non-zero length sends a request that carries no
 /// buffer down the copy-in path, which rejects the null `arg` with `EFAULT`.
-pub fn ioctl(fd: u64, request: u64, arg: u64) -> i64 {
-    unsafe { sys::syscall5(sys::SYS_IOCTL, fd, request, arg, 0, 0) as i64 }
+pub fn ioctl(fd: u64, request: u64, arg: u64) -> Result<u64, Errno> {
+    sys::sys_result(unsafe { sys::syscall5(sys::SYS_IOCTL, fd, request, arg, 0, 0) })
 }
 
 pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
@@ -515,8 +527,8 @@ pub const PTY_IOCTL_GET_WINSIZE: u64 = 0x5005;
 ///
 /// Called by the terminal on resize. A full-screen program reads it back with
 /// [`get_winsize`] rather than assuming a size the terminal never promised.
-pub fn set_winsize(fd: u64, cols: u16, rows: u16) -> i64 {
-    ioctl(fd, PTY_IOCTL_SET_WINSIZE, (rows as u64) << 16 | cols as u64)
+pub fn set_winsize(fd: u64, cols: u16, rows: u16) -> Result<(), Errno> {
+    ioctl(fd, PTY_IOCTL_SET_WINSIZE, (rows as u64) << 16 | cols as u64).map(|_| ())
 }
 
 /// The character grid of the terminal behind `fd`, as (cols, rows).
@@ -524,37 +536,32 @@ pub fn set_winsize(fd: u64, cols: u16, rows: u16) -> i64 {
 /// `None` when the descriptor is not a pty, which is the case for a pipe or a
 /// file: a caller redirected somewhere without a size should pick its own.
 pub fn get_winsize(fd: u64) -> Option<(u16, u16)> {
-    let packed = ioctl(fd, PTY_IOCTL_GET_WINSIZE, 0);
-    if packed < 0 {
-        return None;
-    }
-    let packed = packed as u64;
+    let packed = ioctl(fd, PTY_IOCTL_GET_WINSIZE, 0).ok()?;
     Some(((packed & 0xFFFF) as u16, ((packed >> 16) & 0xFFFF) as u16))
 }
 
 /// Switch the PTY slave fd to raw mode (no echo, no line buffering).
 pub fn pty_set_raw(fd: u64) {
-    ioctl(fd, PTY_IOCTL_SET_RAW, 0);
+    let _ = ioctl(fd, PTY_IOCTL_SET_RAW, 0);
 }
 
 /// Switch the PTY slave fd to canonical mode (echo enabled, line buffering).
 pub fn pty_set_canonical(fd: u64) {
-    ioctl(fd, PTY_IOCTL_SET_CANONICAL, 0);
+    let _ = ioctl(fd, PTY_IOCTL_SET_CANONICAL, 0);
 }
 
-/// Map memory. Returns the mapped virtual address, or `!0` on error.
+/// Map memory, answering the mapped virtual address.
 ///
-/// A failing syscall returns a negated errno, which is a plausible-looking
-/// address; collapsing it to `!0` is what keeps this function's contract, and
-/// the code stays readable through [`errno`].
-pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, phys_addr: u64) -> u64 {
-    let ret = unsafe { sys::syscall5(sys::SYS_MMAP, addr, length, prot, flags, phys_addr) };
-    if sys::is_err(ret) { u64::MAX } else { ret }
+/// A failing syscall returns a negated errno, which is indistinguishable from a
+/// plausible address once it is in a `u64`; the `Result` is what keeps a caller
+/// from mapping at one.
+pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, phys_addr: u64) -> Result<u64, Errno> {
+    sys::sys_result(unsafe { sys::syscall5(sys::SYS_MMAP, addr, length, prot, flags, phys_addr) })
 }
 
-/// Unmap memory. Returns 0 on success.
-pub fn munmap(addr: u64, length: u64) -> i64 {
-    unsafe { sys::syscall2(sys::SYS_MUNMAP, addr, length) as i64 }
+/// Unmap memory.
+pub fn munmap(addr: u64, length: u64) -> Result<(), Errno> {
+    sys::sys_ok(unsafe { sys::syscall2(sys::SYS_MUNMAP, addr, length) })
 }
 
 /// Poll stdin for readability with the given timeout.
@@ -573,8 +580,7 @@ pub fn poll_readable(fd: u64, timeout_ms: u64) -> bool {
         },
         result: PollState::default(),
     }];
-    let result = poll(&mut fds, timeout_ms);
-    result > 0 && fds[0].result.readable
+    poll(&mut fds, timeout_ms).is_ok_and(|n| n > 0) && fds[0].result.readable
 }
 
 /// Publish `lines` to the kernel log, each prefixed with `tag`.

@@ -95,11 +95,13 @@ impl Input {
             return true;
         }
         let mut chunk = [0u8; 32];
-        let n = sys_read(0, &mut chunk);
-        if n <= 0 {
+        let Ok(n) = sys_read(0, &mut chunk) else {
+            return false;
+        };
+        if n == 0 {
             return false;
         }
-        self.buf.extend(&chunk[..n as usize]);
+        self.buf.extend(&chunk[..n]);
         true
     }
 

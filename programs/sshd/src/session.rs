@@ -230,7 +230,7 @@ impl<'a> Session<'a> {
                 });
             }
 
-            if poll(&mut fds, POLL_INTERVAL) < 0 {
+            if poll(&mut fds, POLL_INTERVAL).is_err() {
                 return Err(Error::Io("poll failed"));
             }
 
@@ -407,7 +407,7 @@ impl<'a> Session<'a> {
                     if let Some(child) = c.child.as_ref()
                         && child.is_pty
                     {
-                        set_winsize(child.write_fd, cols, rows);
+                        let _ = set_winsize(child.write_fd, cols, rows);
                     }
                 }
                 // RFC 4254 §6.7: window-change never gets a reply.
@@ -445,7 +445,7 @@ impl<'a> Session<'a> {
                 let Some((master_fd, slave_fd)) = process::openpty() else {
                     return Ok(false);
                 };
-                set_winsize(slave_fd, pty.cols, pty.rows);
+                let _ = set_winsize(slave_fd, pty.cols, pty.rows);
                 (slave_fd, slave_fd, master_fd, master_fd, true)
             }
             None => {

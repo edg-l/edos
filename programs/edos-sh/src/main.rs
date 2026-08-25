@@ -728,12 +728,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
 
     loop {
         let _poll_ready = poll_stdin(100);
-        let n = sys_read(0, &mut buf);
-
-        if n < 0 {
-            // EINTR from Ctrl+C or error: discard partial input, re-prompt
-            return None;
-        }
+        // EINTR from Ctrl+C or error: discard partial input, re-prompt.
+        let n = sys_read(0, &mut buf).ok()?;
         if n == 0 {
             continue;
         }
@@ -766,10 +762,10 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             let mut seq = [0u8; 2];
             if poll_stdin(20) {
                 let n = sys_read(0, &mut seq[..1]);
-                if n == 1 && seq[0] == b'[' && poll_stdin(20) {
+                if n == Ok(1) && seq[0] == b'[' && poll_stdin(20) {
                     {
                         let n = sys_read(0, &mut seq[1..2]);
-                        if n == 1 {
+                        if n == Ok(1) {
                             match seq[1] {
                                 b'A' => {
                                     // Up arrow
@@ -923,7 +919,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                     break;
                 }
                 let n = sys_read(0, &mut seq[got..got + 1]);
-                if n != 1 {
+                if n != Ok(1) {
                     break;
                 }
                 got += 1;

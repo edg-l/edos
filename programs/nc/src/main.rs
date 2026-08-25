@@ -280,11 +280,10 @@ fn relay(sock: u64, opts: &Options) -> i32 {
         } else {
             opts.quit_ms.min(opts.idle_ms)
         };
-        let ready = poll(&mut fds, timeout);
-        if ready < 0 {
+        let Ok(ready) = poll(&mut fds, timeout) else {
             eprintln!("nc: poll failed");
             return 1;
-        }
+        };
         if ready == 0 {
             return 0; // -w or -q expired
         }
@@ -321,14 +320,14 @@ fn relay(sock: u64, opts: &Options) -> i32 {
         }
 
         if stdin_open && (fds[1].result.readable || fds[1].result.hangup) {
-            let n = sys_read(0, &mut buf);
-            if n <= 0 {
+            let n = sys_read(0, &mut buf).unwrap_or(0);
+            if n == 0 {
                 stdin_open = false;
                 // Half-close: the peer sees end of input and can still answer.
                 let _ = net::shutdown(sock, net::SHUT_WR);
                 continue;
             }
-            if net::send_all(sock, &buf[..n as usize]).is_err() {
+            if net::send_all(sock, &buf[..n]).is_err() {
                 eprintln!("nc: send failed");
                 return 1;
             }

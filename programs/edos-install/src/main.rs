@@ -17,6 +17,7 @@ use std::path::Path;
 use std::process;
 
 use edos_lib::io::ioctl;
+use edos_lib::sys::Errno;
 
 /// Mirrors `kernel/src/fs/devfs/block.rs`.
 const BLOCK_IOCTL_FLUSH: u64 = 0x424B_0001;
@@ -68,7 +69,7 @@ fn fail(msg: &str) -> ! {
     process::exit(1);
 }
 
-fn device_ioctl(dev: &File, request: u64) -> i64 {
+fn device_ioctl(dev: &File, request: u64) -> Result<u64, Errno> {
     use std::os::fd::AsRawFd;
     ioctl(dev.as_raw_fd() as u64, request, 0)
 }
@@ -144,13 +145,12 @@ fn partitions_of(device_id: u64) -> Vec<(u64, [u8; 16])> {
 /// nothing about its id, and NVMe encodes a controller and a namespace number
 /// in a name whose id base is not in the name at all.
 fn device_id_for(dev: &File, path: &str) -> u64 {
-    let ret = device_ioctl(dev, BLOCK_IOCTL_DEVICE_ID);
-    if ret < 0 {
+    let Ok(ret) = device_ioctl(dev, BLOCK_IOCTL_DEVICE_ID) else {
         fail(&format!(
-            "{path} did not answer BLOCK_IOCTL_DEVICE_ID ({ret}); it is not a block device node"
+            "{path} did not answer BLOCK_IOCTL_DEVICE_ID; it is not a block device node"
         ));
-    }
-    ret as u64
+    };
+    ret
 }
 
 fn confirm(plan: &str) {
@@ -198,7 +198,7 @@ fn main() {
 
     let device_id = device_id_for(&dev, &device_path);
 
-    if device_ioctl(&dev, BLOCK_IOCTL_IS_MOUNTED) == 1 {
+    if device_ioctl(&dev, BLOCK_IOCTL_IS_MOUNTED) == Ok(1) {
         fail(&format!(
             "{device_path} backs a mounted filesystem; refusing to touch it"
         ));
@@ -282,7 +282,7 @@ fn main() {
     .unwrap_or_else(|e| fail(&format!("failed to format the ESP: {e}")));
 
     // Push everything to the disk before the formatter reopens the device.
-    if device_ioctl(&dev, BLOCK_IOCTL_FLUSH) < 0 {
+    if device_ioctl(&dev, BLOCK_IOCTL_FLUSH).is_err() {
         fail("failed to flush the device");
     }
     drop(dev);
@@ -305,16 +305,15 @@ fn main() {
         .write(true)
         .open(&device_path)
         .unwrap_or_else(|e| fail(&format!("cannot reopen {device_path}: {e}")));
-    if device_ioctl(&dev, BLOCK_IOCTL_FLUSH) < 0 {
+    if device_ioctl(&dev, BLOCK_IOCTL_FLUSH).is_err() {
         fail("failed to flush the device");
     }
 
     lap("root formatted", &mut phase);
     println!("Re-reading the partition table...");
-    let found = device_ioctl(&dev, BLOCK_IOCTL_RESCAN);
-    if found < 0 {
+    let Ok(found) = device_ioctl(&dev, BLOCK_IOCTL_RESCAN) else {
         fail("failed to re-read the partition table");
-    }
+    };
     if found != 2 {
         fail(&format!(
             "expected 2 partitions after partitioning, kernel found {found}"
@@ -364,7 +363,7 @@ fn main() {
     if failed_sync_passes() > passes_before {
         fail("the kernel could not write every dirty page; the install is not durable");
     }
-    if device_ioctl(&dev, BLOCK_IOCTL_FLUSH) < 0 {
+    if device_ioctl(&dev, BLOCK_IOCTL_FLUSH).is_err() {
         fail("failed to flush the device");
     }
     lap("flushed", &mut phase);

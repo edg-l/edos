@@ -55,14 +55,8 @@ fn send(command: &str, name: &str) -> Result<(), String> {
     // O_NONBLOCK, so that a control FIFO left behind by an init that is no
     // longer running fails here instead of waiting forever for a reader that
     // is never going to arrive. That is the case POSIX gives ENXIO for.
-    let fd = io::open(CONTROL_FIFO, io::O_WRONLY | io::O_NONBLOCK);
-    if fd < 0 {
-        return Err(format!(
-            "{CONTROL_FIFO}: {:?}; is init running?",
-            io::last_errno()
-        ));
-    }
-    let fd = fd as u64;
+    let fd = io::open(CONTROL_FIFO, io::O_WRONLY | io::O_NONBLOCK)
+        .map_err(|e| format!("{CONTROL_FIFO}: {e:?}; is init running?"))?;
 
     // The flag governs the write too, so a control FIFO that init has stopped
     // draining reports EAGAIN rather than parking here. A short write is the
@@ -70,11 +64,9 @@ fn send(command: &str, name: &str) -> Result<(), String> {
     // line reaches init as a command it cannot parse.
     let line = format!("{command} {name}\n");
     let written = io::sys_write(fd, line.as_bytes());
-    io::close(fd);
-    if written < 0 {
-        return Err(format!("{CONTROL_FIFO}: {:?}", io::last_errno()));
-    }
-    if written as usize != line.len() {
+    let _ = io::close(fd);
+    let written = written.map_err(|e| format!("{CONTROL_FIFO}: {e:?}"))?;
+    if written != line.len() {
         return Err(format!(
             "{CONTROL_FIFO}: wrote {written} of {} bytes; is init reading?",
             line.len()

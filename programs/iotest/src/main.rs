@@ -18,6 +18,7 @@ use edos_lib::io::{
     pwrite, readlink, set_file_times, stat, symlink, truncate, utimensat,
 };
 use edos_lib::process;
+use edos_lib::sys::Errno;
 use edos_lib::time::{self, Timespec};
 
 const CHUNK: usize = 512;
@@ -54,14 +55,14 @@ fn test1(dir: &str) {
 
     let written = vec![0xABu8; CHUNK];
     let n = pwrite(fd, &written, (CHUNK * 2) as u64);
-    if n != CHUNK as isize {
-        fail(1, &format!("pwrite returned {}, expected {}", n, CHUNK));
+    if n != Ok(CHUNK) {
+        fail(1, &format!("pwrite returned {:?}, expected {}", n, CHUNK));
     }
 
     let mut got = vec![0u8; CHUNK];
     let n = pread(fd, &mut got, (CHUNK * 2) as u64);
-    if n != CHUNK as isize {
-        fail(1, &format!("pread returned {}, expected {}", n, CHUNK));
+    if n != Ok(CHUNK) {
+        fail(1, &format!("pread returned {:?}, expected {}", n, CHUNK));
     }
     if got != written {
         fail(1, "pread did not return what pwrite wrote");
@@ -119,7 +120,7 @@ fn test2(dir: &str) {
             for _ in 0..64 {
                 let mut buf = vec![0u8; CHUNK];
                 let n = pread(fd, &mut buf, (i * CHUNK) as u64);
-                if n != CHUNK as isize || buf.iter().any(|&b| b != pattern(i)) {
+                if n != Ok(CHUNK) || buf.iter().any(|&b| b != pattern(i)) {
                     bad += 1;
                 }
             }
@@ -160,15 +161,15 @@ fn test3() {
     let mut buf = [0u8; 16];
     // stdin is a terminal or a pipe here, never a regular file.
     let n = pread(0, &mut buf, 0);
-    if n >= 0 {
+    if n.is_ok() {
         fail(
             3,
-            &format!("pread on stdin returned {}, expected failure", n),
+            &format!("pread on stdin returned {:?}, expected failure", n),
         );
     }
     let n = pread(9999, &mut buf, 0);
-    if n >= 0 {
-        fail(3, &format!("pread on a closed fd returned {}", n));
+    if n.is_ok() {
+        fail(3, &format!("pread on a closed fd returned {:?}", n));
     }
     pass(3, "pread refused on a non-seekable fd and on a bad fd");
 }
@@ -449,10 +450,7 @@ fn test9(dir: &str) {
     // No path stamps the file the descriptor already names, which is the only
     // form reachable from a runtime that hands out descriptors and not names.
     const FUTIME: i64 = 1_200_000_000;
-    let fd = open(&path, 0);
-    if fd < 0 {
-        fail(9, "open for futimens failed");
-    }
+    let fd = open(&path, 0).unwrap_or_else(|_| fail(9, "open for futimens failed"));
     let times = [
         Timespec {
             tv_sec: FUTIME,
@@ -466,7 +464,7 @@ fn test9(dir: &str) {
     if futimens(fd as u64, Some(&times)).is_err() {
         fail(9, "futimens failed");
     }
-    close(fd as u64);
+    let _ = close(fd as u64);
     let got = stat(&path).unwrap_or_else(|| fail(9, "stat after futimens"));
     if got.modified != FUTIME as u64 {
         fail(9, "futimens did not stamp the modification time");
@@ -880,19 +878,14 @@ fn test13(dir: &str) {
     let _ = fs::remove_dir_all(&base);
     fs::create_dir(&base).unwrap_or_else(|e| fail(13, &format!("create dir: {}", e)));
 
-    let dirfd = open(&base, 0);
-    if dirfd < 0 {
-        fail(13, "cannot open a directory as a descriptor");
-    }
-    let dirfd = dirfd as u64;
+    let dirfd =
+        open(&base, 0).unwrap_or_else(|_| fail(13, "cannot open a directory as a descriptor"));
 
     // A relative name resolves against the descriptor, not the working
     // directory, so the file lands inside `base`.
-    let fd = openat(dirfd as i64, "made", 0x40 | 1);
-    if fd < 0 {
-        fail(13, "openat with O_CREAT failed");
-    }
-    if pwrite(fd as u64, b"at", 0) != 2 {
+    let fd = openat(dirfd as i64, "made", 0x40 | 1)
+        .unwrap_or_else(|_| fail(13, "openat with O_CREAT failed"));
+    if pwrite(fd as u64, b"at", 0) != Ok(2) {
         fail(13, "write through an openat descriptor failed");
     }
     close(fd as u64);
@@ -908,12 +901,10 @@ fn test13(dir: &str) {
 
     // An absolute path ignores dirfd entirely.
     let abs = format!("{}/made", base);
-    let fd = openat(dirfd as i64, &abs, 0);
-    if fd < 0 {
-        fail(13, "openat refused an absolute path");
-    }
+    let fd = openat(dirfd as i64, &abs, 0)
+        .unwrap_or_else(|_| fail(13, "openat refused an absolute path"));
     let mut buf = [0u8; 2];
-    if pread(fd as u64, &mut buf, 0) != 2 || &buf != b"at" {
+    if pread(fd as u64, &mut buf, 0) != Ok(2) || &buf != b"at" {
         fail(13, "read back the wrong contents through openat");
     }
     close(fd as u64);
@@ -943,15 +934,13 @@ fn test13(dir: &str) {
 
     // A descriptor that is not a directory, and one that is not open at all,
     // are both refused; AT_FDCWD keeps the working-directory meaning.
-    let filefd = open(&format!("{}/plain", base), 0x40 | 1);
-    if filefd < 0 {
-        fail(13, "cannot create a plain file");
-    }
-    if !failed(openat(filefd, "x", 0) as i64) {
+    let filefd = open(&format!("{}/plain", base), 0x40 | 1)
+        .unwrap_or_else(|_| fail(13, "cannot create a plain file"));
+    if openat(filefd as i64, "x", 0).is_ok() {
         fail(13, "openat accepted a descriptor that is not a directory");
     }
-    close(filefd as u64);
-    if !failed(openat(4242, "x", 0) as i64) {
+    close(filefd);
+    if openat(4242, "x", 0).is_ok() {
         fail(13, "openat accepted a closed descriptor");
     }
     if fstatat(AT_FDCWD, &base, 0).is_none() {
@@ -1100,8 +1089,8 @@ fn test15(dir: &str) {
     let f = File::open(&path).unwrap_or_else(|e| fail(15, &format!("open: {}", e)));
     let mut tail = [0u8; 64];
     let n = pread(f.as_raw_fd() as u64, &mut tail, body.len() as u64);
-    if n != 0 {
-        fail(15, &format!("pread past EOF returned {}, want 0", n));
+    if n != Ok(0) {
+        fail(15, &format!("pread past EOF returned {:?}, want 0", n));
     }
     drop(f);
 
@@ -1149,12 +1138,12 @@ fn test16(dir: &str) {
     let f = File::open(&path).unwrap_or_else(|e| fail(16, &format!("open: {}", e)));
     let mut mid = [0xAAu8; 512];
     let n = pread(f.as_raw_fd() as u64, &mut mid, 8192);
-    if n != 512 || mid.iter().any(|&b| b != 0) {
-        fail(16, &format!("pread inside the hole returned {}", n));
+    if n != Ok(512) || mid.iter().any(|&b| b != 0) {
+        fail(16, &format!("pread inside the hole returned {:?}", n));
     }
     let n = pread(f.as_raw_fd() as u64, &mut mid, GROWN as u64);
-    if n != 0 {
-        fail(16, &format!("pread past EOF returned {}, want 0", n));
+    if n != Ok(0) {
+        fail(16, &format!("pread past EOF returned {:?}, want 0", n));
     }
     drop(f);
 
@@ -1164,7 +1153,7 @@ fn test16(dir: &str) {
         .open(&path)
         .unwrap_or_else(|e| fail(16, &format!("open for write: {}", e)));
     let filled = [0x5Au8; 256];
-    if pwrite(f.as_raw_fd() as u64, &filled, 8192) != filled.len() as isize {
+    if pwrite(f.as_raw_fd() as u64, &filled, 8192) != Ok(filled.len()) {
         fail(16, "pwrite into a hole failed");
     }
     drop(f);
@@ -1204,16 +1193,13 @@ fn test17(dir: &str) {
     let _ = fs::remove_dir_all(&base);
     fs::create_dir(&base).unwrap_or_else(|e| fail(17, &format!("create dir: {}", e)));
 
-    let dirfd = open(&base, 0);
-    if dirfd < 0 {
-        fail(17, "cannot open a directory as a descriptor");
-    }
+    let dirfd = open(&base, 0)
+        .unwrap_or_else(|_| fail(17, "cannot open a directory as a descriptor"))
+        as i64;
 
-    let fd = openat(dirfd, "a", 0x40 | 1);
-    if fd < 0 {
-        fail(17, "openat with O_CREAT failed");
-    }
-    if pwrite(fd as u64, b"body", 0) != 4 {
+    let fd =
+        openat(dirfd, "a", 0x40 | 1).unwrap_or_else(|_| fail(17, "openat with O_CREAT failed"));
+    if pwrite(fd as u64, b"body", 0) != Ok(4) {
         fail(17, "write through an openat descriptor failed");
     }
     close(fd as u64);
@@ -1272,10 +1258,9 @@ fn test17(dir: &str) {
     if mkdirat(dirfd, "sub").is_err() {
         fail(17, "mkdirat failed");
     }
-    let subfd = open(&format!("{}/sub", base), 0);
-    if subfd < 0 {
-        fail(17, "cannot open the subdirectory as a descriptor");
-    }
+    let subfd = open(&format!("{}/sub", base), 0)
+        .unwrap_or_else(|_| fail(17, "cannot open the subdirectory as a descriptor"))
+        as i64;
     if renameat(dirfd, "a", subfd, "moved").is_err() {
         fail(17, "renameat across two descriptors failed");
     }
@@ -1328,10 +1313,10 @@ fn test18(dir: &str) {
     // An empty buffer contributes nothing and does not end the sequence.
     let parts: [&[u8]; 4] = [b"alpha", b"", b"-beta", b"-gamma"];
     let n = writev(fd, &parts);
-    if n != 16 {
-        fail(18, &format!("writev wrote {} bytes, want 16", n));
+    if n != Ok(16) {
+        fail(18, &format!("writev wrote {:?} bytes, want 16", n));
     }
-    if writev(fd, &[]) != 0 {
+    if writev(fd, &[]) != Ok(0) {
         fail(18, "writev of no buffers did not return 0");
     }
     file.sync_all()
@@ -1349,8 +1334,8 @@ fn test18(dir: &str) {
     {
         let mut bufs: [&mut [u8]; 3] = [&mut a, &mut b, &mut c];
         let n = readv(fd, &mut bufs);
-        if n != 16 {
-            fail(18, &format!("readv read {} bytes, want 16", n));
+        if n != Ok(16) {
+            fail(18, &format!("readv read {:?} bytes, want 16", n));
         }
     }
     if &a != b"alpha" || &b != b"-beta" || &c != b"-gamma" {
@@ -1365,8 +1350,8 @@ fn test18(dir: &str) {
     {
         let mut bufs: [&mut [u8]; 2] = [&mut head, &mut tail];
         let n = readv(fd, &mut bufs);
-        if n != 3 {
-            fail(18, &format!("readv near EOF read {} bytes, want 3", n));
+        if n != Ok(3) {
+            fail(18, &format!("readv near EOF read {:?} bytes, want 3", n));
         }
     }
     if &head != b"mm" || tail[0] != b'a' || tail[1..] != [0, 0, 0] {
@@ -1377,14 +1362,14 @@ fn test18(dir: &str) {
     let mut end = [0u8; 8];
     {
         let mut bufs: [&mut [u8]; 1] = [&mut end];
-        if readv(fd, &mut bufs) != 0 {
+        if readv(fd, &mut bufs) != Ok(0) {
             fail(18, "readv at EOF did not return 0");
         }
     }
 
     // More buffers than IOV_MAX is refused outright.
     let too_many: Vec<&[u8]> = vec![&b"x"[..]; 1025];
-    if !failed(writev(fd, &too_many) as i64) {
+    if writev(fd, &too_many).is_ok() {
         fail(18, "writev accepted more buffers than IOV_MAX");
     }
 
@@ -1485,7 +1470,7 @@ fn test19(dir: &str) {
         .write_vectored(&[IoSlice::new(b"one-"), IoSlice::new(b"two")])
         .unwrap_or_else(|e| fail(19, &format!("write_vectored: {}", e)));
     if n != 7 {
-        fail(19, &format!("write_vectored wrote {}, want 7", n));
+        fail(19, &format!("write_vectored wrote {n}, want 7"));
     }
     file.seek(SeekFrom::Start(0))
         .unwrap_or_else(|e| fail(19, &format!("seek: {}", e)));
@@ -1533,22 +1518,19 @@ fn test20(dir: &str) {
     let empty: [u8; 0] = [];
     let mut empty_out: [u8; 0] = [];
 
-    let cases: [(&str, isize); 6] = [
+    let cases: [(&str, Result<usize, Errno>); 6] = [
         ("read", edos_lib::io::sys_read(CLOSED, &mut empty_out)),
-        ("write", to_isize(process::write(CLOSED, &empty))),
+        ("write", process::write(CLOSED, &empty)),
         ("pread", pread(CLOSED, &mut empty_out, 0)),
         ("pwrite", pwrite(CLOSED, &empty, 0)),
         ("readv", edos_lib::io::readv(CLOSED, &mut [])),
         ("writev", edos_lib::io::writev(CLOSED, &[])),
     ];
     for (name, ret) in cases {
-        if ret >= 0 {
+        if let Ok(n) = ret {
             fail(
                 20,
-                &format!(
-                    "{}(closed fd, 0 bytes) returned {}, want failure",
-                    name, ret
-                ),
+                &format!("{name}(closed fd, 0 bytes) returned {n}, want failure"),
             );
         }
     }
@@ -1565,19 +1547,19 @@ fn test20(dir: &str) {
         .unwrap_or_else(|e| fail(20, &format!("create: {}", e)));
     let fd = file.as_raw_fd() as u64;
 
-    let cases: [(&str, isize); 6] = [
+    let cases: [(&str, Result<usize, Errno>); 6] = [
         ("read", edos_lib::io::sys_read(fd, &mut empty_out)),
-        ("write", to_isize(process::write(fd, &empty))),
+        ("write", process::write(fd, &empty)),
         ("pread", pread(fd, &mut empty_out, 0)),
         ("pwrite", pwrite(fd, &empty, 0)),
         ("readv", edos_lib::io::readv(fd, &mut [])),
         ("writev", edos_lib::io::writev(fd, &[])),
     ];
     for (name, ret) in cases {
-        if ret != 0 {
+        if ret != Ok(0) {
             fail(
                 20,
-                &format!("{}(open fd, 0 bytes) returned {}, want 0", name, ret),
+                &format!("{name}(open fd, 0 bytes) returned {ret:?}, want 0"),
             );
         }
     }
@@ -1600,7 +1582,7 @@ fn writable(fd: u64) -> bool {
         },
         result: Default::default(),
     }];
-    edos_lib::io::poll(&mut fds, 0);
+    let _ = edos_lib::io::poll(&mut fds, 0);
     fds[0].result.writable
 }
 
@@ -1648,15 +1630,15 @@ fn test21() {
     // would never wake: the bound has to be a wait, not a wall.
     let mut sink = [0u8; CHUNK];
     let drained = edos_lib::io::sys_read(master, &mut sink);
-    if drained <= 0 {
-        fail(21, &format!("read from the master returned {}", drained));
+    if drained.unwrap_or(0) == 0 {
+        fail(21, &format!("read from the master returned {drained:?}"));
     }
     if !writable(slave) {
         fail(21, "a drained terminal still reports itself full");
     }
 
-    close(master);
-    close(slave);
+    let _ = close(master);
+    let _ = close(slave);
     pass(
         21,
         &format!("a terminal bounds its output at {} bytes", accepted),
@@ -1690,55 +1672,46 @@ fn test22(dir: &str) {
     let writer_path = path.clone();
     let writer = thread::spawn(move || {
         // Blocks here until the reader below opens its end.
-        let fd = open(&writer_path, edos_lib::io::O_WRONLY);
-        if fd < 0 {
-            return -1i64;
-        }
-        let n = to_isize(process::write(fd as u64, MESSAGE));
-        close(fd as u64);
-        n as i64
+        let Ok(fd) = open(&writer_path, edos_lib::io::O_WRONLY) else {
+            return None;
+        };
+        let n = process::write(fd, MESSAGE).ok();
+        let _ = close(fd);
+        n
     });
 
-    let fd = open(&path, edos_lib::io::O_RDONLY);
-    if fd < 0 {
-        fail(
-            22,
-            &format!("open for reading: {:?}", edos_lib::io::last_errno()),
-        );
-    }
+    let fd = open(&path, edos_lib::io::O_RDONLY)
+        .unwrap_or_else(|e| fail(22, &format!("open for reading: {e:?}")));
     let mut buf = [0u8; 64];
-    let n = edos_lib::io::sys_read(fd as u64, &mut buf);
-    if n <= 0 {
-        fail(22, &format!("read from the fifo returned {}", n));
+    let n = edos_lib::io::sys_read(fd, &mut buf).unwrap_or(0);
+    if n == 0 {
+        fail(22, "read from the fifo returned nothing");
     }
-    if &buf[..n as usize] != MESSAGE {
-        fail(
-            22,
-            &format!("read {:?}, want {:?}", &buf[..n as usize], MESSAGE),
-        );
+    if &buf[..n] != MESSAGE {
+        fail(22, &format!("read {:?}, want {:?}", &buf[..n], MESSAGE));
     }
 
     // With the writer gone the read reports end of file rather than waiting,
     // which is what tells a reader the transfer is over.
-    let eof = edos_lib::io::sys_read(fd as u64, &mut buf);
-    if eof != 0 {
+    let eof = edos_lib::io::sys_read(fd, &mut buf);
+    if eof != Ok(0) {
         fail(
             22,
-            &format!("after the writer closed, read returned {}", eof),
+            &format!("after the writer closed, read returned {eof:?}"),
         );
     }
-    close(fd as u64);
+    let _ = close(fd);
 
-    let written = writer.join().unwrap_or(-1);
-    if written != MESSAGE.len() as i64 {
-        fail(22, &format!("the writer reported {} bytes", written));
+    let written = writer.join().ok().flatten();
+    if written != Some(MESSAGE.len()) {
+        fail(22, &format!("the writer reported {written:?} bytes"));
     }
 
     // Opening a FIFO for writing with nobody reading is ENXIO, not a wait: it
     // is what lets a control client fail instead of hanging on a dead server.
     let refused = open(&path, edos_lib::io::O_WRONLY | edos_lib::io::O_NONBLOCK);
-    if refused >= 0 {
-        close(refused as u64);
+    if let Ok(refused) = refused {
+        let _ = close(refused);
         fail(
             22,
             "a non-blocking write-only open succeeded with no reader",
@@ -1763,14 +1736,8 @@ fn test23(dir: &str) {
         fail(23, &format!("mkfifo: {:?}", edos_lib::io::last_errno()));
     }
 
-    let fd = open(&path, edos_lib::io::O_RDWR | edos_lib::io::O_NONBLOCK);
-    if fd < 0 {
-        fail(
-            23,
-            &format!("open O_RDWR|O_NONBLOCK: {:?}", edos_lib::io::last_errno()),
-        );
-    }
-    let fd = fd as u64;
+    let fd = open(&path, edos_lib::io::O_RDWR | edos_lib::io::O_NONBLOCK)
+        .unwrap_or_else(|e| fail(23, &format!("open O_RDWR|O_NONBLOCK: {e:?}")));
 
     // The open reported the flag, so a program that inherited the descriptor
     // can find out how it behaves rather than having to be told.
@@ -1784,10 +1751,10 @@ fn test23(dir: &str) {
 
     let mut buf = [0u8; 64];
     let empty = edos_lib::io::sys_read(fd, &mut buf);
-    if empty >= 0 {
+    if let Ok(n) = empty {
         fail(
             23,
-            &format!("a non-blocking read of an empty pipe returned {}", empty),
+            &format!("a non-blocking read of an empty pipe returned {n}"),
         );
     }
     if edos_lib::io::last_errno() != edos_lib::sys::Errno::EAGAIN {
@@ -1806,8 +1773,8 @@ fn test23(dir: &str) {
     if process::write(fd, MESSAGE) != Ok(MESSAGE.len()) {
         fail(23, "the non-blocking write of a short message was short");
     }
-    let n = edos_lib::io::sys_read(fd, &mut buf);
-    if n != MESSAGE.len() as isize || &buf[..n as usize] != MESSAGE {
+    let n = edos_lib::io::sys_read(fd, &mut buf).unwrap_or(0);
+    if n != MESSAGE.len() || &buf[..n] != MESSAGE {
         fail(
             23,
             &format!("read back {} bytes, want {}", n, MESSAGE.len()),
@@ -1858,11 +1825,11 @@ fn test23(dir: &str) {
     }
     // Blocking again, and there are 64 KiB waiting, so this cannot park.
     let mut sink = [0u8; 4096];
-    if edos_lib::io::sys_read(fd, &mut sink) <= 0 {
+    if edos_lib::io::sys_read(fd, &mut sink).unwrap_or(0) == 0 {
         fail(23, "a blocking read of a full pipe returned nothing");
     }
 
-    close(fd);
+    let _ = close(fd);
     let _ = fs::remove_file(&path);
     pass(
         23,
@@ -1876,17 +1843,6 @@ fn test23(dir: &str) {
 /// a failure and not only the legacy `-1`.
 /// A `Result` return read back as the raw convention, so a table of syscalls
 /// that report failure differently can still be checked in one loop.
-fn to_isize(r: Result<usize, edos_lib::sys::Errno>) -> isize {
-    match r {
-        Ok(n) => n as isize,
-        Err(e) => -(e as i64) as isize,
-    }
-}
-
-fn failed(ret: i64) -> bool {
-    edos_lib::sys::is_err(ret as u64)
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");

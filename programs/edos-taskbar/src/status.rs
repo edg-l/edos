@@ -295,15 +295,14 @@ impl StatusPopups {
 /// asynchronously, so a panel that opened it once at start would never see an
 /// audio device that arrived a moment later.
 fn dsp() -> Option<u64> {
-    let fd = eio::open("/dev/dsp", 0);
-    (fd >= 0).then_some(fd as u64)
+    eio::open("/dev/dsp", 0).ok()
 }
 
 fn read_volume() -> Option<u8> {
     let fd = dsp()?;
     let level = eio::ioctl(fd, AUDIO_IOCTL_GET_VOLUME, 0);
-    eio::close(fd);
-    (level >= 0).then(|| level.min(100) as u8)
+    let _ = eio::close(fd);
+    Some(level.ok()?.min(100) as u8)
 }
 
 fn write_volume(level: u8) -> bool {
@@ -311,8 +310,8 @@ fn write_volume(level: u8) -> bool {
         return false;
     };
     let result = eio::ioctl(fd, AUDIO_IOCTL_SET_VOLUME, level as u64);
-    eio::close(fd);
-    result >= 0
+    let _ = eio::close(fd);
+    result.is_ok()
 }
 
 /// The interface fields worth showing, in the order they are worth reading.

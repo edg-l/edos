@@ -237,8 +237,8 @@ pub fn write_positional(dir: &str, chunk: usize, budget: Budget) -> Report {
     while run.keep_going() {
         let buf = pattern_buf(chunk as u64, offset, chunk);
         let done = run.op(chunk as u64, || match pwrite(fd, &buf, offset) {
-            n if n == chunk as isize => Ok(()),
-            n => Err(format!("pwrite returned {n}, expected {chunk}")),
+            n if n == Ok(chunk) => Ok(()),
+            n => Err(format!("pwrite returned {n:?}, expected {chunk}")),
         });
         if done.is_none() {
             break;
@@ -319,8 +319,8 @@ pub fn write_random(dir: &str, file_bytes: u64, budget: Budget) -> Report {
         let offset = rng.below(blocks) * BLOCK as u64;
         let buf = pattern_buf(BLOCK as u64, offset, BLOCK);
         let done = run.op(BLOCK as u64, || match pwrite(fd, &buf, offset) {
-            n if n == BLOCK as isize => Ok(()),
-            n => Err(format!("pwrite returned {n}")),
+            n if n == Ok(BLOCK) => Ok(()),
+            n => Err(format!("pwrite returned {n:?}")),
         });
         if done.is_none() {
             break;
@@ -457,8 +457,8 @@ pub fn read_positional(dir: &str, chunk: usize, budget: Budget) -> Report {
             offset = 0;
         }
         let done = run.op(chunk as u64, || match pread(fd, &mut buf, offset) {
-            n if n == chunk as isize => Ok(()),
-            n => Err(format!("pread returned {n}, expected {chunk}")),
+            n if n == Ok(chunk) => Ok(()),
+            n => Err(format!("pread returned {n:?}, expected {chunk}")),
         });
         if done.is_none() {
             break;
@@ -494,8 +494,8 @@ pub fn read_random(dir: &str, budget: Budget) -> Report {
     while run.keep_going() {
         let offset = rng.below(blocks) * BLOCK as u64;
         let done = run.op(BLOCK as u64, || match pread(fd, &mut buf, offset) {
-            n if n == BLOCK as isize => Ok(()),
-            n => Err(format!("pread returned {n}")),
+            n if n == Ok(BLOCK) => Ok(()),
+            n => Err(format!("pread returned {n:?}")),
         });
         if done.is_none() {
             break;
@@ -684,8 +684,8 @@ pub fn raw_read(device: &str, chunk: usize, skip: u64, span: u64, budget: Budget
         }
         let at = offset;
         let done = run.op(chunk as u64, || match pread(fd, &mut buf, at) {
-            n if n == chunk as isize => Ok(()),
-            n => Err(format!("pread at {at} returned {n}")),
+            n if n == Ok(chunk) => Ok(()),
+            n => Err(format!("pread at {at} returned {n:?}")),
         });
         if done.is_none() {
             break;
@@ -735,8 +735,8 @@ pub fn raw_write(device: &str, chunk: usize, skip: u64, span: u64, budget: Budge
         let at = offset;
         let buf = pattern_buf(chunk as u64, at, chunk);
         let done = run.op(chunk as u64, || match pwrite(fd, &buf, at) {
-            n if n == chunk as isize => Ok(()),
-            n => Err(format!("pwrite at {at} returned {n}")),
+            n if n == Ok(chunk) => Ok(()),
+            n => Err(format!("pwrite at {at} returned {n:?}")),
         });
         if done.is_none() {
             break;

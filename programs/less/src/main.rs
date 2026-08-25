@@ -126,13 +126,13 @@ enum Key {
 /// into the key it stands for.
 fn read_key(fd: u64) -> Option<Key> {
     let mut buf = [0u8; 1];
-    if sys_read(fd, &mut buf) <= 0 {
+    if sys_read(fd, &mut buf).unwrap_or(0) == 0 {
         return None;
     }
     if buf[0] != 0x1b {
         return Some(Key::Byte(buf[0]));
     }
-    if !poll_readable(fd, ESCAPE_WAIT_MS) || sys_read(fd, &mut buf) <= 0 {
+    if !poll_readable(fd, ESCAPE_WAIT_MS) || sys_read(fd, &mut buf).unwrap_or(0) == 0 {
         return Some(Key::Escape);
     }
     // Both CSI (`\x1b[`) and the application cursor keys (`\x1bO`) address the
@@ -142,7 +142,7 @@ fn read_key(fd: u64) -> Option<Key> {
     }
     let mut params = String::new();
     loop {
-        if sys_read(fd, &mut buf) <= 0 {
+        if sys_read(fd, &mut buf).unwrap_or(0) == 0 {
             return Some(Key::Escape);
         }
         let c = buf[0] as char;
