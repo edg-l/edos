@@ -90,7 +90,7 @@ use crate::thread::scheduler::{
 };
 
 /// Set the caller's errno and return the `-1` every failing syscall reports.
-fn fail_with(errno: Errno) -> u64 {
+pub(super) fn fail_with(errno: Errno) -> u64 {
     current_thread_info().lock().errno = errno;
     !0u64
 }

@@ -24,7 +24,7 @@ use crate::{
     debug::lock_order::RANK_TRACE_RING,
     memory::vma::USER_VA_END,
     ranked_lock,
-    syscalls::{Errno, SyscallContext, table},
+    syscalls::{Errno, SyscallContext, fail_with, table},
     thread::{
         preempt::PreemptSpinlock,
         scheduler::{current_thread_id, current_thread_info},
@@ -372,24 +372,19 @@ fn end_session() {
     WAITQ.wake_all();
 }
 
-fn fail(errno: Errno) -> u64 {
-    current_thread_info().lock().errno = errno;
-    !0u64
-}
-
 /// Mark or unmark one thread. `tid` of 0 means the caller.
 fn set_mark(tid: u64, generation: u64) -> u64 {
     let tid = if tid == 0 {
         match current_thread_id() {
             Some(id) => id.0,
-            None => return fail(Errno::EINVAL),
+            None => return fail_with(Errno::EINVAL),
         }
     } else {
         tid
     };
 
     let Some(thread) = get_thread_by_id(ThreadId(tid)) else {
-        return fail(Errno::ENOENT);
+        return fail_with(Errno::ENOENT);
     };
     thread.traced.store(generation, Ordering::Relaxed);
     0
@@ -400,7 +395,7 @@ pub fn sys_trace_ctl(op: u64, arg: u64) -> u64 {
     info.lock().errno = Errno::Clear;
 
     let Some(caller) = current_thread_id() else {
-        return fail(Errno::EINVAL);
+        return fail_with(Errno::EINVAL);
     };
 
     match op {
@@ -409,7 +404,7 @@ pub fn sys_trace_ctl(op: u64, arg: u64) -> u64 {
             // never held across the allocator.
             let mut buf = Vec::new();
             if buf.try_reserve_exact(RING_CAP).is_err() {
-                return fail(Errno::ENOMEM);
+                return fail_with(Errno::ENOMEM);
             }
             buf.resize(RING_CAP, TraceRecord::zeroed());
 
@@ -422,7 +417,7 @@ pub fn sys_trace_ctl(op: u64, arg: u64) -> u64 {
                 .is_err()
             {
                 drop(guard);
-                return fail(Errno::EBUSY);
+                return fail_with(Errno::EBUSY);
             }
 
             DROPPED.store(0, Ordering::Relaxed);
@@ -440,7 +435,7 @@ pub fn sys_trace_ctl(op: u64, arg: u64) -> u64 {
         }
         ctl::RELEASE => {
             if TRACER_TID.load(Ordering::Acquire) != caller.0 {
-                return fail(Errno::EPERM);
+                return fail_with(Errno::EPERM);
             }
             end_session();
             0
@@ -452,12 +447,12 @@ pub fn sys_trace_ctl(op: u64, arg: u64) -> u64 {
             // without racing the tracer's attach.
             let owner = TRACER_TID.load(Ordering::Acquire);
             if owner == 0 {
-                return fail(Errno::EPERM);
+                return fail_with(Errno::EPERM);
             }
             // A tracer that traces itself records two calls per `trace_read`,
             // so the ring never drains to empty and the trace is all tracer.
             if arg == owner || (arg == 0 && caller.0 == owner) {
-                return fail(Errno::EINVAL);
+                return fail_with(Errno::EINVAL);
             }
             set_mark(arg, TRACE_GEN.load(Ordering::Relaxed))
         }
@@ -465,12 +460,12 @@ pub fn sys_trace_ctl(op: u64, arg: u64) -> u64 {
         // process blind a live trace one thread at a time.
         ctl::UNMARK => {
             if TRACER_TID.load(Ordering::Acquire) != caller.0 {
-                return fail(Errno::EPERM);
+                return fail_with(Errno::EPERM);
             }
             set_mark(arg, 0)
         }
         ctl::DROPPED => DROPPED.load(Ordering::Relaxed),
-        _ => fail(Errno::EINVAL),
+        _ => fail_with(Errno::EINVAL),
     }
 }
 
@@ -487,7 +482,7 @@ pub fn sys_trace_read(dst: *mut TraceRecord, max: u64, timeout_ms: u64) -> u64 {
     info.lock().errno = Errno::Clear;
 
     if dst.is_null() || max == 0 {
-        return fail(Errno::EINVAL);
+        return fail_with(Errno::EINVAL);
     }
     let max = (max as usize).min(MAX_READ_BATCH);
 
@@ -497,10 +492,10 @@ pub fn sys_trace_read(dst: *mut TraceRecord, max: u64, timeout_ms: u64) -> u64 {
     // `push_back` panics the kernel past `WAITQUEUE_CAP` waiters. With this
     // check the queue depth is one.
     let Some(caller) = current_thread_id() else {
-        return fail(Errno::EINVAL);
+        return fail_with(Errno::EINVAL);
     };
     if TRACER_TID.load(Ordering::Acquire) != caller.0 {
-        return fail(Errno::EPERM);
+        return fail_with(Errno::EPERM);
     }
 
     if AVAILABLE.load(Ordering::Acquire) == 0 && timeout_ms > 0 {
@@ -515,13 +510,13 @@ pub fn sys_trace_read(dst: *mut TraceRecord, max: u64, timeout_ms: u64) -> u64 {
 
     let mut batch: Vec<TraceRecord> = Vec::new();
     if batch.try_reserve_exact(max).is_err() {
-        return fail(Errno::ENOMEM);
+        return fail_with(Errno::ENOMEM);
     }
 
     {
         let mut guard = ranked_lock!(RANK_TRACE_RING, "trace::read", RING);
         let Some(ring) = guard.as_mut() else {
-            return fail(Errno::EPERM);
+            return fail_with(Errno::EPERM);
         };
         while batch.len() < max {
             match ring.pop() {
@@ -540,7 +535,7 @@ pub fn sys_trace_read(dst: *mut TraceRecord, max: u64, timeout_ms: u64) -> u64 {
     if !unsafe { try_copy_to_user(dst as *mut u8, batch.as_ptr() as *const u8, bytes) } {
         // The records are already out of the ring; a tracer that hands the
         // kernel an unwritable buffer loses them, which is its own doing.
-        return fail(Errno::EFAULT);
+        return fail_with(Errno::EFAULT);
     }
 
     batch.len() as u64

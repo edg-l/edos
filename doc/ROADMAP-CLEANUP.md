@@ -93,26 +93,11 @@ in `[-4095, -1]` is an error and anything else is a result"), seen from the
 kernel: every syscall body re-implements the protocol, so every syscall body can
 get it wrong, and 380 hand-written assignments is the surface area.
 
-### B1. `fail()` is copy-pasted (S2, E1)
-
-`kernel/src/syscalls/trace.rs:375` and `kernel/src/syscalls/profile.rs:14` are
-byte-identical:
-
-```rust
-fn fail(errno: Errno) -> u64 {
-    current_thread_info().lock().errno = errno;
-    !0u64
-}
-```
-
-Two files found the right helper independently and neither shared it. Promote it
-to `syscalls/mod.rs` and use it from both. Do this first: it is ten minutes and
-it is the seed of B2.
-
 ### B2. Syscall bodies should return `Result<u64, Errno>` (S2, E3)
 
 **Fix.** Every `sys_*` returns `Result<u64, Errno>`. One conversion in the
-dispatcher does what all 477 assignments do now: `Ok(v)` clears the errno and
+dispatcher does what all 477 assignments do now (`fail_with` in
+`syscalls/mod.rs` is the seed): `Ok(v)` clears the errno and
 returns `v`, `Err(e)` sets it and returns `!0u64`. The `?` operator then replaces
 every `match ... { Err(_) => { info.lock().errno = ...; return !0u64 } }` block
 in the tree.
