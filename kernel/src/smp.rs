@@ -35,6 +35,26 @@ static CPU_LAPIC_IDS: [AtomicU32; 64] = {
 /// Number of online CPUs (populated alongside CPU_LAPIC_IDS).
 static CPU_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// APs that have finished `ap_start` and are ready to run threads.
+///
+/// Distinct from `CPU_COUNT`, which an AP raises as its first act so that
+/// `current_cpu_index` can answer for it during the rest of its own init. This
+/// one is raised last, and is what `init` waits on before returning: a CPU that
+/// has claimed an index is not yet one that has a scheduler, a synced TSC or an
+/// FPU.
+static AP_READY_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// How long `init` will wait for the APs Limine was asked to start.
+///
+/// A ceiling, not a delay: the wait ends as soon as every AP reports in. It is
+/// set well above what bringup costs — sixteen vCPUs report in across 78 to
+/// 178 ms on this host, four in under a millisecond — because the cost of
+/// waiting too long is a slower boot on a machine that is already broken,
+/// while the cost of waiting too little is running threads on a CPU that has
+/// no scheduler. Reaching the ceiling is logged and survivable: the system
+/// runs on whichever CPUs did arrive.
+const AP_BRINGUP_TIMEOUT: Duration = Duration::from_millis(1000);
+
 /// Timer ticks taken, per CPU index.
 ///
 /// One CPU asking whether another is executing at all. A CPU that owes an
@@ -126,8 +146,15 @@ pub fn init() {
         NUM_CPUS.store(1, Ordering::Relaxed);
     }
 
+    // Every CPU Limine reported, less the BSP, which is running this.
+    let expected = NUM_CPUS.load(Ordering::Relaxed).saturating_sub(1) as u32;
     let now = Instant::now();
-    while now.elapsed() < Duration::from_millis(100) {
+    while AP_READY_COUNT.load(Ordering::Acquire) < expected {
+        if now.elapsed() >= AP_BRINGUP_TIMEOUT {
+            let ready = AP_READY_COUNT.load(Ordering::Acquire);
+            println!("[smp] {ready} of {expected} APs online after timeout");
+            break;
+        }
         spin_loop();
     }
 }
@@ -174,6 +201,9 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
     crate::allocator::enable_percpu_cache();
 
     println!("[smp] AP online: LAPIC id {}", unsafe { get_lapic().id() });
+
+    // Last, so the BSP's wait ends only once this CPU can carry a thread.
+    AP_READY_COUNT.fetch_add(1, Ordering::Release);
 
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();

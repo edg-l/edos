@@ -9,7 +9,7 @@
 // own merits.
 #![allow(clippy::too_many_arguments)]
 
-use core::{hint::spin_loop, time::Duration};
+use core::time::Duration;
 
 use alloc::{boxed::Box, string::ToString, sync::Arc};
 use x86_64::instructions::hlt;
@@ -34,7 +34,7 @@ use crate::{
             queue_spawn_thread,
         },
     },
-    timer::{Instant, get_timer_calibration, init_boot_time, uptime_us},
+    timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
 mod acpi;
@@ -206,13 +206,8 @@ fn main() -> ! {
         }
     }
 
+    // `sched-test` ends in the loop above and never reaches normal boot.
     #[allow(unreachable_code)]
-    let now = Instant::now();
-
-    while now.elapsed() < Duration::from_millis(100) {
-        spin_loop();
-    }
-    //test_new();
     logs::init();
     crate::fs::block_page_cache::BlockPageCache::init();
     drivers::init_drivers();
