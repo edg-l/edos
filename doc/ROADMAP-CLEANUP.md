@@ -182,12 +182,18 @@ is gone with it.
 `Result<usize, Errno>`. The two shapes those collapse to are
 `sys::sys_ok` and `sys::sys_count`, which `process.rs` now uses as well.
 
+`time.rs::nanosleep` answers `Result<(), Errno>` too, and it was the only
+sentinel left outside `io.rs`: the `-> i64` and `-> u64` signatures counted here
+in `mounts.rs`, `net.rs`, `procinfo.rs`, `profile.rs` and `trace.rs` are
+genuine values (byte totals, a dropped-record count, an errno a `NetError`
+already carries), not failures in disguise, and those modules already answer
+`Option` or `bool` where they can fail.
+
 **Still open.** The rest of `io.rs`: the descriptor group (`open`, `openat`,
 `close`, `sys_read`, `sys_write`, `pread`, `pwrite`, `readv`, `writev`,
 `ioctl`, `set_winsize`, `poll`, `mmap`, `munmap`), which is where the call-site
-weight is. Then `mounts.rs` (3), `net.rs`, `procinfo.rs`, `profile.rs`,
-`time.rs`, `trace.rs` (1 each), and C3's `mem.rs`. `io.rs:587` still converts a
-real `is_err` check back into `u64::MAX`. Two shapes are not covered by the rule
+weight is, and C3's `mem.rs`. `io.rs:587` still converts a real `is_err` check
+back into `u64::MAX`. Two shapes are not covered by the rule
 and were left alone in `process.rs`: `close` answers `i32` and `waitpid` answers
 `-1` for a failed wait, neither of which is `i64`, `isize` or a sentinel `u64`.
 

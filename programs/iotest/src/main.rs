@@ -283,7 +283,7 @@ fn test7() {
         (0, -1, "negative nanos"),
         (-1, 0, "negative seconds"),
     ] {
-        if time::nanosleep(sec, nanos) == 0 {
+        if time::nanosleep(sec, nanos).is_ok() {
             fail(7, &format!("nanosleep accepted {}", what));
         }
     }
@@ -292,7 +292,7 @@ fn test7() {
     // round each one to zero and return immediately.
     let start = Instant::now();
     for _ in 0..20 {
-        if time::nanosleep(0, 500_000) != 0 {
+        if time::nanosleep(0, 500_000).is_err() {
             fail(7, "nanosleep(0, 500_000) failed");
         }
     }
@@ -310,7 +310,7 @@ fn test7() {
     // A single longer sleep must not return early. The monotonic clock is
     // microsecond-resolution, so allow one millisecond of truncation.
     let start = Instant::now();
-    if time::nanosleep(0, 120_000_000) != 0 {
+    if time::nanosleep(0, 120_000_000).is_err() {
         fail(7, "nanosleep(0, 120ms) failed");
     }
     let elapsed = start.elapsed();

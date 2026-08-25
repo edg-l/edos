@@ -292,7 +292,7 @@ pub fn send_all(fd: u64, data: &[u8]) -> Result<(), NetError> {
     while sent < data.len() {
         match send(fd, &data[sent..]) {
             Ok(0) => {
-                time::nanosleep(0, 1_000_000);
+                let _ = time::nanosleep(0, 1_000_000);
             }
             Ok(n) => sent += n,
             Err(e) => return Err(e),
