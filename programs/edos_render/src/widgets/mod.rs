@@ -239,17 +239,26 @@ pub fn draw_rect(
     height: u32,
     color: u32,
 ) {
+    if buffer_width == 0 {
+        return;
+    }
+    // The far edges are computed in i64. A rect entirely left of or above the
+    // surface has a negative one, and casting that to u32 before the clamp
+    // turns it into a value far larger than the surface -- which is how a
+    // fully off-screen rect came to fill whole rows.
     let start_x = x.max(0) as u32;
     let start_y = y.max(0) as u32;
-    let end_x = ((x + width as i32) as u32).min(buffer_width);
-    let end_y = ((y + height as i32) as u32).min(buffer_height);
+    let end_x = (x as i64 + width as i64).clamp(0, buffer_width as i64) as u32;
+    // Rows the buffer actually holds, which is what bounds the writes; a
+    // caller passing fewer than `buffer_height` claims is clamped here rather
+    // than caught per pixel further down.
+    let rows = (buffer.len() / buffer_width as usize) as u32;
+    let end_y = (y as i64 + height as i64).clamp(0, buffer_height.min(rows) as i64) as u32;
 
     for py in start_y..end_y {
-        for px in start_x..end_x {
-            let idx = (py * buffer_width + px) as usize;
-            if idx < buffer.len() {
-                buffer[idx] = color;
-            }
+        let row = (py * buffer_width) as usize;
+        if start_x < end_x {
+            buffer[row + start_x as usize..row + end_x as usize].fill(color);
         }
     }
 }

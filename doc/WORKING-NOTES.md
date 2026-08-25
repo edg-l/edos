@@ -10416,3 +10416,21 @@ is `const`, and `unreachable!("msg")` expands to a `panic!` carrying a
 arm is genuinely unreachable: `complete` writes `e as u32` from this same enum,
 every discriminant is >= 1, and the success path writes 0 with a state the
 decoder never reads.
+
+## A fully off-screen rect used to fill whole rows
+
+`widgets::draw_rect` clamped its right edge as
+`((x + width as i32) as u32).min(buffer_width)`. For a rect entirely left of the
+surface the sum is negative, the `as u32` makes it ~4 billion, the `min` pulls
+it back to `buffer_width`, and `start_x` clamps up to 0 -- so the rect that
+should have drawn nothing painted the full width of every row it spanned. The
+`if idx < buffer.len()` test on each pixel could not see it: every one of those
+indices was in range.
+
+Edges are computed and clamped in `i64` now, `end_y` is clamped against the rows
+the slice actually holds rather than the height it claims, and a row is one
+`fill` on a subslice. That makes the clamp the bounds check, which is what the
+per-pixel test was pretending to be.
+
+Nothing on screen moved, which is the point: no current caller passes a
+negative-past-the-edge rect. It was a trap waiting for one that does.

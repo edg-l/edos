@@ -247,12 +247,19 @@ one in `Canvas`, one in `edos-web`, one in `imgview`.
 should too. This falls out of D1: once a surface exists, the rasteriser lives on
 it and the three types become three ways of *obtaining* a surface.
 
-### D3. `draw_rect` bounds-checks per pixel after clamping (S3, E1)
+### D3. ~~`draw_rect` bounds-checks per pixel after clamping~~ (done)
 
-`widgets/mod.rs:189`: the loop clamps `start_x`/`end_x` against the buffer, then
-tests `if idx < buffer.len()` on every pixel anyway. Either the clamp is right
-and the test is dead, or the clamp is wrong and the test is hiding it. Decide,
-then write the row with `fill` on a slice instead of a per-pixel loop.
+The clamp was wrong and the per-pixel test was hiding it, but not the way the
+item guessed. `end_x` was `((x + width as i32) as u32).min(buffer_width)`, so a
+rect entirely left of the surface -- negative right edge -- cast to a u32 larger
+than any surface, clamped to `buffer_width`, and with `start_x` clamped up to 0
+filled the **whole row**. The `idx < buffer.len()` test never caught it because
+those indices were all in range.
+
+The far edges are computed in `i64` and clamped in that width now, `end_y` is
+additionally clamped against the rows the slice really holds, and each row is
+one `fill` on a subslice. The per-pixel test is gone because the clamp is the
+bounds check.
 
 ### D6. The ANSI palette is 16 literals in the terminal widget (S3, E1)
 
