@@ -401,26 +401,6 @@ reach.
 
 ## F. Duplicated code
 
-### F1. 439 lines of test code exist twice, and neither copy runs (S1, E1)
-
-`tests/intrusive_list/src/lib.rs:9-447` is a verbatim copy of the
-`#[cfg(test)] mod tests` inside `libs/intrusive_list/src/lib.rs:492-930`, plus a
-second 30-line block. Measured with a longest-common-block diff over the tree.
-
-`tests/` is in no workspace, no Makefile target and no CI job.
-`scripts/host-tests` runs `edos_http`, `grab`, `sshd`, `edos-web/src/css.rs` and
-`lookupd/src/dns.rs`, and nothing else; `make check-fsck` and `check-mkfs` cover
-the two tools. So the intrusive list, which the scheduler's runqueues are built
-on, has 470 lines of tests and no gate running them.
-
-**Fix.** Delete `tests/intrusive_list/` and add
-`cargo test --manifest-path libs/intrusive_list/Cargo.toml` to
-`scripts/host-tests`. Add `libs/efs-common` and `libs/window-abi` in the same
-line while there.
-
-**Done when** `make host-tests` runs the intrusive-list suite and the count in
-`CLAUDE.md` ("138 userspace unit tests") is updated to match.
-
 ### F2. `read_user_path_with_len` and `read_user_path_at` share 12 lines (S2, E1)
 
 `kernel/src/syscalls/fs.rs:37` and `:69`. Both do: null check, length bound,
@@ -592,11 +572,6 @@ parameter object waiting to happen.
 
 The point of a gate is that the class does not come back. Each of these
 corresponds to a section above.
-
-### I1. Run the tests that exist (S1, E1)
-
-`scripts/host-tests` skips `libs/intrusive_list`, `libs/efs-common` and
-`libs/window-abi`. Add them. See F1.
 
 ### I2. A duplicate-block check in CI (S2, E2)
 

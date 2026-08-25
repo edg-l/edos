@@ -925,16 +925,15 @@ mod tests {
         assert!(list.is_empty());
     }
 
+    /// Two links in one node: only the one the list was told about may move.
     struct DualNode {
-        value: u64,
         link_a: Link,
         link_b: Link,
     }
 
     impl DualNode {
-        fn new(value: u64) -> Self {
+        fn new() -> Self {
             Self {
-                value,
                 link_a: Link::new(),
                 link_b: Link::new(),
             }
@@ -945,7 +944,7 @@ mod tests {
 
     #[test]
     fn dual_link_independence() {
-        let mut node = DualNode::new(99);
+        let mut node = DualNode::new();
 
         let mut list_a = IntrusiveList::<DualNode>::new();
         unsafe { list_a.push_back(&mut node) };

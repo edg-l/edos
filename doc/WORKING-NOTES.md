@@ -10084,3 +10084,26 @@ Every other widget already used `keycode::`. After this there are no numeric
 scancode comparisons left in `programs/`: `grep -rn 'scancode ==' programs/ |
 grep -v 'keycode::'` returns nothing, which is the check to re-run before
 trusting a new widget's key handling.
+
+## The intrusive list's tests were written twice and run zero times
+
+`tests/intrusive_list/` was a whole crate whose `lib.rs` was, apart from one
+`#[allow(dead_code)]`, byte-for-byte the `#[cfg(test)] mod tests` already inside
+`libs/intrusive_list/src/lib.rs`. Checked before deleting, with
+`diff <(sed -n '492,959p' libs/intrusive_list/src/lib.rs) <(sed -n '9,477p'
+tests/intrusive_list/src/lib.rs)`, which printed one line. Nothing was lost.
+
+Neither copy ran. `tests/` was in no workspace, no Makefile target and no CI
+job, and `scripts/host-tests` only knew about crates under `programs/`. So the
+23 cases covering the structure the scheduler's runqueues are made of were
+decorative, and had been for as long as they existed.
+
+`libs/` is the trap: those crates are in **no** workspace, because they are
+shared with a kernel that builds for `x86_64-unknown-none`. That is why nothing
+picked them up by accident and why `host-tests` now iterates their manifests
+explicitly. A new crate under `libs/` gets the same treatment or it gets no gate
+at all; adding it to a workspace is not an option.
+
+Host-test count moves 138 → 164: intrusive-list 23, efs-common 3, window-abi 0.
+`window-abi` has no tests and is in the loop anyway, so that it is at least
+compiled for the host on every run.
