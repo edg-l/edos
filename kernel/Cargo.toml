@@ -57,6 +57,7 @@ intrusive-list = { path = "../libs/intrusive_list" }
 efs-common = { path = "../libs/efs-common" }
 edos-trace-abi = { path = "../libs/edos-trace-abi" }
 edos-profile-abi = { path = "../libs/edos-profile-abi" }
+syscall-abi = { path = "../libs/syscall-abi" }
 window-abi = { path = "../libs/window-abi" }
 
 [profile.dev]

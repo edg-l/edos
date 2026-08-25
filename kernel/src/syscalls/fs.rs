@@ -1,5 +1,6 @@
 use alloc::{ffi::CString, string::ToString};
 use bytemuck::{Pod, Zeroable};
+use syscall_abi::{RawStatFs, Stat};
 use x86_64::instructions::interrupts;
 
 use crate::{
@@ -497,18 +498,7 @@ pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
     written as i64
 }
 
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct FstatEntry {
-    pub size: u64,
-    pub created: u64,
-    pub accessed: u64,
-    pub modified: u64,
-    pub attrs: u16,
-    pub kind: u8,
-}
-
-fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
+fn file_to_fstat_entry(file: &crate::fs::File) -> Stat {
     let unix_secs = |time: Option<crate::fs::FileTime>| {
         time.and_then(|ft| ft.to_datetime())
             .map(|dt| dt.to_unix_secs())
@@ -541,7 +531,7 @@ fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
         crate::fs::FileKind::Fifo => 4,
     };
 
-    FstatEntry {
+    Stat {
         size: file.size,
         created,
         accessed,
@@ -551,7 +541,7 @@ fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
     }
 }
 
-pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
+pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
@@ -586,7 +576,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
             }
         }
         FileDescriptor::StandardStream(_) => {
-            FstatEntry {
+            Stat {
                 size: 0,
                 created: 0,
                 accessed: 0,
@@ -598,7 +588,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
         FileDescriptor::PipeRead(_)
         | FileDescriptor::PipeWrite(_)
         | FileDescriptor::PipeReadWrite(_) => {
-            FstatEntry {
+            Stat {
                 size: 0,
                 created: 0,
                 accessed: 0,
@@ -608,7 +598,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
             }
         }
         FileDescriptor::PtyMaster(_) | FileDescriptor::PtySlave(_) => {
-            FstatEntry {
+            Stat {
                 size: 0,
                 created: 0,
                 accessed: 0,
@@ -618,7 +608,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
             }
         }
         FileDescriptor::Socket(_) => {
-            FstatEntry {
+            Stat {
                 size: 0,
                 created: 0,
                 accessed: 0,
@@ -637,7 +627,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
     0
 }
 
-pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry) -> i64 {
+pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut Stat) -> i64 {
     sys_fstatat(AT_FDCWD, path_ptr, path_len, fstat_buf, 0)
 }
 
@@ -655,7 +645,7 @@ pub fn sys_fstatat(
     dirfd: i64,
     path_ptr: *const u8,
     path_len: usize,
-    fstat_buf: *mut FstatEntry,
+    fstat_buf: *mut Stat,
     flags: u64,
 ) -> i64 {
     let info = current_thread_info();
@@ -1075,21 +1065,6 @@ fn now_unix_secs() -> u64 {
 }
 
 /// statfs(path, buf, buf_len) -> 0 on success, -1 on error
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawStatFs {
-    fs_type: [u8; 16],
-    block_size: u64,
-    total_blocks: u64,
-    free_blocks: u64,
-    total_inodes: u64,
-    free_inodes: u64,
-    volume_name: [u8; 64],
-    version: u32,
-    block_groups: u16,
-    _pad: [u8; 2],
-}
-
 pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;

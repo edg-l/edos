@@ -29,39 +29,28 @@ Effort is a guess at one sitting (**E1**), a day (**E2**), or a project (**E3**)
 This is the highest-risk section. `CLAUDE.md` already states the mechanism:
 `WindowListEntry` "used to be written out on both sides, where changing one
 alone compiled cleanly and made the compositor read garbage", which is why
-`libs/window-abi` exists. Only the window ABI got that treatment. Seven other
-`#[repr(C)]` types still live in two files.
+`libs/window-abi` exists. `libs/syscall-abi` now does the same for the seven
+`#[repr(C)]` types the syscalls exchange. `Errno` is the one name still written
+out twice, and its second copy is in the Rust fork rather than in this tree.
 
-### A1. Seven ABI structs have two independent definitions (S1, E2)
+### A1. Errno is still declared on both sides of the boundary (S2, E2)
 
-| type | kernel | userspace |
-|---|---|---|
-| `DirEntry` | `kernel/src/syscalls/io.rs:134` | `programs/edos_lib/src/io.rs:91` |
-| `SelectFd` | `kernel/src/syscalls/io.rs:144` | `programs/edos_lib/src/io.rs` |
-| `Timespec` | `kernel/src/syscalls/mod.rs:1776` | `programs/edos_lib/src/time.rs` |
-| `StatFs` | `kernel/src/fs/mod.rs:438` | `programs/edos_lib/src/mounts.rs` |
-| `PollState` | `kernel/src/fs/mod.rs:106` | `programs/edos_lib/src/io.rs` |
-| `SockAddrIn` | `kernel/src/net/socket.rs` | `programs/edos_lib/src/net.rs` |
-| `FstatEntry` / `Stat` | `kernel/src/syscalls/fs.rs:502` | `programs/edos_lib/src/io.rs:344` |
+`libs/syscall-abi` now holds every `#[repr(C)]` type that crosses a syscall --
+`PollState`, `SelectFd`, `DirEntry`, `Stat`, `RawStatFs`, `SockAddrIn` -- and
+both the kernel and `edos_lib` depend on it rather than declaring their own.
+`Timespec` was unified within userspace separately. `grep 'struct DirEntry'`
+over the tree returns one hit.
 
-The last row is the worst case: the same layout under two different names, so
-grep cannot even pair them.
+What is left is `Errno`. The kernel declares it in
+`kernel/src/syscalls/mod.rs:1408`; userspace reads it as `edos_rt::sys::Errno`,
+which lives in the Rust fork at `~/dev/rust`, not in this tree. Moving it into
+`syscall-abi` means making `edos_rt` depend on a path outside its own crate,
+publishing it, and moving the fork's pin -- the whole `edos_rt` publish loop in
+`CLAUDE.md`.
 
-**They have already drifted once.** The kernel documented
-`DirEntry::file_type` as `4=device` while userspace documented it as `4=fifo`;
-`file_kind_to_u8` in `kernel/src/syscalls/io.rs` writes `FileKind::Fifo` for 4,
-so userspace was right and the kernel comment, on the side that defines the
-ABI, was wrong. Nothing broke because only the comment moved. That one is
-corrected; the shape that produced it is not.
-
-**Fix.** One crate per boundary, the way `libs/window-abi` already does it. A
-`libs/syscall-abi` holding these seven types, `#[repr(C)]`, with the meaning of
-every enumerated field written once; kernel and `edos_lib` both depend on it and
-neither declares the type. Move `Errno` there in the same crate rather than a
-second one.
-
-**Done when** no `#[repr(C)]` type crossing a syscall is declared in more than
-one crate, and `grep -c 'struct DirEntry' ` over the tree returns 1.
+**Done when** `Errno` has one definition, or this item records the decision not
+to make `edos_rt` depend on a crate in this tree and says what keeps the two
+lists in step instead.
 
 ---
 

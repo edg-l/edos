@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::{string::ToString, vec::Vec};
 use core::time::Duration;
 
+use syscall_abi::{DirEntry, SelectFd};
 use x86_64::instructions::interrupts;
 
 use crate::debug::lock_order::{RANK_PIPE, RANK_PTY};
@@ -22,6 +23,7 @@ use crate::thread::scheduler::{
 };
 use crate::thread::waitqueue::WaitOutcome;
 use crate::util::uaccess::{access_ok, try_copy_from_user, try_copy_to_user, try_write_user};
+
 use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
     log, ranked_lock,
@@ -126,32 +128,6 @@ fn copy_out(user_ptr: *mut u8, data: &[u8]) -> bool {
         return true;
     }
     unsafe { try_copy_to_user(user_ptr, data.as_ptr(), data.len()) }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct DirEntry {
-    pub name_len: u32,     // Length of the filename
-    pub file_type: u8,     // 0=File, 1=Directory, 2=Symlink, 3=Special, 4=Fifo
-    pub size: u64,         // File size in bytes
-    pub attrs: u8,         // File attributes (readonly=1, hidden=2, system=4, archive=8)
-    pub reserved: [u8; 2], // Padding for alignment
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SelectFd {
-    pub fd: u64,
-    pub interests: PollState,
-    pub result: PollState,
-}
-
-impl SelectFd {
-    const EMPTY: Self = Self {
-        fd: 0,
-        interests: PollState::none(),
-        result: PollState::none(),
-    };
 }
 
 /// Descriptor counts at or below this are served from the stack.

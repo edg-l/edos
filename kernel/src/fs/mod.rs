@@ -98,93 +98,9 @@ pub enum Error {
     ProtocolMismatch,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PollState {
-    pub readable: bool,
-    pub writable: bool,
-    pub error: bool,
-    pub hangup: bool,
-    pub invalid: bool,
-}
-
-impl PollState {
-    pub const fn none() -> Self {
-        Self {
-            readable: false,
-            writable: false,
-            error: false,
-            hangup: false,
-            invalid: false,
-        }
-    }
-
-    #[expect(unused)]
-    pub const fn with_readable() -> Self {
-        Self {
-            readable: true,
-            writable: false,
-            error: false,
-            hangup: false,
-            invalid: false,
-        }
-    }
-
-    /// Whether this state makes a poll on `interests` ready.
-    ///
-    /// Error, hang-up and invalid are reported whether or not the caller asked
-    /// for them (POSIX.1-2024 `poll`, which lists POLLERR, POLLHUP and POLLNVAL
-    /// as output-only). A caller waiting for data on a descriptor whose peer has
-    /// gone away would otherwise wait forever for a read that would return end
-    /// of file immediately.
-    pub fn matches(&self, interests: Self) -> bool {
-        if self.error || self.hangup || self.invalid {
-            return true;
-        }
-
-        let mut matched = false;
-
-        if interests.readable && self.readable {
-            matched = true;
-        }
-        if interests.writable && self.writable {
-            matched = true;
-        }
-
-        if !interests.readable && !interests.writable {
-            matched = self.readable || self.writable;
-        }
-
-        matched
-    }
-
-    #[expect(unused)]
-    pub fn merge(&mut self, other: Self) {
-        self.readable |= other.readable;
-        self.writable |= other.writable;
-        self.error |= other.error;
-        self.hangup |= other.hangup;
-        self.invalid |= other.invalid;
-    }
-
-    pub const fn to_bits(self) -> u8 {
-        (self.readable as u8)
-            | ((self.writable as u8) << 1)
-            | ((self.error as u8) << 2)
-            | ((self.hangup as u8) << 3)
-            | ((self.invalid as u8) << 4)
-    }
-
-    pub const fn from_bits(bits: u8) -> Self {
-        Self {
-            readable: (bits & 0x01) != 0,
-            writable: (bits & 0x02) != 0,
-            error: (bits & 0x04) != 0,
-            hangup: (bits & 0x08) != 0,
-            invalid: (bits & 0x10) != 0,
-        }
-    }
-}
+/// What a descriptor is ready for, both as a poll interest and as a result.
+/// The layout crosses the syscall boundary, so it lives in `syscall-abi`.
+pub use syscall_abi::PollState;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

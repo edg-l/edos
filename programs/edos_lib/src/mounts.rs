@@ -5,6 +5,8 @@
 //! each followed by a variable-length path, and `statfs` answers with a struct
 //! whose two string fields are NUL-padded rather than terminated.
 
+use syscall_abi::RawStatFs;
+
 use crate::sys::{self, SYS_LIST_MOUNTS, SYS_STATFS, syscall2, syscall3};
 
 /// Which filesystem is behind a mount.
@@ -161,21 +163,6 @@ fn covers(mount_point: &str, path: &str) -> bool {
         Some(rest) => rest.starts_with('/'),
         None => false,
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawStatFs {
-    fs_type: [u8; 16],
-    block_size: u64,
-    total_blocks: u64,
-    free_blocks: u64,
-    total_inodes: u64,
-    free_inodes: u64,
-    volume_name: [u8; 64],
-    version: u32,
-    block_groups: u16,
-    _pad: [u8; 2],
 }
 
 /// How much room a filesystem has, and what it calls itself.

@@ -561,6 +561,7 @@ dependencies = [
  "edos-profile-abi",
  "edos-trace-abi",
  "edos_rt",
+ "syscall-abi",
 ]
 
 [[package]]
@@ -2206,6 +2207,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "syscall-abi"
+version = "0.1.0"
 
 [[package]]
 name = "syscallfuzz"

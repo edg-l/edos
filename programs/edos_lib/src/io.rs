@@ -2,24 +2,7 @@
 
 use crate::{sys, time::Timespec};
 
-/// Poll interest/result state for a file descriptor.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct PollState {
-    pub readable: bool,
-    pub writable: bool,
-    pub error: bool,
-    pub hangup: bool,
-    pub invalid: bool,
-}
-
-/// A file descriptor to poll with its interests and results.
-#[repr(C)]
-pub struct SelectFd {
-    pub fd: u64,
-    pub interests: PollState,
-    pub result: PollState,
-}
+pub use syscall_abi::{DirEntry, PollState, SelectFd, Stat};
 
 /// Poll a set of file descriptors with an optional timeout.
 /// Returns the number of ready file descriptors, or a negative error code.
@@ -82,20 +65,6 @@ pub fn last_errno_raw() -> u32 {
 /// Close a file descriptor. Returns 0 on success, or negative on error.
 pub fn close(fd: u64) -> i64 {
     unsafe { sys::syscall1(sys::SYS_CLOSE, fd) as i64 }
-}
-
-/// One directory entry as the kernel writes it, immediately followed in the
-/// buffer by `name_len` bytes of name.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct DirEntry {
-    pub name_len: u32,
-    /// 0=file, 1=directory, 2=symlink, 3=special, 4=fifo.
-    pub file_type: u8,
-    pub size: u64,
-    /// readonly=1, hidden=2, system=4, archive=8.
-    pub attrs: u8,
-    pub reserved: [u8; 2],
 }
 
 /// Read the entries of `path` into `buf`, starting at entry index `start`.
@@ -328,19 +297,6 @@ pub fn renameat(olddirfd: i64, old: &str, newdirfd: i64, new: &str) -> i64 {
             new.len() as u64,
         ) as i64
     }
-}
-
-/// What `stat` reports about a file.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct Stat {
-    pub size: u64,
-    /// Creation, access and modification times, in whole Unix seconds.
-    pub created: u64,
-    pub accessed: u64,
-    pub modified: u64,
-    pub attrs: u16,
-    pub kind: u8,
 }
 
 /// Stat a path. Returns `None` when it cannot be resolved.

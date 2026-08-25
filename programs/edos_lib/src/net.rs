@@ -17,25 +17,7 @@ impl NetError {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SockAddrIn {
-    pub family: u16,
-    pub port: u16,
-    pub addr: [u8; 4],
-    pub zero: [u8; 8],
-}
-
-impl SockAddrIn {
-    pub fn new(ip: [u8; 4], port: u16) -> Self {
-        Self {
-            family: sys::AF_INET as u16,
-            port: port.to_be(),
-            addr: ip,
-            zero: [0; 8],
-        }
-    }
-}
+pub use syscall_abi::SockAddrIn;
 
 pub fn create_udp_socket() -> Result<u64, NetError> {
     let fd = unsafe {

@@ -126,6 +126,7 @@ dependencies = [
  "pic8259",
  "raw-cpuid 11.6.0",
  "spin 0.12.2",
+ "syscall-abi",
  "thiserror",
  "uart_16550",
  "window-abi",
@@ -340,6 +341,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "syscall-abi"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"

@@ -23,15 +23,7 @@ pub struct SocketAddr {
     pub port: u16,
 }
 
-/// C-compatible sockaddr_in layout for syscall interface.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SockAddrIn {
-    pub family: u16,
-    pub port: u16, // network byte order (big-endian)
-    pub addr: [u8; 4],
-    pub zero: [u8; 8],
-}
+pub use syscall_abi::SockAddrIn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketState {

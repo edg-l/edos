@@ -10258,6 +10258,30 @@ counting calls, errors and nanoseconds per syscall, colliding by name with
 `Timespec` lives in `edos_lib::time`; `io` imports it, and `utimensat`'s
 callers reach it through `edos_lib::time::Timespec`.
 
-The remaining six ABI types are still written out on both sides. Nothing in
-this pass makes the next drift less likely; only the `libs/syscall-abi` crate
-does, which is roadmap item A1.
+## libs/syscall-abi: the syscall structs now have one declaration
+
+`libs/syscall-abi` is to the syscalls what `libs/window-abi` is to the window
+system: one `no_std` crate holding every `#[repr(C)]` type that crosses the
+boundary, depended on by `edos-kernel` and by `edos_lib`, declared by neither.
+It holds `PollState`, `SelectFd`, `DirEntry`, `Stat`, `RawStatFs` and
+`SockAddrIn`, and `grep 'struct DirEntry'` over the tree now returns one hit
+where it returned two.
+
+Three things fell out of the move rather than being decided separately:
+
+- The kernel called the `fstat` reply `FstatEntry` and userspace called the
+  same layout `Stat`. One layout under two names is worse than one under one,
+  because grep cannot pair them; it is `Stat` on both sides now.
+- `PollState::with_readable` and `PollState::merge` were carrying
+  `#[expect(unused)]` and had no caller on either side. Moving them into a
+  library crate would have laundered them into "public API", so they are
+  deleted.
+- `SockAddrIn::new` used to read `sys::AF_INET as u16` from `edos_lib`. The
+  constant is `AF_INET: u16` in the ABI crate now, next to the only struct
+  whose field it fills.
+
+`Errno` did not move and cannot, without leaving this tree. The kernel's list
+is `kernel/src/syscalls/mod.rs`; userspace reads `edos_rt::sys::Errno`, and
+`edos_rt` is published from the Rust fork. Making it depend on a path in this
+repository means the full publish loop, so the two lists are still kept in step
+by hand. That is what remains of roadmap item A1.

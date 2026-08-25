@@ -10,6 +10,7 @@ use alloc::{format, string::ToString, sync::Arc, vec::Vec};
 use heapless::Vec as HeaplessVec;
 use intrusive_list::Link;
 use spin::{Mutex, RwLock};
+use syscall_abi::{SelectFd, Stat};
 use x86_64::{
     VirtAddr,
     registers::{
@@ -35,14 +36,14 @@ use crate::{
     power, println, ranked_lock,
     syscalls::{
         fs::{
-            FstatEntry, UserTimespec, sys_access, sys_faccessat, sys_fstat, sys_fstatat,
-            sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mkfifoat, sys_mount,
-            sys_readlink, sys_readlinkat, sys_renameat, sys_rmdir, sys_rmdir_all, sys_stat,
-            sys_symlink, sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
+            UserTimespec, sys_access, sys_faccessat, sys_fstat, sys_fstatat, sys_list_mounts,
+            sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mkfifoat, sys_mount, sys_readlink,
+            sys_readlinkat, sys_renameat, sys_rmdir, sys_rmdir_all, sys_stat, sys_symlink,
+            sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
         },
         io::{
-            O_NONBLOCK, SelectFd, descriptor_open_flags, sys_chdir, sys_close, sys_getcwd,
-            sys_getrandom, sys_list_dir, sys_poll, sys_read, sys_write,
+            O_NONBLOCK, descriptor_open_flags, sys_chdir, sys_close, sys_getcwd, sys_getrandom,
+            sys_list_dir, sys_poll, sys_read, sys_write,
         },
         memory::{sys_mmap, sys_mprotect, sys_msync, sys_munmap},
     },
@@ -623,13 +624,13 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_FSTAT => {
             let fd = ctx.rdi;
-            let fstat_buf = ctx.rsi as *mut FstatEntry;
+            let fstat_buf = ctx.rsi as *mut Stat;
             ctx.rax = sys_fstat(fd, fstat_buf) as u64;
         }
         SYS_STAT => {
             let path_ptr = ctx.rdi as *const u8;
             let path_len = ctx.rsi as usize;
-            let fstat_buf = ctx.rdx as *mut FstatEntry;
+            let fstat_buf = ctx.rdx as *mut Stat;
             ctx.rax = sys_stat(path_ptr, path_len, fstat_buf) as u64;
         }
         SYS_ACCESS => {
@@ -688,7 +689,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let dirfd = ctx.rdi as i64;
             let path_ptr = ctx.rsi as *const u8;
             let path_len = ctx.rdx as usize;
-            let fstat_buf = ctx.r10 as *mut FstatEntry;
+            let fstat_buf = ctx.r10 as *mut Stat;
             let flags = ctx.r8;
             ctx.rax = sys_fstatat(dirfd, path_ptr, path_len, fstat_buf, flags) as u64;
         }
