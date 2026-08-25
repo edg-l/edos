@@ -42,6 +42,7 @@ SUITES = [
     ("iotest", "", 120),
     ("iotest", "/var", 180),
     ("mmaptest", "", 120),
+    ("forktest", "", 90),
     ("socktest", "", 120),
     ("sigtest", "", 90),
     ("killtest", "", 90),

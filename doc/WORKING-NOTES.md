@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-19
+# Working notes, sessions of 2026-08-08 to 2026-08-25
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -9974,3 +9974,48 @@ What the measurement refuted is worth as much as what it found: cache thrash at
 page** at 64 KiB and 1 MiB alike), and `MAX_RUN_PAGES` is not either (992 KiB is
 one command and has already given up 85% of the loss). `fsbench raw` now sweeps
 densely enough to show that and prints per-size counter deltas under each row.
+
+---
+
+## `fork` gave the child six registers fewer than its parent (2026-08-25)
+
+CI's `guest suites` job had been red for a week on `mmaptest` test 8, and it
+never once failed here. The evidence that settled it was already in the
+artifact: the children of tests 5 and 8 faulted at `0x1000` and `0x0`, which is
+`ptr.add(PAGE)` and `ptr` evaluated with a null `ptr`, while test 6's child ran
+the same expression against the correct address. A child's copy of a pointer its
+parent had just checked was reading as zero.
+
+Not the mapping, and not COW: the value lived in a register. The SYSCALL stub
+restores `rdi`, `rsi`, `rdx`, `r8`, `r9` and `r10` before `sysretq`, and the raw
+stubs declare only `rax`, `rcx` and `r11` as clobbered, so the compiler is free
+to hold a live value in one of them across an inlined `syscall`. `sys_fork` was
+copying `rbx`, `rbp` and `r12`–`r15` into the child and zeroing the rest.
+Whether a call site notices is a register-allocation accident, which is the
+whole of the "CI only" mystery — the same kernel bug was here all along in a
+binary that happened not to use those registers at those two sites.
+
+**Reproducing the environment was the wrong instinct.** Nested KVM and Intel vs
+AMD were the standing suspects and neither was worth an hour: `programs/forktest`
+now forks with a known value in every preserved register and reads them back on
+both sides, and it went red on the first local run.
+
+### The bug hiding behind it
+
+Hardening `mmaptest` to check *which* address the child died at (a negative case
+that asserts only "the child died" passes on any fault, and in CI test 5 was
+passing on a null dereference while claiming a past-EOF rejection) turned up a
+second defect. The child records the address, the parent reads it back, and the
+parent's `read` failed — `EINVAL`, which after `sys_read` was taught to report
+the filesystem's own error turned out to be `EIO` from `try_copy_to_user`.
+
+`fork` marks the address space copy-on-write on both sides. A write to such a
+page is a protection violation on a *present* page, and the ring-0 branch of the
+page-fault handler serviced only *not-present* faults before falling through to
+the uaccess fixup. Ring 3 had a COW branch; ring 0 did not. So a syscall writing
+into any page its caller had not touched since forking failed and reported a bad
+buffer — one `Vec::with_capacity` away at any time in a parent process.
+
+Both are written up in `doc/bugs/2026-08-25-what-fork-did-not-give-the-child.md`.
+Gates: `forktest` is in `guest-check` (18 suites now), and `mmaptest` 5, 6 and 8
+pin the faulting address.

@@ -924,8 +924,12 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     );
                     match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
                         Ok(n) => (n, ra),
-                        Err(_) => {
-                            info.lock().errno = Errno::EINVAL;
+                        Err(e) => {
+                            // The filesystem's own error, not a blanket EINVAL:
+                            // a caller told "invalid argument" for a failed
+                            // fill or a bad address has no way back to what
+                            // actually went wrong.
+                            info.lock().errno = Errno::from(e);
                             return -1;
                         }
                     }

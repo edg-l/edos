@@ -3211,6 +3211,23 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     child_ctx.interrupt_stack_frame.cpu_flags =
         RFlags::from_bits_truncate(parent_ctx.rflags) | RFlags::INTERRUPT_FLAG;
     child_ctx.rax = 0; // fork returns 0 in child
+
+    // Every register the SYSCALL stub hands back to the caller, because the
+    // child returns from the same instruction and the convention is the same
+    // one on both sides. That covers the argument registers as well as the
+    // callee-saved set: the stub restores them, so a caller may keep a live
+    // value in one across the `syscall`, and the raw stubs declare only rax,
+    // rcx and r11 as clobbered — which is what tells the compiler it may.
+    // Dropping any of them here hands the child a zero where its parent has a
+    // pointer or a length, at whichever call site the register allocator
+    // chose, and nothing at that call site says so. RCX and R11 are excluded
+    // because SYSCALL itself consumes them for the return address and RFLAGS.
+    child_ctx.rdi = parent_ctx.rdi;
+    child_ctx.rsi = parent_ctx.rsi;
+    child_ctx.rdx = parent_ctx.rdx;
+    child_ctx.r8 = parent_ctx.r8;
+    child_ctx.r9 = parent_ctx.r9;
+    child_ctx.r10 = parent_ctx.r10;
     child_ctx.rbx = parent_ctx.rbx;
     child_ctx.rbp = parent_ctx.rbp;
     child_ctx.r12 = parent_ctx.r12;

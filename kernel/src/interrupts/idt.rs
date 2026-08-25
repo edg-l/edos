@@ -231,6 +231,29 @@ extern "x86-interrupt" fn page_fault_handler(
             x86_64::instructions::interrupts::disable();
         }
 
+        // A write into a page the process shares copy-on-write with the one it
+        // forked from. The writer here is the kernel filling a user buffer, so
+        // the fault carries no USER_MODE bit and the ring-3 test below does not
+        // match it, but it is the same fault and wants the same copy. Without
+        // this every syscall that writes into a page its caller has not touched
+        // since forking fails, and the caller is told its buffer was bad: a
+        // `read` into a freshly allocated buffer is the ordinary way to meet it.
+        //
+        // `NoFaultGuard` is excluded for the reason the demand path excludes
+        // it: the copy allocates a frame and takes the VMA lock, which a caller
+        // that cannot block must not do.
+        if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+            && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+            && address.as_u64() < 0x0000_8000_0000_0000
+            && !current_cpu_uaccess().is_nofault()
+        {
+            x86_64::instructions::interrupts::enable();
+            if unsafe { handle_cow_fault(address) } {
+                return;
+            }
+            x86_64::instructions::interrupts::disable();
+        }
+
         // Check if we're in a user access operation
         let uaccess = current_cpu_uaccess();
         if uaccess.is_active() {

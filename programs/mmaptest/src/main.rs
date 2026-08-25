@@ -19,6 +19,60 @@ fn pass(test: u32, dir: &str, detail: &str) {
     println!("PASS test {} [{}]: {}", test, dir, detail);
 }
 
+/// Where a child leaves the address it is about to touch.
+///
+/// A case that only asserts the child died with code 11 passes on *any* fault,
+/// including one at an address the case knows nothing about, so it can report
+/// that the kernel rejected a past-EOF read while the child in fact took a
+/// null dereference on the way there. The child writes down what it is about
+/// to touch and the parent checks it against its own pointer, which turns the
+/// exit code into a statement about this mapping.
+fn touch_record(test: u32, dir: &str) -> String {
+    format!("{}/mmaptest_t{}.touch", dir, test)
+}
+
+/// Child side: record `addr` before the access that is expected to fault.
+fn record_touch(test: u32, dir: &str, addr: *const u8) {
+    let path = touch_record(test, dir);
+    if let Err(e) = fs::write(&path, format!("{}", addr as usize)) {
+        println!("test{test} child: could not record {path}: {e}");
+    }
+}
+
+/// Parent side: the address the child died on is the one this case is about.
+fn check_touch(test: u32, dir: &str, expected: *const u8) {
+    let path = touch_record(test, dir);
+    let recorded = match fs::read(&path).map(|b| String::from_utf8_lossy(&b).into_owned()) {
+        Ok(s) => s,
+        Err(e) => fail(
+            test,
+            dir,
+            &format!("child left no record of the address it touched: {}", e),
+        ),
+    };
+    let _ = fs::remove_file(&path);
+
+    let got: usize = match recorded.trim().parse() {
+        Ok(v) => v,
+        Err(e) => fail(
+            test,
+            dir,
+            &format!("unreadable touch record {recorded:?}: {e}"),
+        ),
+    };
+    if got != expected as usize {
+        fail(
+            test,
+            dir,
+            &format!(
+                "child was about to touch {:#x} where the parent holds {:#x}, so it died of \
+                 something other than this case",
+                got, expected as usize
+            ),
+        );
+    }
+}
+
 fn timed<R>(test: u32, dir: &str, label: &str, f: impl FnOnce() -> R) -> R {
     let start = Instant::now();
     let r = f();
@@ -299,6 +353,7 @@ fn test5(dir: &str) {
     if child_pid == 0 {
         // Child: touch the past-EOF page -- kernel must kill us.
         // read_volatile prevents the compiler from optimizing out the load.
+        record_touch(5, dir, unsafe { ptr.add(PAGE as usize) });
         let byte = unsafe { core::ptr::read_volatile(ptr.add(PAGE as usize)) };
         // Prints only if the access somehow didn't fault.
         println!("test5 child: unexpected byte {} past EOF", byte);
@@ -310,6 +365,7 @@ fn test5(dir: &str) {
     munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
+        check_touch(5, dir, unsafe { ptr.add(PAGE as usize) });
         pass(5, dir, "past-EOF fault killed child with code 11: ok");
     } else {
         fail(
@@ -371,6 +427,7 @@ fn test6(dir: &str) {
     if child_pid == 0 {
         // Child: access byte 4096 (past truncated end) -- should be killed.
         // read_volatile prevents the compiler from optimizing out the load.
+        record_touch(6, dir, unsafe { ptr.add(PAGE as usize) });
         let byte = unsafe { core::ptr::read_volatile(ptr.add(PAGE as usize)) };
         println!("test6 child: unexpected byte {} after truncate", byte);
         std::process::exit(0);
@@ -380,6 +437,7 @@ fn test6(dir: &str) {
     munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
+        check_touch(6, dir, unsafe { ptr.add(PAGE as usize) });
         pass(6, dir, "post-truncate fault killed child with code 11: ok");
     } else {
         fail(
@@ -490,6 +548,7 @@ fn test8(dir: &str) {
     if child_pid == 0 {
         // Child: write to its private mapping. COW should isolate the
         // parent's view and not touch the on-disk file.
+        record_touch(8, dir, ptr);
         unsafe { core::ptr::write_volatile(ptr, b'X') };
         let mine = unsafe { core::ptr::read_volatile(ptr) };
         if mine != b'X' {
@@ -502,8 +561,24 @@ fn test8(dir: &str) {
     let exit_code = process::waitpid(child_pid as u64);
     if exit_code != 0 {
         munmap(ptr, PAGE);
-        fail(8, dir, &format!("child exited {}, expected 0", exit_code));
+        // The child is not supposed to fault here at all, so say which address
+        // it was working from: a child holding an address its parent does not
+        // is a different bug from one the kernel refused to fill.
+        let held = fs::read(touch_record(8, dir))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|_| "?".into());
+        fail(
+            8,
+            dir,
+            &format!(
+                "child exited {}, expected 0 (child held {}, parent holds {})",
+                exit_code,
+                held.trim(),
+                ptr as usize
+            ),
+        );
     }
+    let _ = fs::remove_file(touch_record(8, dir));
 
     // Parent view: byte 0 must still be 'A' (COW isolation).
     let parent_byte = unsafe { core::ptr::read_volatile(ptr) };
