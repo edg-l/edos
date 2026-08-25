@@ -50,7 +50,7 @@ struct Pending {
 }
 
 #[derive(Default)]
-struct Stat {
+struct CallStats {
     calls: u64,
     errors: u64,
     time_ns: u64,
@@ -161,10 +161,10 @@ fn follow(
     root: u64,
     spawned: bool,
     out: &mut dyn Write,
-) -> BTreeMap<u32, Stat> {
+) -> BTreeMap<u32, CallStats> {
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut live: HashSet<u64> = HashSet::from([root]);
-    let mut stats: BTreeMap<u32, Stat> = BTreeMap::new();
+    let mut stats: BTreeMap<u32, CallStats> = BTreeMap::new();
     let mut buf = vec![TraceRecord::zeroed(); 256];
 
     loop {
@@ -308,8 +308,8 @@ fn emit(out: &mut dyn Write, root: u64, tid: u64, line: &str, took_ns: Option<u6
     }
 }
 
-fn print_summary(table: &SyscallTable, out: &mut dyn Write, stats: &BTreeMap<u32, Stat>) {
-    let mut rows: Vec<(&u32, &Stat)> = stats.iter().collect();
+fn print_summary(table: &SyscallTable, out: &mut dyn Write, stats: &BTreeMap<u32, CallStats>) {
+    let mut rows: Vec<(&u32, &CallStats)> = stats.iter().collect();
     rows.sort_by_key(|(_, stat)| core::cmp::Reverse(stat.time_ns));
 
     let total_ns: u64 = rows.iter().map(|(_, stat)| stat.time_ns).sum();

@@ -14,11 +14,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use edos_lib::io::{
-    AT_FDCWD, F_OK, R_OK, Timespec, UTIME_NOW, UTIME_OMIT, W_OK, X_OK, access, close, futimens,
-    open, pread, pwrite, readlink, set_file_times, stat, symlink, truncate, utimensat,
+    AT_FDCWD, F_OK, R_OK, UTIME_NOW, UTIME_OMIT, W_OK, X_OK, access, close, futimens, open, pread,
+    pwrite, readlink, set_file_times, stat, symlink, truncate, utimensat,
 };
 use edos_lib::process;
-use edos_lib::time;
+use edos_lib::time::{self, Timespec};
 
 const CHUNK: usize = 512;
 const THREADS: usize = 8;

@@ -10239,3 +10239,25 @@ One line was deleted rather than rewritten: `sys_mmap` opened with
 `let _file_offset = r9; // used in Phase B for file-backed path`, a binding
 that named a plan step and was never read — the real one is 150 lines further
 down, where the file-backed branch reads `r9` for itself.
+
+## The ABI's fifth file kind is a fifo, and only userspace said so
+
+`DirEntry::file_type` is the one place the kernel/userspace duplication of the
+syscall ABI has actually drifted. The kernel's declaration documented
+`4=device`; `edos_lib` documented `4=fifo`. `file_kind_to_u8` in
+`kernel/src/syscalls/io.rs` is what fills the field, and it writes 4 for
+`FileKind::Fifo`, so the side that *defines* the ABI was the side describing it
+wrongly, and nothing caught it because a comment does not compile.
+
+Two smaller versions of the same duplication are now gone rather than
+documented: `Timespec` was declared in both `edos_lib::time` and `edos_lib::io`
+— two `#[repr(C)]` structs of identical layout inside one crate, one of which
+would eventually have grown a field — and `strace` had its own `struct Stat`
+counting calls, errors and nanoseconds per syscall, colliding by name with
+`edos_lib::io::Stat`, which is the `fstat` ABI struct. It is `CallStats` now.
+`Timespec` lives in `edos_lib::time`; `io` imports it, and `utimensat`'s
+callers reach it through `edos_lib::time::Timespec`.
+
+The remaining six ABI types are still written out on both sides. Nothing in
+this pass makes the next drift less likely; only the `libs/syscall-abi` crate
+does, which is roadmap item A1.

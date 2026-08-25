@@ -1,6 +1,6 @@
 //! Poll and I/O multiplexing utilities.
 
-use crate::sys;
+use crate::{sys, time::Timespec};
 
 /// Poll interest/result state for a file descriptor.
 #[repr(C)]
@@ -196,14 +196,6 @@ pub fn truncate(path: &str, size: u64) -> i64 {
             size,
         ) as i64
     }
-}
-
-/// POSIX `struct timespec`, as passed to [`utimensat`].
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Timespec {
-    pub tv_sec: i64,
-    pub tv_nsec: i64,
 }
 
 /// `tv_nsec` values that name a time instead of carrying one: take the current

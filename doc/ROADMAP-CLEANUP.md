@@ -38,7 +38,7 @@ alone compiled cleanly and made the compositor read garbage", which is why
 |---|---|---|
 | `DirEntry` | `kernel/src/syscalls/io.rs:134` | `programs/edos_lib/src/io.rs:91` |
 | `SelectFd` | `kernel/src/syscalls/io.rs:144` | `programs/edos_lib/src/io.rs` |
-| `Timespec` | `kernel/src/syscalls/mod.rs:1776` | `programs/edos_lib/src/time.rs`, `io.rs` |
+| `Timespec` | `kernel/src/syscalls/mod.rs:1776` | `programs/edos_lib/src/time.rs` |
 | `StatFs` | `kernel/src/fs/mod.rs:438` | `programs/edos_lib/src/mounts.rs` |
 | `PollState` | `kernel/src/fs/mod.rs:106` | `programs/edos_lib/src/io.rs` |
 | `SockAddrIn` | `kernel/src/net/socket.rs` | `programs/edos_lib/src/net.rs` |
@@ -47,11 +47,12 @@ alone compiled cleanly and made the compositor read garbage", which is why
 The last row is the worst case: the same layout under two different names, so
 grep cannot even pair them.
 
-**They have already drifted.** `kernel/src/syscalls/io.rs:136` documents
-`DirEntry::file_type` as `4=device`; `programs/edos_lib/src/io.rs:94` documents
-it as `4=fifo`. `FileKind` at `kernel/src/fs/mod.rs:460` makes `Fifo` the fifth
-variant, so userspace is right and the kernel comment, on the side that defines
-the ABI, is wrong. Nothing broke this time because only the comment moved.
+**They have already drifted once.** The kernel documented
+`DirEntry::file_type` as `4=device` while userspace documented it as `4=fifo`;
+`file_kind_to_u8` in `kernel/src/syscalls/io.rs` writes `FileKind::Fifo` for 4,
+so userspace was right and the kernel comment, on the side that defines the
+ABI, was wrong. Nothing broke because only the comment moved. That one is
+corrected; the shape that produced it is not.
 
 **Fix.** One crate per boundary, the way `libs/window-abi` already does it. A
 `libs/syscall-abi` holding these seven types, `#[repr(C)]`, with the meaning of
@@ -61,18 +62,6 @@ second one.
 
 **Done when** no `#[repr(C)]` type crossing a syscall is declared in more than
 one crate, and `grep -c 'struct DirEntry' ` over the tree returns 1.
-
-### A2. `Timespec` is declared twice inside userspace alone (S2, E1)
-
-`programs/edos_lib/src/time.rs` and `programs/edos_lib/src/io.rs` both declare
-it, in one crate. Fold into A1's crate, or at minimum into one module of
-`edos_lib`.
-
-### A3. `strace`'s `Stat` collides with the ABI `Stat` (S3, E1)
-
-`programs/strace/src/main.rs:53` declares `struct Stat { calls, errors, time_ns }`,
-a per-syscall counter that has nothing to do with `edos_lib::io::Stat`. Rename to
-`CallStats`.
 
 ---
 

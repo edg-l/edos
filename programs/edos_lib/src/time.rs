@@ -2,7 +2,8 @@
 
 use crate::{net, sys};
 
-/// POSIX `timespec`, laid out as the kernel reads it.
+/// POSIX `timespec`, laid out as the kernel reads it. Both a duration, for
+/// [`nanosleep`], and an absolute time, for [`crate::io::utimensat`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Timespec {
