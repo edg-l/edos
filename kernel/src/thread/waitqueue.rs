@@ -15,9 +15,9 @@ use crate::thread::{
 use crate::timer::Instant;
 
 /// Maximum number of threads that can wait on a single WaitQueue.
-/// Raised from 32 to 64 (Foundation #5 Task 0.4b): fault-storm / many-core
-/// concurrent-reader scenarios may bring up to 64 threads to the same uncached
-/// page simultaneously; 32 was too tight. Cost: ~512 B extra per handle.
+/// A fault storm on a many-core boot can bring one thread per CPU, plus the
+/// readers already queued, to the same uncached page at once, so the bound has
+/// to clear the core count with room to spare. Cost: ~512 B per handle.
 const WAITQUEUE_CAP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

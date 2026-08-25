@@ -149,7 +149,6 @@ pub(super) fn claim_range(
 /// `r9` is the file offset (used only for file-backed mappings).
 pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64) -> u64 {
     let phys_addr = r8; // alias for MAP_PHYSICAL path
-    let _file_offset = r9; // used in Phase B for file-backed path
     let prot_str = match (
         prot & PROT_READ != 0,
         prot & PROT_WRITE != 0,

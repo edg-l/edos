@@ -6,7 +6,7 @@
 //! before taking the page_cache lock (see fault.rs).
 //! See doc/invariants/lock-order.md for the full rank table and enforcement.
 //!
-//! # in_flight registry (Foundation #5)
+//! # in_flight registry
 //!
 //! `InodePages::in_flight` is an `IrqSpinlock<BTreeMap<u64, Arc<PageFillHandle>>>`
 //! at rank 42, sitting between `pages` (40) and `dirty_keys` (50).

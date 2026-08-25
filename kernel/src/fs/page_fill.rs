@@ -526,7 +526,7 @@ pub fn issue_prefetch_bulk(
 }
 
 // ---------------------------------------------------------------------------
-// inline_fill_no_handle (Task 1.7b)
+// inline_fill_no_handle
 // ---------------------------------------------------------------------------
 
 /// Fill a single page inline without installing a `PageFillHandle`.
@@ -568,16 +568,15 @@ pub fn inline_fill_no_handle(
 }
 
 // ---------------------------------------------------------------------------
-// get_or_fill_async_sync (Tasks 1.5, 1.6, 1.7)
+// get_or_fill_async_sync
 // ---------------------------------------------------------------------------
 
 /// Get or fill a single page using the in-flight registry protocol.
 ///
-/// This is the new entry point that will replace direct `InodePages::get_or_fill`
-/// calls. Behavior is identical to the legacy path in Phase 1 (the backend is
-/// still the synchronous `fill_fn`), but concurrent readers for the same
-/// `page_idx` park on the publisher's `PageFillHandle` rather than issuing
-/// redundant I/O.
+/// The backend is still the synchronous `fill_fn`, so a single reader behaves
+/// exactly as `InodePages::get_or_fill` does; what this adds is that concurrent
+/// readers of the same `page_idx` park on the publisher's `PageFillHandle`
+/// rather than each issuing the same I/O.
 ///
 /// # Reader state machine
 ///
@@ -807,7 +806,7 @@ pub fn get_or_fill_async_sync(
 }
 
 // ---------------------------------------------------------------------------
-// get_or_fill_bulk_async_sync (Task 2.2)
+// get_or_fill_bulk_async_sync
 // ---------------------------------------------------------------------------
 
 /// Populate `inode.pages` for the exclusive range `[start_page, start_page + page_count)`

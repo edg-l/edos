@@ -349,9 +349,9 @@ unsafe fn fault_in_reloc_page(
         }
         // Non-FileBacked backing inside reloc_vma_range. Today this is only
         // the BSS-extension Anonymous VMA when BSS crosses a page boundary
-        // past the FileBacked region — Phase 0 census confirmed no current
-        // EDOS binary places reloc targets in such a page (last reloc on the
-        // last file-data page, BSS extension begins past it). Returning None
+        // past the FileBacked region — no EDOS binary places a reloc target in
+        // such a page (the last reloc sits on the last file-data page, and the
+        // BSS extension begins past it). Returning None
         // lets the caller fall through to the normal demand path which
         // zero-fills the anon page. If a future binary violates this and
         // puts a reloc target in a BSS-extension page, the relocation will

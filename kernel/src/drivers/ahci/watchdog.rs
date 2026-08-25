@@ -2,8 +2,7 @@
 //!
 //! Why this exists
 //! ----------------
-//! After Foundation #6 Phase C1, `BlockIoHandle::wait()` is indefinite.
-//! Hardware completion is normally driven by the IRQ dispatcher in
+//! `BlockIoHandle::wait()` is indefinite. Hardware completion is normally driven by the IRQ dispatcher in
 //! `ahci_driver_main`, or, on a drive error, by the TFES path
 //! (`fail_all_ncq_slots` + `restart_port`). If a SATA drive hangs without
 //! either an IRQ or a TFES (bad sector retry exhaustion, firmware bug,

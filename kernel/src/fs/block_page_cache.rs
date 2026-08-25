@@ -360,7 +360,7 @@ pub struct BlockPageCache {
     /// sync_all() waiters block here until their request is complete.
     pub sync_done_wq: WaitQueue,
     /// Per-device journal handles registered at mount time.
-    /// Wired in Phase 5; populated by `register_device`.
+    /// Populated by `register_device`.
     journals: BlockingMutex<BTreeMap<u64, Arc<crate::fs::journal::Journal>>>,
 }
 

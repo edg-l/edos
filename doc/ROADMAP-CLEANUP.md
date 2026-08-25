@@ -360,33 +360,6 @@ small derive-style macro, removes three copies.
 process that produced the code. The kernel mostly honours this and reads well.
 Two pockets do not.
 
-### G1. Plan vocabulary is baked into kernel comments (S2, E1)
-
-"Foundation #N", "Phase 3b, Session B", "Task 0.4b", "Phase 0 census", "Phase C1"
-appear in at least ten places:
-
-```
-kernel/src/thread/thread.rs:1430,1439,1441,1450
-kernel/src/thread/cancel.rs:21
-kernel/src/thread/waitqueue.rs:18
-kernel/src/debug/lock_order.rs:87,387
-kernel/src/drivers/ahci/watchdog.rs:5
-kernel/src/drivers/ahci/port.rs:723
-kernel/src/fs/page_cache.rs:9
-kernel/src/fs/journal/mod.rs:527
-kernel/src/memory/fault.rs:352
-kernel/src/loader/mod.rs:353,626
-```
-
-A reader with no access to the plan cannot tell what "the pre-Foundation-#2
-behaviour" was, and there is no document in the tree that says. Rewrite each to
-name the behaviour: "falls back to parking with no cancellation hookup for that
-op".
-
-`kernel/src/thread/waitqueue.rs:18` is the clearest case: "Raised from 32 to 64
-(Foundation #5 Task 0.4b)" is a diff note. What the reader needs is why 64 is
-enough, which the rest of the comment does say.
-
 ### G2. Restate-the-signature doc comments in `edos_render` (S3, E2)
 
 `programs/edos_render/src/widgets/layout/hbox.rs` has, consecutively: "Set the

@@ -3317,7 +3317,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         })),
     );
 
-    // Task 3.4b: Register the fork child as a mapper of every FileBacked VMA it
+    // Register the fork child as a mapper of every FileBacked VMA it
     // inherited so that truncate/invalidate_mappings_above can reach the child.
     // Collect inode Arcs under the VmaSet lock, then register outside the lock
     // to avoid holding two locks simultaneously (inode.mappers > vmas ordering).

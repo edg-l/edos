@@ -17,9 +17,10 @@
 //!
 //! # Overflow
 //!
-//! If `owned_ops_push` returns `Err(op)` (registry full), the caller falls
-//! back to the pre-Foundation-#2 behaviour (no cancellation hookup for that
-//! op).  With `OWNED_OPS_CAP = 32` this is exceedingly rare.
+//! If `owned_ops_push` returns `Err(op)` (registry full), the caller parks
+//! with no cancellation hookup for that op: it completes or times out on its
+//! own, and a dying owner cannot cut it short.  With `OWNED_OPS_CAP = 32` this
+//! is exceedingly rare.
 
 use alloc::sync::Arc;
 

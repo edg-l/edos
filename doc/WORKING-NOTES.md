@@ -10205,3 +10205,37 @@ its pages plus `output_ctx` (DMA the controller reaches by physical address, so
 holding the field *is* the job), `FaultReject`'s payloads and `XhciError::
 TransferError` (read only through a derived `Debug`, which the lint does not
 count), `BufferOwner::{Owned,Static}`, and `VfsInode::kind`.
+
+## "Phase" in a kernel comment is sometimes the code and sometimes the plan
+
+The sweep that took plan vocabulary out of kernel comments (Foundation #N,
+Phase N, Task N.Nb, "Phase 0 census") touched 16 files. The grep that finds
+them also finds four places where the word names something real, and rewriting
+those would make the code harder to read, not easier:
+
+- `thread/interrupt.rs:58,98` — the context switch genuinely has two halves,
+  and the second one runs on a different stack. "Phase 1 saved the outgoing
+  thread's context" is the only short way to say which half already ran.
+- `drivers/usb/xhci/mod.rs:754,787` — reading a configuration descriptor is a
+  9-byte header fetch followed by a full-length fetch sized from `wTotalLength`.
+- `drivers/nvme/queue.rs` — the completion queue's *phase bit*, which is the
+  NVMe spec's own name for it. Phase 0 and phase 1 here are values the
+  controller writes, not steps in a plan.
+- `debug/lock_order.rs:117` — "phase compare" in the same NVMe sense.
+
+The tell is whether a reader with no access to the plan can act on the
+sentence. "Wired in Phase 5" and "Task 2.4:" name a place in a schedule nobody
+kept; "Phase 1 saved the outgoing thread's context" names a state the machine
+is actually in.
+
+Two comments were carrying a claim worth keeping and lost only the citation:
+the lazy-reloc path asserts that no `R_X86_64_RELATIVE` straddles a page
+boundary and that exactly one writable `PT_LOAD` carries relocs, which used to
+read "per Phase 0 census". The assertion enforces it either way, so what the
+census bought was confidence, not a guarantee; the comments now state the
+property and let the `assert!` be the enforcement.
+
+One line was deleted rather than rewritten: `sys_mmap` opened with
+`let _file_offset = r9; // used in Phase B for file-backed path`, a binding
+that named a plan step and was never read — the real one is 150 lines further
+down, where the file-backed branch reads `r9` for itself.

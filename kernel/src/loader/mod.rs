@@ -350,9 +350,8 @@ pub fn load_elf(
         PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
     // Candidate writable PT_LOAD segments. After SHT_RELA is parsed, exactly
     // one of these must contain all reloc targets; the rest are non-reloc
-    // writable segments (e.g. a future GNU_RELRO + .data split). Phase 0
-    // census shows current binaries always have exactly one writable PT_LOAD,
-    // so writable_candidates.len() == 1 in practice today.
+    // writable segments (e.g. a future GNU_RELRO + .data split). Every current
+    // binary has exactly one writable PT_LOAD, so this holds one entry today.
     struct WritableCandidate {
         vma_range: core::ops::Range<VirtAddr>,
         file_offset: u64,
@@ -390,7 +389,7 @@ pub fn load_elf(
         }
     }
 
-    // Task 2.4: Build FileBacked + BSS VMAs for each PT_LOAD.
+    // Build FileBacked + BSS VMAs for each PT_LOAD.
     for i in 0..e_phnum as usize {
         let base = i * PHDR_SIZE;
         let p_type = le_u32(&phdr_bytes, base).ok_or_else(short)?;
@@ -527,7 +526,7 @@ pub fn load_elf(
             let segment_end = p_vaddr + p_memsz;
             max_addr = max_addr.max(segment_end + load_base.as_u64());
         } else if p_type == PT_TLS {
-            // Task 2.5: TLS template via targeted read_file_range.
+            // TLS template via targeted read_file_range.
             if p_memsz == 0 {
                 continue;
             }
@@ -623,8 +622,8 @@ pub fn load_elf(
     }
 
     // Resolve the reloc-bearing writable PT_LOAD by intersecting the parsed
-    // RELATIVE entries with the writable PT_LOAD candidates. Per Phase 0 census,
-    // every current binary has exactly one such candidate. Two candidates that
+    // RELATIVE entries with the writable PT_LOAD candidates. Every current
+    // binary has exactly one such candidate. Two candidates that
     // both carry relocs, or none that carries them, describe a binary the lazy
     // reloc path cannot apply, so the load fails rather than the kernel.
     let (reloc_vma_range, reloc_skip_file_offset): (

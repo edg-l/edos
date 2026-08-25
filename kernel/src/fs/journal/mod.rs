@@ -1,12 +1,11 @@
 // EFS write-ahead journal: ring I/O and bookkeeping.
 //
-// Phase 3 implements: Journal struct, ring-block I/O helpers, write_journal_sb,
-// and a seal_and_commit stub with bookkeeping only (no block writes yet).
+// The `Journal` itself and its ring-block I/O, the superblock writer, the
+// `Transaction` / `TxHandle` pair that enrols blocks and revokes, and the
+// committer kthread that seals a transaction, gates writeback behind it,
+// advances the tail, and backs sys_sync / sys_fsync.
 //
-// Phase 4 adds: enrolled_blocks / revokes to Transaction, TxHandle RAII,
-// Journal::begin_tx, and real seal_and_commit I/O body.
-// Phase 5 adds: committer kthread, writeback gating, advance_tail,
-// force_commit_and_wait, and sys_sync / sys_fsync wiring.
+// The on-disk format is doc/efs.md §14.
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -702,8 +701,8 @@ impl Journal {
         // blocks are already at home.
         let min_journaled_seq = {
             // Hoist committed_seq() read before taking checkpoint_tracker to avoid
-            // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
-            // Task 0.0 of Foundation #4).
+            // a tracker -> state lock-order inversion (see
+            // doc/invariants/lock-order.md).
             let committed = self.committed_seq();
             let tracker = ranked_lock!(
                 RANK_JOURNAL_TRACKER,

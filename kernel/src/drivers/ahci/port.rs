@@ -719,9 +719,8 @@ impl AhciPort {
     /// Allocate a slot (non-blocking), create an `AhciSlotOp`, register it
     /// with the submitter's `owned_ops`, run `f`, then clean up.
     ///
-    /// Used by non-NCQ / legacy paths where no slot available is an error.
-    /// ATAPI commands use try semantics (matching pre-Foundation-#2 behavior:
-    /// `execute_atapi_command` always used `allocate_slot`, never blocking).
+    /// Used by non-NCQ paths where no slot available is an error: ATAPI
+    /// commands never block waiting for one.
     ///
     /// Returns `Err(AhciError::PortNotReady)` immediately if no slot is free.
     /// If `f` returns `Err`, the slot is still cleaned up.

@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 /// from the ELF relocation record.
 #[derive(Clone, Debug)]
 pub struct RelocEntry {
-    /// Byte offset from the ELF load base. Fits in u32 per Phase 0 census.
+    /// Byte offset from the ELF load base; u32 caps the load image at 4 GiB.
     pub offset: u32,
     /// Addend for the RELATIVE relocation: value = base + addend.
     pub addend: i64,
@@ -70,8 +70,7 @@ impl RelocTable {
             assert!(
                 (off & 0xfff) <= 0xff8,
                 "lazy reloc: R_X86_64_RELATIVE at offset {:#x} straddles a \
-                 page boundary (low 12 bits = {:#x}); zero straddlers expected \
-                 per Phase 0 census",
+                 page boundary (low 12 bits = {:#x}); zero straddlers expected",
                 off,
                 off & 0xfff
             );
@@ -84,8 +83,8 @@ impl RelocTable {
 
         // Build per-page buckets. Each bucket covers one 4-KiB page of the
         // writable PT_LOAD VMA. Entries outside [vma_page_start, vma_page_start
-        // + vma_page_count * 4096) are ignored (shouldn't exist per Phase 0,
-        // but be defensive).
+        // + vma_page_count * 4096) are ignored; none are expected, but a
+        // stray one must not index outside the bucket table.
         let mut buckets: Vec<Bucket> = Vec::with_capacity(vma_page_count);
         for _ in 0..vma_page_count {
             buckets.push(Bucket { start: 0, len: 0 });

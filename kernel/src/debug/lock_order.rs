@@ -84,7 +84,10 @@ pub const RANK_DENTRY: u16 = 35;
 // dentry lock is held.
 pub const RANK_ICACHE: u16 = 36;
 pub const RANK_PAGES: u16 = 40;
-pub const RANK_IN_FLIGHT: u16 = 42; // forward ref for Foundation #5
+// Per-inode in-flight page-fill registry, between the page cache (40) and the
+// dirty-key set (50): a filler holds it while publishing a handle the readers
+// of the same page park on.
+pub const RANK_IN_FLIGHT: u16 = 42;
 pub const RANK_DIRTY_KEYS: u16 = 50;
 pub const RANK_MAPPERS: u16 = 60;
 pub const RANK_VMAS: u16 = 70;
@@ -383,9 +386,9 @@ pub fn exit(rank: u16, site: &'static str) {
     };
 
     // See `enter()` for rationale: bogus Arc pointer means skip tracking.
-    // This mirrors `enter`'s skip so the paired push/pop stay balanced when
-    // a Foundation-#4 tracking window straddles a torn-read; if `enter`
-    // skipped, `exit` must also skip or the stack underflows.
+    // This mirrors `enter`'s skip so the paired push/pop stay balanced when a
+    // tracking window straddles a torn read; if `enter` skipped, `exit` must
+    // also skip or the stack underflows.
     let ptr = alloc::sync::Arc::as_ptr(&thread) as usize;
     if ptr < 0xffff_8000_0000_0000 {
         crate::serial::emergency_write(b"lock_order: skipping exit due to bogus thread Arc\n");

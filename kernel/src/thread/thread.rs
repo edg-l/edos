@@ -1178,12 +1178,10 @@ impl Thread {
             cmdline,
         }));
 
-        // Task 2.9: Register the new process as a mapper of every FileBacked VMA
-        // so that truncate/invalidate_mappings_above can unmap pages in this process.
-        // Collect inode Arcs while holding the VmaSet lock, then register while
-        // NOT holding the VmaSet lock to respect lock ordering (inode.mappers > vmas).
-        // Registers this process as a mapper of every FileBacked VMA so that
+        // Register the new process as a mapper of every FileBacked VMA so that
         // truncate/invalidate_mappings_above can unmap pages in this process.
+        // Collect inode Arcs while holding the VmaSet lock, then register while
+        // NOT holding it, to respect lock ordering (inode.mappers > vmas).
         {
             let file_backed_inodes: Vec<Arc<crate::fs::inode::VfsInode>> = {
                 let user = user_state.read();
@@ -1422,7 +1420,7 @@ impl Thread {
     }
 
     // -----------------------------------------------------------------------
-    // Owned-ops registry (Foundation #2: cancellable waits)
+    // Owned-ops registry: the in-flight operations a dying thread must cancel
     // -----------------------------------------------------------------------
 
     /// Register an in-flight async operation before parking.
@@ -1431,8 +1429,7 @@ impl Thread {
     /// context, so heap allocation (Arc construction) is allowed.
     ///
     /// Returns `Err(op)` if the registry is full (`OWNED_OPS_CAP` reached).
-    /// On overflow the caller falls back to the pre-Foundation-#2 behaviour
-    /// (no cancel hookup for that op).
+    /// On overflow the caller parks with no cancel hookup for that op.
     pub fn owned_ops_push(&self, op: ArcCancellableOp) -> Result<(), ArcCancellableOp> {
         self.owned_ops.lock().push(op)
     }

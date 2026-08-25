@@ -43,7 +43,7 @@ pub enum VmaBacking {
     Stack,
     /// File-backed mapping (MAP_PRIVATE or MAP_SHARED).
     /// `pages` has one slot per VMA page (length = VMA size / 4096), initially all None.
-    /// Phase B fills slots during demand faults; Phase C uses them for msync/munmap.
+    /// Demand faults fill the slots; msync and munmap read them back.
     FileBacked {
         inode: Arc<VfsInode>,
         /// Byte offset in the file corresponding to the VMA start (4 KiB aligned).
