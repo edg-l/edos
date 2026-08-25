@@ -100,10 +100,19 @@ def run_suite(name, args, budget):
 
     The command is echoed to `/dev/klog` rather than read off the terminal:
     stdout goes to the GUI terminal, which the serial log never sees.
+
+    The suite's own output goes there too, and `2>&1` with it. A bare exit code
+    says a suite failed and nothing about which case, which is unreadable from
+    a CI artifact: every one of these prints a `FAIL <case>: <reason>` line that
+    was being thrown away. `eprintln!` in particular is invisible otherwise --
+    it stays on the guest's terminal, and the only symptom is the exit code.
     """
     label = f"{name}{(' ' + args) if args else ''}"
     mark = serial_mark()
-    type_line(f'{name} {args}; echo "{MARKER} {name} rc=$?" > /dev/klog', settle=1)
+    type_line(
+        f'{name} {args} > /dev/klog 2>&1; echo "{MARKER} {name} rc=$?" > /dev/klog',
+        settle=1,
+    )
 
     deadline = time.time() + budget
     pattern = re.compile(rf"{MARKER} {re.escape(name)} rc=(\d+)")

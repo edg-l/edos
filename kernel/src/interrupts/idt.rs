@@ -295,11 +295,29 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
+        // Which thread died. Without it the line says a fault happened and not
+        // to whom, which is unreadable when several programs are running and
+        // one of them is a forked child of another.
+        //
+        // Read under `without_interrupts` because the branch above re-enabled
+        // them: `get_percpu_data` resolves a GS base, and a thread moved
+        // between that read and the access would name the CPU it left. Cloning
+        // the name is an `Arc` refcount bump, so nothing here allocates on a
+        // path that must not.
+        let culprit = x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::util::per_cpu::get_percpu_data()
+                .with_current_thread(|t| (t.id.0, t.name.clone()))
+        });
+        let (tid, name) = match &culprit {
+            Some((tid, name)) => (*tid, name.as_str()),
+            None => (0, "<no current thread>"),
+        };
+
         // Use emergency_println (bypasses SERIAL_DBG lock) so that if the
         // faulting code itself held the serial lock, we still get output
         // instead of deadlocking.
         crate::emergency_println!(
-            "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc}) reject={reject:?}",
+            "KILL: PF {name}:{tid} addr={:p} rip={:p} err={error_code:?} ({error_desc}) reject={reject:?}",
             address,
             stack_frame.instruction_pointer
         );
