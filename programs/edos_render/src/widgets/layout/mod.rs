@@ -5,21 +5,20 @@
 //!
 //! # Available Layouts
 //!
-//! - [`VBoxLayout`] - Stacks widgets vertically
-//! - [`HBoxLayout`] - Arranges widgets horizontally
+//! - [`LinearLayout`] - Arranges widgets in a line, along either axis
 //! - [`GridLayout`] - Arranges widgets in a grid
 //!
 //! # Example
 //!
 //! ```ignore
 //! use edos_render::widgets::{WidgetContainer, Label, Button};
-//! use edos_render::widgets::layout::{VBoxLayout, Insets, Rect};
+//! use edos_render::widgets::layout::{LinearLayout, Insets, Rect};
 //!
 //! let mut widgets = WidgetContainer::new();
 //! let label = widgets.add(Label::new(0, 0, "Hello"));
 //! let button = widgets.add(Button::new(0, 0, "Click"));
 //!
-//! let mut layout = VBoxLayout::new();
+//! let mut layout = LinearLayout::vertical();
 //! layout.set_padding(Insets::all(10));
 //! layout.set_spacing(5);
 //! layout.set_bounds(Rect::new(0, 0, 200, 100));
@@ -30,15 +29,13 @@
 
 pub mod alignment;
 pub mod grid;
-pub mod hbox;
+pub mod linear;
 pub mod size;
-pub mod vbox;
 
-pub use alignment::{Alignment, HAlign, VAlign};
+pub use alignment::{Align, Alignment};
 pub use grid::{GridCell, GridLayout};
-pub use hbox::HBoxLayout;
+pub use linear::{Axis, LinearLayout};
 pub use size::{SizeHint, SizePolicy, Sizing};
-pub use vbox::VBoxLayout;
 
 use super::{Widget, WidgetId};
 

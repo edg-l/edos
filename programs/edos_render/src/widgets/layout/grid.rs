@@ -1,6 +1,6 @@
 //! Grid layout - arranges widgets in rows and columns.
 
-use super::{Alignment, HAlign, Insets, Sizable, SizePolicy, VAlign};
+use super::{Align, Alignment, Insets, Sizable, SizePolicy};
 use crate::widgets::{Rect, WidgetContainer, WidgetId};
 
 /// Configuration for a grid column.
@@ -286,25 +286,23 @@ impl GridLayout {
 
                 // Calculate position based on alignment
                 let final_x = match cell.alignment.horizontal {
-                    HAlign::Start => available_x,
-                    HAlign::Center => {
+                    Align::Start => available_x,
+                    Align::Center => {
                         available_x + (available_width.saturating_sub(widget_width) / 2) as i32
                     }
-                    HAlign::End => {
-                        available_x + available_width.saturating_sub(widget_width) as i32
-                    }
-                    HAlign::Stretch => available_x,
+                    Align::End => available_x + available_width.saturating_sub(widget_width) as i32,
+                    Align::Stretch => available_x,
                 };
 
                 let final_y = match cell.alignment.vertical {
-                    VAlign::Start => available_y,
-                    VAlign::Center => {
+                    Align::Start => available_y,
+                    Align::Center => {
                         available_y + (available_height.saturating_sub(widget_height) / 2) as i32
                     }
-                    VAlign::End => {
+                    Align::End => {
                         available_y + available_height.saturating_sub(widget_height) as i32
                     }
-                    VAlign::Stretch => available_y,
+                    Align::Stretch => available_y,
                 };
 
                 widget.set_position(final_x, final_y);

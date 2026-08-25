@@ -285,28 +285,39 @@ reach.
 
 ## F. Duplicated code
 
-### F2. `read_user_path_with_len` and `read_user_path_at` share 12 lines (S2, E1)
+### F2. ~~`read_user_path_with_len` and `read_user_path_at` share 12 lines~~ (done)
 
-`kernel/src/syscalls/fs.rs:37` and `:69`. Both do: null check, length bound,
-`try_copy_from_user` into a `PathBuf`, UTF-8 validate, then diverge only in how
-the base directory is chosen. Extract the copy, keep the two resolution
-policies.
+The shared span was one operation: null check, length bound,
+`try_copy_from_user` into a caller-owned `PathBuf`, UTF-8 validate. It is
+`copy_user_path_len` in `kernel/src/syscalls/mod.rs`, beside the NUL-terminated
+`copy_user_path` it mirrors; the two resolution policies in
+`syscalls/fs.rs` are three lines each now and differ only in how they pick the
+base directory.
 
-While there: five overlapping user-copy front ends exist for what is one
-operation. `copy_in`/`copy_out` (`io.rs:48`, `:125`), `read_user_path`,
-`read_user_path_with_len`, `read_user_path_at`, `read_user_str` (`fs.rs`),
-`copy_user_path`, `copy_user_c_string` (`mod.rs:3365`, `:3383`), and
-`Mapper::copy_to_user` / `write_val_to_user` (`memory/mapper.rs:525`, `:560`).
-Decide which layer owns it and delete the rest.
+The five front ends the item asked about are three layers, not one repeated:
+`util::uaccess` owns the raw copies; `syscalls::mod` owns the two path front
+ends (`copy_user_path`, `copy_user_path_len`), both returning a `&str` borrowed
+from a caller stack buffer; `syscalls::fs` owns resolution policy
+(`read_user_path`, `read_user_path_with_len`, `read_user_path_at`). `copy_in` /
+`copy_out` are a different operation -- counted bytes through the heap, so a
+caller can copy before taking a lock -- and `read_user_str` /
+`copy_user_c_string` answer with owned `CString` / `Vec<u8>` for values that are
+not paths. Nothing left to merge.
 
-### F3. `hbox` and `vbox` are one algorithm written twice (S2, E1)
+### F3. ~~`hbox` and `vbox` are one algorithm written twice~~ (done)
 
-`programs/edos_render/src/widgets/layout/hbox.rs` and `vbox.rs` share 78 lines,
-including a 56-line identical block. They differ only in which axis is the main
-one.
+`programs/edos_render/src/widgets/layout/linear.rs` holds the one algorithm.
+`Axis` answers the six questions that differed between the two copies -- which
+size policy, which alignment, which half of a `SizeHint`, which margins, where a
+`Rect` starts and how far it reaches -- so the layout body is written once in
+terms of a main and a cross axis. `LinearLayout::horizontal()` and
+`LinearLayout::vertical()` are the constructors; `HBoxLayout` and `VBoxLayout`
+are gone.
 
-**Fix.** One `LinearLayout` parameterised by `Axis`, with `HBox` and `VBox` as
-constructors. Fixing a layout bug currently means remembering to fix it twice.
+`HBox`'s uniform-column pass was never horizontal in anything but its name and
+is now `set_uniform`, available on both axes. `HAlign` and `VAlign` were the
+same four variants declared twice, which is what made the shared body impossible
+to write; they are one `Align`, and `Alignment` still names the two fields.
 
 ### F4. ~~`mbr.rs` and `gpt.rs` share 43 lines~~ (done)
 

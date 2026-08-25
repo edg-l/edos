@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use edos_render::metrics::{space, CONTROL_HEIGHT, TEXT_CELL_HEIGHT};
-use edos_render::widgets::layout::{Alignment, HBoxLayout, Insets, SizePolicy, VBoxLayout};
+use edos_render::widgets::layout::{Alignment, Insets, LinearLayout, SizePolicy};
 use edos_render::widgets::{
     Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer, WidgetEvent,
     WidgetId,
@@ -69,7 +69,7 @@ const SLIDER_ROW_W: u32 = 300;
 
 /// Put a section label in the shared label column, so the controls beside it
 /// start at `INDENT_X` whatever the label says.
-fn add_section_label(row: &mut HBoxLayout, label: WidgetId) {
+fn add_section_label(row: &mut LinearLayout, label: WidgetId) {
     row.add(label)
         .set_width(SizePolicy::Fixed(LABEL_W))
         .set_alignment(Alignment::center_left());
@@ -161,7 +161,7 @@ fn main() {
     let status_label = widgets.add(Label::new(0, 0, "Status:"));
 
     // Create main vertical layout
-    let mut main_layout = VBoxLayout::new();
+    let mut main_layout = LinearLayout::vertical();
     main_layout.set_padding(Insets::new(MARGIN, MARGIN, MARGIN, MARGIN));
     main_layout.set_spacing(ROW_GAP);
     main_layout.set_bounds(Rect::new(0, 0, WIN_W, WIN_H));
@@ -170,7 +170,7 @@ fn main() {
     main_layout.add(title_label);
 
     // Buttons row (use HBoxLayout)
-    let mut button_row = HBoxLayout::new();
+    let mut button_row = LinearLayout::horizontal();
     button_row.set_spacing(GROUP_GAP);
     button_row.set_bounds(Rect::new(CONTENT_X, ROW_BUTTONS, CONTENT_W, ROW_H));
     add_section_label(&mut button_row, btn_label);
@@ -180,7 +180,7 @@ fn main() {
     button_row.add_stretch(1.0);
 
     // Input row
-    let mut input_row = HBoxLayout::new();
+    let mut input_row = LinearLayout::horizontal();
     input_row.set_spacing(GROUP_GAP);
     input_row.set_bounds(Rect::new(CONTENT_X, ROW_INPUT, CONTENT_W, ROW_H));
     add_section_label(&mut input_row, input_label);
@@ -188,18 +188,18 @@ fn main() {
     input_row.add(btn_greet);
 
     // Checkboxes - two rows
-    let mut chk_row1 = HBoxLayout::new();
+    let mut chk_row1 = LinearLayout::horizontal();
     chk_row1.set_spacing(GROUP_GAP);
-    chk_row1.set_uniform_columns(true);
+    chk_row1.set_uniform(true);
     chk_row1.set_bounds(Rect::new(CONTENT_X, ROW_CHK1, CONTENT_W, ROW_H));
     add_section_label(&mut chk_row1, chk_label);
     chk_row1.add(chk_sound);
     chk_row1.add(chk_auto);
     chk_row1.add_stretch(1.0);
 
-    let mut chk_row2 = HBoxLayout::new();
+    let mut chk_row2 = LinearLayout::horizontal();
     chk_row2.set_spacing(GROUP_GAP);
-    chk_row2.set_uniform_columns(true);
+    chk_row2.set_uniform(true);
     chk_row2.set_bounds(Rect::new(
         INDENT_X,
         ROW_CHK2,
@@ -211,26 +211,26 @@ fn main() {
     chk_row2.add_stretch(1.0);
 
     // Slider rows
-    let mut vol_row = HBoxLayout::new();
+    let mut vol_row = LinearLayout::horizontal();
     vol_row.set_spacing(GROUP_GAP);
     vol_row.set_bounds(Rect::new(CONTENT_X, ROW_VOLUME, SLIDER_ROW_W, ROW_H));
     add_section_label(&mut vol_row, vol_label);
     vol_row.add(slider_vol);
 
-    let mut bright_row = HBoxLayout::new();
+    let mut bright_row = LinearLayout::horizontal();
     bright_row.set_spacing(GROUP_GAP);
     bright_row.set_bounds(Rect::new(CONTENT_X, ROW_BRIGHTNESS, SLIDER_ROW_W, ROW_H));
     add_section_label(&mut bright_row, bright_label);
     bright_row.add(slider_bright);
 
-    let mut speed_row = HBoxLayout::new();
+    let mut speed_row = LinearLayout::horizontal();
     speed_row.set_spacing(GROUP_GAP);
     speed_row.set_bounds(Rect::new(CONTENT_X, ROW_SPEED, SLIDER_ROW_W, ROW_H));
     add_section_label(&mut speed_row, speed_label);
     speed_row.add(slider_speed);
 
     // Status row
-    let mut status_row = HBoxLayout::new();
+    let mut status_row = LinearLayout::horizontal();
     status_row.set_spacing(GROUP_GAP);
     status_row.set_bounds(Rect::new(CONTENT_X, ROW_STATUS, CONTENT_W, ROW_H));
     add_section_label(&mut status_row, status_label);

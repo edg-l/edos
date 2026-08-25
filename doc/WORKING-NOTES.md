@@ -10302,3 +10302,39 @@ width, and both listings put the type in a `{:<20}` column.
 Neither listing runs in the `make test` boot -- they are called from
 `fs::mod.rs` only when a partition scan finds a table -- so this is compile-
 and boot-verified, not output-verified.
+
+## Layout: one algorithm, two axes
+
+`edos_render`'s box layout is `widgets/layout/linear.rs`. `HBoxLayout` and
+`VBoxLayout` no longer exist; `LinearLayout::horizontal()` and
+`LinearLayout::vertical()` construct the same type, and `Axis` supplies the six
+axis-dependent answers (size policy, alignment, half of a `SizeHint`, margin
+extent, a `Rect`'s origin and its extent) that the two copies used to differ in.
+
+The thing that had kept them apart was `HAlign` and `VAlign`: two enums with the
+same four variants, so no single expression could align on "the main axis". They
+are one `Align` now, and `Alignment { horizontal, vertical }` is what says which
+is which. Anything reaching for `HAlign::Center` wants `Align::Center`.
+
+`set_uniform_columns` is `set_uniform`. The pass it names -- give every
+content-sized item the extent of the largest, so the next column starts at the
+same offset on every row -- was never horizontal in anything but its name.
+
+Verified in a guest: `wintest` renders its five rows aligned, the two
+uniform checkbox rows keep their columns, and Tab still walks the buttons.
+
+## The kernel has two path front ends, not five
+
+`kernel/src/syscalls/mod.rs` owns both: `copy_user_path` for a NUL-terminated
+user path and `copy_user_path_len` for a counted one. Both fill a caller-owned
+`PathBuf` (a stack array, so `open`/`stat`/`mkdir` never reach the allocator)
+and hand back a `&str` borrowed from it.
+
+`syscalls/fs.rs` owns policy on top and nothing else: `read_user_path` resolves
+against the working directory, `read_user_path_with_len` against a caller-named
+one, and `read_user_path_at` implements the `*at` rule. Each is three lines.
+
+The other user-copy helpers are not this operation and should not be folded in:
+`copy_in`/`copy_out` (`io.rs`) move counted bytes through the heap so a caller
+can copy *before* taking a lock, and `read_user_str` / `copy_user_c_string`
+answer with an owned `CString` / `Vec<u8>` for values that are not paths.
