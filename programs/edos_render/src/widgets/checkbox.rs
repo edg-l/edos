@@ -1,7 +1,7 @@
 //! Checkbox widget with label.
 
 use super::{
-    Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
+    Rect, FocusState, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
     text_height, text_width,
 };
 use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
@@ -14,8 +14,7 @@ pub struct Checkbox {
     label: String,
     checked: bool,
     hovered: bool,
-    focused: bool,
-    enabled: bool,
+    focus: FocusState,
 }
 
 impl Checkbox {
@@ -27,8 +26,7 @@ impl Checkbox {
             label: label.to_string(),
             checked: false,
             hovered: false,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
         }
     }
 
@@ -40,8 +38,7 @@ impl Checkbox {
             label: label.to_string(),
             checked,
             hovered: false,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
         }
     }
 
@@ -91,7 +88,7 @@ impl Widget for Checkbox {
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
         // Draw checkbox box background
-        let bg_color = if !self.enabled {
+        let bg_color = if !self.focus.enabled {
             colors::CONTROL_DISABLED
         } else if self.hovered {
             colors::BUTTON_HOVER
@@ -111,7 +108,7 @@ impl Widget for Checkbox {
         );
 
         // Draw focus ring if focused
-        if self.focused {
+        if self.focus.focused {
             draw_focus_ring(
                 buffer,
                 buffer_width,
@@ -124,9 +121,9 @@ impl Widget for Checkbox {
         }
 
         // Draw border
-        let border_color = if !self.enabled {
+        let border_color = if !self.focus.enabled {
             colors::CONTROL_DISABLED
-        } else if self.focused {
+        } else if self.focus.focused {
             colors::FOCUS_RING
         } else if self.hovered {
             colors::BORDER_HOVER
@@ -168,7 +165,7 @@ impl Widget for Checkbox {
             label_x,
             label_y,
             &self.label,
-            if self.enabled {
+            if self.focus.enabled {
                 colors::TEXT
             } else {
                 colors::TEXT_DISABLED
@@ -181,7 +178,7 @@ impl Widget for Checkbox {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         if !pressed && self.bounds().contains(x, y) {
@@ -193,18 +190,18 @@ impl Widget for Checkbox {
     }
 
     fn on_char(&mut self, _ch: char) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         None
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         // Space toggles the checkbox when focused.
-        if self.focused && pressed && scancode == keycode::SPACEBAR {
+        if self.focus.focused && pressed && scancode == keycode::SPACEBAR {
             self.toggle();
             Some(WidgetEvent::ValueChanged(if self.checked { 1 } else { 0 }))
         } else {
@@ -212,24 +209,11 @@ impl Widget for Checkbox {
         }
     }
 
-    fn focusable(&self) -> bool {
-        // A disabled control is skipped by Tab: focusing something that cannot
-        // act is a dead end the user has to Tab out of again.
-        self.enabled
+    fn focus_state(&self) -> Option<&FocusState> {
+        Some(&self.focus)
     }
 
-    fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
-    }
-
-    fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-        if !enabled {
-            self.focused = false;
-        }
+    fn focus_state_mut(&mut self) -> Option<&mut FocusState> {
+        Some(&mut self.focus)
     }
 }

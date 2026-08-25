@@ -3,7 +3,7 @@
 use edos_lib::keymap::keycode;
 
 use super::{
-    Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
+    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
     text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, TEXT_PAD_X};
@@ -21,8 +21,7 @@ pub struct TextInput {
     /// multi-byte character and the next `String::insert` would panic on the
     /// boundary assertion. Byte offsets are derived at the point of use.
     cursor_pos: usize,
-    focused: bool,
-    enabled: bool,
+    focus: FocusState,
     placeholder: String,
     cursor_visible: bool,
     cursor_blink_counter: u32,
@@ -37,8 +36,7 @@ impl TextInput {
             width,
             text: String::new(),
             cursor_pos: 0,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
             placeholder: String::new(),
             cursor_visible: true,
             cursor_blink_counter: 0,
@@ -53,8 +51,7 @@ impl TextInput {
             width,
             text: String::new(),
             cursor_pos: 0,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
             placeholder: placeholder.to_string(),
             cursor_visible: true,
             cursor_blink_counter: 0,
@@ -111,7 +108,7 @@ impl TextInput {
     /// Whether the field has the focus, which decides where a key press goes
     /// for a program routing input itself rather than through a container.
     pub fn focused(&self) -> bool {
-        self.focused
+        self.focus.focused
     }
 
     /// Insert a character at the cursor position.
@@ -195,7 +192,7 @@ impl Widget for TextInput {
         );
 
         // Draw focus ring if focused
-        if self.focused {
+        if self.focus.focused {
             draw_focus_ring(
                 buffer,
                 buffer_width,
@@ -208,9 +205,9 @@ impl Widget for TextInput {
         }
 
         // Draw border
-        let border_color = if !self.enabled {
+        let border_color = if !self.focus.enabled {
             colors::CONTROL_DISABLED
-        } else if self.focused {
+        } else if self.focus.focused {
             colors::FOCUS_RING
         } else {
             colors::INPUT_BORDER
@@ -248,7 +245,7 @@ impl Widget for TextInput {
                 text_x,
                 text_y,
                 &self.text,
-                if self.enabled {
+                if self.focus.enabled {
                     colors::TEXT
                 } else {
                     colors::TEXT_DISABLED
@@ -257,7 +254,7 @@ impl Widget for TextInput {
         }
 
         // Draw cursor if focused and visible
-        if self.focused && self.cursor_visible {
+        if self.focus.focused && self.cursor_visible {
             let cursor_x = text_x + text_width(&self.text[..self.cursor_byte()]) as i32;
             draw_rect(
                 buffer,
@@ -277,7 +274,7 @@ impl Widget for TextInput {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         if !pressed && self.bounds().contains(x, y) {
@@ -293,10 +290,10 @@ impl Widget for TextInput {
     }
 
     fn on_char(&mut self, ch: char) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
-        if !self.focused {
+        if !self.focus.focused {
             return None;
         }
 
@@ -318,10 +315,10 @@ impl Widget for TextInput {
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
-        if !self.focused || !pressed {
+        if !self.focus.focused || !pressed {
             return None;
         }
 
@@ -360,14 +357,14 @@ impl Widget for TextInput {
     /// The whole field. There is no selection here, so a copy takes everything
     /// the field holds rather than nothing.
     fn clipboard_copy(&self) -> Option<String> {
-        if !self.enabled || self.text.is_empty() {
+        if !self.focus.enabled || self.text.is_empty() {
             return None;
         }
         Some(self.text.clone())
     }
 
     fn clipboard_cut(&mut self) -> Option<WidgetEvent> {
-        if !self.enabled || self.text.is_empty() {
+        if !self.focus.enabled || self.text.is_empty() {
             return None;
         }
         self.text.clear();
@@ -377,7 +374,7 @@ impl Widget for TextInput {
     }
 
     fn clipboard_paste(&mut self, text: &str) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         // A field is one line, so a newline in the pasted text ends it rather
@@ -391,25 +388,16 @@ impl Widget for TextInput {
         Some(WidgetEvent::TextChanged(self.text.clone()))
     }
 
-    fn focusable(&self) -> bool {
-        // A disabled control is skipped by Tab: focusing something that cannot
-        // act is a dead end the user has to Tab out of again.
-        self.enabled
+    fn focus_state(&self) -> Option<&FocusState> {
+        Some(&self.focus)
     }
 
-    fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-        if !enabled {
-            self.focused = false;
-        }
+    fn focus_state_mut(&mut self) -> Option<&mut FocusState> {
+        Some(&mut self.focus)
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
+        self.focus.focused = focused;
         if focused {
             self.reset_cursor_blink();
         }

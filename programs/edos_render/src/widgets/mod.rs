@@ -64,6 +64,39 @@ pub enum WidgetEvent {
     Submit(String),
 }
 
+/// Focus and enablement, the two bits every interactive widget carries.
+///
+/// A widget that holds one gets [`Widget::focusable`], [`Widget::set_focused`],
+/// [`Widget::enabled`] and [`Widget::set_enabled`] from the trait's defaults by
+/// answering [`Widget::focus_state`]; a widget that also has to react to the
+/// change (a button dropping its hover, a text input restarting its cursor
+/// blink) overrides the one method and calls the inherent setter here.
+#[derive(Clone, Copy, Debug)]
+pub struct FocusState {
+    pub focused: bool,
+    pub enabled: bool,
+}
+
+impl Default for FocusState {
+    fn default() -> Self {
+        Self {
+            focused: false,
+            enabled: true,
+        }
+    }
+}
+
+impl FocusState {
+    /// Enable or disable, dropping focus on the way out: a disabled control
+    /// that kept focus would swallow the keys aimed at whatever is next.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+        }
+    }
+}
+
 /// Trait that all widgets must implement.
 ///
 /// A widget has no identity of its own: `WidgetContainer::add` returns the id
@@ -91,11 +124,33 @@ pub trait Widget {
     /// Handle key press/release. Returns event if one was triggered.
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent>;
 
+    /// This widget's focus and enablement, or `None` for a widget that is
+    /// decoration and never takes input. The four methods below are written
+    /// against it, so a widget that answers here implements none of them.
+    fn focus_state(&self) -> Option<&FocusState> {
+        None
+    }
+
+    /// The mutable half of [`Widget::focus_state`]. A widget that overrides one
+    /// overrides both.
+    fn focus_state_mut(&mut self) -> Option<&mut FocusState> {
+        None
+    }
+
     /// Check if this widget can receive focus.
-    fn focusable(&self) -> bool;
+    ///
+    /// A disabled control is skipped by Tab: focusing something that cannot act
+    /// is a dead end the user has to Tab out of again.
+    fn focusable(&self) -> bool {
+        self.focus_state().is_some_and(|f| f.enabled)
+    }
 
     /// Set the focused state of this widget.
-    fn set_focused(&mut self, focused: bool);
+    fn set_focused(&mut self, focused: bool) {
+        if let Some(f) = self.focus_state_mut() {
+            f.focused = focused;
+        }
+    }
 
     /// Whether this widget currently accepts input.
     ///
@@ -104,11 +159,15 @@ pub trait Widget {
     /// exists. Widgets that cannot be disabled report `true` and ignore
     /// `set_enabled`.
     fn enabled(&self) -> bool {
-        true
+        self.focus_state().is_none_or(|f| f.enabled)
     }
 
     /// Enable or disable the widget.
-    fn set_enabled(&mut self, _enabled: bool) {}
+    fn set_enabled(&mut self, enabled: bool) {
+        if let Some(f) = self.focus_state_mut() {
+            f.set_enabled(enabled);
+        }
+    }
 
     /// What a copy takes from this widget, or None if it holds nothing to copy.
     ///

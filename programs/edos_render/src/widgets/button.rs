@@ -1,7 +1,7 @@
 //! Clickable button widget.
 
 use super::{
-    Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
+    Rect, FocusState, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline, draw_text,
     text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, CONTROL_PAD_X};
@@ -16,8 +16,7 @@ pub struct Button {
     label: String,
     hovered: bool,
     pressed: bool,
-    focused: bool,
-    enabled: bool,
+    focus: FocusState,
 }
 
 impl Button {
@@ -33,8 +32,7 @@ impl Button {
             label: label.to_string(),
             hovered: false,
             pressed: false,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
         }
     }
 
@@ -48,8 +46,7 @@ impl Button {
             label: label.to_string(),
             hovered: false,
             pressed: false,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
         }
     }
 
@@ -76,7 +73,7 @@ impl Widget for Button {
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
         // Choose background color based on state
-        if !self.enabled {
+        if !self.focus.enabled {
             draw_rect(
                 buffer,
                 buffer_width,
@@ -131,7 +128,7 @@ impl Widget for Button {
         );
 
         // Draw focus ring if focused
-        if self.focused {
+        if self.focus.focused {
             draw_focus_ring(
                 buffer,
                 buffer_width,
@@ -177,7 +174,7 @@ impl Widget for Button {
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {
-        if !self.enabled {
+        if !self.focus.enabled {
             return;
         }
         self.hovered = self.bounds().contains(x, y);
@@ -188,7 +185,7 @@ impl Widget for Button {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         let inside = self.bounds().contains(x, y);
@@ -211,8 +208,8 @@ impl Widget for Button {
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
         // Space or Enter activates the button when focused.
-        if self.enabled
-            && self.focused
+        if self.focus.enabled
+            && self.focus.focused
             && pressed
             && matches!(
                 scancode,
@@ -225,26 +222,19 @@ impl Widget for Button {
         }
     }
 
-    fn focusable(&self) -> bool {
-        // A disabled control is skipped by Tab: focusing something that cannot
-        // act is a dead end the user has to Tab out of again.
-        self.enabled
+    fn focus_state(&self) -> Option<&FocusState> {
+        Some(&self.focus)
     }
 
-    fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
-    }
-
-    fn enabled(&self) -> bool {
-        self.enabled
+    fn focus_state_mut(&mut self) -> Option<&mut FocusState> {
+        Some(&mut self.focus)
     }
 
     fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
+        self.focus.set_enabled(enabled);
         if !enabled {
             self.hovered = false;
             self.pressed = false;
-            self.focused = false;
         }
     }
 }

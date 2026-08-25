@@ -336,12 +336,15 @@ about — the driver reuses the tree blocks the inode already holds, `efs-mkfs`
 allocates fresh ones near the file. `max_extents` moved beside it, so the
 depth-1 ceiling is stated once as well.
 
-### F6. Button, checkbox and slider share a 21-line block (S3, E1)
+### F6. ~~Button, checkbox and slider share a 21-line block~~ (done)
 
-`button.rs:224-244`, `checkbox.rs:218-238`, `slider.rs:300-319`: the
-`focusable` / `set_focused` / `enabled` / `set_enabled` quartet with the same
-comment. A `FocusState` struct with a `focus_state()` accessor on the trait, or a
-small derive-style macro, removes three copies.
+`FocusState { focused, enabled }` is the state, and `Widget::focus_state` /
+`focus_state_mut` is the only thing a widget implements: `focusable`,
+`set_focused`, `enabled` and `set_enabled` are trait defaults written against
+it. `Label` implements none of them, since a widget that answers `None` gets
+"never focusable, always enabled" for free. `Button` and `TextInput` override a
+single method each, for the hover/press state one drops and the cursor blink the
+other restarts. `Terminal` moved onto it too.
 
 ---
 

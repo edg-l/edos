@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use edos_lib::clipboard::{self, Buffer};
 
-use super::{Rect, Widget, WidgetEvent, char_width, draw_rect, draw_text_styled, text_height};
+use super::{FocusState, Rect, Widget, WidgetEvent, char_width, draw_rect, draw_text_styled, text_height};
 use crate::text::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -167,7 +167,7 @@ pub struct Terminal {
     max_history: usize,
 
     // State
-    focused: bool,
+    focus: FocusState,
     bg_color: u32,
     fg_color: u32,
 
@@ -237,7 +237,7 @@ impl Terminal {
             scroll_offset: 0,
             history: VecDeque::new(),
             max_history: 1000,
-            focused: false,
+            focus: FocusState::default(),
             bg_color: terminal_colors::BACKGROUND,
             fg_color: terminal_colors::FOREGROUND,
             current_fg: terminal_colors::FOREGROUND,
@@ -1168,7 +1168,7 @@ impl Terminal {
             row: self.cursor_row,
             col: self.cursor_col,
             drawn: self.scroll_offset == 0
-                && self.focused
+                && self.focus.focused
                 && self.cursor_enabled
                 && self.cursor_visible,
         }
@@ -1389,7 +1389,7 @@ impl Widget for Terminal {
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
         use edos_lib::keymap::{keycode, map_keycode, update_modifiers};
 
-        if !self.focused {
+        if !self.focus.focused {
             return None;
         }
 
@@ -1493,12 +1493,16 @@ impl Widget for Terminal {
         None
     }
 
-    fn focusable(&self) -> bool {
-        true
+    fn focus_state(&self) -> Option<&FocusState> {
+        Some(&self.focus)
+    }
+
+    fn focus_state_mut(&mut self) -> Option<&mut FocusState> {
+        Some(&mut self.focus)
     }
 
     fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
+        self.focus.focused = focused;
         if focused {
             self.cursor_visible = true;
             self.cursor_blink_counter = 0;

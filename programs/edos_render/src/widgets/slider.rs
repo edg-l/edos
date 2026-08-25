@@ -1,6 +1,6 @@
 //! Horizontal slider widget.
 
-use super::{Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline};
+use super::{FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline};
 use crate::metrics::{
     CONTROL_HEIGHT, SLIDER_THUMB_HEIGHT, SLIDER_THUMB_WIDTH, SLIDER_TRACK_HEIGHT,
 };
@@ -16,8 +16,7 @@ pub struct Slider {
     value: i32,
     dragging: bool,
     hovered: bool,
-    focused: bool,
-    enabled: bool,
+    focus: FocusState,
 }
 
 impl Slider {
@@ -32,8 +31,7 @@ impl Slider {
             value: min,
             dragging: false,
             hovered: false,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
         }
     }
 
@@ -49,8 +47,7 @@ impl Slider {
             value: clamped,
             dragging: false,
             hovered: false,
-            focused: false,
-            enabled: true,
+            focus: FocusState::default(),
         }
     }
 
@@ -155,7 +152,7 @@ impl Widget for Slider {
         );
 
         // Draw focus ring if focused
-        if self.focused {
+        if self.focus.focused {
             draw_focus_ring(
                 buffer,
                 buffer_width,
@@ -168,7 +165,7 @@ impl Widget for Slider {
         }
 
         // Draw thumb
-        let thumb_color = if !self.enabled {
+        let thumb_color = if !self.focus.enabled {
             colors::TEXT_DISABLED
         } else if self.dragging || self.hovered {
             Theme::DEFAULT.slider_thumb_hover.raw()
@@ -207,7 +204,7 @@ impl Widget for Slider {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         if pressed {
@@ -231,17 +228,17 @@ impl Widget for Slider {
     }
 
     fn on_char(&mut self, _ch: char) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
         None
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.enabled {
+        if !self.focus.enabled {
             return None;
         }
-        if !self.focused || !pressed {
+        if !self.focus.focused || !pressed {
             return None;
         }
 
@@ -283,24 +280,11 @@ impl Widget for Slider {
         None
     }
 
-    fn focusable(&self) -> bool {
-        // A disabled control is skipped by Tab: focusing something that cannot
-        // act is a dead end the user has to Tab out of again.
-        self.enabled
+    fn focus_state(&self) -> Option<&FocusState> {
+        Some(&self.focus)
     }
 
-    fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
-    }
-
-    fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-        if !enabled {
-            self.focused = false;
-        }
+    fn focus_state_mut(&mut self) -> Option<&mut FocusState> {
+        Some(&mut self.focus)
     }
 }

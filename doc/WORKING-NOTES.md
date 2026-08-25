@@ -10364,3 +10364,21 @@ than being kept in sync by hand.
 `filesystem/.manifest`, which a change to the *tool* does not touch. Run `make
 nvme-disk.img sata-disk.img` before the gates when the encoder or the layout
 code changed, or the guest boots an image the old tool wrote.
+
+## Focus and enablement are one state, not four methods per widget
+
+`FocusState { focused, enabled }` in `programs/edos_render/src/widgets/mod.rs`.
+A widget holds one and implements `Widget::focus_state` / `focus_state_mut`;
+`focusable`, `set_focused`, `enabled` and `set_enabled` are trait defaults
+written against that. `focus_state` returning `None` means "decoration": never
+focusable, always enabled, `set_*` ignored, which is exactly what `Label`
+wanted and now says by writing nothing at all.
+
+Two widgets need more than the state change and override one method each:
+`Button::set_enabled` also drops hover and press, `TextInput::set_focused` also
+restarts the cursor blink. Both call the inherent `FocusState` setter first, so
+the rule that disabling drops focus is still stated once.
+
+Verified in a guest: `wintest` auto-focuses "Say Hello", Space fires it, Tab
+walks Count, Reset, the text input and on to the first checkbox while skipping
+the disabled "Greet" button, and Space there toggles it.

@@ -86,12 +86,4 @@ impl Widget for Label {
     fn on_key(&mut self, _scancode: u32, _pressed: bool) -> Option<WidgetEvent> {
         None
     }
-
-    fn focusable(&self) -> bool {
-        false
-    }
-
-    fn set_focused(&mut self, _focused: bool) {
-        // Labels cannot be focused
-    }
 }
