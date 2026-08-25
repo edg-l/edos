@@ -10019,3 +10019,46 @@ buffer — one `Vec::with_capacity` away at any time in a parent process.
 Both are written up in `doc/bugs/2026-08-25-what-fork-did-not-give-the-child.md`.
 Gates: `forktest` is in `guest-check` (18 suites now), and `mmaptest` 5, 6 and 8
 pin the faulting address.
+
+---
+
+## The gate baseline, measured
+
+Every gate the tree has was run from a clean shell on 2026-08-26 against
+`611413a3`, with a warm `target/` in both workspaces. **All of them are green.
+There are no pre-existing failures.** Anything red after this point was
+introduced after it.
+
+| gate | verdict | wall, warm |
+|---|---|---|
+| `make -C kernel check` | green | 16 s |
+| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | green | 1 s |
+| `make host-tests` | green, 138 passed across 8 binaries | 4 s |
+| `make programs` | green | 5 s |
+| `cd programs && cargo +edos clippy --all-targets -- -D warnings` | green, 0 warnings | 5 s |
+| `cd kernel && cargo clippy` | green, 0 warnings | 3 s |
+| `cd kernel && cargo clippy --features sched-test` | green, 0 warnings | 3 s |
+| `cd kernel && cargo clippy --features trace` | green, 0 warnings | 3 s |
+| `cd kernel && cargo clippy --features sched-prof` | green, 0 warnings | 3 s |
+| `make test AUDIODEV=none` | green, ALL 58 TESTS PASSED | 12 s |
+| `make guest-check` | green, 18 suites passed | 84 s |
+
+**The times are warm-incremental and are not a build budget.** Nothing in that
+table rebuilds a workspace from scratch; the four clippy runs at three seconds
+are re-checking an already-checked tree. A cold clone pays the kernel build and
+the whole `programs/` workspace before any of it. Read the column as "what an
+iteration pays to re-verify", not as "what CI pays".
+
+**Run `make test` before `make guest-check`, never after, and never expect the
+second number to be a boot.** `make test` builds the ISO with `--features
+sched-test`; `guest-check` depends on the same ISO path with the default feature
+set, so it rebuilds the kernel and relinks the ISO before it boots anything.
+The 84 s above is that rebuild plus one boot plus 18 suites, and running the
+pair in the other order just moves the rebuild to the other gate. Both also
+depend on `sata-disk.img` and `nvme-disk.img`, so a touched `filesystem/` adds
+an `efs-mkfs` of each.
+
+Three counts in `CLAUDE.md` were checked against the run rather than trusted:
+138 host tests, 58 sched-test cases, 18 `guest-check` suites. All three are
+correct.
+
