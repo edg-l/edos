@@ -589,8 +589,22 @@ either: 992 KiB is a single command and has already given up 85% of the loss.
 Per-page bookkeeping is what is left after the copies -- 2.4 us per 4 KiB page
 against a few hundred nanoseconds of memcpy. Per page that is one frame
 allocation under the global frame-allocator lock, two shard-lock acquisitions
-(lookup, then insert), an LRU insert and an eviction. None of it has been
-attributed individually.
+(lookup, then insert), an LRU insert and an eviction.
+
+The allocator half now has a number, and it took an instrument that can see
+interrupts-off code. `scripts/perf-kvm` over `fsbench raw /dev/nvme0n1` puts
+**6 to 8% of guest cycles in the kernel heap and the frame allocator** across
+three runs: `<buddy_system_allocator::Heap<32>>::dealloc` alone reads 3.9 to
+7.0%, with `Heap::alloc`, both `try_percpu_*` closures and three
+`BitmapFrameAllocator` symbols under it. The guest's own `profile` reports
+**zero samples** in every one of them, because `Heap<32>` sits inside an
+`IrqSpinlock` and `try_percpu_alloc`/`dealloc` run inside `without_interrupts`.
+Read `doc/profiling.md` before taking either instrument's number, and in
+particular before comparing them: their denominators differ, and an MMIO write
+is charged to the guest by one and to the host by the other.
+
+The shard locks, the LRU insert and the eviction are still unattributed
+individually.
 
 ## Correctness items still open
 

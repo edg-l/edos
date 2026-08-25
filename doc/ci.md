@@ -105,13 +105,16 @@ rustup toolchain link edos ~/edos-toolchain
 
 ## What is not covered
 
-Five gates never run in CI: `nvme-check`, `storage-check`, `recovery-check`,
-`orphan-check` and `ssh-check`. They are multi-boot harnesses: they cut power
-on a disk mid-write, reboot between a write phase and a verify phase, boot a
-purpose-built ISO, or drive the host's own OpenSSH client at the guest. The
+Six gates never run in CI: `nvme-check`, `storage-check`, `recovery-check`,
+`orphan-check`, `ssh-check` and `profile-check`. Most are multi-boot harnesses:
+they cut power on a disk mid-write, reboot between a write phase and a verify
+phase, boot a purpose-built ISO, or drive the host's own OpenSSH client at the
+guest. `profile-check` is the exception and the cheapest of the six — one boot
+plus a host-side `addr2line` pass. The
 table in `doc/WORKING-NOTES.md` says what each one costs and needs. The
 consequence is worth stating plainly: **a regression in the NVMe driver, in the journal's replay
-path, in orphan reclamation or in `sshd` is visible only in a local run.**
+path, in orphan reclamation, in `sshd` or in the profiler is visible only in a
+local run.**
 `ci.yml` boots a guest in exactly two jobs, for the in-kernel suite and the 17
 guest suites, and nothing else boots. `nvme-check` is five boots now rather
 than four: the fifth is the watchdog case, on `edos-nvme-hostile.iso`.
@@ -124,22 +127,38 @@ tick in that window put the increment on one CPU and the guard's release on
 another. The runner image carries QEMU 8.2, which hits it inside a single boot.
 Post-mortem in `doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md`.
 
-The lesson for this file is that **upgrading the runner's QEMU would have hidden
-a real kernel bug**, and the older one is the only host in the project that
-reproduces it reliably. Keep it. When a guest misbehaves under 8.2 and not under
-10.0, the guest is the first suspect, not the emulator. Reproduce in one
-command:
+The lesson that survives is that **a guest misbehaving under one hypervisor and
+not another is the guest's fault first, not the emulator's.** The lesson that
+does *not* survive is "keep 8.2 because it is the only thing that reproduces
+this". That was true of the era before `b7702071`, and it is not a tested claim
+now: run the recipe below against a current tree and 8.2 passes 17/17 on this
+host, while the `guest suites` job stayed red after the fix landed. So the
+runner's QEMU version is not the established differentiator, and nothing here
+should be organised around keeping an old one.
+
+The runner differs from this host in three ways that all perturb timing harder
+than a QEMU version does, and none of them has been tested apart from the
+others: its KVM is **nested**, because the runner is itself a VM; it has 4 vCPUs
+against this host's 12; and it is Intel VMX against this host's AMD SVM. When
+the `guest suites` job is red and a local run is green, those are the suspects,
+in that order. Reproduce the runner's QEMU in one command:
 
 ```bash
 docker run --rm --device /dev/kvm --security-opt seccomp=unconfined \
   -v "$PWD":/w -w /w ubuntu:24.04 bash -c \
   'apt-get update -qq; apt-get install -y -qq --no-install-recommends \
-     qemu-system-x86 python3; scripts/guest-check; rc=$?; exit $rc'
+     qemu-system-x86 python3 make; scripts/guest-check; rc=$?; exit $rc'
 ```
 
-Two things that will otherwise waste an hour: seccomp has to be unconfined or
-QEMU cannot initialise io_uring, and `guest-check` must not be the container's
-pid 1 or `edos-vm` refuses it the guest slot.
+Three things that will otherwise waste an hour. seccomp has to be unconfined or
+QEMU cannot initialise io_uring. `guest-check` must not be the container's pid 1
+or `edos-vm` refuses it the guest slot. And `make` has to be installed even
+though nothing here builds: `edos-vm start` rebuilds any attached image older
+than `filesystem/.manifest`, and without `make` on the path that step dies with
+a `FileNotFoundError` traceback out of `vmdrive.py` rather than anything about
+images. The container has no `cargo`, so settle the images on the host first
+(one `scripts/edos-vm start` and `stop` does it) and the rebuild will find
+nothing to do.
 
 `scripts/release prepare` does not close the gap either. It gates on the kernel
 check, clippy, both formatters, the host tests, a userspace build and `make

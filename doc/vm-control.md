@@ -51,20 +51,24 @@ the guest (`-r` to reboot, `-H` to halt) syncs every filesystem first and then p
 machine off through ACPI, which is what to use before running `efs-fsck` on the
 disk image.
 
-Three make targets drive the guest for you and need no display either:
+Five make targets drive the guest for you and need no display either:
 
 ```bash
 make test-headless    # kernel sched-test suite; `make test` needs a desktop
                       # session for its PipeWire audio backend, this does not
 make storage-check    # scripts/fs-regression (EFS then FAT32) + scripts/fsbench-run
 make guest-check      # the guest's own suites -- iotest, socktest, mmaptest and
-                      # twelve more -- in one boot, judged by their exit codes
+                      # fourteen more -- in one boot, judged by their exit codes
 make nvme-check       # scripts/nvme-check: an NVMe-root boot, a SATA+NVMe
                       # coexistence boot, the logical_block_size=4096 refusal,
-                      # and edos-install onto a blank NVMe image
+                      # edos-install onto a blank NVMe image, and the watchdog
+                      # under nvme_timeout_ms=0
+make profile-check    # the sampling profiler end to end: the guest profiles a
+                      # known workload and the host has to resolve it to the
+                      # function that workload spends its time in
 ```
 
-All four exit 0 only when the run passed. The sched-test suite reports through
+All five exit 0 only when the run passed. The sched-test suite reports through
 `isa-debug-exit`, so qemu's own status is 1 for a pass and 3 for a failure;
 `make test` translates that, and a guest that dies before reporting a verdict is
 a failure too.

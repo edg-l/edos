@@ -9296,7 +9296,7 @@ Two traps this cost time on, both recurring:
 
 ## The gate set, and which of them build the disk they judge (2026-08-19)
 
-There are nine local gates now and they do not cost the same thing or need the
+There are ten local gates now and they do not cost the same thing or need the
 same setup. Run whole, in this order, they take a little over an hour.
 
 | gate | what it is | needs |
@@ -9305,28 +9305,39 @@ same setup. Run whole, in this order, they take a little over an hour.
 | `make host-tests` | 138 userspace unit tests that need no guest, about a second | nothing |
 | `make test AUDIODEV=none` | the in-kernel `sched-test` suite, 58 cases, 4-CPU KVM | `/dev/kvm`; a PipeWire session unless `AUDIODEV=none` |
 | `make guest-check` | 17 guest suites in one boot, each judged by its exit code | `/dev/kvm` |
-| `make nvme-check` | four boots: NVMe root, SATA+NVMe coexistence, the 4Kn refusal, install-and-reboot | `/dev/kvm`; builds `edos-nvme.iso` and a blank `nvme-disk.img` |
+| `make nvme-check` | five boots: NVMe root, SATA+NVMe coexistence, the 4Kn refusal, install-and-reboot, and the watchdog under `nvme_timeout_ms=0` | `/dev/kvm`; builds `edos-nvme.iso` and a blank `nvme-disk.img` |
 | `make recovery-check` | pause checkpointing, cut power, remount, assert replay | a `fault-inject` ISO, which it builds; a freshly formatted `journal-test.img` |
 | `make orphan-check` | unlinked-but-open files across a power cut | the same fresh image, plus `efs-fsck` |
 | `make storage-check` | `fs-regression` over EFS and FAT32, then `fsbench-run` | `/dev/kvm` |
+| `make profile-check` | the sampling profiler end to end: the guest profiles a known workload, the host resolves it, and `sha256sum`'s compression loop has to come out on top | `/dev/kvm` |
 | `make ssh-check` | the host's own OpenSSH client against the guest's `sshd`: auth, a refused password, exit status, ~10 MB each way, concurrent sessions | `/dev/kvm`; the host's `ssh` |
 
 **Only the first four run in CI.** `ci.yml` boots a guest for `make test` and
 `make guest-check` and for nothing else, so `nvme-check`, `recovery-check`,
-`orphan-check`, `storage-check` and `ssh-check` gate nothing but a local run —
+`orphan-check`, `storage-check`, `ssh-check` and `profile-check` gate nothing
+but a local run —
 `doc/ci.md`'s "What is not covered" says what that costs and what the fix would
 look like.
 
-**Every one of them that drives a real guest boots `sata-disk.img`, and runs
-the userspace inside that image rather than the one in `filesystem/`.** `make
-all` does not rebuild it, so a gate that does not name it as a prerequisite
-judges whatever binaries the image happened to hold. That cost two separate
+**Every one of them that drives a real guest runs the userspace inside a disk
+image rather than the one in `filesystem/`** — `nvme-disk.img` now, since NVMe
+became the default root. Building a program does not put it in that image, so a
+stale image judges whatever binaries it happened to hold. That cost two separate
 investigations in one day — `nvme-check` case 4 chasing an `edos-install`
 `EFAULT` that had already been fixed, and `evicttest` appearing not to change.
-Every gate above that boots a guest names it now. The rebuild is not free (a
-5 GB raw image, `efs-mkfs`, and a qcow2 convert, roughly a minute) and it
-discards whatever the development root held, which is the price of judging the
-tree you actually have.
+
+This is now handled rather than remembered: `scripts/edos-vm start` rebuilds any
+attached image older than `filesystem/.manifest` before booting, and every gate
+inherits it through `vmdrive.boot()`. So `make programs` followed by a bare
+`start` is correct, and `--no-rebuild` opts out. Do not compare file mtimes by
+hand to decide this — a running guest writes to its own image, so the image is
+normally *newer* than the binary missing from it, and the manifest is the only
+comparison that works.
+
+Every gate above that boots a guest names the image as a prerequisite too. The
+rebuild is not free (a 5 GB raw image, `efs-mkfs`, and a qcow2 convert, roughly
+a minute) and it discards whatever the development root held, which is the price
+of judging the tree you actually have.
 
 **A gate holds the one QEMU slot for its whole run, and an idle-looking guest
 is usually a live gate's.** `scripts/edos-vm` keeps a single pidfile and a

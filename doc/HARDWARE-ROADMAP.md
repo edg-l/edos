@@ -78,10 +78,12 @@ a controller that also offers a 512-byte format, `CAP.MPSMIN > 0`,
 no-AHCI-controller boot path (`619f10ae`), since q35 always exposes the ICH9
 controller — which is exactly the machine this item exists for.
 
-`make nvme-check` is the gate, and it is four boots: root on an NVMe namespace
+`make nvme-check` is the gate, and it is five boots: root on an NVMe namespace
 with no SATA disk attached, SATA and NVMe coexisting with a device node each,
-the `logical_block_size=4096` refusal, and `edos-install --yes /dev/nvme0n1`
-onto a blank image followed by a boot from it. `doc/nvme.md` documents the
+the `logical_block_size=4096` refusal, `edos-install --yes /dev/nvme0n1` onto a
+blank image followed by a boot from it, and the watchdog under
+`nvme_timeout_ms=0`, where every command is declared hung the moment it is
+issued and the root filesystem still has to mount. `doc/nvme.md` documents the
 register and queue model, the nine decisions, the `/proc/nvme_stats` fields, and
 the QEMU knob that reaches each path.
 
