@@ -57,7 +57,7 @@ to the `last_syscall` store the dispatcher already does.
 
 **Two records per call.** `syscall_handler` in `kernel/src/syscalls/mod.rs` is
 one choke point for the whole syscall surface, so the entry record is written
-there before the match and the return record after it. A `TracedCall` — tid,
+there before `dispatch` and the return record after it. A `TracedCall` — tid,
 session generation, number and the six arguments — is built once at entry and
 carried to the return. That is what stops a thread which marks itself mid-call
 from emitting a return with no matching entry, and it is why the return path
@@ -80,7 +80,8 @@ than changing the timing of the program it is supposed to be observing.
 
 Arguments are the six syscall registers, plus up to two strings copied out of
 user memory. Which arguments are strings comes from the table in
-`kernel/src/syscalls/table.rs`, which also names every syscall — and which
+`kernel/src/syscalls/table.rs`, which also names every syscall, says which
+function implements it, and is what `dispatch` is generated from — and which
 `/proc/syscalls` publishes, so `strace` formats calls from the kernel's own
 description instead of a second copy that would rot:
 

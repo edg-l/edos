@@ -7032,6 +7032,11 @@ setting errno now logs and reports `UNKNOWN` (4095, the top of the window),
 because `-1` read as a code means `EPERM` and silently blaming the wrong thing
 is worse.
 
+That substitution and its log are gone as of 2026-08-26: once every `sys_*`
+answers `Result<u64, Errno>` there is no sentinel to substitute and no way to
+fail without naming a code. See "The syscall table is one list, and the bodies
+answer Result" below.
+
 A macro generates the enum, `ALL_ERRNOS` and `name()` from one list, in the
 kernel and again in `edos_rt`. They were three parallel lists that had to be
 edited together. `edos_rt`'s `from_raw` also had to stop being a `transmute`:
@@ -10870,13 +10875,12 @@ boxes with `(buffer, width, height, top)` by hand. Porting that one crate
 closes H5 and D1's remainder together, and nothing else in the tree is left in
 that shape.
 
-The largest untouched item is B2/B3, and its size is worth stating plainly
-before anyone starts: 477 hand-written errno assignments across nine files,
-380 of them real (the other 97 are the `Errno::Clear` reset at entry), plus an
-831-line dispatch match that writes the argument shapes out a second time
-beside `table.rs`. It is a project, not a sitting, and the roadmap's
-smallest-first order (`sync.rs` at 6 assignments, then `shm.rs` at 18) is the
-way in.
+The largest untouched item was B2/B3, and its size is worth stating plainly:
+477 hand-written errno assignments across nine files, 380 of them real (the
+other 97 are the `Errno::Clear` reset at entry), plus an 831-line dispatch
+match that writes the argument shapes out a second time beside `table.rs`.
+Both closed on 2026-08-26; the section below is what came of it, and the
+roadmap's smallest-first order was the way in.
 
 ## `edos-web` draws through `edos_render::Surface`
 
@@ -10957,3 +10961,76 @@ wants such a mutex fails, and the machine still boots.
 All three are latent on this hardware today -- QEMU's DSDT declares few mutexes
 and the AML paths the mutex hooks serve are not reached -- except the loader
 one, which is on the spawn path every process takes.
+
+## The syscall table is one list, and the bodies answer Result
+
+ROADMAP-CLEANUP B2 and B3, closed together on 2026-08-26 because both live in
+`syscalls/mod.rs` and the wrong order means touching 124 dispatch arms twice.
+Six commits, `7c3f7f17..79485ab5`, net -2,600 lines.
+
+**B3 first, and it is what made B2 cheap.** `table.rs` holds one list of 124
+entries, each `number, "name", function, (kind: type, ...)`, and hands itself
+to a macro named by its caller: `syscall_rows!` in that file builds the
+`SyscallInfo` array `/proc/syscalls` publishes, `syscall_arms!` in `mod.rs`
+builds `dispatch`, where the implementations are in scope. A list macro rather
+than a plain one because the two expansions land in different modules, and a
+`macro_rules!` invocation cannot produce match arms in place — so `syscall_arms!`
+emits the whole function.
+
+Arguments come off `rdi, rsi, rdx, r10, r8, r9` through a `FromReg` impl per
+type. Not `as` at the call site: `as` would let a pointer argument be cast to
+an integer by a typo, and the impls are the only conversions that exist. The
+arities are spelled out in `syscall_invoke!` because a register sequence cannot
+be indexed inside a macro repetition, and because a dispatch table is worth
+being able to read.
+
+**The merge is where a drift would have shown, and there was none.** All 124
+table rows agreed with the arms on arity, and every arm read its registers in
+ABI order. Two clipboard arms looked reordered and were not: they bound `rsi`
+to a local before the call and passed `rdi` first. Checking that mechanically
+before trusting the conversion cost ten minutes and is the reason the first
+guest boot worked.
+
+**B2's one design decision: errno is not cleared on success.** The roadmap
+asked for `Ok(v)` to clear it. It does not, and the reason is that nothing can
+observe the difference: `edos_rt::sys_result` reads the field only after a call
+has already reported an error, and that is also what POSIX says errno means.
+Clearing it would have added a `current_thread_info().lock()` to every
+successful syscall including `getpid`, which is 94 ns and pays for everything
+added to that path. The 97 entry-time `errno = Errno::Clear` resets went away
+with the same argument.
+
+**What the conversion found, in the order it found it.** Each is a failure that
+was already unreportable, and a `Result` is what made it a compile error rather
+than a shrug:
+
+- `sys_shm_size` returned `-1` with no errno set at all. The dispatcher logged
+  "returned -1 with no errno set" and reported `UNKNOWN`. It names `EINVAL` now.
+- `sys_sync` could not fail, yet `power::quiesce` called it for its effect and
+  had to discard a `Result`. Split: `sync_all` does the work, `sys_sync` is the
+  syscall over it.
+- `sys_mkdirat`'s doc comment was attached to `sys_mkfifoat`, and had been since
+  both were written.
+- Every `-> 0 on success, -1 on error` line in `fs.rs`, `window.rs` and `io.rs`
+  restated a signature that had stopped saying that. `window.rs`'s went further
+  and listed the argument registers a second time, which is the dispatch table's
+  job now.
+
+**Method, for the next conversion this size.** A regex pass over the two
+repeating shapes (`errno = X; return SENT;` and the same in value position),
+then the signature, then let the compiler enumerate the rest — `cargo check
+--message-format json` gives the exact line of every `unused variable: info`
+left behind by a deleted errno write, which is a script rather than a read.
+Per file: convert, compile, then run the gate. `make guest-check` after each
+group rather than at the end, because a syscall regression is not a compile
+error.
+
+**The one flake seen.** `iotest /var` failed once at test 19 with `read_link:
+invalid input parameter`, in the guest-check after `memory`/`shm`/`sync`
+converted. It did not reproduce: the same binary passed standalone, passed
+again with `iotest` run before it in the same boot the way the gate does, and
+`make guest-check` was green on the immediate re-run and on all three later
+runs. EINVAL out of `read_link` is `fs::api::read_link` saying the path is not
+a symbolic link, moments after `soft_link` created it on EFS — an FS-layer
+visibility question with nothing in the converted files on the path. Recorded
+rather than chased.
