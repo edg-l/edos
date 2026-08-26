@@ -1,0 +1,9 @@
+#!/bin/bash
+# Alternate the two reset configurations so the host answers for both equally.
+cd /home/edgar/dev/edos-v2
+for i in $(seq 1 "${1:-10}"); do
+  for m in exit pause; do
+    WEDGE_MODE=$m WEDGE_OUT="logs/2026-08-26-ab/$m-p$i" scripts/wedge-probe 1 2>&1 \
+      | sed "s/^/[$m p$i] /"
+  done
+done

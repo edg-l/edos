@@ -1,0 +1,136 @@
+#!/usr/bin/env -S python3 -u
+"""Catch the `nvme_timeout_ms=0` wedge and ask QEMU where the guest stopped.
+
+The serial log going quiet is ambiguous: the machine may be dead, or alive with
+its log path saturated -- `nvme-check`'s own watchdog case documents that a
+thousand watchdog messages a second evict everything else from the bounded ring
+`log!` pushes into. Nothing in the tree has ever distinguished the two.
+
+This does, without touching the kernel. When the serial log stops growing, it
+asks QMP for the guest's run state and every vCPU's registers. A guest that is
+halted, or one whose vCPUs sit at a RIP that resolves into the serial write
+path, is alive with a stuck log; a guest whose RIPs sit anywhere else is not.
+
+Each run gets a fresh `nvme-disk.img`: the guest writes to it, and the case's
+duration is decided by how much journal there is to replay, so consecutive runs
+against one image measure an increasingly churned filesystem rather than a
+kernel.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+REPO = "/home/edgar/dev/edos-v2"
+OUT = os.path.join(REPO, os.environ.get("WEDGE_OUT", "logs/2026-08-26-wedge"))
+SERIAL = os.path.join(REPO, "run_log.txt")
+VM = os.path.join(REPO, "scripts/edos-vm")
+
+SILENCE = 12      # seconds of no serial growth before calling it wedged
+RUN_CAP = 120     # hard cap per run
+RUNS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+
+# `exit` is the gate's own configuration: `-no-reboot`, so a guest that resets
+# takes QEMU with it. `pause` freezes it instead and keeps QMP answering. The
+# two are run alternating because the failure is intermittent and the host is
+# not identical from one minute to the next.
+MODE = os.environ.get("WEDGE_MODE", "pause")
+MODE_ARGS = (["--on-reset", "pause", "--qemu-log", "qemu-reset.log"]
+             if MODE == "pause" else ["--on-reset", "exit"])
+
+
+def sh(*a, **kw):
+    return subprocess.run(a, cwd=REPO, capture_output=True, text=True, **kw)
+
+
+def qmp(command, **payload):
+    a = [VM, "qmp", command] + ([json.dumps(payload)] if payload else [])
+    r = sh(*a, timeout=20)
+    return r.stdout.strip() or r.stderr.strip()
+
+
+def hmp(line):
+    return qmp("human-monitor-command", **{"command-line": line})
+
+
+def fresh_disk():
+    sh("rm", "-f", "nvme-disk.img")
+    r = sh("make", "nvme-disk.img")
+    if r.returncode != 0:
+        raise SystemExit("nvme-disk.img build failed:\n" + r.stdout + r.stderr)
+
+
+def one(n):
+    fresh_disk()
+    # Truncate first. `SERIAL` is one shared path, so a run whose guest never
+    # started would otherwise be judged against the PREVIOUS run's log and
+    # reported as a wedge -- with that run's timestamps, which is the only
+    # thing that gives it away.
+    open(SERIAL, "w").close()
+    r = sh(VM, "start", "--iso", "edos-nvme-hostile.iso",
+           "--nvme-disk", "nvme-disk.img", "--no-sata",
+           *MODE_ARGS, timeout=180)
+    if r.returncode != 0:
+        print(f"run{n:02d} start-failed: {(r.stdout + r.stderr).strip()[:200]}")
+        return "start-failed"
+
+    size, last_growth, t0 = -1, time.time(), time.time()
+    verdict = "timeout"
+    while time.time() - t0 < RUN_CAP:
+        time.sleep(1)
+        try:
+            cur = os.path.getsize(SERIAL)
+        except OSError:
+            cur = 0
+        if cur != size:
+            size, last_growth = cur, time.time()
+        log = open(SERIAL, errors="replace").read() if cur else ""
+        if "init: pid" in log and "nvme: controller reset complete" in log:
+            verdict = "pass"
+            break
+        if '"status": "paused"' in qmp("query-status"):
+            verdict = "RESET"
+            break
+        if time.time() - last_growth > SILENCE:
+            verdict = "WEDGE"
+            break
+
+    tag = f"run{n:02d}-{verdict}"
+    probe = ""
+    if verdict != "pass":
+        probe = "\n".join([
+            "=== query-status ===", qmp("query-status"),
+            "=== info registers -a ===", hmp("info registers -a"),
+            "=== info cpus ===", hmp("info cpus"),
+        ])
+        open(os.path.join(OUT, tag + ".qmp"), "w").write(probe)
+        try:
+            sh("cp", "qemu-reset.log", os.path.join(OUT, tag + ".qemulog"))
+        except Exception:
+            pass
+    try:
+        sh("cp", SERIAL, os.path.join(OUT, tag + ".log"))
+    except Exception:
+        pass
+    sh(VM, "stop", timeout=60)
+
+    log = open(os.path.join(OUT, tag + ".log"), errors="replace").read()
+    print(f"{tag}  bytes={len(log):>7}  init={'y' if 'init: pid' in log else 'n'}"
+          f"  wd={log.count('nvme: watchdog firing')}"
+          f"  ends_mid_line={'y' if log and not log.endswith(chr(10)) else 'n'}")
+    return verdict
+
+
+if __name__ == "__main__":
+    tally = {}
+    for i in range(1, RUNS + 1):
+        try:
+            v = one(i)
+        except Exception as e:
+            v = f"error:{e}"
+            print(f"run{i:02d} {v}")
+            sh(VM, "stop", timeout=60)
+        tally[v] = tally.get(v, 0) + 1
+    print("\ntally:", tally)

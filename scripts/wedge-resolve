@@ -1,0 +1,40 @@
+#!/usr/bin/env -S python3 -u
+"""Resolve the RIPs in a `wedge-probe` QMP dump to kernel symbols.
+
+`info registers -a` prints one block per vCPU. What matters when the guest has
+gone quiet is where each one is: a RIP inside the serial write path means the
+machine is alive with its log wedged, a RIP anywhere else means it is not, and
+a vCPU reported halted means it is waiting rather than spinning.
+"""
+import re
+import subprocess
+import sys
+
+KERNEL = "/home/edgar/dev/edos-v2/kernel/target/x86_64-unknown-none/debug/edos-kernel"
+
+
+def resolve(addr):
+    r = subprocess.run(["addr2line", "-e", KERNEL, "-f", "-C", "-i", hex(addr)],
+                       capture_output=True, text=True)
+    out = [l for l in r.stdout.strip().splitlines() if l and l != "??"]
+    return " / ".join(out[:4]) if out else "<unresolved>"
+
+
+for path in sys.argv[1:]:
+    text = open(path, errors="replace").read()
+    print(f"=== {path}")
+    m = re.search(r'"return":\s*"(.*?)"\s*}', text, re.S)
+    body = m.group(1).encode().decode("unicode_escape") if m else text
+    cpu = None
+    for line in body.splitlines():
+        c = re.match(r"CPU#(\d+)", line.strip())
+        if c:
+            cpu = c.group(1)
+        for rip in re.findall(r"RIP=([0-9a-fA-F]{16})", line):
+            a = int(rip, 16)
+            print(f"  CPU#{cpu} RIP={rip}  {resolve(a) if a >= 0xffffffff80000000 else '<user or low>'}")
+    for st in re.findall(r'"status":\s*"(\w+)"', text):
+        print(f"  run-state: {st}")
+    halted = re.findall(r"\(halted\)", text)
+    if halted:
+        print(f"  vCPUs reported halted: {len(halted)}")
