@@ -21,12 +21,21 @@
 //! exactly like a wedged one from here, so this is a debugging build to point
 //! at a workload that should never be idle, the way `heap-poison` is a
 //! debugging build to point at a heap that should never be corrupt.
+//!
+//! **It has never been seen to fire, and that is worth knowing before it is
+//! trusted.** It was built to explain a wedge that turned out not to be one:
+//! the machine was running about a thousand threads a second inside a
+//! watchdog's own millisecond sleep, so there was no stall to detect. What
+//! answered that question was reading the kernel's counters out of the guest
+//! over QMP (`scripts/wedge-probe`), which needs no kernel build at all.
+//! Reach for that first, and treat a silent run under this feature as
+//! unproven rather than as evidence of anything.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{
-    println,
+    emergency_println,
     thread::thread::{State, Thread, list_threads},
     timer::Instant,
 };
@@ -34,9 +43,9 @@ use crate::{
 /// How long the machine may run nothing before this calls it a stall.
 ///
 /// Well above any legitimate pause on the workloads this is pointed at, and
-/// well below the two minutes a probe waits, so a dump lands inside the run
-/// that produced it.
-const STALL_MS: u64 = 8_000;
+/// well below the twelve seconds of silence `scripts/wedge-probe` waits out
+/// before it stops the guest, so a dump lands inside the run that produced it.
+const STALL_MS: u64 = 4_000;
 
 /// Switches into a thread that is not the idle loop. Relaxed and monotonic:
 /// the only question asked of it is whether it changed.
@@ -84,6 +93,10 @@ pub fn poll() {
     // re-enter this on every pass for the rest of the boot.
     LAST_MOVED_MS.store(now, Ordering::Relaxed);
     if DUMPED.swap(true, Ordering::AcqRel) {
+        // One line per window after the first dump, so a reader can tell a
+        // machine that stayed stopped from one that started again: the full
+        // dump is a snapshot and says nothing about what happened after it.
+        emergency_println!("stall: still nothing, switches={switches}");
         return;
     }
     dump(switches);
@@ -95,16 +108,20 @@ fn now_ms() -> u64 {
 
 /// Print every thread and the stack it is blocked on.
 ///
-/// `println!` rather than `log!`: the ring buffer is drained by a kthread,
-/// and a machine with nothing runnable has no kthread to drain it.
+/// `emergency_println!` rather than `log!` or `println!`, for two reasons that
+/// both bite here. The ring buffer is drained by a kthread, and a machine with
+/// nothing runnable has no kthread to drain it; and the ordinary serial path
+/// takes a lock whose holder may be one of the threads this is trying to
+/// name. The emergency path spins on the UART's THRE bit and takes nothing.
 fn dump(switches: u64) {
-    println!(
+    emergency_println!(
         "\n=== STALL: nothing ran for {} ms ({} switches this boot) ===",
-        STALL_MS, switches
+        STALL_MS,
+        switches
     );
     for thread in list_threads() {
         let state = thread.state();
-        println!(
+        emergency_println!(
             "  tid {:<4} {:<8?} {}",
             thread.id.0,
             state,
@@ -114,7 +131,7 @@ fn dump(switches: u64) {
             backtrace(&thread);
         }
     }
-    println!("=== end stall dump ===");
+    emergency_println!("=== end stall dump ===");
 }
 
 /// Walk a blocked thread's saved frame-pointer chain.
@@ -131,7 +148,7 @@ fn backtrace(thread: &Arc<Thread>) {
     // on the scheduler, and a contended `ctx` means the thread is being
     // switched right now -- in which case it is not the one that is stuck.
     let Some(ctx) = thread.ctx.try_lock() else {
-        println!("        <ctx busy>");
+        emergency_println!("        <ctx busy>");
         return;
     };
     let mut rbp = ctx.rbp;
@@ -151,7 +168,7 @@ fn backtrace(thread: &Arc<Thread>) {
         if ret == 0 {
             break;
         }
-        println!("        {ret:#018x}");
+        emergency_println!("        {ret:#018x}");
         if next <= rbp {
             break;
         }
