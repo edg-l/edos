@@ -214,17 +214,23 @@ impl Handler for AcpiHandler {
 
     fn create_mutex(&self) -> Handle {
         let index = AML_MUTEX_COUNT.fetch_add(1, Ordering::Relaxed);
-        assert!(
-            index < AML_MUTEXES.len(),
-            "AML declares more than {} mutexes",
-            AML_MUTEXES.len()
-        );
+        if index == AML_MUTEXES.len() {
+            println!(
+                "ACPI: AML declares more than {} mutexes; the rest cannot be acquired",
+                AML_MUTEXES.len()
+            );
+        }
+        // A handle past the table is handed back anyway: an unacquirable mutex
+        // fails the AML method that wants it, where a panic here would fail the
+        // boot on a firmware table this kernel does not otherwise care about.
         Handle(index as u32)
     }
 
     fn acquire(&self, mutex: Handle, timeout: u16) -> Result<(), acpi::aml::AmlError> {
         let owner = owner_key();
-        let slot = aml_mutex(mutex);
+        let Some(slot) = aml_mutex(mutex) else {
+            return Err(acpi::aml::AmlError::MutexAcquireTimeout);
+        };
 
         // ACPI 6.5 §19.6.2: AML mutexes are reentrant for their owner, so a
         // second acquire by the same thread only deepens the count.
@@ -256,7 +262,16 @@ impl Handler for AcpiHandler {
     }
 
     fn release(&self, mutex: Handle) {
-        let slot = aml_mutex(mutex);
+        let Some(slot) = aml_mutex(mutex) else {
+            return;
+        };
+        // A Release the owner did not pair with an Acquire is ignored rather
+        // than decremented: taking the count below zero would wrap it and
+        // leave `owner` set, so the mutex would stay held by a thread that has
+        // already moved on and no later Acquire could ever take it.
+        if slot.owner.load(Ordering::Relaxed) != owner_key() {
+            return;
+        }
         if slot.depth.fetch_sub(1, Ordering::Relaxed) == 1 {
             slot.owner.store(NO_OWNER, Ordering::Release);
         }
@@ -301,6 +316,8 @@ const INDEFINITE_TIMEOUT: u16 = 0xFFFF;
 
 /// Mutexes are declared by the DSDT and never freed, so they are a fixed table
 /// indexed by handle rather than an allocation the interpreter has to track.
+/// A DSDT declaring more than this gets handles past the end, which
+/// [`aml_mutex`] answers `None` for.
 static AML_MUTEXES: [AmlMutex; 128] = [const {
     AmlMutex {
         owner: AtomicU64::new(NO_OWNER),
@@ -310,8 +327,9 @@ static AML_MUTEXES: [AmlMutex; 128] = [const {
 
 static AML_MUTEX_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn aml_mutex(handle: Handle) -> &'static AmlMutex {
-    &AML_MUTEXES[handle.0 as usize]
+/// The slot a handle names, or `None` for a handle past the table.
+fn aml_mutex(handle: Handle) -> Option<&'static AmlMutex> {
+    AML_MUTEXES.get(handle.0 as usize)
 }
 
 /// The current thread's identity as an owner, distinct from [`NO_OWNER`]. Code

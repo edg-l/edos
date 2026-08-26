@@ -417,11 +417,12 @@ fn parse_ehdr(path: &Path) -> Result<ElfHeader, ElfLoadError> {
 
 /// Validate one `PT_LOAD` into a `LoadSegment`.
 ///
-/// `p_vaddr`, `p_memsz` and `p_filesz` are attacker-controlled: any user can
-/// spawn any file it can read, and the map step turns these into `VirtAddr`s
-/// and VMA ranges. `VirtAddr::new` panics on a non-canonical address, and a VMA
-/// reaching past `USER_VA_END` would map kernel space user-accessible, so the
-/// segment is bounded to the user half here and nowhere else.
+/// `p_offset`, `p_vaddr`, `p_memsz` and `p_filesz` are attacker-controlled: any
+/// user can spawn any file it can read, and the map step turns these into
+/// `VirtAddr`s and VMA ranges. `VirtAddr::new` panics on a non-canonical
+/// address, and a VMA reaching past `USER_VA_END` would map kernel space
+/// user-accessible, so the segment is bounded to the user half here and
+/// nowhere else.
 fn validate_load_segment(
     load_base: u64,
     p_flags: u32,
@@ -446,13 +447,14 @@ fn validate_load_segment(
     let vma_start = VirtAddr::new(seg_start & !0xfff);
     let vaddr_offset = seg_start - vma_start.as_u64();
 
-    // Linker invariant: p_offset % p_align == p_vaddr % p_align, so
-    // file_offset = p_offset - vaddr_offset is page-aligned. A linker that
-    // violates this would produce incorrect page-cache lookups.
-    debug_assert!(
-        (p_offset.wrapping_sub(vaddr_offset)) & 0xfff == 0,
-        "ELF segment p_offset must share low bits with p_vaddr"
-    );
+    // System V ABI, Program Header: p_offset and p_vaddr are congruent modulo
+    // the page size, which is what makes file_offset = p_offset - vaddr_offset
+    // page-aligned and the page-cache lookups below correct. Rejecting the
+    // violation also rules out the subtraction underflowing, which a header
+    // naming a p_offset under its own page offset would otherwise do.
+    if p_offset & 0xfff != vaddr_offset {
+        return Err(ElfLoadError::InvalidSegment);
+    }
 
     let mut prot = VmaProt::empty();
     if p_flags & PF_R != 0 {

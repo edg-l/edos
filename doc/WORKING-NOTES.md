@@ -10917,3 +10917,39 @@ buffer: &mut [u32] signatures        12 -> 4    all four in termbench, on purpos
 The closing table's "functions with 7+ parameters 45 -> 29" has no recorded
 command behind it and no scan reproduces it; the allow count above is the
 replacement, because `git grep -c too_many_arguments -- '*.rs'` can be re-run.
+
+## Two header fields and one AML mutex that could halt the machine
+
+Three panics reachable from data the kernel does not control, found reading the
+cleanup run's own diff.
+
+**`p_offset` was the one ELF header field nobody validated.**
+`loader::validate_load_segment` `checked_add`s `p_vaddr` and `p_memsz`, bounds
+the segment to `USER_VA_END`, and its doc comment named the attacker-controlled
+fields; `p_offset` was not among them. The System V ABI congruence
+(`p_offset % p_align == p_vaddr % p_align`) was a `debug_assert!`, and the line
+under it computed `p_offset - vaddr_offset`. A `PT_LOAD` naming a `p_offset`
+below its own page offset therefore panicked the kernel, in a build with debug
+assertions at the assert and in one without them at the subtraction. Any user
+who can write a file and spawn it could halt the machine; no crafted relocation
+or truncated header was needed, just two mismatched low halves. It is a real
+check now, answering `InvalidSegment`, and it is never stricter than the ABI:
+congruence modulo a `p_align` of 0x200000 implies congruence modulo 0x1000.
+
+**An AML `Release` with no matching `Acquire` wedged the mutex it named.**
+`AmlMutex::release` decremented `depth` unconditionally, so an unpaired release
+wrapped a `u32` to its maximum and left `owner` set. The mutex was then held
+forever by a thread that had already moved on, and no later `Acquire` could
+take it. Release now returns unless the caller is the recorded owner. AML is
+firmware-supplied, so "the interpreter pairs them" is an assumption about
+someone else's bytes.
+
+**A DSDT with more than 128 mutexes failed the boot rather than the method.**
+`create_mutex` asserted against the table size. Handles past the end are handed
+back now and `aml_mutex` answers `None` for them, which turns into
+`MutexAcquireTimeout` at `acquire` and a no-op at `release`: the AML method that
+wants such a mutex fails, and the machine still boots.
+
+All three are latent on this hardware today -- QEMU's DSDT declares few mutexes
+and the AML paths the mutex hooks serve are not reached -- except the loader
+one, which is on the spawn path every process takes.
