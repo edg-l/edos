@@ -164,6 +164,50 @@ allocator is for. Add a debug-only guard page or a poison-on-free to the kernel
 allocator and re-run `scripts/wedge-probe`; a poisoned pointer faults at the
 free that is wrong rather than at the next unrelated `pop`.
 
+## Three refuted hypotheses, and the instrument each needed
+
+All three looked strong. Each was killed by a number rather than by an
+argument, and the numbers are what to trust when a fourth candidate appears.
+
+| hypothesis | instrument | result |
+|---|---|---|
+| a command installed across a reset is never failed | post-reset pass that logs each one | fired **0** times in 20 boots; shape A still occurred |
+| the heap is corrupted by a double free | `heap-poison`: magic in each freed block's tail, panic on a second free | fired **0** times; race intact at 3/20 |
+| the device DMAs into a page the watchdog already freed | quarantine: withhold those pages from the allocator | **5**/20, no better than baseline |
+
+The middle row is the one worth reading twice, because the first attempt at it
+lied. Poisoning the whole block on free took the failure from roughly one boot
+in five to **none in twenty**, which reads exactly like a fix. It was not: a
+memset per free is enough extra work to move the race. Dropping the memset and
+keeping only the eight-byte tail stamp restored the failure rate to 3/20 and
+proved the detector silent. **A clean run is only evidence if the failure still
+happens when the instrument is present.**
+
+The third is the one that felt most certain. The watchdog fails commands, and
+so frees their bounce buffers and PRP pages, while the controller is still
+running: `CC.EN` is not cleared until `reset_controller` several steps later.
+Handing those pages back with the device possibly still writing to them is a
+use-after-free whose writer is not a CPU, which would explain why no CPU-side
+check sees anything. Leaking them deliberately changed nothing.
+
+So the corruption is real -- the `LinkedList::pop` #GP is not ambiguous -- and
+it is not any of: a stranded NVMe command, a double free, or device DMA into
+reclaimed pages.
+
+### What `heap-poison` is, and that it is kept
+
+`kernel/Cargo.toml` gains a `heap-poison` feature, off by default. It stamps
+`0xDEAD_F2EE_DEAD_F2EE` into the last eight bytes of every freed block and
+panics on a free that finds it already there, naming the address, size and
+alignment while the second caller is still on the stack. The stamp is at the
+*end* because both free lists here, the buddy heap's and the per-CPU cache's,
+thread their link through the *start*.
+
+It is kept because it is now a measured instrument rather than a guess: two
+accesses per alloc/free, and the failure rate under it matches stock. Reach for
+it first the next time this kernel corrupts its heap; it answers "is this a
+double free?" in one 20-boot run.
+
 ## Refuted: the reset window (2026-08-26)
 
 The first hypothesis was the reset path's unguarded window against submitters,

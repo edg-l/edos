@@ -200,17 +200,27 @@ pub fn mark_gs_ready() {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Try per-CPU cache first (interrupts disabled for the duration).
-        if gs_ready()
+        let ptr = if gs_ready()
             && let Some(ptr) = self.try_percpu_alloc(layout)
         {
-            return ptr;
-        }
-
-        // Fall through to global allocator.
-        self.global_alloc(layout)
+            ptr
+        } else {
+            // Fall through to global allocator.
+            self.global_alloc(layout)
+        };
+        #[cfg(feature = "heap-poison")]
+        unsafe {
+            poison::on_alloc(ptr, layout)
+        };
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        #[cfg(feature = "heap-poison")]
+        unsafe {
+            poison::on_free(ptr, layout)
+        };
+
         // Try per-CPU cache first.
         if gs_ready() && self.try_percpu_dealloc(ptr, layout) {
             return;
@@ -221,6 +231,68 @@ unsafe impl GlobalAlloc for Allocator {
             self.inner
                 .lock()
                 .dealloc(NonNull::new_unchecked(ptr), layout);
+        }
+    }
+}
+
+/// Catches a block freed twice, at the second free rather than at the next
+/// unrelated allocation.
+///
+/// A double free pushes one block onto a free list twice, and the list is a
+/// chain of pointers stored in the blocks themselves, so the damage surfaces
+/// later as `LinkedList::pop` dereferencing a pointer that is no longer one.
+/// By then nothing connects the fault to the code that freed twice. This
+/// stamps a magic into the last eight bytes of every freed block and refuses a
+/// free that finds it already there, which names the size and address while
+/// the second caller is still on the stack.
+///
+/// The stamp goes at the *end* of the block because both free lists this
+/// allocator uses, the buddy heap's and the per-CPU cache's, thread their link
+/// through the *start*. A block that was never freed matches the magic only by
+/// holding that exact eight-byte value already, and `on_alloc` clears it on the
+/// way out so a legitimate free of reused memory does not trip.
+#[cfg(feature = "heap-poison")]
+mod poison {
+    use core::alloc::Layout;
+
+    /// Written into the last eight bytes of a freed block. Non-canonical as an
+    /// address, so a stamp that reaches a pointer field faults rather than
+    /// reading something plausible.
+    const FREED: u64 = 0xDEAD_F2EE_DEAD_F2EE;
+
+    fn tail(ptr: *mut u8, layout: Layout) -> Option<*mut u64> {
+        let size = layout.size();
+        if size < 8 || ptr.is_null() {
+            return None;
+        }
+        Some(unsafe { ptr.add(size - 8) } as *mut u64)
+    }
+
+    /// # Safety
+    /// `ptr` must be the live allocation `layout` describes, about to be freed.
+    pub unsafe fn on_free(ptr: *mut u8, layout: Layout) {
+        let Some(t) = tail(ptr, layout) else { return };
+        if unsafe { t.read_unaligned() } == FREED {
+            panic!(
+                "heap double free: {:p}, size {}, align {}",
+                ptr,
+                layout.size(),
+                layout.align()
+            );
+        }
+        // Only the tail is written. Poisoning the whole body would also catch
+        // a read through a stale pointer, but a memset on every free is enough
+        // extra work to change the timing of the race this exists to catch --
+        // measured, it took a failure seen in roughly one boot in five to none
+        // in twenty, which is a perturbed instrument rather than a result.
+        unsafe { t.write_unaligned(FREED) };
+    }
+
+    /// # Safety
+    /// `ptr` must be the allocation `layout` describes, just handed out.
+    pub unsafe fn on_alloc(ptr: *mut u8, layout: Layout) {
+        if let Some(t) = tail(ptr, layout) {
+            unsafe { t.write_unaligned(0) };
         }
     }
 }

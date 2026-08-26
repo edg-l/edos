@@ -23,6 +23,10 @@ lock-order-self-test-inversion = []
 ## `WINDOW_REGISTRY_READERS`, so a reader that parks without releasing can be
 ## named from outside the guest. Silent: no logging, no allocation.
 window-lock-debug = []
+## Stamps every freed heap block and panics on a block freed twice, naming the
+## address and size at the second free. Costs a memset per free, so it is a
+## debugging build rather than something to leave on.
+heap-poison = []
 ## Exposes `/dev/journal-ctl`, which pauses journal checkpointing on demand so
 ## an unclean cut has committed transactions left to replay. Recovery is
 ## otherwise unreachable from a test: a clean unmount replays nothing, and
