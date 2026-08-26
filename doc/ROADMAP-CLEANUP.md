@@ -505,11 +505,11 @@ the function body, and the magic numbers that were bare (`8` for
 behind a match, rather than a match with a 300-line body. B2 touches these
 anyway.
 
-### H4. `edos-wm`'s `main`, 607 lines (S2, E2)
+### H4. ~~`edos-wm`'s `main`, 607 lines~~ (done)
 
-`programs/edos-wm/src/main.rs:503`. The compositor already lives in
-`compositor.rs` and input in `input.rs`; the event loop should be a third module,
-not the binary's `main`.
+The event loop is `session.rs` and the window-under-the-pointer arithmetic is
+`interaction.rs`, beside the `compositor.rs` and `input.rs` that were already
+there. `main` is the seven lines that open a `Session` and run it.
 
 ### H5. ~~Long parameter lists~~ (done)
 
