@@ -33,7 +33,7 @@ alone compiled cleanly and made the compositor read garbage", which is why
 `#[repr(C)]` types the syscalls exchange. `Errno` is the one name still written
 out twice, and its second copy is in the Rust fork rather than in this tree.
 
-### A1. Errno is still declared on both sides of the boundary (S2, E2)
+### A1. ~~Errno is still declared on both sides of the boundary~~ (blocked on the fork)
 
 `libs/syscall-abi` now holds every `#[repr(C)]` type that crosses a syscall --
 `PollState`, `SelectFd`, `DirEntry`, `Stat`, `RawStatFs`, `SockAddrIn` -- and
@@ -180,7 +180,7 @@ failed, the sentinel check missed it"), and documents the workaround: prefer
 That is a note telling callers which of two functions in one module is safe. The
 fix is to make both safe.
 
-### C1. Give every `edos_lib` entry point a typed failure (S1, E2)
+### C1. ~~Give every `edos_lib` entry point a typed failure~~ (done)
 
 `process.rs` is done: every entry point there answers `Result<T, Errno>`, except
 `execve` and `reboot`, which return only on failure and so answer the `Errno`
@@ -202,21 +202,18 @@ genuine values (byte totals, a dropped-record count, an errno a `NetError`
 already carries), not failures in disguise, and those modules already answer
 `Option` or `bool` where they can fail.
 
-`io.rs`'s descriptor group is done as well: `open`, `openat` and `mmap` answer
+`io.rs`'s descriptor group is done as well: `open` and `openat` answer
 `Result<u64, Errno>`, `ioctl` answers the request's own `Result<u64, Errno>`,
-`close`, `munmap` and `set_winsize` answer `Result<(), Errno>`, and `sys_read`,
+`close` and `set_winsize` answer `Result<(), Errno>`, and `sys_read`,
 `sys_write`, `pread`, `pwrite`, `readv`, `writev` and `poll` answer
-`Result<usize, Errno>`. `mmap` no longer collapses a negated errno to `!0`, so
-the last `u64::MAX` in the module is gone. Two shapes are not covered by the
-rule and were left alone in `process.rs`: `close` there answers `i32` and
-`waitpid` answers `-1` for a failed wait, neither of which is `i64`, `isize` or
-a sentinel `u64`.
+`Result<usize, Errno>`. Two shapes are not covered by the rule and were left
+alone in `process.rs`: `close` there answers `i32` and `waitpid` answers `-1`
+for a failed wait, neither of which is `i64`, `isize` or a sentinel `u64`.
 
-The `-> i64` and `-> u64` signatures counted here in `mounts.rs`, `net.rs`,
-`procinfo.rs`, `profile.rs` and `trace.rs` are genuine values (byte totals, a
-dropped-record count, an errno a `NetError` already carries), not failures in
-disguise, and those modules already answer `Option` or `bool` where they can
-fail. `mem.rs` returned `i32`, which C3 closed.
+`mem.rs` is C3's: `mmap` answers `Result<NonNull<u8>, Errno>` and `munmap`,
+`mprotect` and `msync` answer `Result<(), Errno>`. `io.rs` held a duplicate
+`mmap`/`munmap` pair that nothing called; it is gone, and with it the last
+`u64::MAX` in the module.
 
 **Done.** No `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a sentinel
 `u64`.
