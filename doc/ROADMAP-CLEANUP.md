@@ -8,10 +8,10 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-26.** 23 of the 32 entries are struck; G2 is struck with
-a named remainder. What is open, in the order the evidence suggests: B2 and B3
-(the syscall convention and its dispatcher, the largest remaining item by far),
-C2 (no argument parser), H1 and H3 (two long functions), G3 (split
+**State as of 2026-08-26.** 24 of the 32 entries are struck; G2 is struck with
+a named remainder. What is open, in the order the evidence suggests: B2 (the
+syscall error convention, the largest remaining item by far, and now sitting on
+B3's table), C2 (no argument parser), H1 and H3 (two long functions), G3 (split
 `WORKING-NOTES.md`), and the three gates I2, I5, I6. The numbers each entry
 quotes were remeasured on this date.
 
@@ -98,28 +98,25 @@ Do it one file at a time, smallest first: `sync.rs` (6 assignments), `shm.rs`
 **Done when** `grep -rc 'errno = Errno::' kernel/src/syscalls/` is one site (the
 dispatcher) and `!0u64` appears only there.
 
-### B3. `syscall_handler` is an 831-line register-unpacking match (S2, E2)
+### B3. ~~`syscall_handler` is an 831-line register-unpacking match~~ (done)
 
-`kernel/src/syscalls/mod.rs:492`. 124 arms, each one hand-copying `ctx.rdi`,
-`ctx.rsi`, `ctx.rdx`, `ctx.r10`, `ctx.r8` into named locals and casting them.
-The argument shapes are already written down a second time, correctly, in
-`kernel/src/syscalls/table.rs` (124 `sc!` entries), which exists precisely "so
-neither can hold a private copy that rots".
+`kernel/src/syscalls/table.rs` now holds one list of 124 entries, each
+`number, "name", function, (kind: type, ...)`, and hands itself to a macro
+named by its caller. `syscall_rows!` in that file expands it into the
+`SyscallInfo` array `/proc/syscalls` publishes; `syscall_arms!` in
+`syscalls/mod.rs` expands it into `dispatch`, where arguments come off
+`rdi, rsi, rdx, r10, r8, r9` in order through a `FromReg` impl per type rather
+than an `as` per call site. `syscall_handler` is 72 lines and holds only the
+trace bookkeeping, the errno substitution and the signal boundary.
 
-**Fix.** One macro taking the number, the target function and the argument list,
-emitting both the dispatch arm and the `SyscallInfo` row. A new syscall then
-becomes one line that cannot be added to the dispatcher and forgotten in the
-table, which is the failure the table's own doc comment warns about.
+Neither expansion writes a `sys_*` signature, so every implementation stays
+where a reader can see it. Eleven arms that were implemented inside the match
+became functions to get there: `sys_exit`, `sys_gettid`, `sys_getuid`,
+`sys_getgid`, `sys_sched_yield`, `sys_kill`, `sys_sigaction`,
+`sys_sigprocmask`, `sys_setpgid`, `sys_getpgid`, and `sys_ioctl`'s arm.
 
-Constrain it to that and no more: the macro emits the arm and the row, declares
-no items of its own, and does not write or alter the `sys_*` signature, which
-stays where a reader can see it. A macro that also generated the wrapper would
-be a second place for the dispatcher and `strace` to disagree, in a new way. The
-test a dispatch table passes and most macros do not is that a reader knows
-exactly what it expands to and simply does not want to type it 124 times.
-
-**Done when** adding a syscall touches one table and `syscall_handler` is under
-150 lines.
+The merge found no drift: all 124 rows agreed with the arms on arity, and every
+arm read its registers in ABI order.
 
 ### B4. ~~`fs::Error` names one storage driver~~ (done)
 

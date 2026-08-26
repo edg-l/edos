@@ -17,11 +17,7 @@ use core::sync::atomic::Ordering;
 use crate::{
     memory::vma::USER_VA_END,
     syscalls::{Errno, SyscallContext},
-    thread::{
-        scheduler::{current_thread, current_thread_info},
-        signal,
-        thread::Thread,
-    },
+    thread::{scheduler::current_thread, signal, thread::Thread},
     util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 
@@ -141,16 +137,11 @@ fn build_frame(thread: &Thread, ctx: &mut SyscallContext, signum: u32, handler: 
 
 /// Return from a signal handler: reload the context the frame saved.
 ///
-/// Never returns a value — `ctx.rax` is part of what is restored, so the
-/// interrupted syscall's result survives the detour.
-pub fn sys_sigreturn(ctx: &mut SyscallContext) {
-    let info = current_thread_info();
-
-    let Some(thread) = current_thread() else {
-        info.lock().errno = Errno::EINVAL;
-        ctx.rax = !0u64;
-        return;
-    };
+/// The value answered is `ctx.rax` as the frame held it, so the interrupted
+/// syscall's own result survives the detour rather than being overwritten by
+/// this call's.
+pub fn sys_sigreturn(ctx: &mut SyscallContext) -> Result<u64, Errno> {
+    let thread = current_thread().ok_or(Errno::EINVAL)?;
 
     let mut frame = SigFrame {
         magic: 0,
@@ -170,9 +161,7 @@ pub fn sys_sigreturn(ctx: &mut SyscallContext) {
     // A frame this kernel did not write is a forged one. Refusing it matters
     // because the restore below loads rip, rsp and rflags wholesale.
     if !read || frame.magic != SIGFRAME_MAGIC {
-        info.lock().errno = Errno::EINVAL;
-        ctx.rax = !0u64;
-        return;
+        return Err(Errno::EINVAL);
     }
 
     thread.signal.restore_blocked(frame.saved_blocked as u32);
@@ -183,12 +172,11 @@ pub fn sys_sigreturn(ctx: &mut SyscallContext) {
     let mut restored = frame.saved;
     restored.rflags = (restored.rflags & USER_RFLAGS_MASK) | RFLAGS_INTERRUPT;
     if restored.rip >= USER_VA_END || restored.rsp >= USER_VA_END {
-        info.lock().errno = Errno::EINVAL;
-        ctx.rax = !0u64;
-        return;
+        return Err(Errno::EINVAL);
     }
 
     *ctx = restored;
+    Ok(ctx.rax)
 }
 
 /// Flags userspace is allowed to set. Everything else — IOPL, NT, the

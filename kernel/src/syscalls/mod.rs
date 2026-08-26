@@ -35,19 +35,7 @@ use crate::{
     },
     net::device::NetDevice,
     power, println, ranked_lock,
-    syscalls::{
-        fs::{
-            UserTimespec, sys_access, sys_faccessat, sys_fstat, sys_fstatat, sys_list_mounts,
-            sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mkfifoat, sys_mount, sys_readlink,
-            sys_readlinkat, sys_renameat, sys_rmdir, sys_rmdir_all, sys_stat, sys_symlink,
-            sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
-        },
-        io::{
-            O_NONBLOCK, descriptor_open_flags, sys_chdir, sys_close, sys_getcwd, sys_getrandom,
-            sys_list_dir, sys_poll, sys_read, sys_write,
-        },
-        memory::{sys_mmap, sys_mprotect, sys_msync, sys_munmap},
-    },
+    syscalls::io::{O_NONBLOCK, descriptor_open_flags},
     thread::{
         UserThreadInfo,
         context::CpuContext,
@@ -83,8 +71,6 @@ mod table;
 pub mod trace;
 mod window;
 
-use self::ioctl::sys_ioctl;
-use self::sync::{sys_futex_wait, sys_futex_wait_pi, sys_futex_wake};
 use crate::thread::scheduler::{
     current_thread, current_thread_id, current_thread_info, current_thread_killed,
     current_thread_weak, exit_if_killed, stop_if_signalled, thread_exit, thread_park_while,
@@ -489,6 +475,181 @@ struct SpawnArgs {
 unsafe impl Send for SpawnArgs {}
 unsafe impl Sync for SpawnArgs {}
 
+/// How a syscall argument register becomes a typed argument.
+///
+/// The table names a type per argument and this is the one place that says
+/// what a register holds: an integer is truncated to width, a pointer is an
+/// address. Going through a trait rather than writing `as` at 124 call sites
+/// is what stops a pointer argument from being quietly cast to an integer,
+/// since these impls are the only conversions that exist.
+trait FromReg {
+    fn from_reg(reg: u64) -> Self;
+}
+
+impl FromReg for u64 {
+    fn from_reg(reg: u64) -> Self {
+        reg
+    }
+}
+
+macro_rules! from_reg_truncating {
+    ($($t:ty),*) => {
+        $(impl FromReg for $t {
+            fn from_reg(reg: u64) -> Self {
+                reg as $t
+            }
+        })*
+    };
+}
+from_reg_truncating!(usize, u32, u16, i64, i32);
+
+impl<T> FromReg for *const T {
+    fn from_reg(reg: u64) -> Self {
+        reg as usize as *const T
+    }
+}
+
+impl<T> FromReg for *mut T {
+    fn from_reg(reg: u64) -> Self {
+        reg as usize as *mut T
+    }
+}
+
+fn reg<T: FromReg>(value: u64) -> T {
+    T::from_reg(value)
+}
+
+/// How a syscall's return value becomes `rax`.
+///
+/// `Result<u64, Errno>` is what a syscall body answers: the dispatcher does
+/// once what every body used to do by hand, which is set the errno and report
+/// the failure. The integer forms are the older convention — a body that sets
+/// the errno itself and returns a bare `-1` — and they exist only until the
+/// last file has moved off it.
+trait SyscallRet {
+    fn into_rax(self) -> u64;
+}
+
+impl SyscallRet for Result<u64, Errno> {
+    fn into_rax(self) -> u64 {
+        match self {
+            Ok(value) => value,
+            Err(errno) => fail_with(errno),
+        }
+    }
+}
+
+impl SyscallRet for u64 {
+    fn into_rax(self) -> u64 {
+        self
+    }
+}
+
+macro_rules! sentinel_ret {
+    ($($t:ty),*) => {
+        $(impl SyscallRet for $t {
+            fn into_rax(self) -> u64 {
+                self as u64
+            }
+        })*
+    };
+}
+sentinel_ret!(i64, i32);
+
+impl SyscallRet for () {
+    fn into_rax(self) -> u64 {
+        0
+    }
+}
+
+/// One dispatch arm's call: the argument registers in the order the SYSCALL
+/// ABI passes them, each read as the type the table names.
+///
+/// The arities are spelled out because a register sequence cannot be indexed
+/// inside a repetition, and because the expansion of a dispatch table is
+/// worth being able to read. Arguments are bound before the call so a form
+/// taking `ctx` does not borrow it and read through it in the same expression.
+macro_rules! syscall_invoke {
+    ($c:ident, $f:path,) => {
+        $f().into_rax()
+    };
+    ($c:ident, $f:path, $k0:ident : $t0:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        $f(a0).into_rax()
+    }};
+    ($c:ident, $f:path, $k0:ident : $t0:ty, $k1:ident : $t1:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        $f(a0, a1).into_rax()
+    }};
+    ($c:ident, $f:path, $k0:ident : $t0:ty, $k1:ident : $t1:ty, $k2:ident : $t2:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        let a2 = reg::<$t2>($c.rdx);
+        $f(a0, a1, a2).into_rax()
+    }};
+    ($c:ident, $f:path, $k0:ident : $t0:ty, $k1:ident : $t1:ty, $k2:ident : $t2:ty,
+     $k3:ident : $t3:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        let a2 = reg::<$t2>($c.rdx);
+        let a3 = reg::<$t3>($c.r10);
+        $f(a0, a1, a2, a3).into_rax()
+    }};
+    ($c:ident, $f:path, $k0:ident : $t0:ty, $k1:ident : $t1:ty, $k2:ident : $t2:ty,
+     $k3:ident : $t3:ty, $k4:ident : $t4:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        let a2 = reg::<$t2>($c.rdx);
+        let a3 = reg::<$t3>($c.r10);
+        let a4 = reg::<$t4>($c.r8);
+        $f(a0, a1, a2, a3, a4).into_rax()
+    }};
+    ($c:ident, $f:path, $k0:ident : $t0:ty, $k1:ident : $t1:ty, $k2:ident : $t2:ty,
+     $k3:ident : $t3:ty, $k4:ident : $t4:ty, $k5:ident : $t5:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        let a2 = reg::<$t2>($c.rdx);
+        let a3 = reg::<$t3>($c.r10);
+        let a4 = reg::<$t4>($c.r8);
+        let a5 = reg::<$t5>($c.r9);
+        $f(a0, a1, a2, a3, a4, a5).into_rax()
+    }};
+    ($c:ident, $f:path, ctx) => {
+        $f($c).into_rax()
+    };
+    ($c:ident, $f:path, ctx, $k0:ident : $t0:ty, $k1:ident : $t1:ty,
+     $k2:ident : $t2:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        let a2 = reg::<$t2>($c.rdx);
+        $f($c, a0, a1, a2).into_rax()
+    }};
+    ($c:ident, $f:path, ctx, $k0:ident : $t0:ty, $k1:ident : $t1:ty,
+     $k2:ident : $t2:ty, $k3:ident : $t3:ty) => {{
+        let a0 = reg::<$t0>($c.rdi);
+        let a1 = reg::<$t1>($c.rsi);
+        let a2 = reg::<$t2>($c.rdx);
+        let a3 = reg::<$t3>($c.r10);
+        $f($c, a0, a1, a2, a3).into_rax()
+    }};
+}
+
+macro_rules! syscall_arms {
+    ($($nr:ident, $name:literal, $f:path, ($($args:tt)*);)*) => {
+        /// Call the implementation the table names for this context's `rax`,
+        /// and put its answer back in `rax`.
+        fn dispatch(ctx: &mut SyscallContext) {
+            match ctx.rax {
+                $($nr => ctx.rax = syscall_invoke!(ctx, $f, $($args)*),)*
+                _ => ctx.rax = fail_with(Errno::ENOSYS),
+            }
+        }
+    };
+}
+
+table::syscall_table!(syscall_arms);
+
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
 
@@ -515,770 +676,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         trace::record_enter(call);
     }
 
-    // Each arm overwrites `ctx.rax` with its result, so the number has to be
-    // kept if anything after the match wants to name the call.
+    // `dispatch` overwrites `ctx.rax` with the result, so the number has to
+    // be kept if anything after it wants to name the call.
     let syscall_number = ctx.rax;
 
-    match ctx.rax {
-        SYS_WRITE => {
-            let fd = ctx.rdi;
-            let buffer_ptr = ctx.rsi as *const u8;
-            let count = ctx.rdx as usize;
-            ctx.rax = sys_write(fd, buffer_ptr, count);
-        }
-        SYS_READ => {
-            let fd = ctx.rdi;
-            let buffer_ptr = ctx.rsi as *mut u8;
-            let count = ctx.rdx as usize;
-            ctx.rax = sys_read(fd, buffer_ptr, count) as u64;
-        }
-        SYS_IOCTL => {
-            let fd = ctx.rdi;
-            let request = ctx.rsi;
-            let arg = ctx.rdx;
-            let arg_len = ctx.r10 as usize;
-            let flags = ctx.r8;
-            ctx.rax = sys_ioctl(fd, request, arg, arg_len, flags) as u64;
-        }
-        SYS_CLOSE => {
-            let fd = ctx.rdi;
-            ctx.rax = sys_close(fd) as u64;
-        }
-        SYS_ISATTY => {
-            let fd = ctx.rdi;
-            ctx.rax = io::sys_isatty(fd);
-        }
-        SYS_PREAD => {
-            let fd = ctx.rdi;
-            let buffer_ptr = ctx.rsi as *mut u8;
-            let count = ctx.rdx as usize;
-            let offset = ctx.r10;
-            ctx.rax = io::sys_pread(fd, buffer_ptr, count, offset) as u64;
-        }
-        SYS_PWRITE => {
-            let fd = ctx.rdi;
-            let buffer_ptr = ctx.rsi as *const u8;
-            let count = ctx.rdx as usize;
-            let offset = ctx.r10;
-            ctx.rax = io::sys_pwrite(fd, buffer_ptr, count, offset) as u64;
-        }
-        SYS_READV => {
-            let fd = ctx.rdi;
-            let iov_ptr = ctx.rsi as *const io::IoVec;
-            let iovcnt = ctx.rdx as usize;
-            ctx.rax = io::sys_readv(fd, iov_ptr, iovcnt) as u64;
-        }
-        SYS_WRITEV => {
-            let fd = ctx.rdi;
-            let iov_ptr = ctx.rsi as *const io::IoVec;
-            let iovcnt = ctx.rdx as usize;
-            ctx.rax = io::sys_writev(fd, iov_ptr, iovcnt) as u64;
-        }
-        SYS_LSEEK => {
-            let fd = ctx.rdi;
-            let offset = ctx.rsi as i64;
-            let whence = ctx.rdx as u32;
-            ctx.rax = io::sys_lseek(fd, offset, whence) as u64;
-        }
-        SYS_FTRUNCATE => {
-            let fd = ctx.rdi;
-            let size = ctx.rsi;
-            ctx.rax = io::sys_ftruncate(fd, size) as u64;
-        }
-        SYS_FSYNC => {
-            let fd = ctx.rdi;
-            ctx.rax = io::sys_fsync(fd) as u64;
-        }
-        SYS_RENAME => {
-            let old_path_ptr = ctx.rdi as *const u8;
-            let new_path_ptr = ctx.rsi as *const u8;
-            ctx.rax = io::sys_rename(old_path_ptr, new_path_ptr) as u64;
-        }
-        SYS_LIST_DIR => {
-            let path_ptr = ctx.rdi as *const u8;
-            let buffer_ptr = ctx.rsi as *mut u8;
-            let buffer_size = ctx.rdx as usize;
-            ctx.rax = sys_list_dir(path_ptr, buffer_ptr, buffer_size) as u64;
-        }
-        SYS_GETDENTS => {
-            let path_ptr = ctx.rdi as *const u8;
-            let path_len = ctx.rsi as usize;
-            let buffer_ptr = ctx.rdx as *mut u8;
-            let buffer_size = ctx.r10 as usize;
-            let start = ctx.r8 as usize;
-            ctx.rax = io::sys_getdents(path_ptr, path_len, buffer_ptr, buffer_size, start) as u64;
-        }
-        SYS_GETCWD => {
-            let buffer_ptr = ctx.rdi as *mut u8;
-            let size = ctx.rsi as usize;
-            ctx.rax = sys_getcwd(buffer_ptr, size) as u64;
-        }
-        SYS_CHDIR => {
-            let path_ptr = ctx.rdi as *const u8;
-            ctx.rax = sys_chdir(path_ptr) as u64;
-        }
-        SYS_POLL => {
-            let fds_ptr = ctx.rdi as *mut SelectFd;
-            let count = ctx.rsi as usize;
-            let timeout = ctx.rdx;
-            ctx.rax = sys_poll(fds_ptr, count, timeout) as u64;
-        }
-        SYS_FSTAT => {
-            let fd = ctx.rdi;
-            let fstat_buf = ctx.rsi as *mut Stat;
-            ctx.rax = sys_fstat(fd, fstat_buf) as u64;
-        }
-        SYS_STAT => {
-            let path_ptr = ctx.rdi as *const u8;
-            let path_len = ctx.rsi as usize;
-            let fstat_buf = ctx.rdx as *mut Stat;
-            ctx.rax = sys_stat(path_ptr, path_len, fstat_buf) as u64;
-        }
-        SYS_ACCESS => {
-            let path_ptr = ctx.rdi as *const u8;
-            let path_len = ctx.rsi as usize;
-            let mode = ctx.rdx as u32;
-            ctx.rax = sys_access(path_ptr, path_len, mode) as u64;
-        }
-        SYS_TRUNCATE => {
-            let path_ptr = ctx.rdi as *const u8;
-            let path_len = ctx.rsi as usize;
-            let size = ctx.rdx;
-            ctx.rax = sys_truncate(path_ptr, path_len, size) as u64;
-        }
-        SYS_SYMLINK => {
-            let target_ptr = ctx.rdi as *const u8;
-            let target_len = ctx.rsi as usize;
-            let path_ptr = ctx.rdx as *const u8;
-            let path_len = ctx.r10 as usize;
-            ctx.rax = sys_symlink(target_ptr, target_len, path_ptr, path_len) as u64;
-        }
-        SYS_READLINK => {
-            let path_ptr = ctx.rdi as *const u8;
-            let path_len = ctx.rsi as usize;
-            let buf = ctx.rdx as *mut u8;
-            let buf_len = ctx.r10 as usize;
-            ctx.rax = sys_readlink(path_ptr, path_len, buf, buf_len) as u64;
-        }
-        SYS_OPENAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            let flags = ctx.r10;
-            ctx.rax = io::sys_openat(dirfd, path_ptr, path_len, flags) as u64;
-        }
-        SYS_MKDIRAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            ctx.rax = sys_mkdirat(dirfd, path_ptr, path_len) as u64;
-        }
-        SYS_MKFIFOAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            ctx.rax = sys_mkfifoat(dirfd, path_ptr, path_len) as u64;
-        }
-        SYS_UNLINKAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            let flags = ctx.r10;
-            ctx.rax = sys_unlinkat(dirfd, path_ptr, path_len, flags) as u64;
-        }
-        SYS_FSTATAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            let fstat_buf = ctx.r10 as *mut Stat;
-            let flags = ctx.r8;
-            ctx.rax = sys_fstatat(dirfd, path_ptr, path_len, fstat_buf, flags) as u64;
-        }
-        SYS_RENAMEAT => {
-            let olddirfd = ctx.rdi as i64;
-            let old_ptr = ctx.rsi as *const u8;
-            let old_len = ctx.rdx as usize;
-            let newdirfd = ctx.r10 as i64;
-            let new_ptr = ctx.r8 as *const u8;
-            let new_len = ctx.r9 as usize;
-            ctx.rax = sys_renameat(olddirfd, old_ptr, old_len, newdirfd, new_ptr, new_len) as u64;
-        }
-        SYS_SYMLINKAT => {
-            let target_ptr = ctx.rdi as *const u8;
-            let target_len = ctx.rsi as usize;
-            let newdirfd = ctx.rdx as i64;
-            let path_ptr = ctx.r10 as *const u8;
-            let path_len = ctx.r8 as usize;
-            ctx.rax = sys_symlinkat(target_ptr, target_len, newdirfd, path_ptr, path_len) as u64;
-        }
-        SYS_READLINKAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            let buf = ctx.r10 as *mut u8;
-            let buf_len = ctx.r8 as usize;
-            ctx.rax = sys_readlinkat(dirfd, path_ptr, path_len, buf, buf_len) as u64;
-        }
-        SYS_FACCESSAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            let mode = ctx.r10 as u32;
-            let flags = ctx.r8;
-            ctx.rax = sys_faccessat(dirfd, path_ptr, path_len, mode, flags) as u64;
-        }
-        SYS_UTIMENSAT => {
-            let dirfd = ctx.rdi as i64;
-            let path_ptr = ctx.rsi as *const u8;
-            let path_len = ctx.rdx as usize;
-            let times = ctx.r10 as *const UserTimespec;
-            let flags = ctx.r8;
-            ctx.rax = sys_utimensat(dirfd, path_ptr, path_len, times, flags) as u64;
-        }
-        SYS_MMAP => {
-            let addr = ctx.rdi;
-            let length = ctx.rsi;
-            let prot = ctx.rdx as u32;
-            let flags = ctx.r10 as u32;
-            let r8 = ctx.r8; // phys_addr (MAP_PHYSICAL) or fd (file-backed)
-            let r9 = ctx.r9; // file_offset (file-backed only)
-
-            ctx.rax = sys_mmap(addr, length, prot, flags, r8, r9);
-        }
-        SYS_MUNMAP => {
-            let addr = ctx.rdi;
-            let length = ctx.rsi;
-
-            ctx.rax = sys_munmap(addr, length) as u64;
-        }
-        SYS_MPROTECT => {
-            let addr = ctx.rdi;
-            let length = ctx.rsi;
-            let prot = ctx.rdx as u32;
-
-            ctx.rax = sys_mprotect(addr, length, prot) as u64;
-        }
-        SYS_MSYNC => {
-            let addr = ctx.rdi;
-            let len = ctx.rsi;
-            let flags = ctx.rdx as u32;
-            ctx.rax = sys_msync(addr, len, flags) as u64;
-        }
-        SYS_EXIT => {
-            let code = ctx.rdi as i32;
-            if code != 0 {
-                log!("exit: process exited with code {}", code);
-            }
-            thread_exit(code);
-        }
-        SYS_GETPID => {
-            ctx.rax = sys_getpid();
-        }
-        SYS_GETTID => {
-            ctx.rax = current_thread().map_or(0, |t| t.id.0);
-        }
-        SYS_SCHED_YIELD => {
-            thread_yield();
-            ctx.rax = 0;
-        }
-        SYS_SCHED_SETATTR => {
-            let tid = ctx.rdi;
-            let attr_ptr = ctx.rsi as *const SchedAttr;
-            ctx.rax = sys_sched_setattr(tid, attr_ptr);
-        }
-        SYS_SCHED_GETATTR => {
-            let tid = ctx.rdi;
-            let attr_ptr = ctx.rsi as *mut SchedAttr;
-            ctx.rax = sys_sched_getattr(tid, attr_ptr);
-        }
-        SYS_GETUID => {
-            ctx.rax = current_thread_info().lock().user_id as u64;
-        }
-        SYS_GETGID => {
-            ctx.rax = current_thread_info().lock().group_id as u64;
-        }
-        SYS_WAIT_PID => {
-            let pid = ctx.rdi;
-            let flags = ctx.rsi;
-            let status_ptr = ctx.rdx as *mut i32;
-            ctx.rax = sys_waitpid(pid, flags, status_ptr);
-        }
-        SYS_ERRNO => {
-            ctx.rax = sys_errno();
-        }
-        SYS_PIPE => {
-            let pipefd_ptr = ctx.rdi as *mut [u64; 2];
-            ctx.rax = sys_pipe(pipefd_ptr);
-        }
-        SYS_SPAWN => {
-            let path_ptr = ctx.rdi as *const u8;
-            let argv_ptr = ctx.rsi as *const *const u8;
-            let stdin_fd = ctx.rdx;
-            let stdout_fd = ctx.r10;
-            let stderr_fd = ctx.r8;
-            ctx.rax = sys_spawn(path_ptr, argv_ptr, stdin_fd, stdout_fd, stderr_fd);
-        }
-        SYS_EXECVE => {
-            let path_ptr = ctx.rdi as *const u8;
-            let argv = ctx.rsi as *const *const u8;
-            let envp = ctx.rdx as *const *const u8;
-            ctx.rax = sys_execve(ctx, path_ptr, argv, envp);
-        }
-        SYS_FCNTL => {
-            let fd = ctx.rdi;
-            let cmd = ctx.rsi;
-            let arg = ctx.rdx;
-            ctx.rax = sys_fcntl(fd, cmd, arg) as u64;
-        }
-        SYS_DUP => {
-            let oldfd = ctx.rdi;
-            ctx.rax = sys_dup(oldfd);
-        }
-        SYS_DUP2 => {
-            let oldfd = ctx.rdi;
-            let newfd = ctx.rsi;
-            ctx.rax = sys_dup2(oldfd, newfd);
-        }
-        SYS_LIST_PARTITIONS => {
-            let buffer = ctx.rdi as *mut u8;
-            let size = ctx.rsi;
-            ctx.rax = sys_list_partitions(buffer, size) as u64;
-        }
-        SYS_LIST_MOUNTS => {
-            let buffer = ctx.rdi as *mut u8;
-            let size = ctx.rsi as usize;
-            ctx.rax = sys_list_mounts(buffer, size) as u64;
-        }
-        SYS_STATFS => {
-            let path_ptr = ctx.rdi as *const u8;
-            let buf = ctx.rsi as *mut u8;
-            let buf_len = ctx.rdx as usize;
-            ctx.rax = fs::sys_statfs(path_ptr, buf, buf_len) as u64;
-        }
-        SYS_SLEEP_MS => {
-            let milliseconds = ctx.rdi;
-            ctx.rax = sys_sleep_ms(milliseconds);
-        }
-        SYS_NANOSLEEP => {
-            let req_ptr = ctx.rdi as *const Timespec;
-            let rem_ptr = ctx.rsi as *mut Timespec;
-            ctx.rax = sys_nanosleep(req_ptr, rem_ptr);
-        }
-        SYS_MONOTONIC_TIME => {
-            ctx.rax = sys_monotonic_time();
-        }
-        SYS_MOUNT => {
-            let device_id = ctx.rdi;
-            let partition_idx = ctx.rsi;
-            let path_ptr = ctx.rdx as *const u8;
-            let fs_type_ptr = ctx.r10 as *const u8;
-            ctx.rax = sys_mount(device_id, partition_idx, path_ptr, fs_type_ptr) as u64;
-        }
-        SYS_MKDIR => {
-            let path_ptr = ctx.rdi as *const u8;
-            ctx.rax = sys_mkdir(path_ptr) as u64;
-        }
-        SYS_RMDIR => {
-            let path_ptr = ctx.rdi as *const u8;
-            ctx.rax = sys_rmdir(path_ptr) as u64;
-        }
-        SYS_RMDIR_ALL => {
-            let path_ptr = ctx.rdi as *const u8;
-            ctx.rax = sys_rmdir_all(path_ptr) as u64;
-        }
-        SYS_UNLINK => {
-            let path_ptr = ctx.rdi as *const u8;
-            ctx.rax = sys_unlink(path_ptr) as u64;
-        }
-        SYS_CLONE => {
-            let func_ptr = ctx.rdi;
-            let arg = ctx.rsi;
-            let flags = ctx.rdx;
-            let child_stack = ctx.r10;
-            ctx.rax = sys_clone(ctx, func_ptr, arg, flags, child_stack);
-        }
-        SYS_FUTEX_WAIT => {
-            let addr = ctx.rdi as *const u32;
-            let expected = ctx.rsi as u32;
-            let timeout_ns = ctx.rdx;
-            ctx.rax = sys_futex_wait(addr, expected, timeout_ns);
-        }
-        SYS_FUTEX_WAIT_PI => {
-            let addr = ctx.rdi as *const u32;
-            let expected = ctx.rsi as u32;
-            let timeout_ns = ctx.rdx;
-            let owner_tid = ctx.r10;
-            ctx.rax = sys_futex_wait_pi(addr, expected, timeout_ns, owner_tid);
-        }
-        SYS_FUTEX_WAKE => {
-            let addr = ctx.rdi as *const u32;
-            let count = ctx.rsi as u32;
-            ctx.rax = sys_futex_wake(addr, count);
-        }
-        SYS_GETRANDOM => {
-            let buffer_ptr = ctx.rdi as *mut u8;
-            let length = ctx.rsi as usize;
-            let flags = ctx.rdx;
-            ctx.rax = sys_getrandom(buffer_ptr, length, flags) as u64;
-        }
-        SYS_SHM_CREATE => {
-            let size = ctx.rdi;
-            ctx.rax = shm::sys_shm_create(size) as u64;
-        }
-        SYS_SHM_MAP => {
-            let shm_id = ctx.rdi;
-            let addr_hint = ctx.rsi;
-            let prot = ctx.rdx as u32;
-            ctx.rax = shm::sys_shm_map(shm_id, addr_hint, prot);
-        }
-        SYS_SHM_UNMAP => {
-            let addr = ctx.rdi;
-            ctx.rax = shm::sys_shm_unmap(addr) as u64;
-        }
-        SYS_SHM_DESTROY => {
-            let shm_id = ctx.rdi;
-            ctx.rax = shm::sys_shm_destroy(shm_id) as u64;
-        }
-        SYS_WINDOW_CREATE => {
-            let x = ctx.rdi as i64;
-            let y = ctx.rsi as i64;
-            let width = ctx.rdx;
-            let height = ctx.r10;
-            ctx.rax = window::sys_window_create(x, y, width, height);
-        }
-        SYS_WINDOW_DESTROY => {
-            let window_id = ctx.rdi;
-            ctx.rax = window::sys_window_destroy(window_id);
-        }
-        SYS_WINDOW_SET => {
-            let window_id = ctx.rdi;
-            let prop = ctx.rsi;
-            let value = ctx.rdx;
-            ctx.rax = window::sys_window_set(window_id, prop, value);
-        }
-        SYS_WINDOW_GET => {
-            let window_id = ctx.rdi;
-            let prop = ctx.rsi;
-            ctx.rax = window::sys_window_get(window_id, prop);
-        }
-        SYS_WINDOW_POLL => {
-            let window_id = ctx.rdi;
-            let events_ptr = ctx.rsi as *mut crate::window::WindowEvent;
-            let max = ctx.rdx;
-            ctx.rax = window::sys_window_poll(window_id, events_ptr, max);
-        }
-        SYS_WINDOW_LIST => {
-            let buffer_ptr = ctx.rdi as *mut u8;
-            let max = ctx.rsi;
-            let list_flags = ctx.rdx;
-            ctx.rax = window::sys_window_list(buffer_ptr, max, list_flags);
-        }
-        SYS_WINDOW_SEND_EVENT => {
-            let window_id = ctx.rdi;
-            let event_ptr = ctx.rsi as *const crate::window::WindowEvent;
-            ctx.rax = window::sys_window_send_event(window_id, event_ptr);
-        }
-        SYS_WINDOW_PRESENT => {
-            ctx.rax = window::sys_window_present();
-        }
-        SYS_WINDOW_WAIT => {
-            ctx.rax = window::sys_window_wait(ctx.rdi, ctx.rsi, ctx.rdx);
-        }
-        SYS_WINDOW_DAMAGE => {
-            let window_id = ctx.rdi;
-            ctx.rax = window::sys_window_damage(
-                window_id,
-                ctx.rsi as u32,
-                ctx.rdx as u32,
-                ctx.r10 as u32,
-                ctx.r8 as u32,
-            );
-        }
-        SYS_WINDOW_GRAB_KEY => {
-            ctx.rax = window::sys_window_grab_key(ctx.rdi, ctx.rsi, ctx.rdx);
-        }
-        SYS_WINDOW_GRANT_SHELL => {
-            ctx.rax = window::sys_window_grant_shell(ctx.rdi);
-        }
-        SYS_CLIPBOARD_GET => {
-            let buffer_ptr = ctx.rsi as *mut u8;
-            ctx.rax = window::sys_clipboard_get(ctx.rdi, buffer_ptr, ctx.rdx as usize);
-        }
-        SYS_CLIPBOARD_SET => {
-            let buffer_ptr = ctx.rsi as *const u8;
-            ctx.rax = window::sys_clipboard_set(ctx.rdi, buffer_ptr, ctx.rdx as usize);
-        }
-        SYS_CLOCK_GETTIME => {
-            let buf_ptr = ctx.rdi as *mut u8;
-            ctx.rax = sys_clock_gettime(buf_ptr);
-        }
-        SYS_CLOCK_SETTIME => {
-            let buf_ptr = ctx.rdi as *const u8;
-            ctx.rax = sys_clock_settime(buf_ptr);
-        }
-        SYS_OPENPTY => {
-            let pipefd_ptr = ctx.rdi as *mut [u64; 2];
-            ctx.rax = io::sys_openpty(pipefd_ptr);
-        }
-        SYS_SPAWN2 => {
-            let args_ptr = ctx.rdi as *const SpawnArgs;
-            ctx.rax = sys_spawn2(args_ptr);
-        }
-        SYS_KILL => {
-            // POSIX addressing: a positive pid is one process, 0 is the
-            // caller's group, and a negative pid is the group named by its
-            // magnitude. The group forms are how a shell stops a whole job.
-            let pid = ctx.rdi as i64;
-            let signum = ctx.rsi as u32;
-            let info = current_thread_info();
-            let delivered = if signum == 0 || signum >= 32 {
-                false
-            } else if pid > 0 {
-                kill_process_with_signal(pid as u64, signum)
-            } else {
-                let pgid = match pid {
-                    0 => current_thread().map(|t| t.pgid()),
-                    _ => Some(pid.unsigned_abs()),
-                };
-                pgid.is_some_and(|pgid| signal_process_group(pgid, signum))
-            };
-            if delivered {
-                ctx.rax = 0;
-            } else {
-                info.lock().errno = Errno::EINVAL;
-                ctx.rax = !0u64;
-            }
-        }
-        SYS_SIGACTION => {
-            // `handler` is SIG_DFL, SIG_IGN, or a user function address.
-            // `restorer` is the address a handler returns through and is
-            // required whenever a real handler is installed: the kernel cannot
-            // supply those instructions itself without making a stack
-            // executable.
-            let signum = ctx.rdi as u32;
-            let handler = ctx.rsi;
-            let restorer = ctx.rdx;
-            let info = current_thread_info();
-            if signum == 0
-                || signum >= 32
-                || signal::is_uncatchable(signum)
-                || (handler > signal::SIG_IGN && restorer == 0)
-            {
-                info.lock().errno = Errno::EINVAL;
-                ctx.rax = !0u64;
-            } else if let Some(cur_thread) = current_thread() {
-                if restorer != 0 {
-                    cur_thread
-                        .signal
-                        .restorer
-                        .store(restorer, Ordering::Release);
-                }
-                let prev = cur_thread.signal.set_handler(signum, handler);
-                ctx.rax = prev;
-            } else {
-                info.lock().errno = Errno::EINVAL;
-                ctx.rax = !0u64;
-            }
-        }
-        SYS_SIGRETURN => {
-            sigframe::sys_sigreturn(ctx);
-        }
-        SYS_SIGPROCMASK => {
-            // Signal sets are 32 bits wide here, so the mask is passed and the
-            // previous one returned by value rather than through pointers.
-            let how = ctx.rdi as u32;
-            let mask = ctx.rsi as u32;
-            let old = current_thread().map(|t| (t.signal.blocked(), t));
-            let new = old.as_ref().and_then(|(old, _)| match how {
-                signal::SIG_BLOCK => Some(old | mask),
-                signal::SIG_UNBLOCK => Some(old & !mask),
-                signal::SIG_SETMASK => Some(mask),
-                _ => None,
-            });
-            match (old, new) {
-                (Some((old, thread)), Some(new)) => {
-                    thread.signal.set_blocked(new);
-                    // Whatever the new mask stopped blocking is delivered now.
-                    deliver_unblocked_signals(&thread);
-                    ctx.rax = old as u64;
-                }
-                _ => {
-                    current_thread_info().lock().errno = Errno::EINVAL;
-                    ctx.rax = !0u64;
-                }
-            }
-        }
-        SYS_SHM_SIZE => {
-            let shm_id = ctx.rdi;
-            ctx.rax = shm::sys_shm_size(shm_id) as u64;
-        }
-        SYS_PING => {
-            let dst_ip_ptr = ctx.rdi as *const [u8; 4];
-            let id = ctx.rsi as u16;
-            let seq = ctx.rdx as u16;
-            let timeout_ms = ctx.r10;
-            ctx.rax = sys_ping(dst_ip_ptr, id, seq, timeout_ms);
-        }
-        SYS_SOCKET => {
-            let domain = ctx.rdi;
-            let sock_type = ctx.rsi;
-            let protocol = ctx.rdx;
-            ctx.rax = net::sys_socket(domain, sock_type, protocol);
-        }
-        SYS_BIND => {
-            let fd = ctx.rdi;
-            let addr_ptr = ctx.rsi as *const net::SockAddrIn;
-            let addr_len = ctx.rdx;
-            ctx.rax = net::sys_bind(fd, addr_ptr, addr_len);
-        }
-        SYS_CONNECT => {
-            let fd = ctx.rdi;
-            let addr_ptr = ctx.rsi as *const net::SockAddrIn;
-            let addr_len = ctx.rdx;
-            ctx.rax = net::sys_connect(fd, addr_ptr, addr_len);
-        }
-        SYS_LISTEN => {
-            let fd = ctx.rdi;
-            let backlog = ctx.rsi as u32;
-            ctx.rax = net::sys_listen(fd, backlog);
-        }
-        SYS_ACCEPT => {
-            let fd = ctx.rdi;
-            let addr_ptr = ctx.rsi as *mut net::SockAddrIn;
-            let addr_len_ptr = ctx.rdx as *mut u32;
-            ctx.rax = net::sys_accept(fd, addr_ptr, addr_len_ptr);
-        }
-        SYS_SENDTO => {
-            let fd = ctx.rdi;
-            let buf_ptr = ctx.rsi as *const u8;
-            let len = ctx.rdx;
-            let flags = ctx.r10;
-            let addr_ptr = ctx.r8 as *const net::SockAddrIn;
-            let addr_len = ctx.r9;
-            ctx.rax = net::sys_sendto(fd, buf_ptr, len, flags, addr_ptr, addr_len);
-        }
-        SYS_RECVFROM => {
-            let fd = ctx.rdi;
-            let buf_ptr = ctx.rsi as *mut u8;
-            let len = ctx.rdx;
-            let flags = ctx.r10;
-            let addr_ptr = ctx.r8 as *mut net::SockAddrIn;
-            let addr_len_ptr = ctx.r9 as *mut u32;
-            ctx.rax = net::sys_recvfrom(fd, buf_ptr, len, flags, addr_ptr, addr_len_ptr);
-        }
-        SYS_NETINFO => {
-            let buf_ptr = ctx.rdi as *mut u8;
-            let buf_len = ctx.rsi as usize;
-            ctx.rax = sys_netinfo(buf_ptr, buf_len);
-        }
-        SYS_SHUTDOWN => {
-            ctx.rax = net::sys_shutdown(ctx.rdi, ctx.rsi);
-        }
-        SYS_SETSOCKOPT => {
-            ctx.rax = net::sys_setsockopt(
-                ctx.rdi,
-                ctx.rsi as i32,
-                ctx.rdx as i32,
-                ctx.r10 as *const u8,
-                ctx.r8 as u32,
-            );
-        }
-        SYS_GETSOCKOPT => {
-            ctx.rax = net::sys_getsockopt(
-                ctx.rdi,
-                ctx.rsi as i32,
-                ctx.rdx as i32,
-                ctx.r10 as *mut u8,
-                ctx.r8 as *mut u32,
-            );
-        }
-        SYS_GETPEERNAME => {
-            ctx.rax = net::sys_getpeername(
-                ctx.rdi,
-                ctx.rsi as *mut net::SockAddrIn,
-                ctx.rdx as *mut u32,
-            );
-        }
-        SYS_GETSOCKNAME => {
-            ctx.rax = net::sys_getsockname(
-                ctx.rdi,
-                ctx.rsi as *mut net::SockAddrIn,
-                ctx.rdx as *mut u32,
-            );
-        }
-        SYS_FORK => {
-            ctx.rax = sys_fork(ctx) as u64;
-        }
-        SYS_GETDNS => {
-            ctx.rax = net::sys_getdns(ctx.rdi as *mut [u8; 4]);
-        }
-        SYS_SETDNS => {
-            ctx.rax = net::sys_setdns(ctx.rdi as *const [u8; 4]);
-        }
-        SYS_SYNC => {
-            io::sys_sync();
-            ctx.rax = 0;
-        }
-        SYS_REBOOT => {
-            ctx.rax = sys_reboot(ctx.rdi);
-        }
-        SYS_SETPGID => {
-            let pid = ctx.rdi;
-            let pgid = ctx.rsi;
-            ctx.rax = match current_thread_id() {
-                Some(caller) => match set_process_group(pid, pgid, caller.0) {
-                    Ok(()) => 0,
-                    Err(errno) => fail_with(errno),
-                },
-                None => fail_with(Errno::EINVAL),
-            };
-        }
-        SYS_GETPGID => {
-            let pid = ctx.rdi;
-            ctx.rax = match current_thread_id() {
-                Some(caller) => match process_group_of(pid, caller.0) {
-                    Ok(pgid) => pgid,
-                    Err(errno) => fail_with(errno),
-                },
-                None => fail_with(Errno::EINVAL),
-            };
-        }
-        SYS_TCSETPGRP => {
-            let fd = ctx.rdi;
-            let pgid = ctx.rsi;
-            ctx.rax = io::sys_tcsetpgrp(fd, pgid);
-        }
-        SYS_TCGETPGRP => {
-            let fd = ctx.rdi;
-            ctx.rax = io::sys_tcgetpgrp(fd);
-        }
-        SYS_TRACE_CTL => {
-            let op = ctx.rdi;
-            let arg = ctx.rsi;
-            ctx.rax = trace::sys_trace_ctl(op, arg);
-        }
-        SYS_TRACE_READ => {
-            let buf = ctx.rdi as *mut edos_trace_abi::TraceRecord;
-            let max = ctx.rsi;
-            let timeout_ms = ctx.rdx;
-            ctx.rax = trace::sys_trace_read(buf, max, timeout_ms);
-        }
-        SYS_PROFILE_CTL => {
-            let op = ctx.rdi;
-            let arg = ctx.rsi;
-            ctx.rax = profile::sys_profile_ctl(op, arg);
-        }
-        SYS_PROFILE_READ => {
-            let buf = ctx.rdi as *mut edos_profile_abi::Sample;
-            let max = ctx.rsi;
-            let timeout_ms = ctx.rdx;
-            ctx.rax = profile::sys_profile_read(buf, max, timeout_ms);
-        }
-        _ => {
-            current_thread_info().lock().errno = Errno::ENOSYS;
-            ctx.rax = !0u64;
-        }
-    }
+    dispatch(ctx);
 
     // A failure leaves the entry as a negated errno, which is what every C
     // library expects: a return in `[-4095, -1]` is an error code and anything
@@ -1583,6 +985,103 @@ impl From<FsError> for Errno {
 
 fn sys_getpid() -> u64 {
     current_thread_info().lock().pid
+}
+
+/// The calling thread's id, which is the process id only when the process has
+/// one thread.
+fn sys_gettid() -> Result<u64, Errno> {
+    Ok(current_thread().map_or(0, |t| t.id.0))
+}
+
+fn sys_getuid() -> Result<u64, Errno> {
+    Ok(current_thread_info().lock().user_id as u64)
+}
+
+fn sys_getgid() -> Result<u64, Errno> {
+    Ok(current_thread_info().lock().group_id as u64)
+}
+
+fn sys_sched_yield() -> Result<u64, Errno> {
+    thread_yield();
+    Ok(0)
+}
+
+fn sys_exit(code: i32) -> Result<u64, Errno> {
+    if code != 0 {
+        log!("exit: process exited with code {}", code);
+    }
+    thread_exit(code)
+}
+
+/// Send a signal to a process or a process group.
+///
+/// POSIX addressing: a positive pid is one process, 0 is the caller's group,
+/// and a negative pid is the group named by its magnitude. The group forms are
+/// how a shell stops a whole job.
+fn sys_kill(pid: i64, signum: u32) -> Result<u64, Errno> {
+    let delivered = if signum == 0 || signum >= 32 {
+        false
+    } else if pid > 0 {
+        kill_process_with_signal(pid as u64, signum)
+    } else {
+        let pgid = match pid {
+            0 => current_thread().map(|t| t.pgid()),
+            _ => Some(pid.unsigned_abs()),
+        };
+        pgid.is_some_and(|pgid| signal_process_group(pgid, signum))
+    };
+    if delivered { Ok(0) } else { Err(Errno::EINVAL) }
+}
+
+/// Install a signal handler and answer with the one it replaced.
+///
+/// `handler` is SIG_DFL, SIG_IGN, or a user function address. `restorer` is
+/// the address a handler returns through and is required whenever a real
+/// handler is installed: the kernel cannot supply those instructions itself
+/// without making a stack executable.
+fn sys_sigaction(signum: u32, handler: u64, restorer: u64) -> Result<u64, Errno> {
+    if signum == 0
+        || signum >= 32
+        || signal::is_uncatchable(signum)
+        || (handler > signal::SIG_IGN && restorer == 0)
+    {
+        return Err(Errno::EINVAL);
+    }
+    let thread = current_thread().ok_or(Errno::EINVAL)?;
+    if restorer != 0 {
+        thread.signal.restorer.store(restorer, Ordering::Release);
+    }
+    Ok(thread.signal.set_handler(signum, handler))
+}
+
+/// Block or unblock signals and answer with the previous mask.
+///
+/// Signal sets are 32 bits wide here, so the mask is passed and the previous
+/// one returned by value rather than through pointers.
+fn sys_sigprocmask(how: u32, mask: u32) -> Result<u64, Errno> {
+    let thread = current_thread().ok_or(Errno::EINVAL)?;
+    let old = thread.signal.blocked();
+    let new = match how {
+        signal::SIG_BLOCK => old | mask,
+        signal::SIG_UNBLOCK => old & !mask,
+        signal::SIG_SETMASK => mask,
+        _ => return Err(Errno::EINVAL),
+    };
+    thread.signal.set_blocked(new);
+    // Whatever the new mask stopped blocking is delivered now.
+    deliver_unblocked_signals(&thread);
+    Ok(old as u64)
+}
+
+fn sys_setpgid(pid: u64, pgid: u64) -> Result<u64, Errno> {
+    let caller = current_thread_id().ok_or(Errno::EINVAL)?;
+    set_process_group(pid, pgid, caller.0)?;
+    Ok(0)
+}
+
+fn sys_getpgid(pid: u64) -> Result<u64, Errno> {
+    let caller = current_thread_id().ok_or(Errno::EINVAL)?;
+    process_group_of(pid, caller.0)
 }
 
 /// What a thread asks the scheduler for, as userspace states it.
