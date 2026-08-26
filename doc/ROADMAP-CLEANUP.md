@@ -500,13 +500,24 @@ anyway.
 `compositor.rs` and input in `input.rs`; the event loop should be a third module,
 not the binary's `main`.
 
-### H5. 45 functions take seven or more parameters (S2, E2)
+### H5. 29 functions take seven or more parameters, 15 of them 8 or more (S2, E3)
 
-Most are the drawing functions D1 fixes. The rest worth naming:
-`kernel/src/net/tcp.rs:118` `build` (10), `kernel/src/thread/thread.rs:1126`
-`new_user` (8), `kernel/src/syscalls/mod.rs:2079` `do_spawn` (8),
-`tools/efs-fsck/src/repair.rs:441` `repair_link_counts` (8). Each is a
-parameter object waiting to happen.
+Down from 45: D1 and D2 took the `edos_render` drawing functions with them, and
+I3 gave each of the 15 that trip clippy a per-site `allow` rather than a blanket
+one. Five of those judged a parameter object to be the same list one level out
+(`net/tcp.rs` `build`, `thread/thread.rs` `new_user`, `syscalls/mod.rs`
+`do_spawn`, `usb/mass_storage.rs` `bot_transfer`, `fs/efs/mod.rs`
+`rename_inner`), and that judgement stands.
+
+What is left is one cluster, not 29 scattered functions:
+`programs/edos-web/src/view.rs` carries five of the fifteen, and its `blit`,
+`fill`, `fill_rounded`, `stroke_rounded` and `draw_scrollbar` still take
+`buffer: &mut [u32], width, height, top` by hand because `edos-web` never
+adopted `edos_render::Surface`. Nine of the twelve remaining `buffer: &mut
+[u32]` signatures in the tree are in `edos-web` (6 in `view.rs`, 2 in `ui.rs`);
+the other three are `termbench`, which measures the raw blit on purpose, and one
+in `wintest`. Porting `edos-web` to `Surface` closes the parameter counts and
+the raw-buffer count together.
 
 ---
 
