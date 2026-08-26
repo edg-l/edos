@@ -153,28 +153,18 @@ fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
 /// interrupts before doing any filesystem work, and report the outcome the way
 /// the ABI says. A copy of that body per syscall is four places for the
 /// interrupt enable or the errno convention to drift.
-fn on_cwd_path<T>(path_ptr: *const u8, act: impl FnOnce(&Path) -> Result<T, Error>) -> i64 {
+fn on_cwd_path<T>(
+    path_ptr: *const u8,
+    act: impl FnOnce(&Path) -> Result<T, Error>,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let cwd = current_cwd(&info);
-    let path = match read_user_path(path_ptr, &cwd) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
+    let path = read_user_path(path_ptr, &cwd)?;
 
     interrupts::enable();
 
-    match act(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    act(&path).map_err(Errno::from)?;
+    Ok(0)
 }
 
 /// As [`on_cwd_path`], for the `*at` forms: the path is resolved against
@@ -184,27 +174,13 @@ fn on_dir_path<T>(
     path_ptr: *const u8,
     path_len: usize,
     act: impl FnOnce(&Path) -> Result<T, Error>,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
+) -> Result<u64, Errno> {
+    let path = read_user_path_at(dirfd, path_ptr, path_len)?;
 
     interrupts::enable();
 
-    match act(&path) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
-    }
+    act(&path).map_err(Errno::from)?;
+    Ok(0)
 }
 
 #[repr(C)]
@@ -236,47 +212,28 @@ pub fn sys_mount(
     partition_idx: u64,
     path_ptr: *const u8,
     fs_type: *const u8,
-) -> i64 {
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let cwd = current_cwd(&info);
-    let mount_point = match read_user_path(path_ptr, &cwd) {
-        Ok(path) => path,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
+    let mount_point = read_user_path(path_ptr, &cwd)?;
 
     interrupts::enable();
 
     let finfo = match file_info(&mount_point) {
         Ok(info) => info,
         Err(Error::FileNotFound) => {
-            info.lock().errno = Errno::ENOENT;
-            return -1;
+            return Err(Errno::ENOENT);
         }
         Err(err) => {
-            info.lock().errno = Errno::from(err);
-            return -1;
+            return Err(Errno::from(err));
         }
     };
 
     if finfo.kind != FileKind::Directory {
-        info.lock().errno = Errno::ENOTDIR;
-        return -1;
+        return Err(Errno::ENOTDIR);
     }
 
-    let fs_type = match read_user_str(fs_type) {
-        Ok(x) => x,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    }
-    .to_string_lossy()
-    .to_string();
+    let fs_type = read_user_str(fs_type)?.to_string_lossy().to_string();
 
     let fs_type = match fs_type.as_str() {
         "fat32" => FilesystemType::Fat32,
@@ -293,58 +250,59 @@ pub fn sys_mount(
         mount_point,
         fs_type,
     ) {
-        Ok(_) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
+        Ok(_) => Ok(0),
+        Err(err) => Err(Errno::from(err)),
     }
 }
 
-pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
+pub fn sys_mkdir(path_ptr: *const u8) -> Result<u64, Errno> {
     on_cwd_path(path_ptr, create_dir)
 }
 
-pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
+pub fn sys_rmdir(path_ptr: *const u8) -> Result<u64, Errno> {
     on_cwd_path(path_ptr, remove_dir)
 }
 
-pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
+pub fn sys_rmdir_all(path_ptr: *const u8) -> Result<u64, Errno> {
     on_cwd_path(path_ptr, remove_dir_recursive)
 }
 
-pub fn sys_unlink(path_ptr: *const u8) -> i64 {
+pub fn sys_unlink(path_ptr: *const u8) -> Result<u64, Errno> {
     on_cwd_path(path_ptr, remove_file)
 }
 
 /// `flags` bit selecting `rmdir` semantics, as in Linux `<fcntl.h>`.
 const AT_REMOVEDIR: u64 = 0x200;
 
-/// mkdirat(dirfd, path, path_len) -> 0 on success, -1 on error
+/// Create a named pipe relative to a directory descriptor.
 ///
-/// No `mode` argument: EDOS carries no permission bits, so one would be a
-/// value nothing could observe.
-/// mkfifoat(dirfd, path, path_len) -> 0, or -1 on error
-///
-/// Create a named pipe. Nothing opens it here: the buffer its ends meet in
-/// comes into being when the first `open` arrives, so this only puts the name
-/// and its type into the filesystem.
-pub fn sys_mkfifoat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
+/// Nothing opens it here: the buffer its ends meet in comes into being when
+/// the first `open` arrives, so this only puts the name and its type into the
+/// filesystem.
+pub fn sys_mkfifoat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> Result<u64, Errno> {
     on_dir_path(dirfd, path_ptr, path_len, crate::fs::api::create_fifo)
 }
 
-pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
+/// Create a directory relative to a directory descriptor.
+///
+/// No `mode` argument: EDOS carries no permission bits, so one would be a
+/// value nothing could observe.
+pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> Result<u64, Errno> {
     on_dir_path(dirfd, path_ptr, path_len, create_dir)
 }
 
-/// unlinkat(dirfd, path, path_len, flags) -> 0 on success, -1 on error
+/// Remove a file or directory relative to a directory descriptor.
 ///
 /// `AT_REMOVEDIR` removes an empty directory instead of a file; no other flag
 /// is defined.
-pub fn sys_unlinkat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) -> i64 {
+pub fn sys_unlinkat(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    flags: u64,
+) -> Result<u64, Errno> {
     if flags & !AT_REMOVEDIR != 0 {
-        current_thread_info().lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     on_dir_path(dirfd, path_ptr, path_len, |path| {
@@ -367,13 +325,9 @@ struct SysPartition {
     pub unique_partition_guid: [u8; 16],
 }
 
-pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> Result<u64, Errno> {
     if buffer.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     interrupts::enable();
@@ -381,8 +335,7 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
     let partitions = match list_partitions() {
         Ok(parts) => parts,
         Err(_) => {
-            info.lock().errno = Errno::EIO;
-            return -1;
+            return Err(Errno::EIO);
         }
     };
 
@@ -406,27 +359,22 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
         }
 
         if !unsafe { try_copy_to_user(current_ptr, bytes.as_ptr(), bytes.len()) } {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
+            return Err(Errno::EFAULT);
         }
         written += bytes.len();
         current_ptr = unsafe { current_ptr.add(bytes.len()) };
     }
 
-    written as i64
+    Ok(written as u64)
 }
 
-pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> Result<u64, Errno> {
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     if buffer_size == 0 {
-        return 0;
+        return Ok(0);
     }
 
     interrupts::enable();
@@ -456,8 +404,7 @@ pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
         };
 
         if !unsafe { try_copy_to_user(buffer_ptr.add(written), entry_bytes.as_ptr(), entry_size) } {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
+            return Err(Errno::EFAULT);
         }
         written += entry_size;
         if !unsafe {
@@ -467,13 +414,12 @@ pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
                 path_bytes.len(),
             )
         } {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
+            return Err(Errno::EFAULT);
         }
         written += path_bytes.len();
     }
 
-    written as i64
+    Ok(written as u64)
 }
 
 fn file_to_fstat_entry(file: &crate::fs::File) -> Stat {
@@ -519,13 +465,10 @@ fn file_to_fstat_entry(file: &crate::fs::File) -> Stat {
     }
 }
 
-pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> i64 {
+pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if fstat_buf.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     // The fd table is a `BlockingMutex` and its contended path parks, so the
@@ -536,8 +479,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> i64 {
     let fd_descriptor = match fd {
         Some(desc) => desc,
         None => {
-            info.lock().errno = Errno::EBADF;
-            return -1;
+            return Err(Errno::EBADF);
         }
     };
 
@@ -548,8 +490,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> i64 {
             match file_info(&fs_file.path) {
                 Ok(file) => file_to_fstat_entry(&file),
                 Err(err) => {
-                    info.lock().errno = Errno::from(err);
-                    return -1;
+                    return Err(Errno::from(err));
                 }
             }
         }
@@ -598,14 +539,13 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> i64 {
     };
 
     if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    0
+    Ok(0)
 }
 
-pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut Stat) -> i64 {
+pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut Stat) -> Result<u64, Errno> {
     sys_fstatat(AT_FDCWD, path_ptr, path_len, fstat_buf, 0)
 }
 
@@ -613,7 +553,7 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut Stat) -> i
 /// `<fcntl.h>`. This is what makes `lstat` distinguishable from `stat`.
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 
-/// fstatat(dirfd, path, path_len, statbuf, flags) -> 0 on success, -1 on error
+/// Stat a path relative to a directory descriptor.
 ///
 /// `AT_SYMLINK_NOFOLLOW` is the only accepted flag; anything else is refused
 /// rather than quietly ignored. With it, a symbolic link reports its own
@@ -625,27 +565,16 @@ pub fn sys_fstatat(
     path_len: usize,
     fstat_buf: *mut Stat,
     flags: u64,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+) -> Result<u64, Errno> {
     if fstat_buf.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
     if flags & !AT_SYMLINK_NOFOLLOW != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
     let nofollow = flags & AT_SYMLINK_NOFOLLOW != 0;
 
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = read_user_path_at(dirfd, path_ptr, path_len)?;
 
     interrupts::enable();
 
@@ -657,17 +586,15 @@ pub fn sys_fstatat(
     let fstat_entry = match looked_up {
         Ok(file) => file_to_fstat_entry(&file),
         Err(err) => {
-            info.lock().errno = Errno::from(err);
-            return -1;
+            return Err(Errno::from(err));
         }
     };
 
     if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    0
+    Ok(0)
 }
 
 /// Bits of the `mode` argument to `sys_access`, as in POSIX `<unistd.h>`.
@@ -676,7 +603,7 @@ const W_OK: u32 = 2;
 const R_OK: u32 = 4;
 const ACCESS_MODE_BITS: u32 = X_OK | W_OK | R_OK;
 
-pub fn sys_access(path_ptr: *const u8, path_len: usize, mode: u32) -> i64 {
+pub fn sys_access(path_ptr: *const u8, path_len: usize, mode: u32) -> Result<u64, Errno> {
     sys_faccessat(AT_FDCWD, path_ptr, path_len, mode, 0)
 }
 
@@ -698,79 +625,54 @@ pub fn sys_faccessat(
     path_len: usize,
     mode: u32,
     flags: u64,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+) -> Result<u64, Errno> {
     if mode & !ACCESS_MODE_BITS != 0 || flags != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = read_user_path_at(dirfd, path_ptr, path_len)?;
 
     interrupts::enable();
 
     let file = match file_info(&path) {
         Ok(file) => file,
         Err(err) => {
-            info.lock().errno = Errno::from(err);
-            return -1;
+            return Err(Errno::from(err));
         }
     };
 
     if mode & W_OK != 0 && file.attrs.readonly {
-        info.lock().errno = Errno::EACCES;
-        return -1;
+        return Err(Errno::EACCES);
     }
 
-    0
+    Ok(0)
 }
 
-/// truncate(path, path_len, size) -> 0 on success, -1 on error.
+/// Resize the file named by a path.
 ///
 /// The path-based form of `ftruncate`, for the callers that have a name and no
 /// descriptor. A directory is refused rather than resized.
-pub fn sys_truncate(path_ptr: *const u8, path_len: usize, size: u64) -> i64 {
+pub fn sys_truncate(path_ptr: *const u8, path_len: usize, size: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let cwd = current_cwd(&info);
 
-    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = read_user_path_with_len(path_ptr, path_len, &cwd)?;
 
     interrupts::enable();
 
     match file_info(&path) {
         Ok(finfo) if finfo.kind == FileKind::Directory => {
-            info.lock().errno = Errno::EISDIR;
-            return -1;
+            return Err(Errno::EISDIR);
         }
         Ok(_) => {}
         Err(err) => {
-            info.lock().errno = Errno::from(err);
-            return -1;
+            return Err(Errno::from(err));
         }
     }
 
     match crate::fs::api::truncate(&path, size) {
-        Ok(()) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
+        Ok(()) => Ok(0),
+        Err(err) => Err(Errno::from(err)),
     }
 }
 
@@ -779,7 +681,7 @@ pub fn sys_symlink(
     target_len: usize,
     path_ptr: *const u8,
     path_len: usize,
-) -> i64 {
+) -> Result<u64, Errno> {
     sys_symlinkat(target_ptr, target_len, AT_FDCWD, path_ptr, path_len)
 }
 
@@ -794,52 +696,41 @@ pub fn sys_symlinkat(
     newdirfd: i64,
     path_ptr: *const u8,
     path_len: usize,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+) -> Result<u64, Errno> {
     if target_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
     if target_len == 0 || target_len > MAX_PATH_LEN {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let mut target_buf: PathBuf = [0u8; MAX_PATH_LEN];
     if !unsafe { try_copy_from_user(target_buf.as_mut_ptr(), target_ptr, target_len) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
     let target = match core::str::from_utf8(&target_buf[..target_len]) {
         Ok(s) => s,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
-    let path = match read_user_path_at(newdirfd, path_ptr, path_len) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = read_user_path_at(newdirfd, path_ptr, path_len)?;
 
     interrupts::enable();
 
     match crate::fs::api::symlink(target, &path) {
-        Ok(()) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
+        Ok(()) => Ok(0),
+        Err(err) => Err(Errno::from(err)),
     }
 }
 
-pub fn sys_readlink(path_ptr: *const u8, path_len: usize, buf: *mut u8, buf_len: usize) -> i64 {
+pub fn sys_readlink(
+    path_ptr: *const u8,
+    path_len: usize,
+    buf: *mut u8,
+    buf_len: usize,
+) -> Result<u64, Errno> {
     sys_readlinkat(AT_FDCWD, path_ptr, path_len, buf, buf_len)
 }
 
@@ -853,43 +744,30 @@ pub fn sys_readlinkat(
     path_len: usize,
     buf: *mut u8,
     buf_len: usize,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+) -> Result<u64, Errno> {
     if buf.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = read_user_path_at(dirfd, path_ptr, path_len)?;
 
     interrupts::enable();
 
     let target = match crate::fs::api::read_link(&path) {
         Ok(t) => t,
         Err(err) => {
-            info.lock().errno = Errno::from(err);
-            return -1;
+            return Err(Errno::from(err));
         }
     };
 
     let count = target.len().min(buf_len);
     if count > 0 && !unsafe { try_copy_to_user(buf, target.as_ptr(), count) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
-    count as i64
+    Ok(count as u64)
 }
 
-/// renameat(olddirfd, old, old_len, newdirfd, new, new_len) -> 0 on success,
-/// -1 on error
+/// Rename between two directory descriptors.
 ///
 /// Each path resolves against its own directory descriptor, so one rename can
 /// name two of them.
@@ -900,39 +778,21 @@ pub fn sys_renameat(
     newdirfd: i64,
     new_ptr: *const u8,
     new_len: usize,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let old_path = match read_user_path_at(olddirfd, old_ptr, old_len) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
-    let new_path = match read_user_path_at(newdirfd, new_ptr, new_len) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+) -> Result<u64, Errno> {
+    let old_path = read_user_path_at(olddirfd, old_ptr, old_len)?;
+    let new_path = read_user_path_at(newdirfd, new_ptr, new_len)?;
 
     rename_resolved(&old_path, &new_path)
 }
 
 /// Rename an already-resolved path, shared with `sys_rename`, which takes
 /// NUL-terminated paths and so cannot go through [`read_user_path_at`].
-pub(super) fn rename_resolved(old: &Path, new: &Path) -> i64 {
+pub(super) fn rename_resolved(old: &Path, new: &Path) -> Result<u64, Errno> {
     interrupts::enable();
 
     match crate::fs::api::rename(old, new) {
-        Ok(()) => 0,
-        Err(err) => {
-            current_thread_info().lock().errno = Errno::from(err);
-            -1
-        }
+        Ok(()) => Ok(0),
+        Err(err) => Err(Errno::from(err)),
     }
 }
 
@@ -949,7 +809,7 @@ pub struct UserTimespec {
 const UTIME_NOW: i64 = (1 << 30) - 1;
 const UTIME_OMIT: i64 = (1 << 30) - 2;
 
-/// utimensat(dirfd, path, path_len, times, flags) -> 0 on success, -1 on error
+/// Stamp a file's access and modification times.
 ///
 /// `times` points at two `timespec`s, access then modification; a null pointer
 /// stamps both with the current time. `UTIME_NOW` and `UTIME_OMIT` in `tv_nsec`
@@ -961,15 +821,11 @@ pub fn sys_utimensat(
     path_len: usize,
     times: *const UserTimespec,
     flags: u64,
-) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+) -> Result<u64, Errno> {
     // `set_times` resolves through symbolic links, so a request not to follow
     // one cannot be honoured and is refused rather than quietly ignored.
     if flags != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     // No path means `dirfd` names the file itself, which is POSIX `futimens`
@@ -980,13 +836,7 @@ pub fn sys_utimensat(
     } else {
         read_user_path_at(dirfd, path_ptr, path_len)
     };
-    let path = match resolved {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = resolved?;
 
     let (atime, mtime) = if times.is_null() {
         (Some(now_unix_secs()), Some(now_unix_secs()))
@@ -1003,8 +853,7 @@ pub fn sys_utimensat(
             )
         };
         if !copied {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
+            return Err(Errno::EFAULT);
         }
 
         let resolve = |ts: UserTimespec| match ts.tv_nsec {
@@ -1017,24 +866,20 @@ pub fn sys_utimensat(
         match (resolve(pair[0]), resolve(pair[1])) {
             (Ok(a), Ok(m)) => (a, m),
             _ => {
-                info.lock().errno = Errno::EINVAL;
-                return -1;
+                return Err(Errno::EINVAL);
             }
         }
     };
 
     if atime.is_none() && mtime.is_none() {
-        return 0;
+        return Ok(0);
     }
 
     interrupts::enable();
 
     match crate::fs::api::set_times(&path, atime, mtime) {
-        Ok(()) => 0,
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
-        }
+        Ok(()) => Ok(0),
+        Err(err) => Err(Errno::from(err)),
     }
 }
 
@@ -1042,41 +887,31 @@ fn now_unix_secs() -> u64 {
     crate::fs::DateTime::now().to_unix_secs()
 }
 
-/// statfs(path, buf, buf_len) -> 0 on success, -1 on error
-pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
+/// Report a mounted filesystem's geometry and free space.
+pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let cwd = current_cwd(&info);
-    let path = match read_user_path(path_ptr, &cwd) {
-        Ok(p) => p,
-        Err(err) => {
-            info.lock().errno = err;
-            return -1;
-        }
-    };
+    let path = read_user_path(path_ptr, &cwd)?;
 
     interrupts::enable();
 
     let op = match vfs::resolve(&path) {
         Some(op) => op,
         None => {
-            info.lock().errno = Errno::ENOENT;
-            return -1;
+            return Err(Errno::ENOENT);
         }
     };
 
     let stat = match vfs::statfs(&op) {
         Ok(s) => s,
         Err(_) => {
-            info.lock().errno = Errno::EIO;
-            return -1;
+            return Err(Errno::EIO);
         }
     };
 
     let needed = core::mem::size_of::<RawStatFs>();
     if buf_len < needed {
-        return needed as i64;
+        return Ok(needed as u64);
     }
 
     let mut raw = RawStatFs {
@@ -1097,9 +932,8 @@ pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
     raw.fs_type[..copy_len].copy_from_slice(&type_bytes[..copy_len]);
 
     if !unsafe { try_copy_to_user(buf, &raw as *const RawStatFs as *const u8, needed) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    0
+    Ok(0)
 }

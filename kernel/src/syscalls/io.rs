@@ -2473,7 +2473,14 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
         }
     };
 
-    super::fs::rename_resolved(&old_path, &new_path) as i32
+    // Bridged to the sentinel convention until this file answers Result.
+    match super::fs::rename_resolved(&old_path, &new_path) {
+        Ok(_) => 0,
+        Err(errno) => {
+            info.lock().errno = errno;
+            -1
+        }
+    }
 }
 
 /// Opens a PTY master/slave pair and writes the two fd numbers to user space.
