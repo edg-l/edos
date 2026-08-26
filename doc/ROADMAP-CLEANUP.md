@@ -510,10 +510,12 @@ one. Five of those judged a parameter object to be the same list one level out
 `rename_inner`), and that judgement stands.
 
 What is left is one cluster, not 29 scattered functions:
-`programs/edos-web/src/view.rs` carries five of the fifteen, and its `blit`,
-`fill`, `fill_rounded`, `stroke_rounded` and `draw_scrollbar` still take
-`buffer: &mut [u32], width, height, top` by hand because `edos-web` never
-adopted `edos_render::Surface`. Nine of the twelve remaining `buffer: &mut
+`programs/edos-web/src/view.rs` carries four of the fifteen, and its `blit`,
+`fill`, `fill_rounded` and `stroke_rounded` still take `buffer: &mut [u32],
+width, height, top` by hand because `edos-web` never adopted
+`edos_render::Surface`. (A fifth `allow` there was orphaned: it and a "Fill a
+rectangle" doc comment sat above `fn uniform`, which takes one argument and
+fills nothing. Both are gone.) Nine of the twelve remaining `buffer: &mut
 [u32]` signatures in the tree are in `edos-web` (6 in `view.rs`, 2 in `ui.rs`);
 the other three are `termbench`, which measures the raw blit on purpose, and one
 in `wintest`. Porting `edos-web` to `Surface` closes the parameter counts and

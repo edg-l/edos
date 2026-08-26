@@ -1630,9 +1630,6 @@ fn blit(
     }
 }
 
-/// Fill a rectangle, clipped to the buffer and to the page area: a background
-/// scrolled under the chrome is cut at `top` rather than painted over it.
-#[allow(clippy::too_many_arguments)]
 /// Whether all four borders are the same width and colour, and so are one
 /// shape rather than four.
 fn uniform(border: &Sides<Edge>) -> bool {
