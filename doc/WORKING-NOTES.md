@@ -10562,3 +10562,23 @@ blitter being the same file is what made `Canvas` look necessary.
 Twelve `buffer: &mut [u32]` parameters are left, all outside the toolkit:
 `edos-web` rasterises its own boxes and rounded boxes, `termbench` owns a bench
 buffer, and `wintest` has a private `draw_hline`. Those are the rest of D2.
+
+## `too_many_arguments` is on, and the count it was hiding was small
+
+The kernel and the userspace workspace each disabled `clippy::too_many_arguments`
+wholesale. Turning both on costs one warning in the kernel across every feature
+set (default, `sched-test`, `trace`, `sched-prof`) and eight in userspace -- not
+the 45 the suppression was assumed to be hiding. Most of that count was the
+`buffer: &mut [u32], width, height` triple, and `Surface` absorbed it.
+
+Measuring this needs an edit, not a flag. `cargo clippy -- --force-warn
+clippy::too_many_arguments` reports nothing: the crate is already built and
+clippy does not re-lint a fresh cache, and a `touch` of the crate root is what
+makes it re-run. Delete the attribute instead.
+
+Five per-site allows in the kernel (`thread.rs`, `net/tcp.rs`, `syscalls/mod.rs`,
+`usb/mass_storage.rs`, `fs/efs/mod.rs`) were dead under the crate-wide one and
+are now live. Four more were added in userspace, each naming why. Three of those
+four -- `graphics::render_text_wrapped` and `edos-web`'s `fill`/`fill_rounded` --
+are rasterisers carrying their own buffer, dimensions and clip, so the lint is
+pointing at the same missing `Surface` the toolkit already has.

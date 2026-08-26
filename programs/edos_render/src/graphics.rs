@@ -903,6 +903,10 @@ fn render_string_at(
 }
 
 /// Render multi-line text with word wrapping
+// Carries the destination buffer, its dimensions and the pen position as
+// loose arguments because it rasterises straight into pixels; four of them
+// collapse into one parameter the day it takes a `Surface`.
+#[allow(clippy::too_many_arguments)]
 fn render_text_wrapped(
     pixels: &mut [u32],
     buffer_width: u64,
@@ -2247,6 +2251,10 @@ impl Screen {
     /// - `src_x`, `src_y`: Offset into the source buffer to start copying from
     /// - `dst_x`, `dst_y`: Destination position on screen
     /// - `copy_w`, `copy_h`: Dimensions of the region to copy
+    // Source geometry, source offset, destination offset and copy extent are
+    // four independent rectangles' worth of numbers; naming a struct for each
+    // would move the same nine values one level out.
+    #[allow(clippy::too_many_arguments)]
     pub fn blit_pixels_clipped(
         &mut self,
         pixels: &[u32],

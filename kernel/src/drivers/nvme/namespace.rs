@@ -13,7 +13,7 @@ use crate::{
         nvme::{
             NvmeError,
             admin::{IO_QID, NvmeController},
-            cancel_op::{Completion, Direction, NvmeOp, SplitOp},
+            cancel_op::{Completion, Direction, NvmeOp, OpPayload, SplitOp},
             queue::{NvmeQueue, PRP_LIST_ENTRIES, build_prp},
             regs::{self, SubmissionQueueEntry},
             stats, status_to_block_error, watchdog,
@@ -21,10 +21,7 @@ use crate::{
     },
     log,
     memory::mapper::memory_mapper,
-    thread::{
-        cancel::ArcCancellableOp,
-        scheduler::{current_thread, current_thread_weak},
-    },
+    thread::{cancel::ArcCancellableOp, scheduler::current_thread},
     timer::Instant,
 };
 
@@ -239,13 +236,14 @@ impl NvmeNamespace {
             Arc::downgrade(&self.controller),
             IO_QID,
             cid,
-            current_thread_weak().unwrap_or_default(),
-            completion,
-            buffer,
-            direction,
-            len,
-            bounce,
-            prp_list,
+            OpPayload {
+                completion,
+                buffer,
+                direction,
+                len,
+                bounce,
+                prp_list,
+            },
         ));
 
         let opcode = match direction {
@@ -391,15 +389,16 @@ impl AsyncBlockDevice for NvmeNamespace {
             Arc::downgrade(&self.controller),
             IO_QID,
             cid,
-            current_thread_weak().unwrap_or_default(),
-            Completion::Whole(Arc::clone(&handle)),
-            // Flush transfers no data, so the op's buffer exists only to
-            // satisfy the shared shape: zero length, nothing to copy back.
-            BlockBuffer::owned_vec(Arc::new(Vec::new())),
-            Direction::Flush,
-            0,
-            None,
-            None,
+            OpPayload {
+                completion: Completion::Whole(Arc::clone(&handle)),
+                // Flush transfers no data, so the op's buffer exists only to
+                // satisfy the shared shape: zero length, nothing to copy back.
+                buffer: BlockBuffer::owned_vec(Arc::new(Vec::new())),
+                direction: Direction::Flush,
+                len: 0,
+                bounce: None,
+                prp_list: None,
+            },
         ));
         let sqe = SubmissionQueueEntry {
             cdw0: regs::cdw0(regs::NVM_OPC_FLUSH, cid as u16),

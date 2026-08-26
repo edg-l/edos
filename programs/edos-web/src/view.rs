@@ -1664,6 +1664,10 @@ fn corner_inset(row: i32, h: u32, radius: u32) -> u32 {
 }
 
 /// Fill a rectangle whose corners are rounded to `radius`.
+// Carries the destination buffer, its dimensions and the top clip as loose
+// arguments because it rasterises straight into pixels; four of them collapse
+// into one parameter the day it takes a `Surface`.
+#[allow(clippy::too_many_arguments)]
 fn fill_rounded(
     buffer: &mut [u32],
     width: u32,
@@ -1749,6 +1753,8 @@ fn stroke_rounded(
     }
 }
 
+// Same hand-rolled surface as `fill_rounded` above.
+#[allow(clippy::too_many_arguments)]
 fn fill(
     buffer: &mut [u32],
     width: u32,

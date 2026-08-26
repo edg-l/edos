@@ -723,11 +723,13 @@ impl App {
             &mut canvas,
             &layout,
             &crumbs,
-            can_back,
-            can_forward,
-            can_up,
-            hover.button,
-            hover.crumb,
+            &view::Nav {
+                can_go_back: can_back,
+                can_go_forward: can_forward,
+                can_go_up: can_up,
+                hovered_button: hover.button,
+                hovered_crumb: hover.crumb,
+            },
         );
         view::draw_rail(
             &mut canvas,
@@ -742,11 +744,13 @@ impl App {
             &mut canvas,
             &layout,
             &self.entries,
-            selected,
-            scroll,
-            hover.row,
-            span,
-            renaming,
+            &view::ListState {
+                selected,
+                scroll,
+                hovered: hover.row,
+                span,
+                renaming,
+            },
         );
         if let Some(pane) = layout.details {
             let thumbnail = self

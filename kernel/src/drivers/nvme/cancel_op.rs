@@ -21,7 +21,7 @@ use crate::{
         dma::{DmaBuffer, dma},
         nvme::admin::NvmeController,
     },
-    thread::{cancel::CancellableOp, thread::Thread},
+    thread::{cancel::CancellableOp, scheduler::current_thread_weak, thread::Thread},
 };
 
 pub const OP_PENDING: u8 = 0;
@@ -165,24 +165,38 @@ pub struct NvmeOp {
     resources: spin::Mutex<OpResources>,
 }
 
+/// The data half of a command: where the bytes live, which way they move,
+/// who to notify, and the DMA memory a completion path has to reclaim.
+/// Separate from the command's identity (controller, queue, command id)
+/// because a flush carries an empty one.
+pub struct OpPayload {
+    pub completion: Completion,
+    pub buffer: BlockBuffer,
+    pub direction: Direction,
+    pub len: usize,
+    pub bounce: Option<DmaBuffer>,
+    pub prp_list: Option<DmaBuffer>,
+}
+
 impl NvmeOp {
-    pub fn new(
-        controller: Weak<NvmeController>,
-        qid: u16,
-        cid: u8,
-        submitter: Weak<Thread>,
-        completion: Completion,
-        buffer: BlockBuffer,
-        direction: Direction,
-        len: usize,
-        bounce: Option<DmaBuffer>,
-        prp_list: Option<DmaBuffer>,
-    ) -> Self {
+    /// Builds the tracker on the thread that is about to submit the command,
+    /// which is what makes `submitter` the current thread: the op is queued
+    /// into that thread's `owned_ops` before the doorbell rings, so a thread
+    /// that dies with the command outstanding can cancel it.
+    pub fn new(controller: Weak<NvmeController>, qid: u16, cid: u8, payload: OpPayload) -> Self {
+        let OpPayload {
+            completion,
+            buffer,
+            direction,
+            len,
+            bounce,
+            prp_list,
+        } = payload;
         Self {
             controller,
             qid,
             cid,
-            submitter,
+            submitter: current_thread_weak().unwrap_or_default(),
             state: AtomicU8::new(OP_PENDING),
             completion,
             buffer,

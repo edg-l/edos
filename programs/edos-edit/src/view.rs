@@ -609,18 +609,28 @@ pub fn draw_pane(
 /// what it is stored on. `note`, when set, replaces that with the result of
 /// the last command — save, undo, redo — drawn in `warning` when it is a
 /// failure.
-pub fn draw_status(
-    canvas: &mut Surface,
-    layout: &Layout,
-    name: &str,
-    language: &str,
-    line: usize,
-    col: usize,
-    indent: &str,
-    encoding: &str,
-    volume: &str,
-    note: Option<(&str, bool)>,
-) {
+pub struct Status<'a> {
+    pub name: &'a str,
+    pub language: &'a str,
+    pub line: usize,
+    pub col: usize,
+    pub indent: &'a str,
+    pub encoding: &'a str,
+    pub volume: &'a str,
+    pub note: Option<(&'a str, bool)>,
+}
+
+pub fn draw_status(canvas: &mut Surface, layout: &Layout, status: &Status<'_>) {
+    let &Status {
+        name,
+        language,
+        line,
+        col,
+        indent,
+        encoding,
+        volume,
+        note,
+    } = status;
     let theme = &Theme::DEFAULT;
     canvas.fill(layout.status, theme.taskbar_bg_bottom.raw());
     canvas.hline(

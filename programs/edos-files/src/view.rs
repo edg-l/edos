@@ -284,16 +284,24 @@ fn entry_icon(entry: &Entry) -> &'static icons::Mask {
 // --- Panels ------------------------------------------------------------------
 
 /// Draw the navigation strip: the three buttons and the path.
-pub fn draw_toolbar(
-    canvas: &mut Surface,
-    layout: &Layout,
-    crumbs: &[(String, String)],
-    can_go_back: bool,
-    can_go_forward: bool,
-    can_go_up: bool,
-    hovered_button: Option<usize>,
-    hovered_crumb: Option<usize>,
-) {
+/// Which of the three navigation buttons are live, and what the pointer is
+/// over.
+pub struct Nav {
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub can_go_up: bool,
+    pub hovered_button: Option<usize>,
+    pub hovered_crumb: Option<usize>,
+}
+
+pub fn draw_toolbar(canvas: &mut Surface, layout: &Layout, crumbs: &[(String, String)], nav: &Nav) {
+    let &Nav {
+        can_go_back,
+        can_go_forward,
+        can_go_up,
+        hovered_button,
+        hovered_crumb,
+    } = nav;
     let theme = &Theme::DEFAULT;
     canvas.fill(layout.toolbar, theme.title_active_bottom.raw());
     canvas.hline(
@@ -563,16 +571,24 @@ impl Span {
 /// `span` is the range of sizes present, which is what the bars are measured
 /// against: the column answers "what is big in here", not "what is big in the
 /// abstract".
-pub fn draw_list(
-    canvas: &mut Surface,
-    layout: &Layout,
-    entries: &[Entry],
-    selected: usize,
-    scroll: usize,
-    hovered: Option<usize>,
-    span: Option<Span>,
-    renaming: bool,
-) {
+/// Where the list is scrolled to and what the pointer and keyboard have
+/// singled out in it.
+pub struct ListState {
+    pub selected: usize,
+    pub scroll: usize,
+    pub hovered: Option<usize>,
+    pub span: Option<Span>,
+    pub renaming: bool,
+}
+
+pub fn draw_list(canvas: &mut Surface, layout: &Layout, entries: &[Entry], state: &ListState) {
+    let &ListState {
+        selected,
+        scroll,
+        hovered,
+        span,
+        renaming,
+    } = state;
     let theme = &Theme::DEFAULT;
     canvas.fill(layout.list, theme.background.raw());
     let columns = Columns::new(layout.list);

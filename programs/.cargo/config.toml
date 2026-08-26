@@ -1,19 +1,8 @@
 [build]
 target = "x86_64-unknown-edos"
-# Suppressed for the whole workspace rather than per crate: 131 members would
-# otherwise each need the attribute. Splitting a widget's draw call or a
-# layout function into argument structs to satisfy a count is churn that makes
-# the call sites harder to read; where a bundle genuinely clarifies it is worth
-# doing on its own merits, not to silence a lint.
-#
 # Frame pointers are kept for the same reason the kernel keeps them: `rbp` is
 # how the profiler walks a stack. LLVM omits them in optimized code, and only
 # about half the functions in an optimized Rust binary leave one behind, so a
 # walk without this reads whatever a function happened to put there and invents
 # callers. The cost is one register and a two-instruction prologue.
-rustflags = [
-    "-A",
-    "clippy::too_many_arguments",
-    "-C",
-    "force-frame-pointers=yes",
-]
+rustflags = ["-C", "force-frame-pointers=yes"]

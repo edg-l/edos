@@ -1063,14 +1063,16 @@ impl App {
         view::draw_status(
             &mut canvas,
             &self.layout,
-            &name,
-            language,
-            self.buffers[active].cursor.line + 1,
-            self.buffers[active].cursor.col + 1,
-            &indent_label,
-            encoding,
-            &volume,
-            note_ref,
+            &view::Status {
+                name: &name,
+                language,
+                line: self.buffers[active].cursor.line + 1,
+                col: self.buffers[active].cursor.col + 1,
+                indent: &indent_label,
+                encoding,
+                volume: &volume,
+                note: note_ref,
+            },
         );
         if let Some(rect) = self.layout.prompt {
             let label = prompt_bar_label.unwrap_or("");

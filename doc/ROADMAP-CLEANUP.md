@@ -489,17 +489,26 @@ threshold (say, 40 identical non-trivial lines across two files) and an
 allowlist. It found F1, F3, F4 and F5 in one pass, and it would have found F1 the
 day it was created.
 
-### I3. Take the global `too_many_arguments` allow off (S2, E1)
+### I3. ~~Take the global `too_many_arguments` allow off~~ (done)
 
-`kernel/src/main.rs:10` and `programs/.cargo/config.toml:16` disable it
-crate-wide and workspace-wide. That is why 45 seven-parameter functions exist and
-why nobody noticed the missing surface type. Six per-site allows already exist in
-the kernel (`thread.rs:1125`, `net/tcp.rs:117`, `syscalls/mod.rs:2078`,
-`usb/mass_storage.rs:363`, `fs/efs/mod.rs:2947`) and are currently dead, since
-the crate-wide allow already covers them.
+Both blanket allows are gone. With D1 landed the lint had far less to say than
+this item assumed: one site in the kernel and eight in userspace, not 45 -- most
+of the count was the `buffer, width, height` triple that `Surface` absorbed.
 
-**Fix.** Do D1 first, then remove the two blanket allows and keep the per-site
-ones, each with a reason.
+Fixed rather than suppressed: `NvmeOp::new` took ten arguments and now takes
+four, with the data half of a command (`completion`, `buffer`, `direction`,
+`len`, `bounce`, `prp_list`) in `nvme::cancel_op::OpPayload` and `submitter`
+read from the constructing thread, which is the submitting thread by
+construction. `edos-edit`'s `draw_status`, and `edos-files`' `draw_toolbar` and
+`draw_list`, took a document's status fields and a list's view state as loose
+parameters; those are `view::Status`, `view::Nav` and `view::ListState`.
+
+Suppressed per site, with the reason at each: `Screen::blit_pixels_clipped`
+(nine numbers from four rectangles), `edos-wm::composite` (one frame's
+independent inputs), and the three hand-rolled rasterisers that carry their own
+buffer, dimensions and clip -- `graphics::render_text_wrapped` and `edos-web`'s
+`fill`/`fill_rounded`. Those three collapse to one parameter each the day they
+take a `Surface`, which is the rest of D2.
 
 ### I4. A dead-code sweep that is not a lint suppression (S2, E1)
 
