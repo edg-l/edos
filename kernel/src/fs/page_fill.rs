@@ -540,7 +540,7 @@ pub fn inline_fill_no_handle(
     page_idx: u64,
     fill_fn: impl FnOnce(&mut [u8]) -> Result<(), Error>,
 ) -> Result<PageGuard, Error> {
-    let frame = frame_allocator().allocate_frame().ok_or(Error::IoError)?;
+    let frame = frame_allocator().allocate_frame().ok_or(Error::NoMemory)?;
     let fd = FrameDrop::new(frame);
 
     let fill_result = {
@@ -734,7 +734,7 @@ pub fn get_or_fill_async_sync(
                 if let Some(t) = current_thread() {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 }
-                return Err(Error::IoError);
+                return Err(Error::NoMemory);
             }
         };
         let fd = FrameDrop::new(frame);
@@ -832,7 +832,7 @@ pub fn get_or_fill_async_sync(
 ///
 /// If the issuing thread's `owned_ops` registry is full, the bulk install is
 /// abandoned entirely: the just-installed handle is removed, `finish_failed` is
-/// called to wake any readers that snuck in, and `Err(Error::IoError)` is
+/// called to wake any readers that snuck in, and `Err(Error::Busy)` is
 /// returned so the caller can fall back to the per-page
 /// `get_or_fill_async_sync` path.
 ///
@@ -933,7 +933,7 @@ pub fn get_or_fill_bulk_async_sync(
             handle.finish_failed();
             in_flight_remove_all(inode, &handle);
             INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-            return Err(Error::IoError);
+            return Err(Error::Busy);
         }
 
         // --- Allocate frames (one per page in the range). ---
@@ -950,7 +950,7 @@ pub fn get_or_fill_bulk_async_sync(
                         t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                     }
                     // frames Vec drops here, returning all partially-allocated frames.
-                    return Err(Error::IoError);
+                    return Err(Error::NoMemory);
                 }
             }
         }

@@ -46,9 +46,9 @@ impl From<DevFsError> for fs::Error {
             DevFsError::Busy => fs::Error::Busy,
             DevFsError::InvalidPath => fs::Error::InvalidArgument,
             DevFsError::NoSpace => fs::Error::NoSpace,
-            DevFsError::AlreadyExists | DevFsError::Unsupported | DevFsError::IoError => {
-                fs::Error::IoError
-            }
+            DevFsError::AlreadyExists => fs::Error::AlreadyExists,
+            DevFsError::Unsupported => fs::Error::Unsupported,
+            DevFsError::IoError => fs::Error::IoError,
         }
     }
 }
@@ -339,15 +339,15 @@ impl FileSystem for DevFsHandle {
     }
 
     fn create_file(&self, _path: &Path) -> Result<(), fs::Error> {
-        Err(fs::Error::IoError)
+        Err(fs::Error::Unsupported)
     }
 
     fn create_dir(&self, _path: &Path) -> Result<(), fs::Error> {
-        Err(fs::Error::IoError)
+        Err(fs::Error::Unsupported)
     }
 
     fn remove_dir(&self, _path: &Path) -> Result<(), fs::Error> {
-        Err(fs::Error::IoError)
+        Err(fs::Error::Unsupported)
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), fs::Error> {

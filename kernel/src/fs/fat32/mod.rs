@@ -345,7 +345,7 @@ impl FileSystem for Fatfs {
 
         // Already exists?
         if (self.find_dir_entry(path)?).is_some() {
-            return Err(Error::IoError);
+            return Err(Error::AlreadyExists);
         }
 
         let (short_name, needs_lfn) = self.generate_short_name(parent_cluster, &name)?;
@@ -401,7 +401,7 @@ impl FileSystem for Fatfs {
 
         // Already exists?
         if (self.find_dir_entry(path)?).is_some() {
-            return Err(Error::IoError);
+            return Err(Error::AlreadyExists);
         }
 
         // Allocate directory cluster
@@ -508,7 +508,7 @@ impl FileSystem for Fatfs {
         let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
         let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_off + 32 > buf.len() {
-            return Err(Error::IoError);
+            return Err(Error::Corrupted);
         }
         buf[entry_off] = 0xE5;
         self.write_disk_sectors(base_lba, &buf, sectors)?;
@@ -570,7 +570,7 @@ impl FileSystem for Fatfs {
                     let de: DirectoryEntry = *bytemuck::from_bytes(&read_buffer[off..off + 32]);
                     let name = de.fat_name_to_string();
                     if !name.eq(".") && !name.eq("..") {
-                        return Err(Error::IoError); // not empty
+                        return Err(Error::NotEmpty);
                     }
                     off += 32;
                 }
@@ -601,7 +601,7 @@ impl FileSystem for Fatfs {
 
         read_buffer = self.read_disk_sectors(base_lba, sectors)?;
         if entry_off + 32 > read_buffer.len() {
-            return Err(Error::IoError);
+            return Err(Error::Corrupted);
         }
         read_buffer[entry_off] = 0xE5;
         self.write_disk_sectors(base_lba, &read_buffer, sectors)?;
@@ -656,7 +656,7 @@ impl FileSystem for Fatfs {
         };
 
         if size > u32::MAX as u64 {
-            return Err(Error::IoError);
+            return Err(Error::InvalidArgument);
         }
 
         if size == 0 {
@@ -711,13 +711,17 @@ impl FileSystem for Fatfs {
         // unchanged. The side table entry is left alone here.
 
         // Only support same-directory renames
-        let old_parent = old_path.parent().ok_or(Error::IoError)?;
-        let new_parent = new_path.parent().ok_or(Error::IoError)?;
+        let old_parent = old_path.parent().ok_or(Error::InvalidArgument)?;
+        let new_parent = new_path.parent().ok_or(Error::InvalidArgument)?;
         if old_parent != new_parent {
             return Err(Error::Unsupported);
         }
 
-        let new_name = new_path.components().last().ok_or(Error::IoError)?.clone();
+        let new_name = new_path
+            .components()
+            .last()
+            .ok_or(Error::InvalidArgument)?
+            .clone();
 
         let (entry, dir_cluster, entry_off) = match self.find_dir_entry(&old_path)? {
             Some(x) => x,

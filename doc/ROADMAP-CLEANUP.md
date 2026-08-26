@@ -124,17 +124,26 @@ partition table (`fs/mod.rs:628`), and `devfs/block.rs` names nodes from
 `ahci::api::list_devices` beside the NVMe and ramdisk id ranges. Neither is a
 type; both want an `AsyncBlockDevice` method instead, which is its own item.
 
-### B5. `Error::IoError` is the catch-all for 136 sites (S2, E2)
+### B5. ~~`Error::IoError` is the catch-all for 136 sites~~ (mostly done)
 
-`grep -rc 'Error::IoError' kernel/src` gives 136. Combined with 71
-`map_err(|_| ...)` in the kernel, most filesystem failures arrive at the syscall
-layer with the cause discarded, which is why a failed mount or a failed read is
-hard to diagnose without a serial log.
+`fs::Error::IoError` no longer stands in for a cause the code already knows.
+Every filesystem site now names one: a full disk is `NoSpace`, a bad user
+pointer is `BadAddress` (EFAULT, not EIO), `rmdir` on a populated directory is
+`NotEmpty` (ENOTEMPTY), a filesystem that does not implement an operation is
+`Unsupported` (EOPNOTSUPP), a frame allocation that failed is `NoMemory`, and a
+`BlockError` reaches the syscall layer as `Error::Block(e)` through the existing
+`From` rather than a `map_err(|_| IoError)` closure. A failed mount replies with
+the driver's own error instead of EIO. `Error::IoError` across `kernel/src` is
+136 → 47, and every one of the 47 belongs to a *different* enum
+(`graphics::Error`, `AhciError`, `DevFsError`, `HdaError`); `kernel/src/fs` has
+one left, the honest `DevFsError::IoError => fs::Error::IoError` conversion.
 
-**Fix.** Not a rewrite. Walk the 71 `map_err(|_|` sites and, wherever the source
-error is already a `fs::Error` or a `BlockError`, keep it. Add `From` impls
-rather than closures: the kernel has 15 error enums and 3 `From` impls between
-them.
+**Still open.** The remaining `map_err(|_| ...)` closures are 65, all outside
+`kernel/src/fs`: `drivers/usb/xhci/mod.rs` (9), `thread/thread.rs` (5),
+`drivers/virtio/gpu.rs` (4), `fs/gpt.rs` and `fs/mbr.rs` (10, all to `&'static
+str`), plus singles. `gpt.rs`/`mbr.rs` are the worthwhile ones: they discard a
+`BlockError` into a string literal, so a partition scan that fails on a real
+device reports "Failed to read GPT header" with no cause.
 
 ### B6. ~~`BlockError::from_code` silently invents a variant~~ (done)
 

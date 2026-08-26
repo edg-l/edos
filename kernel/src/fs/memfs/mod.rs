@@ -62,7 +62,7 @@ fn write_at(node: &mut Node, offset: usize, data: &[u8]) -> Result<u64, Error> {
         return Err(Error::NotAFile);
     }
     if offset > node.file.size as usize {
-        return Err(Error::IoError);
+        return Err(Error::InvalidArgument);
     }
     let end = offset + data.len();
     if end > node.content.len() {
@@ -231,7 +231,7 @@ impl FileSystem for Memfs {
         }
 
         let current_id = inner.next_id;
-        let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
+        let next_id = current_id.checked_add(1).ok_or(Error::NoSpace)?;
         let mut node = Node::new(current_id, path.filename(), FileKind::Symlink);
         node.content = target.as_bytes().to_vec();
         node.file.size = target.len() as u64;
@@ -268,17 +268,17 @@ impl FileSystem for Memfs {
     fn create_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let Some(parent) = path.parent() else {
-            return Err(Error::IoError);
+            return Err(Error::InvalidArgument);
         };
 
         let mut inner = self.inner.write();
         if let Some(parent_node_id) = inner.find_node(&parent)? {
             let current_id = inner.next_id;
-            let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
+            let next_id = current_id.checked_add(1).ok_or(Error::NoSpace)?;
             let parent_node = inner.get_node_mut(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
-                return Err(Error::IoError);
+                return Err(Error::NotADir);
             }
 
             let name = path.filename();
@@ -312,7 +312,7 @@ impl FileSystem for Memfs {
         }
 
         let current_id = inner.next_id;
-        let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
+        let next_id = current_id.checked_add(1).ok_or(Error::NoSpace)?;
         // No `content` and no size: the name is the whole of what is stored.
         let node = Node::new(current_id, path.filename(), FileKind::Fifo);
 
@@ -325,17 +325,17 @@ impl FileSystem for Memfs {
     fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let Some(parent) = path.parent() else {
-            return Err(Error::IoError);
+            return Err(Error::InvalidArgument);
         };
 
         let mut inner = self.inner.write();
         if let Some(parent_node_id) = inner.find_node(&parent)? {
             let current_id = inner.next_id;
-            let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
+            let next_id = current_id.checked_add(1).ok_or(Error::NoSpace)?;
             let parent_node = inner.get_node_mut(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
-                return Err(Error::IoError);
+                return Err(Error::NotADir);
             }
 
             let name = path.filename();
@@ -355,11 +355,11 @@ impl FileSystem for Memfs {
         let path = path.normalize();
 
         if path.is_root() {
-            return Err(Error::IoError);
+            return Err(Error::Busy);
         }
 
         let Some(parent) = path.parent() else {
-            return Err(Error::IoError);
+            return Err(Error::InvalidArgument);
         };
 
         let mut inner = self.inner.write();
@@ -367,7 +367,7 @@ impl FileSystem for Memfs {
             let parent_node = inner.get_node(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
-                return Err(Error::IoError);
+                return Err(Error::NotADir);
             }
 
             let mut idx = None;
@@ -414,11 +414,11 @@ impl FileSystem for Memfs {
         let path = path.normalize();
 
         if path.is_root() {
-            return Err(Error::IoError);
+            return Err(Error::Busy);
         }
 
         let Some(parent) = path.parent() else {
-            return Err(Error::IoError);
+            return Err(Error::InvalidArgument);
         };
 
         let mut inner = self.inner.write();
@@ -426,7 +426,7 @@ impl FileSystem for Memfs {
             let parent_node = inner.get_node(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
-                return Err(Error::IoError);
+                return Err(Error::NotADir);
             }
 
             let mut idx = None;
@@ -585,11 +585,11 @@ impl FileSystem for Memfs {
         let new_path = new_path.normalize();
 
         if old_path.is_root() || new_path.is_root() {
-            return Err(Error::IoError);
+            return Err(Error::Busy);
         }
 
-        let old_parent = old_path.parent().ok_or(Error::IoError)?;
-        let new_parent = new_path.parent().ok_or(Error::IoError)?;
+        let old_parent = old_path.parent().ok_or(Error::InvalidArgument)?;
+        let new_parent = new_path.parent().ok_or(Error::InvalidArgument)?;
 
         let mut inner = self.inner.write();
 

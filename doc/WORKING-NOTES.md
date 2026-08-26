@@ -10749,3 +10749,42 @@ unused, and restores the tree. Two details that matter if it is ever changed:
 It is not a commit gate. An item can be genuinely uncalled and still be the
 right thing to keep, which is why E1's ten survivors carry a written reason
 each; the target is for reading before a release.
+
+## `fs::Error::IoError` stopped being the catch-all (ROADMAP-CLEANUP B5)
+
+`Error::IoError` in `kernel/src` is 136 → 47, and the 47 left all belong to a
+different enum (`graphics::Error`, `AhciError`, `DevFsError`, `HdaError`);
+`kernel/src/fs` keeps exactly one, the `DevFsError::IoError => fs::Error::IoError`
+conversion, which is honest.
+
+Four variants were added to `fs::Error` because the code already knew the cause
+and had nowhere to put it: `NoMemory` (ENOMEM), `NotEmpty` (ENOTEMPTY),
+`BadAddress` (EFAULT) and a corrected `Unsupported` (EOPNOTSUPP, previously
+EIO). What changed at the syscall boundary, all of it user-visible:
+
+- `rmdir` on a populated directory answers ENOTEMPTY. It answered EIO, so
+  `rmdir /d1` printed "Input/output error"; it now prints "directory not empty".
+- A bad user pointer in `read`/`write` answers EFAULT. Six `try_copy_*_user`
+  failures in `vfs.rs` reported EIO.
+- A full filesystem answers ENOSPC. EFS's block and inode allocators, FAT32's
+  cluster allocator and memfs's id space all reported EIO when exhausted, which
+  is why a disk-full failure looked like a device failure.
+- A frame allocation that fails inside `page_fill` answers ENOMEM, and an
+  `owned_ops` registry that is full answers EBUSY.
+- An operation a filesystem does not implement answers EOPNOTSUPP: the `mmap`,
+  `ioctl`, `truncate` and `rename` defaults on the `FileSystem` trait, devfs's
+  `create_file`/`create_dir`/`remove_dir`, and mounting an `Unknown`, `Iso9660`
+  or `Ntfs` partition.
+- A failed mount replies with the driver's own error. The FAT and EFS arms of
+  the fs kthread logged `EfsDriver::new`'s error and then replied EIO; they now
+  carry it, and "no partition matched" is a distinct `FileNotFound`.
+- A `BlockError` reaches the syscall layer intact through the existing
+  `Error::Block(#[from] BlockError)` rather than being flattened by a
+  `map_err(|_| Error::IoError)` closure. `block_io::lookup` returning `None` is
+  `BlockError::DeviceGone`, not EIO.
+
+Still open, and it is all outside `kernel/src/fs`: 65 `map_err(|_| ...)`
+closures remain. `fs/gpt.rs` and `fs/mbr.rs` hold 10 of them and are the ones
+worth doing, because they discard a `BlockError` into a `&'static str`, so a
+partition scan that fails on a real device reports "Failed to read GPT header"
+with no cause at all.

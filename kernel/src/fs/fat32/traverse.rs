@@ -312,7 +312,7 @@ impl Fatfs {
                 }
 
                 if val == CLUSTER_BAD {
-                    return Err(Error::IoError);
+                    return Err(Error::Corrupted);
                 }
 
                 Ok(Some(val))
@@ -333,7 +333,7 @@ impl Fatfs {
                 }
 
                 if val == 0xFFF7 {
-                    return Err(Error::IoError);
+                    return Err(Error::Corrupted);
                 }
 
                 Ok(Some(val))
@@ -361,7 +361,7 @@ impl Fatfs {
                 }
 
                 if val == 0xFF7 {
-                    return Err(Error::IoError);
+                    return Err(Error::Corrupted);
                 }
 
                 Ok(Some(val))
@@ -459,7 +459,7 @@ impl Fatfs {
         match self.variant {
             FatVariant::Fat32 => {
                 // Should not be called for FAT32
-                Err(Error::IoError)
+                Err(Error::Unsupported)
             }
             FatVariant::Fat12 | FatVariant::Fat16 => {
                 let root_dir_lba = self.root_dir_lba();

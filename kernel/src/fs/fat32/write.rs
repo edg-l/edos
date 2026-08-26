@@ -63,7 +63,7 @@ impl Fatfs {
         // Ensure a chain exists up to target_idx
         if head < 2 {
             // Need head cluster; must have position to patch on-disk entry.
-            let (dir_cluster, entry_off) = entry_pos.ok_or(Error::IoError)?;
+            let (dir_cluster, entry_off) = entry_pos.ok_or(Error::InvalidArgument)?;
             head = self.alloc_cluster()?;
             let mut last = head;
             for _ in 0..target_idx {
@@ -76,7 +76,7 @@ impl Fatfs {
             let (base_lba, region_sectors) = self.dir_entry_region(dir_cluster);
             let mut dirbuf = self.read_disk_sectors(base_lba, region_sectors)?;
             if entry_off + 32 > dirbuf.len() {
-                return Err(Error::IoError);
+                return Err(Error::Corrupted);
             }
             let mut de: DirectoryEntry = *bytemuck::from_bytes(&dirbuf[entry_off..entry_off + 32]);
             de.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
@@ -129,7 +129,7 @@ impl Fatfs {
         let mut cluster = head;
         let mut skip = target_idx;
         while skip > 0 {
-            cluster = self.get_fat_entry(cluster)?.ok_or(Error::IoError)?;
+            cluster = self.get_fat_entry(cluster)?.ok_or(Error::Corrupted)?;
             skip -= 1;
         }
         let mut inner_off = (offset as usize) % bpc;
@@ -148,7 +148,7 @@ impl Fatfs {
             } else {
                 let v = self.read_disk_sectors(lba, spc_u16)?;
                 if v.len() != bpc {
-                    return Err(Error::IoError);
+                    return Err(Error::Corrupted);
                 }
                 v
             };
@@ -312,7 +312,7 @@ impl Fatfs {
                 }
                 Ok(c)
             }
-            None => Err(Error::IoError),
+            None => Err(Error::NoSpace),
         }
     }
 
@@ -417,7 +417,7 @@ impl Fatfs {
 
         let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_offset + 32 > buf.len() {
-            return Err(Error::IoError);
+            return Err(Error::Corrupted);
         }
 
         let mut de: DirectoryEntry = *bytemuck::from_bytes(&buf[entry_offset..entry_offset + 32]);
@@ -569,7 +569,7 @@ impl Fatfs {
             let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
             buf = self.read_disk_sectors(base_lba, sectors)?;
             if buf.len() < bps * sectors as usize {
-                return Err(Error::IoError);
+                return Err(Error::Corrupted);
             }
 
             // Scan for contiguous free slots
@@ -628,7 +628,7 @@ impl Fatfs {
         let (base_lba, sectors) = self.dir_entry_region(cluster);
         let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_offset + 32 > buf.len() {
-            return Err(Error::IoError);
+            return Err(Error::Corrupted);
         }
         buf[entry_offset] = 0xE5;
         self.write_disk_sectors(base_lba, &buf, sectors)?;
@@ -720,7 +720,7 @@ impl Fatfs {
             if visited > fat_entries {
                 // cycle or corruption
                 log!("Possible corruption");
-                return Err(Error::IoError);
+                return Err(Error::Corrupted);
             }
 
             // Read next before clearing current

@@ -94,6 +94,12 @@ pub enum Error {
     AlreadyExists,
     #[error("no space left on device")]
     NoSpace,
+    #[error("out of memory")]
+    NoMemory,
+    #[error("directory not empty")]
+    NotEmpty,
+    #[error("bad address")]
+    BadAddress,
     #[error("filesystem thread answered a request with the wrong reply")]
     ProtocolMismatch,
 }
@@ -221,7 +227,7 @@ pub trait FileSystem {
         _length: usize,
         _memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, Error> {
-        Err(Error::IoError)
+        Err(Error::Unsupported)
     }
 
     fn statfs(&self) -> Result<StatFs, Error> {
@@ -255,15 +261,15 @@ pub trait FileSystem {
     fn flush(&self) -> Result<(), Error>;
 
     fn ioctl(&self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
-        Err(Error::IoError)
+        Err(Error::Unsupported)
     }
 
     fn truncate(&self, _path: &Path, _size: u64) -> Result<(), Error> {
-        Err(Error::IoError)
+        Err(Error::Unsupported)
     }
 
     fn rename(&self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
-        Err(Error::IoError)
+        Err(Error::Unsupported)
     }
 
     /// Create a symbolic link at `path` holding `target` verbatim.
@@ -748,13 +754,13 @@ pub extern "C" fn fs_main_thread() -> ! {
                 );
 
                 if vfs::is_mount_point(&mount_point) {
-                    req.reply(FsResponse::Ok(Err(Error::IoError)));
+                    req.reply(FsResponse::Ok(Err(Error::Busy)));
                     continue;
                 }
 
                 match fstype {
                     FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
-                        let mut mounted = false;
+                        let mut outcome = Err(Error::FileNotFound);
                         for partition in partitions.iter() {
                             if partition.device_id as usize == device_id
                                 && partition.index == partition_index
@@ -772,17 +778,18 @@ pub extern "C" fn fs_main_thread() -> ! {
                                                 filesystem: fstype.clone(),
                                             },
                                         );
-                                        mounted = true;
+                                        outcome = Ok(());
                                     }
                                     Err(e) => {
-                                        log!("Failed to create FAT filesystem: {:?}", e);
+                                        log!("Failed to create FAT filesystem: {e:?}");
+                                        outcome = Err(e);
                                     }
                                 }
                                 break;
                             }
                         }
-                        if !mounted {
-                            req.reply(FsResponse::Ok(Err(Error::IoError)));
+                        if let Err(e) = outcome {
+                            req.reply(FsResponse::Ok(Err(e)));
                             continue;
                         }
                     }
@@ -802,8 +809,8 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 );
                             }
                             Err(e) => {
-                                log!("Failed to create memfs: {:?}", e);
-                                req.reply(FsResponse::Ok(Err(Error::IoError)));
+                                log!("Failed to create memfs: {e:?}");
+                                req.reply(FsResponse::Ok(Err(e)));
                                 continue;
                             }
                         }
@@ -824,8 +831,8 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 );
                             }
                             Err(e) => {
-                                log!("Failed to create devfs: {:?}", e);
-                                req.reply(FsResponse::Ok(Err(Error::IoError)));
+                                log!("Failed to create devfs: {e:?}");
+                                req.reply(FsResponse::Ok(Err(e)));
                                 continue;
                             }
                         }
@@ -846,14 +853,14 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 );
                             }
                             Err(e) => {
-                                log!("Failed to create procfs: {:?}", e);
-                                req.reply(FsResponse::Ok(Err(Error::IoError)));
+                                log!("Failed to create procfs: {e:?}");
+                                req.reply(FsResponse::Ok(Err(e)));
                                 continue;
                             }
                         }
                     }
                     FilesystemType::Efs => {
-                        let mut mounted = false;
+                        let mut outcome = Err(Error::FileNotFound);
                         for partition in partitions.iter() {
                             if partition.device_id as usize == device_id
                                 && partition.index == partition_index
@@ -871,22 +878,23 @@ pub extern "C" fn fs_main_thread() -> ! {
                                                 filesystem: fstype.clone(),
                                             },
                                         );
-                                        mounted = true;
+                                        outcome = Ok(());
                                     }
                                     Err(e) => {
-                                        log!("Failed to mount EFS: {:?}", e);
+                                        log!("Failed to mount EFS: {e:?}");
+                                        outcome = Err(e);
                                     }
                                 }
                                 break;
                             }
                         }
-                        if !mounted {
-                            req.reply(FsResponse::Ok(Err(Error::IoError)));
+                        if let Err(e) = outcome {
+                            req.reply(FsResponse::Ok(Err(e)));
                             continue;
                         }
                     }
                     FilesystemType::Unknown | FilesystemType::Iso9660 | FilesystemType::Ntfs => {
-                        req.reply(FsResponse::Ok(Err(Error::IoError)));
+                        req.reply(FsResponse::Ok(Err(Error::Unsupported)));
                         continue;
                     }
                 }
@@ -897,7 +905,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                 let res = if vfs::unmount(&mount_point) {
                     Ok(())
                 } else {
-                    Err(Error::IoError)
+                    Err(Error::InvalidArgument)
                 };
                 req.reply(FsResponse::Ok(res));
             }

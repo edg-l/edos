@@ -1039,7 +1039,7 @@ impl EfsDriver {
             .alloc_blocks(1, extents.goal_for(logical_block), tx)?
             .first()
             .copied()
-            .ok_or(Error::IoError)?;
+            .ok_or(Error::NoSpace)?;
         if new == NewBlock::Zeroed {
             let block_size = self.block_size() as usize;
             self.write_block(phys_block, &vec![0u8; block_size], tx)?;
@@ -1223,7 +1223,7 @@ impl EfsDriver {
         self.alloc_blocks(1, None, tx)?
             .first()
             .copied()
-            .ok_or(Error::IoError)
+            .ok_or(Error::NoSpace)
     }
 
     /// Allocate up to `want` blocks, preferring a single physically contiguous
@@ -1308,7 +1308,7 @@ impl EfsDriver {
             }
         }
         EFS_ALLOC_FAILED.fetch_add(1, Ordering::Relaxed);
-        Err(Error::IoError)
+        Err(Error::NoSpace)
     }
 
     /// Mark `len` blocks from `bit` of group `g` used, and enroll every metadata
@@ -1471,7 +1471,7 @@ impl EfsDriver {
                 return Ok(ino);
             }
         }
-        Err(Error::IoError)
+        Err(Error::NoSpace)
     }
 
     /// Free an inode.
@@ -1991,7 +1991,10 @@ impl FileSystem for EfsDriver {
 
     fn create_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
-        let name = path.last_component().ok_or(Error::IoError)?.to_string();
+        let name = path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
         let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
@@ -2093,9 +2096,7 @@ impl FileSystem for EfsDriver {
         let t0 = crate::timer::Instant::now();
         let tx = self.journal.begin_tx();
         drop(tx); // merges empty set — no-op on active tx
-        self.journal
-            .force_commit_and_wait()
-            .map_err(|_| Error::IoError)?;
+        self.journal.force_commit_and_wait()?;
         let t1 = crate::timer::Instant::now();
         self.device.flush()?;
         let t2 = crate::timer::Instant::now();
@@ -2139,7 +2140,10 @@ impl FileSystem for EfsDriver {
 
     fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
-        let name = path.last_component().ok_or(Error::IoError)?.to_string();
+        let name = path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
         let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
@@ -2160,7 +2164,10 @@ impl FileSystem for EfsDriver {
 
     fn remove_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
-        let name = path.last_component().ok_or(Error::IoError)?.to_string();
+        let name = path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
         let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
@@ -2183,7 +2190,10 @@ impl FileSystem for EfsDriver {
 
     fn remove_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
-        let name = path.last_component().ok_or(Error::IoError)?.to_string();
+        let name = path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
         let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
@@ -2202,7 +2212,7 @@ impl FileSystem for EfsDriver {
             .filter(|(n, _, _)| n != "." && n != "..")
             .count();
         if non_meta > 0 {
-            return Err(Error::IoError);
+            return Err(Error::NotEmpty);
         }
 
         let mut tx = self.journal.begin_tx();
@@ -2343,8 +2353,14 @@ impl FileSystem for EfsDriver {
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();
 
-        let old_name = old_path.last_component().ok_or(Error::IoError)?.to_string();
-        let new_name = new_path.last_component().ok_or(Error::IoError)?.to_string();
+        let old_name = old_path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
+        let new_name = new_path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
 
         let old_parent_path = old_path.parent_or_root();
         let new_parent_path = new_path.parent_or_root();
@@ -3150,8 +3166,9 @@ impl PageCacheOps for EfsDriver {
             })
             .collect();
 
-        let dev = crate::drivers::block_io::lookup(self.device.device_id).ok_or(Error::IoError)?;
-        let handles = dev.submit_read_batch(reqs).map_err(|_| Error::IoError)?;
+        let dev = crate::drivers::block_io::lookup(self.device.device_id)
+            .ok_or(Error::Block(BlockError::DeviceGone))?;
+        let handles = dev.submit_read_batch(reqs).map_err(Error::Block)?;
 
         let runs = handles
             .into_iter()

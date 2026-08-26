@@ -1567,12 +1567,15 @@ impl From<FsError> for Errno {
             FsError::Block(e) => e.into(),
             FsError::InvalidFs => Errno::EINVAL,
             FsError::Corrupted => Errno::EIO,
-            FsError::Unsupported => Errno::EIO,
+            FsError::Unsupported => Errno::EOPNOTSUPP,
             FsError::Busy => Errno::EBUSY,
             FsError::InvalidArgument => Errno::EINVAL,
             FsError::TooManyLinks | FsError::LinkEscape => Errno::ELOOP,
             FsError::AlreadyExists => Errno::EEXIST,
             FsError::NoSpace => Errno::ENOSPC,
+            FsError::NoMemory => Errno::ENOMEM,
+            FsError::NotEmpty => Errno::ENOTEMPTY,
+            FsError::BadAddress => Errno::EFAULT,
             FsError::ProtocolMismatch => Errno::EIO,
         }
     }

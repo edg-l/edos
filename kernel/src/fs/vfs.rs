@@ -392,7 +392,7 @@ pub fn page_cache_read_to_user(
                     len,
                 )
             } {
-                return Err(Error::IoError);
+                return Err(Error::BadAddress);
             }
             pos += len;
             Ok(())
@@ -725,7 +725,7 @@ pub fn write_from_user(
         if !unsafe {
             crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count)
         } {
-            return Err(Error::IoError);
+            return Err(Error::BadAddress);
         }
         // No page-cache ops; reacquire the write lock for the synchronous
         // driver call (no parking expected on these paths).
@@ -740,7 +740,7 @@ pub fn write_from_user(
     }
     let mut buffer = alloc::vec![0u8; count];
     if !unsafe { crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count) } {
-        return Err(Error::IoError);
+        return Err(Error::BadAddress);
     }
     op.fs.write_bytes(&op.relative, actual_offset, &buffer)
 }
@@ -840,7 +840,7 @@ pub fn read_to_user(
     if let Some(data) = fallback {
         let n = data.len();
         if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
-            return Err(Error::IoError);
+            return Err(Error::BadAddress);
         }
         return Ok(n);
     }
@@ -858,7 +858,7 @@ pub fn read_to_user(
             let data = op.fs.read_bytes(&op.relative, offset, count)?;
             let n = data.len();
             if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
-                return Err(Error::IoError);
+                return Err(Error::BadAddress);
             }
             return Ok(n);
         }
@@ -905,7 +905,7 @@ fn page_cache_write_from_user(
                 slice.len(),
             )
         } {
-            return Err(Error::IoError);
+            return Err(Error::BadAddress);
         }
         Ok(())
     })
@@ -922,7 +922,7 @@ fn page_cache_write_core(
         return Ok(0);
     }
 
-    let end_offset = offset.checked_add(count).ok_or(Error::IoError)?;
+    let end_offset = offset.checked_add(count).ok_or(Error::InvalidArgument)?;
 
     let start_page = offset / 4096;
     let end_page = (end_offset - 1) / 4096;

@@ -13,7 +13,7 @@
 use alloc::{collections::BTreeSet, vec};
 
 use crate::{
-    drivers::block_io::{self, BlockBuffer, WriteFlags},
+    drivers::block_io::{self, BlockBuffer, BlockError, WriteFlags},
     fs::{
         Error, FileTime,
         fat32::{FatInodeEntry, Fatfs},
@@ -221,14 +221,15 @@ impl PageCacheOps for Fatfs {
             let read_bytes = sectors_to_read as usize * SECTOR_SIZE;
 
             let mut scratch = vec![0u8; read_bytes];
-            let dev = block_io::lookup(self.partition.device_id).ok_or(Error::IoError)?;
+            let dev = block_io::lookup(self.partition.device_id)
+                .ok_or(Error::Block(BlockError::DeviceGone))?;
             // SAFETY: `h.wait()` below reaps this op before returning.
             let h = dev
                 .submit_read(lba, sectors_to_read as u32, unsafe {
                     BlockBuffer::reaped_by_submitter(scratch.as_mut_ptr(), read_bytes)
                 })
-                .map_err(|_| Error::IoError)?;
-            h.wait().map_err(|_| Error::IoError)?;
+                .map_err(Error::Block)?;
+            h.wait().map_err(Error::Block)?;
 
             // Copy the requested slice from the scratch buffer into buf.
             let src_start = cluster_off % SECTOR_SIZE;
@@ -337,7 +338,8 @@ impl PageCacheOps for Fatfs {
             let mut scratch = vec![0u8; write_bytes];
             scratch[src_start..src_end].copy_from_slice(&buf[buf_pos..buf_pos + take]);
 
-            let dev = block_io::lookup(self.partition.device_id).ok_or(Error::IoError)?;
+            let dev = block_io::lookup(self.partition.device_id)
+                .ok_or(Error::Block(BlockError::DeviceGone))?;
             let scratch_len = scratch.len();
             // SAFETY: `h.wait()` below reaps this op before returning.
             let h = dev
@@ -347,8 +349,8 @@ impl PageCacheOps for Fatfs {
                     unsafe { BlockBuffer::reaped_by_submitter(scratch.as_mut_ptr(), scratch_len) },
                     WriteFlags::NONE,
                 )
-                .map_err(|_| Error::IoError)?;
-            h.wait().map_err(|_| Error::IoError)?;
+                .map_err(Error::Block)?;
+            h.wait().map_err(Error::Block)?;
 
             // These sectors went to the device behind the block page cache,
             // which may still hold them from a directory or format read. Drop
@@ -375,7 +377,7 @@ impl PageCacheOps for Fatfs {
     /// the new EOF, but never to shrink (truncate does that explicitly).
     fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error> {
         if new_size > u32::MAX as u64 {
-            return Err(Error::IoError);
+            return Err(Error::InvalidArgument);
         }
 
         // Pre-check without the write lock to avoid unnecessary contention on
