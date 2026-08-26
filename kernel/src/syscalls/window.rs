@@ -21,23 +21,12 @@ use super::Errno;
 use crate::thread::scheduler::current_thread_info;
 use core::time::Duration;
 
-/// Create a new window.
-///
-/// Arguments:
-/// - rdi: x position
-/// - rsi: y position
-/// - rdx: width
-/// - r10: height
-///
-/// Returns: window ID on success, !0 on error (sets errno).
-pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> u64 {
+/// Create a window at `(x, y)` and answer with its id.
+pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     // Validate dimensions
     if width == 0 || height == 0 || width > 16384 || height > 16384 {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let pid = info.lock().pid;
@@ -60,19 +49,12 @@ pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> u64 {
     }
     send_event(window_id, WindowEvent::focus_gained());
 
-    window_id
+    Ok(window_id)
 }
 
 /// Destroy a window.
-///
-/// Arguments:
-/// - rdi: window ID
-///
-/// Returns: 0 on success, !0 on error (sets errno).
-pub fn sys_window_destroy(window_id: WindowId) -> u64 {
+pub fn sys_window_destroy(window_id: WindowId) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let pid = info.lock().pid;
 
     // Check ownership and destroy in a single write lock to avoid TOCTOU.
@@ -81,12 +63,10 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
             ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_destroy", WINDOW_REGISTRY);
         if let Some(window) = registry.get_window(window_id) {
             if window.pid != pid {
-                info.lock().errno = Errno::EPERM;
-                return !0u64;
+                return Err(Errno::EPERM);
             }
         } else {
-            info.lock().errno = Errno::ENOENT;
-            return !0u64;
+            return Err(Errno::ENOENT);
         }
         registry.destroy_window(window_id)
     };
@@ -100,21 +80,12 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
         send_event(new_focus, WindowEvent::focus_gained());
     }
 
-    0
+    Ok(0)
 }
 
-/// Set a window property.
-///
-/// Arguments:
-/// - rdi: window ID
-/// - rsi: property ID
-/// - rdx: value (or pointer for string properties)
-///
-/// Returns: 0 on success, !0 on error (sets errno).
-pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
+/// Set a window property. `value` is a pointer for the string properties.
+pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let pid = info.lock().pid;
 
     // For TITLE_PTR: read user memory and allocate BEFORE taking the write lock,
@@ -133,8 +104,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
                     }
                     *byte = b;
                 } else {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
+                    return Err(Errno::EFAULT);
                 }
             }
             let len = title_bytes.iter().position(|&b| b == 0).unwrap_or(256);
@@ -152,8 +122,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
     let window = match registry.get_window_mut(window_id) {
         Some(w) => w,
         None => {
-            info.lock().errno = Errno::ENOENT;
-            return !0u64;
+            return Err(Errno::ENOENT);
         }
     };
 
@@ -174,8 +143,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
     );
 
     if window.pid != pid && !(management && caller_is_shell) {
-        info.lock().errno = Errno::EPERM;
-        return !0u64;
+        return Err(Errno::EPERM);
     }
 
     match prop {
@@ -190,15 +158,13 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
         property::WIDTH => {
             if value == 0 || value > 16384 {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
             window.width = value as u32;
         }
         property::HEIGHT => {
             if value == 0 || value > 16384 {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
             window.height = value as u32;
         }
@@ -220,14 +186,12 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
         property::FRAME => {
             let Some(frame) = Frame::from_packed(value) else {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             };
             window.frame = frame;
         }
         _ => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     }
 
@@ -247,62 +211,38 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         send_event(window_id, WindowEvent::focus_gained());
     }
 
-    0
+    Ok(0)
 }
 
-/// Get a window property.
-///
-/// Arguments:
-/// - rdi: window ID
-/// - rsi: property ID
-///
-/// Returns: property value on success, !0 on error (sets errno).
-pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+/// Read a window property.
+pub fn sys_window_get(window_id: WindowId, prop: u64) -> Result<u64, Errno> {
     let registry = read_tracked(ReadSite::SysWindowGet);
 
-    if let Some(window) = registry.get_window(window_id) {
-        match prop {
-            property::VISIBLE => window.visible as u64,
-            property::X => window.x as u64,
-            property::Y => window.y as u64,
-            property::WIDTH => window.width as u64,
-            property::HEIGHT => window.height as u64,
-            property::BUFFER_SHM => window.buffer_shm_id.unwrap_or(0),
-            property::FLAGS => window.flags,
-            property::MINIMIZED => window.minimized as u64,
-            property::FRAME => window.frame.packed(),
-            property::TITLE_PTR => {
-                // Can't return a string through u64; titles are available
-                // via the WindowListEntry.title field in sys_window_list.
-                info.lock().errno = Errno::EINVAL;
-                !0u64
-            }
-            _ => {
-                info.lock().errno = Errno::EINVAL;
-                !0u64
-            }
-        }
-    } else {
-        info.lock().errno = Errno::ENOENT;
-        !0u64
+    let window = registry.get_window(window_id).ok_or(Errno::ENOENT)?;
+    match prop {
+        property::VISIBLE => Ok(window.visible as u64),
+        property::X => Ok(window.x as u64),
+        property::Y => Ok(window.y as u64),
+        property::WIDTH => Ok(window.width as u64),
+        property::HEIGHT => Ok(window.height as u64),
+        property::BUFFER_SHM => Ok(window.buffer_shm_id.unwrap_or(0)),
+        property::FLAGS => Ok(window.flags),
+        property::MINIMIZED => Ok(window.minimized as u64),
+        property::FRAME => Ok(window.frame.packed()),
+        // A title is a string, so it cannot come back through this call at
+        // all; it is the `title` field of a `sys_window_list` entry.
+        property::TITLE_PTR => Err(Errno::EINVAL),
+        _ => Err(Errno::EINVAL),
     }
 }
 
-/// Poll events for a window.
-///
-/// Arguments:
-/// - rdi: window ID
-/// - rsi: pointer to event buffer (array of WindowEvent)
-/// - rdx: maximum number of events
-///
-/// Returns: number of events copied, or !0 on error (sets errno).
-pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u64) -> u64 {
+/// Copy up to `max` pending events for a window and answer with how many.
+pub fn sys_window_poll(
+    window_id: WindowId,
+    events_ptr: *mut WindowEvent,
+    max: u64,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let pid = info.lock().pid;
 
     // Check ownership
@@ -310,17 +250,15 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
         let registry = read_tracked(ReadSite::SysWindowPoll);
         if let Some(window) = registry.get_window(window_id) {
             if window.pid != pid {
-                info.lock().errno = Errno::EPERM;
-                return !0u64;
+                return Err(Errno::EPERM);
             }
         } else {
-            info.lock().errno = Errno::ENOENT;
-            return !0u64;
+            return Err(Errno::ENOENT);
         }
     }
 
     if events_ptr.is_null() || max == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let events = poll_events(window_id, max as usize);
@@ -337,26 +275,21 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
                 bytes_to_copy,
             )
         } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     }
 
-    count as u64
+    Ok(count as u64)
 }
 
 /// List all windows (for compositor use).
 ///
-/// Arguments:
-/// - rdi: pointer to buffer (array of WindowListEntry)
-/// - rsi: maximum number of entries
-/// - rdx: flags; `WINDOW_LIST_CONSUME_DAMAGE` clears each listed window's
-///   damage as it is read, so the caller that acts on it is the one that
-///   takes it
+/// `WINDOW_LIST_CONSUME_DAMAGE` in `flags` clears each listed window's damage
+/// as it is read, so the caller that acts on it is the one that takes it.
 ///
-/// Returns: number of windows, or !0 on error (sets errno).
-///
-/// The buffer receives WindowListEntry structs:
+/// Answers with the number of windows, which may exceed `max`, so a caller can
+/// size its buffer with a null first call. The buffer receives
+/// `WindowListEntry` structs:
 /// ```
 /// struct WindowListEntry {
 ///     id: u64,
@@ -376,10 +309,7 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 ///     title: [u8; TITLE_MAX],
 /// }
 /// ```
-pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> Result<u64, Errno> {
     // `max` is the caller's claim about how many entries its buffer holds.
     // Refuse one that no user buffer could satisfy, rather than trusting it
     // because the window list happened to be shorter. Checked before the
@@ -387,8 +317,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
     if !buffer_ptr.is_null() && max != 0 {
         let declared_bytes = (max as usize).checked_mul(size_of::<WindowListEntry>());
         if !declared_bytes.is_some_and(|bytes| access_ok(buffer_ptr as u64, bytes)) {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     }
 
@@ -404,7 +333,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
 
         if buffer_ptr.is_null() || max == 0 {
             // Just return the count
-            return total_count as u64;
+            return Ok(total_count as u64);
         }
 
         let copy_count = total_count.min(max as usize);
@@ -459,8 +388,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
                 entry_size,
             )
         } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     }
 
@@ -474,7 +402,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> u64 {
         }
     }
 
-    total_count as u64
+    Ok(total_count as u64)
 }
 
 /// Passed by the one caller that acts on damage regions -- the compositor --
@@ -495,19 +423,13 @@ pub use window_abi::{TITLE_MAX, WindowListEntry};
 ///
 /// This allows the window manager to send events (like CloseRequested)
 /// to windows it doesn't own.
-///
-/// Arguments:
-/// - rdi: window ID
-/// - rsi: pointer to WindowEvent
-///
-/// Returns: 0 on success, !0 on error (sets errno).
-pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent) -> u64 {
+pub fn sys_window_send_event(
+    window_id: WindowId,
+    event_ptr: *const WindowEvent,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if event_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     // A window's own process may post to itself; anyone else needs the shell
@@ -518,12 +440,10 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
         let caller_is_shell = shell::is_shell(pid);
         let registry = read_tracked(ReadSite::SysWindowSendEvent);
         let Some(window) = registry.get_window(window_id) else {
-            info.lock().errno = Errno::ENOENT;
-            return !0u64;
+            return Err(Errno::ENOENT);
         };
         if window.pid != pid && !caller_is_shell {
-            info.lock().errno = Errno::EPERM;
-            return !0u64;
+            return Err(Errno::EPERM);
         }
     }
 
@@ -531,8 +451,7 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
     let event: WindowEvent = match unsafe { try_read_user(event_ptr) } {
         Some(e) => e,
         None => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     };
 
@@ -558,45 +477,34 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
     // Send the event to the window's event queue
     crate::window::input::send_event(window_id, event);
 
-    0
+    Ok(0)
 }
 
 /// Appoint another process as part of the shell, so it may manage windows it
 /// does not own.
 ///
-/// Arguments:
-/// - rdi: pid to appoint
-///
-/// Returns: 0 on success, !0 on error (sets errno).
 ///
 /// Only a process that already holds the privilege may grant it, and the
 /// kernel seeds exactly one holder: `bin/edos-init`, the only process it
 /// starts. What a session consists of is init's policy, so this is init's call
 /// to make rather than a race between whoever starts first.
-pub fn sys_window_grant_shell(target_pid: u64) -> u64 {
+pub fn sys_window_grant_shell(target_pid: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
     let pid = info.lock().pid;
 
     if !shell::is_shell(pid) {
-        info.lock().errno = Errno::EPERM;
-        return !0u64;
+        return Err(Errno::EPERM);
     }
     if target_pid == 0 || !shell::grant(target_pid) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
-    0
+    Ok(0)
 }
 
 /// Claim or release a key chord, so the focused window does not see it.
 ///
-/// Arguments:
-/// - rdi: `pc_keyboard` key code
-/// - rsi: modifier mask (`MOD_SHIFT` | `MOD_CTRL` | `MOD_ALT`)
-/// - rdx: non-zero to claim, zero to release
-///
-/// Returns: 0 on success, !0 on error (sets errno).
+/// `mods` is a mask of `MOD_SHIFT`, `MOD_CTRL` and `MOD_ALT`; a non-zero
+/// `claim` takes the chord and a zero one releases it.
 ///
 /// The mask is matched exactly, so Alt+Tab and Ctrl+Alt+Tab are different
 /// chords and claiming one leaves the other with the focused window.
@@ -604,55 +512,50 @@ pub fn sys_window_grant_shell(target_pid: u64) -> u64 {
 /// Restricted to the session shell for the same reason window management is:
 /// a chord claimed by any process at all would let one program read another's
 /// keys by taking them away from it.
-pub fn sys_window_grab_key(code: u64, mods: u64, claim: u64) -> u64 {
+pub fn sys_window_grab_key(code: u64, mods: u64, claim: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
     let pid = info.lock().pid;
 
     if !shell::is_shell(pid) {
-        info.lock().errno = Errno::EPERM;
-        return !0u64;
+        return Err(Errno::EPERM);
     }
     if code > u32::MAX as u64 || mods & !(grab::MOD_MASK as u64) != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let (code, mods) = (code as u32, mods as u32);
     if claim != 0 {
         if !grab::grab(pid, code, mods) {
-            info.lock().errno = Errno::ENOMEM;
-            return !0u64;
+            return Err(Errno::ENOMEM);
         }
     } else {
         grab::ungrab(pid, code, mods);
     }
-    0
+    Ok(0)
 }
 
 /// Mark a window as damaged (client has repainted its buffer).
 ///
-/// Arguments:
-/// - rdi: window ID
-/// - rsi, rdx: x and y of the repainted region, in window coordinates
-/// - r10, r8: its width and height; a zero in either means the whole window
-///
-/// Returns: 0 on success, !0 on error.
-pub fn sys_window_damage(window_id: WindowId, x: u32, y: u32, w: u32, h: u32) -> u64 {
+/// The region is in window coordinates; a zero width or height means the whole
+/// window.
+pub fn sys_window_damage(
+    window_id: WindowId,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
     let pid = info.lock().pid;
 
     let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_damage", WINDOW_REGISTRY);
     let Some(window) = registry.get_window_mut(window_id) else {
-        info.lock().errno = Errno::ENOENT;
-        return !0u64;
+        return Err(Errno::ENOENT);
     };
     // Only the window's own process may declare it repainted. Otherwise any
     // process can make the compositor redraw the screen every frame.
     if window.pid != pid {
-        info.lock().errno = Errno::EPERM;
-        return !0u64;
+        return Err(Errno::EPERM);
     }
     window.damage_seq = window.damage_seq.wrapping_add(1);
 
@@ -683,7 +586,7 @@ pub fn sys_window_damage(window_id: WindowId, x: u32, y: u32, w: u32, h: u32) ->
         Some(existing) => existing.union(reported),
         None => reported,
     });
-    0
+    Ok(0)
 }
 
 /// Bits returned by [`sys_window_wait`].
@@ -696,13 +599,11 @@ pub mod wait_reason {
 
 /// Block until the window has something to do.
 ///
-/// Arguments:
-/// - rdi: window ID
-/// - rsi: the frame count the caller last acted on, from a previous return
-/// - rdx: milliseconds to wait, or 0 to wait indefinitely
+/// `seen_frame` is the frame count the caller last acted on, from a previous
+/// return; `timeout_ms` of 0 waits indefinitely.
 ///
-/// Returns: `wait_reason` bits in the low 32 and the current frame count in the
-/// high 32, or 0 if the wait timed out with nothing to report.
+/// Answers with `wait_reason` bits in the low 32 and the current frame count in
+/// the high 32, or 0 if the wait timed out with nothing to report.
 ///
 /// A client with no way to block guesses an interval and sleeps: it either
 /// wakes with nothing to do or leaves an event sitting for the rest of that
@@ -714,10 +615,11 @@ pub mod wait_reason {
 /// one per window: a window can be waited on from more than one thread, and a
 /// count held in the kernel would let whichever called first consume the
 /// signal, which is the same defect damage reporting had.
-pub fn sys_window_wait(window_id: WindowId, seen_frame: u64, timeout_ms: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_window_wait(
+    window_id: WindowId,
+    seen_frame: u64,
+    timeout_ms: u64,
+) -> Result<u64, Errno> {
     // The queue is created on demand, the same way polling does, so a client
     // may wait before anything has ever been sent to it.
     let queue = get_or_create_event_queue(window_id);
@@ -740,7 +642,7 @@ pub fn sys_window_wait(window_id: WindowId, seen_frame: u64, timeout_ms: u64) ->
     if now != seen_frame {
         reason |= wait_reason::FRAME;
     }
-    reason | (now << 32)
+    Ok(reason | (now << 32))
 }
 
 /// Report that a frame has been put on the display.
@@ -753,72 +655,53 @@ pub fn sys_window_wait(window_id: WindowId, seen_frame: u64, timeout_ms: u64) ->
 /// Deliberately not a side effect of consuming damage: that happens before the
 /// frame is drawn, and a client woken then would be racing the compositor it
 /// is trying to keep step with.
-pub fn sys_window_present() -> u64 {
+pub fn sys_window_present() -> Result<u64, Errno> {
     present_frame();
-    0
+    Ok(0)
 }
 
 /// Replace the contents of a clipboard buffer.
 ///
-/// Arguments:
-/// - rdi: which buffer (0 clipboard, 1 primary selection)
-/// - rsi: pointer to the bytes
-/// - rdx: how many bytes
-///
-/// Returns: 0 on success, !0 on error (sets errno).
-pub fn sys_clipboard_set(which: u64, buffer_ptr: *const u8, len: usize) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+/// `which` is 0 for the clipboard and 1 for the primary selection.
+pub fn sys_clipboard_set(which: u64, buffer_ptr: *const u8, len: usize) -> Result<u64, Errno> {
     if !clipboard::is_valid(which) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
     if len > clipboard::MAX_LEN {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     // An empty set clears the buffer, and takes no user pointer with it.
     let mut bytes = alloc::vec![0u8; len];
     if len != 0 {
         if buffer_ptr.is_null() || !access_ok(buffer_ptr as u64, len) {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
         // Copied before the lock is taken: a copy from a user pointer can
         // demand-fault, and parking on a page fill under a spin lock leaves
         // every other CPU spinning on it for the duration of the I/O.
         if !unsafe { try_copy_from_user(bytes.as_mut_ptr(), buffer_ptr, len) } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     }
 
     clipboard::set(which, bytes);
-    0
+    Ok(0)
 }
 
 /// Read a clipboard buffer.
 ///
-/// Arguments:
-/// - rdi: which buffer (0 clipboard, 1 primary selection)
-/// - rsi: pointer to the destination, or null to ask only for the length
-/// - rdx: how many bytes the destination holds
+/// `which` is 0 for the clipboard and 1 for the primary selection. A null
+/// destination asks only for the length.
 ///
-/// Returns: the full length of the buffer, which may exceed what was copied,
-/// so a caller can size its destination with a null first call. !0 on error.
-pub fn sys_clipboard_get(which: u64, buffer_ptr: *mut u8, len: usize) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+/// Answers with the full length of the buffer, which may exceed what was
+/// copied, so a caller can size its destination with a null first call.
+pub fn sys_clipboard_get(which: u64, buffer_ptr: *mut u8, len: usize) -> Result<u64, Errno> {
     if !clipboard::is_valid(which) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
     if !buffer_ptr.is_null() && len != 0 && !access_ok(buffer_ptr as u64, len) {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let bytes = clipboard::get(which);
@@ -828,9 +711,8 @@ pub fn sys_clipboard_get(which: u64, buffer_ptr: *mut u8, len: usize) -> u64 {
         // released, for the reason `sys_window_list` copies outside the
         // registry lock.
         if !unsafe { try_copy_to_user(buffer_ptr, bytes.as_ptr(), copy_len) } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     }
-    bytes.len() as u64
+    Ok(bytes.len() as u64)
 }
