@@ -2351,7 +2351,7 @@ fn sys_clone(
         // Claim the range before mapping it. Threads of one process share an
         // address space, so two concurrent spawns searching for a free range
         // without claiming it would both land on the same stack.
-        let Some(stack_bottom) = crate::syscalls::memory::claim_range(
+        let stack_bottom = match crate::syscalls::memory::claim_range(
             parent_user,
             &parent_info,
             0,
@@ -2359,8 +2359,9 @@ fn sys_clone(
             VmaProt::READ | VmaProt::WRITE,
             VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
             VmaBacking::Stack,
-        ) else {
-            return !0u64;
+        ) {
+            Ok(addr) => addr,
+            Err(errno) => return fail_with(errno),
         };
 
         // Map the stack

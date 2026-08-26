@@ -36,16 +36,10 @@ pub const PROT_EXEC: u32 = 0x4;
 /// Every syscall that reaches into an address space starts here and refuses a
 /// caller that has none the same way. A kernel thread is the only caller that
 /// can lack one, and it has no business in any of them.
-pub(super) fn current_user_thread(
-    info: &Arc<IrqSpinlock<UserThreadInfo>>,
-) -> Option<Arc<RwLock<UserThread>>> {
-    match current_thread().and_then(|thread| thread.user.clone()) {
-        Some(user) => Some(user),
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            None
-        }
-    }
+pub(super) fn current_user_thread() -> Result<Arc<RwLock<UserThread>>, Errno> {
+    current_thread()
+        .and_then(|thread| thread.user.clone())
+        .ok_or(Errno::EINVAL)
 }
 
 /// The `PROT_*` bits of an `mmap`/`mprotect`/`shmat` call as a [`VmaProt`].
@@ -80,8 +74,7 @@ pub const MS_SYNC: u32 = 0x2;
 #[allow(dead_code)]
 pub const MS_INVALIDATE: u32 = 0x4;
 
-/// Places a VMA and returns the address it covers, or `None` after setting
-/// `errno` on the calling thread.
+/// Places a VMA and answers with the address it covers.
 ///
 /// With `addr == 0` the kernel picks the range; the search and the insert happen
 /// under one acquisition of the VmaSet lock, because a range is only free while
@@ -98,7 +91,7 @@ pub(super) fn claim_range(
     prot: VmaProt,
     flags: VmaFlags,
     backing: VmaBacking,
-) -> Option<VirtAddr> {
+) -> Result<VirtAddr, Errno> {
     let next_mmap_addr = info.lock().next_mmap_addr.clone();
     let result = {
         let user_read = user_arc.read();
@@ -133,21 +126,22 @@ pub(super) fn claim_range(
         }
     };
 
-    match result {
-        Ok(start) => Some(start),
-        Err(e) => {
-            info.lock().errno = match e {
-                VmaError::OutOfUserSpace => Errno::EINVAL,
-                VmaError::NoSpace => Errno::ENOMEM,
-            };
-            None
-        }
-    }
+    result.map_err(|e| match e {
+        VmaError::OutOfUserSpace => Errno::EINVAL,
+        VmaError::NoSpace => Errno::ENOMEM,
+    })
 }
 
 /// `r8` is overloaded: physical address for MAP_PHYSICAL, fd for file-backed mappings.
 /// `r9` is the file offset (used only for file-backed mappings).
-pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64) -> u64 {
+pub fn sys_mmap(
+    addr: u64,
+    length: u64,
+    prot: u32,
+    flags: u32,
+    r8: u64,
+    r9: u64,
+) -> Result<u64, Errno> {
     let phys_addr = r8; // alias for MAP_PHYSICAL path
     let prot_str = match (
         prot & PROT_READ != 0,
@@ -175,39 +169,31 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
     );
     let info = current_thread_info();
 
-    info.lock().errno = Errno::Clear;
-
     if length == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64; // -1 (EINVAL)
+        return Err(Errno::EINVAL);
     }
 
     // A mapping starts at a page boundary, so an address that is not one names a
     // range the MMU cannot give. Rounding it silently would hand back memory the
     // caller did not ask for and can overlap a neighbour.
     if !addr.is_multiple_of(PAGE_SIZE) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let is_physical = (flags & MAP_PHYSICAL) != 0;
 
-    let Some(user_arc) = current_user_thread(&info) else {
-        return !0u64;
-    };
+    let user_arc = current_user_thread()?;
 
     if is_physical {
         // Validate physical address alignment
         if phys_addr & 0xFFF != 0 {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
 
         // Only allow mapping physical ranges that the kernel has explicitly registered
         // (e.g. VRAM). Prevents userspace from mapping arbitrary physical memory.
         if !crate::memory::is_physical_range_allowed(phys_addr, length) {
-            info.lock().errno = Errno::EPERM;
-            return !0u64;
+            return Err(Errno::EPERM);
         }
 
         let vma_prot = vma_prot_from(prot);
@@ -225,9 +211,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                 phys_base: phys_addr,
             },
         );
-        let Some(map_addr) = map_addr else {
-            return !0u64;
-        };
+        let map_addr = map_addr?;
 
         let mut phys_flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
@@ -262,20 +246,18 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                     let _user = user_arc.read();
                     ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).remove(&map_addr);
                 }
-                info.lock().errno = Errno::ENOMEM;
-                return !0u64;
+                return Err(Errno::ENOMEM);
             }
         }
         drop(mm);
 
         log_debug!("mmap: mapped physical at {map_addr:p}");
-        map_addr.as_u64()
+        Ok(map_addr.as_u64())
     } else if (flags & MAP_ANONYMOUS) != 0 || r8 == u64::MAX {
         // Anonymous mapping (MAP_ANONYMOUS set, or fd == -1).
         if (flags & MAP_PRIVATE) == 0 && (flags & MAP_SHARED) == 0 {
             println!("mmap: anonymous mapping must have MAP_PRIVATE or MAP_SHARED");
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
 
         let vma_prot = vma_prot_from(prot);
@@ -290,12 +272,10 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             VmaFlags::PRIVATE | VmaFlags::LAZY,
             VmaBacking::Anonymous,
         );
-        let Some(map_addr) = map_addr else {
-            return !0u64;
-        };
+        let map_addr = map_addr?;
 
         log_debug!("mmap: lazy mapped at {map_addr:p}");
-        map_addr.as_u64()
+        Ok(map_addr.as_u64())
     } else {
         // File-backed mapping.
         let file_offset = r9;
@@ -305,23 +285,19 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         let is_private = (flags & MAP_PRIVATE) != 0;
 
         if !is_shared && !is_private {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         if is_shared && is_private {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
 
         // Alignment checks.
         if file_offset & 0xFFF != 0 {
             log!("mmap: file_offset must be page-aligned");
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         if length & 0xFFF != 0 || addr != 0 && addr & 0xFFF != 0 {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
 
         // Look up the FsFile from the fd table.
@@ -330,8 +306,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             Some(FileDescriptor::FsFile(f)) => f,
             _ => {
                 log!("mmap: invalid fd {fd}");
-                info.lock().errno = Errno::EBADF;
-                return !0u64;
+                return Err(Errno::EBADF);
             }
         };
 
@@ -339,12 +314,10 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         // readable fd. MAP_SHARED + PROT_WRITE additionally requires a
         // writable fd (writes would reach disk).
         if !fs_file.mode.readable() {
-            info.lock().errno = Errno::EACCES;
-            return !0u64;
+            return Err(Errno::EACCES);
         }
         if is_shared && (prot & PROT_WRITE) != 0 && !fs_file.mode.writable() {
-            info.lock().errno = Errno::EACCES;
-            return !0u64;
+            return Err(Errno::EACCES);
         }
 
         // Get the inode and verify the filesystem supports the page cache.
@@ -352,8 +325,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             Some(i) => i.clone(),
             None => {
                 log!("mmap: file has no inode (virtual fs?)");
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
         };
 
@@ -364,8 +336,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                 Some(fs) if fs.as_page_cache_ops().is_some() => {}
                 _ => {
                     log!("mmap: filesystem does not support page-cached mmap");
-                    info.lock().errno = Errno::EINVAL;
-                    return !0u64;
+                    return Err(Errno::EINVAL);
                 }
             }
         }
@@ -395,11 +366,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             writable_mapping,
             pages: alloc::vec![None; num_pages],
         };
-        let Some(map_addr) =
-            claim_range(&user_arc, &info, addr, length, vma_prot, vma_flags, backing)
-        else {
-            return !0u64;
-        };
+        let map_addr = claim_range(&user_arc, &info, addr, length, vma_prot, vma_flags, backing)?;
 
         // D.1: Register this process in the inode's reverse map so that a future
         // truncate can walk all mappers and unmap PTEs past the new EOF.
@@ -427,7 +394,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                 "mmap: file-backed MAP_PRIVATE at {map_addr:p} len={length:#x} off={file_offset:#x}"
             );
         }
-        map_addr.as_u64()
+        Ok(map_addr.as_u64())
     }
 }
 
@@ -491,25 +458,19 @@ pub fn flush_shared_vma_pages(
 ///
 /// Lock ordering: VmaSet lock is acquired to collect work (Arc<CachedPage> + fs info),
 /// then released before calling flush_page (which does AHCI I/O).
-pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_msync(addr: u64, len: u64, flags: u32) -> Result<u64, Errno> {
     // MS_ASYNC: no-op for v1; pages are already marked dirty and the writeback
     // kthread will flush them on its next periodic pass.
     if flags & MS_ASYNC != 0 && flags & MS_SYNC == 0 {
-        return 0;
+        return Ok(0);
     }
     // MS_INVALIDATE: no-op for v1 (no revalidation path yet).
 
     if addr & 0xFFF != 0 || len & 0xFFF != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
-    let Some(user_arc) = current_user_thread(&info) else {
-        return -1;
-    };
+    let user_arc = current_user_thread()?;
 
     let range_start = VirtAddr::new(addr);
     let range_end = VirtAddr::new(addr + len);
@@ -609,13 +570,12 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
             }
             Err(e) => {
                 log!("msync: flush_pages_bulk ino={} err={:?}", inode.ino, e);
-                info.lock().errno = Errno::EIO;
-                return -1;
+                return Err(Errno::EIO);
             }
         }
     }
 
-    0
+    Ok(0)
 }
 
 /// `mprotect(2)`: change the protection of pages already mapped.
@@ -629,30 +589,23 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
 /// with a forked sibling. A COW page deliberately stays unwritable even when
 /// this call grants write: the first write faults, copies, and takes the
 /// permission from the VMA this call just updated.
-pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i32 {
+pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if length == 0
         || !addr.is_multiple_of(PAGE_SIZE)
         || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
     {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let Some(end) = page_round_up(length).and_then(|len| addr.checked_add(len)) else {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     };
     if end > USER_VA_END {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
-    let Some(user_arc) = current_user_thread(&info) else {
-        return -1;
-    };
+    let user_arc = current_user_thread()?;
 
     let start = VirtAddr::new(addr);
     let end = VirtAddr::new(end);
@@ -694,8 +647,7 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i32 {
     };
 
     let Some(spans) = retagged else {
-        info.lock().errno = Errno::ENOMEM;
-        return -1;
+        return Err(Errno::ENOMEM);
     };
 
     let memory_manager = info.lock().memory_manager.clone();
@@ -739,30 +691,24 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i32 {
         crate::memory::tlb::tlb_shootdown(vma_start, pages);
     }
 
-    0
+    Ok(0)
 }
 
-pub fn sys_munmap(addr: u64, length: u64) -> i32 {
+pub fn sys_munmap(addr: u64, length: u64) -> Result<u64, Errno> {
     log_debug!("Unmapping {addr} {length}");
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if length == 0 || !addr.is_multiple_of(PAGE_SIZE) {
-        info.lock().errno = Errno::EINVAL;
-        return -1; // EINVAL
+        return Err(Errno::EINVAL);
     }
 
     let map_addr = VirtAddr::new(addr);
 
-    let Some(user_arc) = current_user_thread(&info) else {
-        return -1;
-    };
+    let user_arc = current_user_thread()?;
 
     // A partial page cannot be unmapped, so the range covers every page it
     // touches, matching the rounding `claim_range` applied when it was mapped.
     let Some(end) = page_round_up(length).and_then(|len| addr.checked_add(len)) else {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     };
     let unmap_end = VirtAddr::new(end);
 
@@ -774,8 +720,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
 
     if removed_vmas.is_empty() {
         log!("Unmap fail, no VMAs in range");
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let memory_manager = info.lock().memory_manager.clone();
@@ -890,11 +835,10 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     }
 
     if any_error {
-        info.lock().errno = Errno::EINVAL;
         log!("Unmap partial error (kernel-managed VMAs in range)");
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     log_debug!("Unmap success");
-    0
+    Ok(0)
 }

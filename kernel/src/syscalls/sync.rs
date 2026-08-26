@@ -85,7 +85,7 @@ impl FutexLoan {
     }
 }
 
-pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> u64 {
+pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> Result<u64, Errno> {
     futex_wait_inner(addr, expected, timeout_ns, 0)
 }
 
@@ -105,29 +105,31 @@ pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> u64 {
 /// is the same loop every waiter already runs against a spurious wake.
 ///
 /// `owner_tid` of 0 asks for no lending and makes this exactly `futex_wait`.
-pub fn sys_futex_wait_pi(addr: *const u32, expected: u32, timeout_ns: u64, owner_tid: u64) -> u64 {
+pub fn sys_futex_wait_pi(
+    addr: *const u32,
+    expected: u32,
+    timeout_ns: u64,
+    owner_tid: u64,
+) -> Result<u64, Errno> {
     futex_wait_inner(addr, expected, timeout_ns, owner_tid)
 }
 
-fn futex_wait_inner(addr: *const u32, expected: u32, timeout_ns: u64, owner_tid: u64) -> u64 {
+fn futex_wait_inner(
+    addr: *const u32,
+    expected: u32,
+    timeout_ns: u64,
+    owner_tid: u64,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
 
     if addr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    let current = match unsafe { try_read_user(addr) } {
-        Some(value) => value,
-        None => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
-        }
-    };
+    let current = unsafe { try_read_user(addr) }.ok_or(Errno::EFAULT)?;
 
     if current != expected {
-        return 1;
+        return Ok(1);
     }
 
     let mm_arc = {
@@ -157,8 +159,7 @@ fn futex_wait_inner(addr: *const u32, expected: u32, timeout_ns: u64, owner_tid:
 
     if let Some(err) = fault.get() {
         cleanup_if_empty(&key, &queue);
-        info.lock().errno = err;
-        return !0u64;
+        return Err(err);
     }
 
     let result = match outcome {
@@ -173,8 +174,7 @@ fn futex_wait_inner(addr: *const u32, expected: u32, timeout_ns: u64, owner_tid:
             }
             None => {
                 cleanup_if_empty(&key, &queue);
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
         },
         WaitOutcome::TimedOut => 2,
@@ -184,24 +184,22 @@ fn futex_wait_inner(addr: *const u32, expected: u32, timeout_ns: u64, owner_tid:
 
     cleanup_if_empty(&key, &queue);
 
-    result
+    Ok(result)
 }
 
-pub fn sys_futex_wake(addr: *const u32, count: u32) -> u64 {
+pub fn sys_futex_wake(addr: *const u32, count: u32) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
 
     // A wake never dereferences the word, it only keys the registry by its
     // address, so the range has to be checked here rather than being caught by
     // a copy the way `sys_futex_wait` is. Validated before the zero-count
     // short-circuit: waking nobody is still a claim about a real address.
     if addr.is_null() || !access_ok(addr as u64, size_of::<u32>()) {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let mm_arc = {
@@ -213,7 +211,7 @@ pub fn sys_futex_wake(addr: *const u32, count: u32) -> u64 {
         let map = FUTEX_REGISTRY.lock();
         match map.get(&key) {
             Some(queue) => Arc::clone(queue),
-            None => return 0,
+            None => return Ok(0),
         }
     };
 
@@ -230,5 +228,5 @@ pub fn sys_futex_wake(addr: *const u32, count: u32) -> u64 {
         cleanup_if_empty(&key, &queue);
     }
 
-    woken
+    Ok(woken)
 }

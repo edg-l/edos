@@ -21,91 +21,52 @@ use crate::{
     syscalls::Errno,
 };
 
-/// Create a new shared memory region
-///
-/// # Arguments
-/// * `size` - Size of the shared memory region in bytes
-///
-/// # Returns
-/// * Shared memory ID on success
-/// * -1 on error (errno set)
-pub fn sys_shm_create(size: u64) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+/// Create a shared memory region of `size` bytes and answer with its id.
+pub fn sys_shm_create(size: u64) -> Result<u64, Errno> {
     if size == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     match SharedMemory::new(size as usize) {
-        Ok(shm) => shm.id() as i64,
-        Err(SharedMemoryError::InvalidSize) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
-        Err(SharedMemoryError::AllocationFailed) => {
-            info.lock().errno = Errno::ENOMEM;
-            -1
-        }
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Ok(shm) => Ok(shm.id()),
+        Err(SharedMemoryError::AllocationFailed) => Err(Errno::ENOMEM),
+        Err(_) => Err(Errno::EINVAL),
     }
 }
 
-/// Map a shared memory region into the calling process's address space
+/// Map a shared memory region into the caller's address space and answer with
+/// the address it landed at.
 ///
-/// # Arguments
-/// * `shm_id` - Shared memory ID
-/// * `addr_hint` - Suggested address (0 for kernel to choose)
-/// * `prot` - Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
-///
-/// # Returns
-/// * Virtual address of the mapping on success
-/// * -1 on error (errno set)
-pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> u64 {
+/// `addr_hint` of 0 lets the kernel choose; `prot` is the `PROT_*` set.
+pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    // Look up the shared memory region
-    let shm = match SharedMemory::get(shm_id) {
-        Some(shm) => shm,
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-    };
+    let shm = SharedMemory::get(shm_id).ok_or(Errno::EINVAL)?;
 
     let size = shm.size() as u64;
 
     let thread = match current_thread() {
         Some(t) => t,
         None => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
     let user_arc = match &thread.user {
         Some(u) => u.clone(),
         None => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
     // Validate a user-supplied address: must be page-aligned and in user space
     if addr_hint != 0 && (addr_hint & 0xFFF != 0 || addr_hint >= 0x0000_8000_0000_0000) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let vma_prot = vma_prot_from(prot);
 
     // Claim the range before mapping frames into it, so a concurrent attach
     // cannot pick the same one.
-    let Some(map_addr) = claim_range(
+    let map_addr = claim_range(
         &user_arc,
         &info,
         addr_hint,
@@ -113,9 +74,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> u64 {
         vma_prot,
         VmaFlags::SHARED,
         VmaBacking::SharedMemory { shm_id },
-    ) else {
-        return !0u64;
-    };
+    )?;
 
     // Hands the claimed range back on a failure path.
     let unclaim = || {
@@ -155,8 +114,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> u64 {
                     }
                 }
                 unclaim();
-                info.lock().errno = Errno::ENOMEM;
-                return !0u64;
+                return Err(Errno::ENOMEM);
             }
         }
     }
@@ -176,30 +134,18 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u32) -> u64 {
         }
         drop(manager);
         unclaim();
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
-    map_addr.as_u64()
+    Ok(map_addr.as_u64())
 }
 
-/// Unmap a shared memory region from the calling process's address space
-///
-/// # Arguments
-/// * `addr` - Virtual address of the mapping
-///
-/// # Returns
-/// * 0 on success
-/// * -1 on error (errno set)
-pub fn sys_shm_unmap(addr: u64) -> i64 {
+/// Unmap a shared memory region from the caller's address space.
+pub fn sys_shm_unmap(addr: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let map_addr = VirtAddr::new(addr);
 
-    let Some(user_arc) = current_user_thread(&info) else {
-        return -1;
-    };
+    let user_arc = current_user_thread()?;
 
     // Find and remove the VMA
     let vma = {
@@ -232,66 +178,34 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                     }
                     crate::memory::tlb::tlb_shootdown(VirtAddr::new(addr), page_count);
 
-                    0
+                    Ok(0)
                 }
                 _ => {
                     // Not a shared memory mapping, restore and return error
                     let _user = user_arc.read();
                     ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert_validated(vma);
-                    info.lock().errno = Errno::EINVAL;
-                    -1
+                    Err(Errno::EINVAL)
                 }
             }
         }
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        None => Err(Errno::EINVAL),
     }
 }
 
-/// Get the size of a shared memory region in bytes.
-///
-/// # Arguments
-/// * `shm_id` - Shared memory ID
-///
-/// # Returns
-/// * Size in bytes on success
-/// * -1 on error
-pub fn sys_shm_size(shm_id: u64) -> i64 {
+/// The size in bytes of a shared memory region.
+pub fn sys_shm_size(shm_id: u64) -> Result<u64, Errno> {
     match SharedMemory::get(shm_id) {
-        Some(shm) => shm.size() as i64,
-        None => -1,
+        Some(shm) => Ok(shm.size() as u64),
+        None => Err(Errno::EINVAL),
     }
 }
 
-/// Destroy a shared memory region
-///
-/// The region can only be destroyed if there are no active mappings.
-///
-/// # Arguments
-/// * `shm_id` - Shared memory ID
-///
-/// # Returns
-/// * 0 on success
-/// * -1 on error (errno set)
-pub fn sys_shm_destroy(shm_id: u64) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+/// Destroy a shared memory region, which succeeds only once nothing maps it.
+pub fn sys_shm_destroy(shm_id: u64) -> Result<u64, Errno> {
     match SharedMemory::destroy(shm_id) {
-        Ok(()) => 0,
-        Err(SharedMemoryError::NotFound) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
-        Err(SharedMemoryError::Destroyed) => {
-            // Already marked for destruction
-            0
-        }
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Ok(()) => Ok(0),
+        // Already marked for destruction.
+        Err(SharedMemoryError::Destroyed) => Ok(0),
+        Err(_) => Err(Errno::EINVAL),
     }
 }
