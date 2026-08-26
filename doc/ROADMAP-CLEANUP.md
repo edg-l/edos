@@ -466,13 +466,27 @@ these are listed by whether the function does more than one job, not by size.
 descriptor fetch, class dispatch and the event loop in one body, with 77 `unsafe`
 blocks in the file. Split along the phases it already names in comments.
 
-### H2. `load_elf`, 498 lines (S1, E2)
+### H2. ~~`load_elf`, 498 lines~~ (done)
 
-`kernel/src/loader/mod.rs:251`. Parses attacker-controlled input, validates it,
-allocates VMAs and maps them, in one function. `doc/AUDIT.md` §1.1 records that
-the address validation gap in this function was reachable from an ordinary
-`mmap`. A parse step that produces a validated description, and a separate map
-step that consumes it, makes the validation boundary visible.
+`load_elf` is fifteen lines: resolve the filesystem, refuse one without a page
+cache, `map_image(parse_image(path)?, ...)`. The validation boundary is the
+`ElfImage` between them.
+
+`parse_image` reads the ehdr, the phdr table and the shdr table and touches no
+process state, so a malformed binary fails before anything is mapped -- where
+before, a bad relocation was diagnosed only after the tail pages of every
+`PT_LOAD` had already been pre-faulted into the address space. Every
+attacker-controlled field is validated in exactly one place: `parse_ehdr` for
+the identification bytes, class, machine, object type and header entry sizes,
+`validate_load_segment` for the user-half bound that `doc/AUDIT.md` §1.1 records
+as once missing, and `parse_relocs` for the symbol index and the 4 GiB target
+bound. The result is a `Vec<LoadSegment>` whose addresses are already resolved
+against the load base and page aligned.
+
+`map_image` consumes that description without re-reading a header field. The
+Elf64 offsets live in a private `elf64` module instead of forty consts inside
+the function body, and the magic numbers that were bare (`8` for
+`R_X86_64_RELATIVE`, `9` for `SHT_REL`, `14` for `SHT_INIT_ARRAY`) are named.
 
 ### H3. `sys_read` / `sys_write`, 353 and 328 lines (S2, E2)
 

@@ -10811,3 +10811,28 @@ the `bytemuck` casts, where the discarded error genuinely says nothing the
 variant does not already name. The rest are in `fs/memfs` (9),
 `drivers/usb/xhci` (9), `thread/thread.rs` (5), `syscalls/fs.rs` (4),
 `fs/devfs/block.rs` (4) and `drivers/virtio/gpu.rs` (4).
+
+### `load_elf` splits into a parse step and a map step
+
+`kernel/src/loader/mod.rs`. One 498-line function parsed attacker-controlled
+ELF bytes, validated them, built VMAs and mapped pages, interleaved. It is now
+`parse_image` -> `ElfImage` -> `map_image`, and `load_elf` itself is fifteen
+lines.
+
+The ordering changed as a side effect and is worth knowing: the section-header
+walk that finds the relocations used to run *after* the `PT_LOAD` loop, so a
+binary with an unsupported relocation had already had its partial tail pages
+pre-faulted and mapped into the address space by the time the load failed. The
+caller unwinds that, but the failure is cleaner when nothing was mapped, and
+that is now the case for every parse error.
+
+Behaviour that is deliberately unchanged: `p_memsz == 0` still skips a header
+(the check moved ahead of the `p_type` match, which reaches the same set of
+headers because no other type is acted on), `max_addr` still defaults to
+`0x10000000` when no `PT_LOAD` contributes one, and the reloc-bearing writable
+`PT_LOAD` is still resolved by intersecting the parsed targets with the
+writable segments rather than assumed to be the only one.
+
+`resolve_reloc_segment` returns an index rather than a `&LoadSegment`: the
+`RelocTable` build wants `image.relocs` by value, and a reference into
+`image.segments` held across that point makes the partial move unborrowable.
