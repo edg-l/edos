@@ -119,7 +119,73 @@ writes to it and the case's duration is set by how much journal there is to
 replay, so consecutive runs against one image measure an increasingly churned
 filesystem rather than a kernel.
 
-## Root cause candidate for shape A
+## The real lead: the kernel heap free list is corrupt
+
+A 20-boot run caught a third outcome the earlier captures had not: a guest that
+**panicked**, so the handler's own output is in the log.
+
+```
+GPF Error code: 0x0
+Selector index: 0
+Table: GDT
+External: false
+Stack frame: InterruptStackFrame {
+    instruction_pointer: VirtAddr(0xffffffff800c99a7),
+    code_segment: SegmentSelector { index: 1, rpl: Ring0 },
+```
+
+```
+$ addr2line -e kernel/target/x86_64-unknown-none/debug/edos-kernel -f -C 0xffffffff800c99a7
+<buddy_system_allocator::linked_list::LinkedList>::pop
+.../buddy_system_allocator-0.13.0/src/linked_list.rs:53
+```
+
+A #GP in ring 0 with **error code 0** is not a selector fault; at a memory
+access it is a non-canonical address. `LinkedList::pop` walking a garbage
+pointer means **the buddy allocator's free list is corrupt**, which is a
+use-after-free or double-free of kernel heap memory, not anything about NVMe
+queues.
+
+That reframes both shapes as symptoms of one defect. Corruption that lands on a
+free-list pointer gives this #GP; land it somewhere the fault handler cannot
+survive and you get shape B's triple fault; corrupt something a wake path needs
+and you get shape A's parked machine. It also explains why shape B always dies
+in the same three lines: that is simply where the boot is when the allocator is
+hottest.
+
+The hot suspects under `nvme_timeout_ms=0` are the op payload's DMA buffers.
+The reset path's own comment says `DmaBuffer` **has no `Drop`** and that
+clearing slots any other way "would strand each op's bounce buffer and PRP list
+page", so the freeing of those pages is manual and by hand on every retire, on
+a path the watchdog and the completion dispatcher both reach.
+
+**Next step**, and it is cheap: this is what a heap canary or a quarantine
+allocator is for. Add a debug-only guard page or a poison-on-free to the kernel
+allocator and re-run `scripts/wedge-probe`; a poisoned pointer faults at the
+free that is wrong rather than at the next unrelated `pop`.
+
+## Refuted: the reset window (2026-08-26)
+
+The first hypothesis was the reset path's unguarded window against submitters,
+and it is **wrong**. It is worth recording because the reasoning looked strong.
+
+The window is real: `begin_restart` is a `compare_exchange` on one `AtomicBool`
+that nothing outside the watchdog reads, so it serialises resets against resets
+and not against submitters, and the reset path's own comment names the case.
+
+It is not what happens. A 33-line change added `is_restarting()`, made
+`submit_transfer` and `submit_flush` refuse to issue during a restart, and
+added a post-reset pass that failed anything installed across the reset and
+**logged each one**. Over 20 boots, hundreds of resets each, that line fired
+**zero times**: no command is ever installed across a reset. Shape A still
+occurred (run13). The change was reverted.
+
+The lesson is the log line rather than the fix. A speculative fix that also
+counts how often its window is entered answers the question even when it does
+not help; without that counter, 17 passes out of 20 would have looked like a
+result.
+
+## Superseded candidate (kept for the mechanism)
 
 Both shape-A captures end on the **same line**, `nvme: controller reset
 complete`, and it is the last thing `watchdog_sweep` logs before
