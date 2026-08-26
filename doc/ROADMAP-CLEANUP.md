@@ -8,13 +8,12 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-26.** 21 of the 31 entries are struck; D1 and G2 are
-struck with a named remainder. What is open, in the order the evidence
-suggests: B2 and B3 (the syscall convention and its dispatcher, the largest
-remaining item by far), C2 (no argument parser), H1/H3/H4 (three long
-functions), H5 and D1's remainder (both close by porting `edos-web` to
-`Surface`), G3 (split `WORKING-NOTES.md`), and the three gates I2, I5.
-The numbers each entry quotes were remeasured on this date.
+**State as of 2026-08-26.** 23 of the 31 entries are struck; G2 is struck with
+a named remainder. What is open, in the order the evidence suggests: B2 and B3
+(the syscall convention and its dispatcher, the largest remaining item by far),
+C2 (no argument parser), H1/H3/H4 (three long functions), G3 (split
+`WORKING-NOTES.md`), and the three gates I2, I5. The numbers each entry quotes
+were remeasured on this date.
 
 ## How to use this file
 
@@ -273,11 +272,11 @@ took `buffer: &mut [u32]`, the `Widget` trait among them. That is what put 45
 functions on seven or more parameters and what kept
 `clippy::too_many_arguments` suppressed globally.
 
-D1 and D2 closed the toolkit half. 12 `buffer: &mut [u32]` signatures are left,
-9 of them in `edos-web`, which never adopted `Surface`; the global allow is off
-and 29 functions take seven or more parameters (H5).
+D1 and D2 closed the toolkit half and `edos-web` closed the rest. Four
+`buffer: &mut [u32]` signatures are left, three of them in `termbench`, which
+measures the raw blit on purpose, and one a closure in the same file.
 
-### D1. ~~One surface type, threaded through `Widget::draw`~~ (mostly done)
+### D1. ~~One surface type, threaded through `Widget::draw`~~ (done)
 
 `Surface` moved out of `text.rs` into `programs/edos_render/src/surface.rs` and
 became the receiver for every drawing operation: `rect`, `rect_outline`,
@@ -291,10 +290,12 @@ methods, so programs that had one now hold a `Surface`.
 `rect` intersects the clip, which the free function never saw, so a clipped
 widget no longer paints its ground outside the clip.
 
-**Still open:** 12 `buffer: &mut [u32]` parameters remain, all outside the
-toolkit: `edos-web/src/view.rs` (6) and `ui.rs` (2) rasterise their own boxes
-and rounded boxes, `termbench` owns a bench buffer, and `wintest` has a private
-`draw_hline`. Closing those is the rest of D2.
+`edos-web` then adopted it: `view::draw`, `ui::toolbar` and `ui::loading_view`
+take `&mut Surface`, and the four hand-rolled rasterisers (`fill`, `blit`,
+`fill_rounded`, `stroke_rounded`) became three that draw through it. The `top`
+those functions threaded by hand is the surface's clip, so a picture scrolled
+under the chrome is cut by the same arithmetic a widget is. `wintest` lost its
+private `draw_hline` and holds one surface for the whole frame.
 
 ### D2. ~~Rectangle rasterisers~~ (done)
 
@@ -510,26 +511,29 @@ anyway.
 `compositor.rs` and input in `input.rs`; the event loop should be a third module,
 not the binary's `main`.
 
-### H5. 29 functions take seven or more parameters, 15 of them 8 or more (S2, E3)
+### H5. ~~Long parameter lists~~ (done)
 
-Down from 45: D1 and D2 took the `edos_render` drawing functions with them, and
-I3 gave each of the 15 that trip clippy a per-site `allow` rather than a blanket
-one. Five of those judged a parameter object to be the same list one level out
-(`net/tcp.rs` `build`, `thread/thread.rs` `new_user`, `syscalls/mod.rs`
-`do_spawn`, `usb/mass_storage.rs` `bot_transfer`, `fs/efs/mod.rs`
-`rename_inner`), and that judgement stands.
+Measured as the count of `#[allow(clippy::too_many_arguments)]` in the tree,
+which is exact and is what the lint fires on now that both blanket allows are
+off: `git grep -c too_many_arguments -- '*.rs'`. 14 -> 10.
 
-What is left is one cluster, not 29 scattered functions:
-`programs/edos-web/src/view.rs` carries four of the fifteen, and its `blit`,
-`fill`, `fill_rounded` and `stroke_rounded` still take `buffer: &mut [u32],
-width, height, top` by hand because `edos-web` never adopted
-`edos_render::Surface`. (A fifth `allow` there was orphaned: it and a "Fill a
-rectangle" doc comment sat above `fn uniform`, which takes one argument and
-fills nothing. Both are gone.) Nine of the twelve remaining `buffer: &mut
-[u32]` signatures in the tree are in `edos-web` (6 in `view.rs`, 2 in `ui.rs`);
-the other three are `termbench`, which measures the raw blit on purpose, and one
-in `wintest`. Porting `edos-web` to `Surface` closes the parameter counts and
-the raw-buffer count together.
+The four that went were `edos-web`'s `blit`, `fill`, `fill_rounded` and
+`stroke_rounded`, which took `buffer: &mut [u32], width, height, top` by hand
+because that crate had never adopted `edos_render::Surface`. Porting it closed
+this and D1's remainder together: the surface carries the buffer, its
+dimensions and the clip, and a rounded box takes a `Rect` rather than four
+loose numbers.
+
+The ten that remain each carry a reason at the site. Five judged a parameter
+object to be the same list one level out (`net/tcp.rs` `build`,
+`thread/thread.rs` `new_user`, `syscalls/mod.rs` `do_spawn`,
+`usb/mass_storage.rs` `bot_transfer`, `fs/efs/mod.rs` `rename_inner`), and that
+judgement stands.
+
+An earlier revision of this entry quoted "45 -> 29 functions taking seven or
+more parameters" without recording the command behind it, and no scan
+reproduces those figures. The allow count above replaces them because it can be
+re-derived.
 
 ---
 
@@ -562,10 +566,10 @@ parameters; those are `view::Status`, `view::Nav` and `view::ListState`.
 
 Suppressed per site, with the reason at each: `Screen::blit_pixels_clipped`
 (nine numbers from four rectangles), `edos-wm::composite` (one frame's
-independent inputs), and the three hand-rolled rasterisers that carry their own
-buffer, dimensions and clip -- `graphics::render_text_wrapped` and `edos-web`'s
-`fill`/`fill_rounded`. Those three collapse to one parameter each the day they
-take a `Surface`, which is the rest of D2.
+independent inputs), and `graphics::render_text_wrapped`, which carries its own
+buffer, dimensions and clip. `edos-web`'s rasterisers were suppressed here too
+and are not any more; porting that crate to `Surface` removed the parameters
+rather than the warning.
 
 ### I4. ~~A dead-code sweep that is not a lint suppression~~ (done)
 

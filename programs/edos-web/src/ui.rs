@@ -653,14 +653,15 @@ impl Browser {
             return;
         };
 
+        let mut surface = Surface::new(buffer, width, height);
         match loading {
-            Some(loading) => loading_view(buffer, width, height, top, loading),
-            None => view::draw(layout, buffer, width, height, top, scroll),
+            Some(loading) => loading_view(&mut surface, top, loading),
+            None => view::draw(layout, &mut surface, top, scroll),
         }
 
         // The toolbar is drawn last so a page scrolled under it is covered.
-        toolbar(buffer, width, height, toolbar_h, top, &chrome);
-        address.draw(&mut Surface::new(buffer, width, height));
+        toolbar(&mut surface, toolbar_h, top, &chrome);
+        address.draw(&mut surface);
         self.window.swap_buffers();
     }
 }
@@ -715,22 +716,15 @@ fn notice_style() -> Style {
 
 /// The strip carrying the buttons and the address bar, and under it the row a
 /// failure takes for as long as it stands.
-fn toolbar(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    toolbar_h: u32,
-    bottom: u32,
-    chrome: &Chrome,
-) {
-    for y in 0..toolbar_h.min(height) {
+fn toolbar(surface: &mut Surface<'_>, toolbar_h: u32, bottom: u32, chrome: &Chrome) {
+    let width = surface.width;
+    for y in 0..toolbar_h.min(surface.height) {
         let color = if y + 1 == toolbar_h {
             Theme::DEFAULT.window_border_highlight.raw()
         } else {
             Theme::DEFAULT.title_inactive_top.raw()
         };
-        let row = y as usize * width as usize;
-        buffer[row..row + width as usize].fill(color);
+        surface.hline(0, y as i32, width, color);
     }
 
     let y = space(2) as i32;
@@ -751,7 +745,7 @@ fn toolbar(
         // The icon is centred in a slot the size of the address bar's height,
         // so the hit test is the slot and the drawing cannot disagree with it.
         let inset = (CONTROL_HEIGHT - icons::SIZE as u32) / 2;
-        Surface::new(buffer, width, height).icon(
+        surface.icon(
             button_x(index) + inset as i32,
             y + inset as i32,
             mask,
@@ -760,22 +754,24 @@ fn toolbar(
     }
 
     if let Some(status) = &chrome.status {
-        Surface::new(buffer, width, height).rect(
+        let notice_h = bottom.saturating_sub(toolbar_h);
+        surface.rect(
             0,
             toolbar_h as i32,
             width,
-            bottom.saturating_sub(toolbar_h),
+            notice_h,
             Theme::DEFAULT.title_inactive_bottom.raw(),
         );
-        let mut surface = Surface::new(buffer, width, height);
-        surface.clip = Some((0, toolbar_h as i32, width as i32, bottom as i32));
+        let outer_clip = surface.clip;
+        surface.clip_to(0, toolbar_h as i32, width, notice_h);
         text::draw(
-            &mut surface,
+            surface,
             PAGE_PAD as i32,
             (toolbar_h + space(1)) as i32,
             status,
             notice_style(),
         );
+        surface.clip = outer_clip;
     }
 }
 
@@ -784,7 +780,8 @@ fn toolbar(
 /// It replaces the page rather than covering part of it: the reader asked for
 /// somewhere else, and a browser that leaves the old page up through a ten
 /// second fetch is one that looks like it ignored the click.
-fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: &Loading) {
+fn loading_view(surface: &mut Surface<'_>, top: u32, loading: &Loading) {
+    let (width, height) = (surface.width, surface.height);
     let elapsed = loading.started.elapsed();
     let middle = top as i32 + (height.saturating_sub(top) / 2) as i32;
 
@@ -799,18 +796,17 @@ fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: 
     let track_y = middle;
     let track_h = space(1).max(2);
 
-    let mut surface = Surface::new(buffer, width, height);
     let heading = "Loading";
     let heading_x = ((width - text::width(heading, title).min(width)) / 2) as i32;
     text::draw(
-        &mut surface,
+        surface,
         heading_x,
         track_y - (text::line_height(title) + space(3)) as i32,
         heading,
         title,
     );
 
-    Surface::new(buffer, width, height).rect(
+    surface.rect(
         track_x,
         track_y,
         track_w,
@@ -825,7 +821,7 @@ fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: 
     let span = track_w - band;
     let step = (elapsed.as_millis() as u32 / 4) % (span * 2).max(1);
     let offset = if step < span { step } else { span * 2 - step };
-    Surface::new(buffer, width, height).rect(
+    surface.rect(
         track_x + offset as i32,
         track_y,
         band,
@@ -833,7 +829,6 @@ fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: 
         Theme::DEFAULT.title_accent.raw(),
     );
 
-    let mut surface = Surface::new(buffer, width, height);
     let lines = [
         elide(&loading.current, track_w, caption),
         format!(
@@ -847,7 +842,7 @@ fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: 
         let y = track_y
             + (track_h + space(2)) as i32
             + index as i32 * text::line_height(caption) as i32;
-        text::draw(&mut surface, x, y, line, caption);
+        text::draw(surface, x, y, line, caption);
     }
 }
 

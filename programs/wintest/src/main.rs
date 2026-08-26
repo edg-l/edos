@@ -398,22 +398,20 @@ fn main() {
         let w = window.width;
         let h = window.height;
         if let Some(buf) = window.buffer_mut() {
+            let mut surface = Surface::new(buf, w, h);
             // Draw all managed widgets
-            widgets.draw_all(&mut Surface::new(buf, w, h));
+            widgets.draw_all(&mut surface);
 
             // Draw dynamic labels for slider values
             let value_x = CONTENT_X + SLIDER_ROW_W as i32 + GROUP_GAP as i32;
             let vol_text = format!("{}%", volume);
-            Label::new(value_x, row_text_y(ROW_VOLUME), &vol_text)
-                .draw(&mut Surface::new(buf, w, h));
+            Label::new(value_x, row_text_y(ROW_VOLUME), &vol_text).draw(&mut surface);
 
             let bright_text = format!("{}%", brightness);
-            Label::new(value_x, row_text_y(ROW_BRIGHTNESS), &bright_text)
-                .draw(&mut Surface::new(buf, w, h));
+            Label::new(value_x, row_text_y(ROW_BRIGHTNESS), &bright_text).draw(&mut surface);
 
             let speed_text = format!("{}%", speed);
-            Label::new(value_x, row_text_y(ROW_SPEED), &speed_text)
-                .draw(&mut Surface::new(buf, w, h));
+            Label::new(value_x, row_text_y(ROW_SPEED), &speed_text).draw(&mut surface);
 
             // Draw status message
             Label::with_color(
@@ -422,28 +420,14 @@ fn main() {
                 &status_message,
                 text_color,
             )
-            .draw(&mut Surface::new(buf, w, h));
+            .draw(&mut surface);
 
             // Draw separator lines
             let rule = edos_render::widgets::colors::INPUT_BORDER;
-            let rule_x = CONTENT_X as u32;
-            draw_hline(
-                buf,
-                w,
-                rule_x,
-                row_rule_y(ROW_BUTTONS) as u32,
-                CONTENT_W,
-                rule,
-            );
-            draw_hline(buf, w, rule_x, row_rule_y(ROW_CHK2) as u32, CONTENT_W, rule);
-            draw_hline(
-                buf,
-                w,
-                rule_x,
-                row_rule_y(ROW_SPEED) as u32,
-                CONTENT_W,
-                rule,
-            );
+            let rule_x = CONTENT_X;
+            for row in [ROW_BUTTONS, ROW_CHK2, ROW_SPEED] {
+                surface.hline(rule_x, row_rule_y(row), CONTENT_W, rule);
+            }
 
             // Draw footer with keyboard hints
             // A legend the reader cannot read is decoration. This one earns
@@ -455,20 +439,10 @@ fn main() {
                 "Tab: focus | Enter: submit | Arrows: adjust slider",
                 hint_color,
             )
-            .draw(&mut Surface::new(buf, w, h));
+            .draw(&mut surface);
         }
 
         window.swap_buffers();
         std::thread::sleep(Duration::from_millis(16));
-    }
-}
-
-/// Draw a horizontal line in the buffer.
-fn draw_hline(buffer: &mut [u32], buffer_width: u32, x: u32, y: u32, width: u32, color: u32) {
-    for px in x..(x + width).min(buffer_width) {
-        let idx = (y * buffer_width + px) as usize;
-        if idx < buffer.len() {
-            buffer[idx] = color;
-        }
     }
 }

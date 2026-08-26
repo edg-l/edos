@@ -10877,3 +10877,43 @@ before anyone starts: 477 hand-written errno assignments across nine files,
 beside `table.rs`. It is a project, not a sitting, and the roadmap's
 smallest-first order (`sync.rs` at 6 assignments, then `shm.rs` at 18) is the
 way in.
+
+## `edos-web` draws through `edos_render::Surface`
+
+The browser was the last crate rasterising by hand. `view.rs` and `ui.rs`
+threaded `(buffer, width, height, top)` through nine signatures, with `top`
+standing in for a clip: every one of `fill`, `blit`, `fill_rounded` and
+`stroke_rounded` re-tested `py < top || py >= height` per pixel. That is what a
+`Surface` clip already is, so `view::draw` sets `clip_to(0, top, width,
+view_h)` once and the four rasterisers became `surface.rect`, `surface.blit`,
+and two helpers taking a `Rect`.
+
+Two things fall out that are worth knowing before touching this again:
+
+- A function that borrows the surface for part of a frame must put the clip
+  back. `view::draw` and `ui::toolbar` save `surface.clip`, narrow it, and
+  restore it, because the caller draws the address bar into the same surface
+  afterwards and would otherwise inherit the page's clip.
+- `Surface::rect` clamps the far edges in `i64` and bounds writes by
+  `pixels.len() / width`, which the hand-rolled `fill` did not. Nothing in the
+  browser relied on the old behaviour, but the difference is real for a rect
+  that starts left of or above the surface.
+
+Verified in a guest on `/share/web/welcome.html`, which is the fixture that
+exercises all of it: rounded fills and strokes (the pill, the ring, the 50%
+dot), table and left-edge borders, `<hr>` rules, an SVG and a raster image, and
+the scrollbar. A picture scrolled halfway under the toolbar is cut at the
+chrome line with nothing bleeding over it, which is the clip the old `blit`
+open-coded.
+
+Counts this moved, against the table in "The cleanup run's closing
+measurements" above:
+
+```
+buffer: &mut [u32] signatures        12 -> 4    all four in termbench, on purpose
+#[allow(clippy::too_many_arguments)] 14 -> 10   git grep -c, exact
+```
+
+The closing table's "functions with 7+ parameters 45 -> 29" has no recorded
+command behind it and no scan reproduces it; the allow count above is the
+replacement, because `git grep -c too_many_arguments -- '*.rs'` can be re-run.

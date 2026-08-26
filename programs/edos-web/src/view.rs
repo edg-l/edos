@@ -15,6 +15,7 @@ use edos_render::metrics::space;
 use edos_render::surface::Surface;
 use edos_render::text::{self, Style, fit_prefix};
 use edos_render::theme::Theme;
+use edos_render::widgets::Rect;
 
 use crate::css::{self, Align, Sides};
 use crate::doc::{Block, BlockKind, Document, Node, Picture, Run};
@@ -1348,13 +1349,14 @@ fn tag_style(run: &Run, base: Style) -> Style {
     style
 }
 
-/// Draw the page into `buffer`, clipped to the viewport, scrolled by `scroll`.
+/// Draw the page into `surface`, clipped to the viewport, scrolled by `scroll`.
 ///
 /// `top` is where the page area begins, below whatever chrome the caller drew.
-pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u32, scroll: u32) {
+pub fn draw(layout: &Layout, surface: &mut Surface<'_>, top: u32, scroll: u32) {
+    let (width, height) = (surface.width, surface.height);
     let view_h = height.saturating_sub(top);
-    let mut surface = Surface::new(buffer, width, height);
-    surface.clip = Some((0, top as i32, width as i32, height as i32));
+    let outer_clip = surface.clip;
+    surface.clip_to(0, top as i32, width, view_h);
     let rule_color = Theme::DEFAULT.window_border_highlight.raw();
 
     for decor in &layout.decor {
@@ -1364,18 +1366,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         }
         let (w, h) = (decor.width, decor.height);
         if let Some(color) = decor.background {
-            fill_rounded(
-                surface.pixels,
-                width,
-                height,
-                top,
-                decor.x,
-                y,
-                w,
-                h,
-                decor.radius,
-                color,
-            );
+            fill_rounded(surface, Rect::new(decor.x, y, w, h), decor.radius, color);
         }
         // Borders sit inside the box, so a background and a border of the same
         // colour are one shape rather than two.
@@ -1386,14 +1377,8 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         // one shape to stroke, which is what a rounded box is written with.
         if decor.radius > 0 && border.top.px > 0 && uniform(border) {
             stroke_rounded(
-                surface.pixels,
-                width,
-                height,
-                top,
-                decor.x,
-                y,
-                w,
-                h,
+                surface,
+                Rect::new(decor.x, y, w, h),
                 decor.radius,
                 border.top.px,
                 border.top.color,
@@ -1420,7 +1405,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         ];
         for (x, y, w, h, color) in sides {
             if w > 0 && h > 0 {
-                fill(surface.pixels, width, height, top, x, y, w, h, color);
+                surface.rect(x, y, w, h, color);
             }
         }
     }
@@ -1432,17 +1417,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
         }
         match &line.kind {
             LineKind::Rule { x, width: rule_w } if !line.hidden => {
-                fill(
-                    surface.pixels,
-                    width,
-                    height,
-                    top,
-                    *x,
-                    y + line.height as i32 / 2,
-                    *rule_w,
-                    1,
-                    rule_color,
-                );
+                surface.rect(*x, y + line.height as i32 / 2, *rule_w, 1, rule_color);
                 continue;
             }
             LineKind::Image {
@@ -1450,17 +1425,7 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                 width: image_w,
             } if !line.hidden => {
                 let x = line.items.first().map_or(PAGE_PAD as i32, |item| item.x);
-                blit(
-                    surface.pixels,
-                    width,
-                    height,
-                    top,
-                    x,
-                    y,
-                    pixels,
-                    *image_w,
-                    line.height,
-                );
+                surface.blit(x, y, *image_w, line.height, pixels);
                 continue;
             }
             // A hidden rule or picture holds its place and draws nothing; the
@@ -1496,20 +1461,10 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
                 let highlight = joined(
                     next.is_some_and(|n| n.background == item.background && n.shift == item.shift),
                 );
-                fill(
-                    surface.pixels,
-                    width,
-                    height,
-                    top,
-                    item.x,
-                    text_top,
-                    highlight,
-                    own,
-                    color,
-                );
+                surface.rect(item.x, text_top, highlight, own, color);
             }
             text::draw_tracked(
-                &mut surface,
+                surface,
                 item.x,
                 text_top,
                 &item.text,
@@ -1539,44 +1494,23 @@ pub fn draw(layout: &Layout, buffer: &mut [u32], width: u32, height: u32, top: u
             ];
             for (drawn, rule_y) in rules {
                 if drawn {
-                    fill(
-                        surface.pixels,
-                        width,
-                        height,
-                        top,
-                        item.x,
-                        rule_y,
-                        span,
-                        1,
-                        item.style.color,
-                    );
+                    surface.rect(item.x, rule_y, span, 1, item.style.color);
                 }
             }
         }
     }
 
-    draw_scrollbar(buffer, width, height, top, view_h, layout.height, scroll);
+    draw_scrollbar(surface, top, view_h, layout.height, scroll);
+    surface.clip = outer_clip;
 }
 
 /// The thumb, drawn only when there is something to scroll.
-fn draw_scrollbar(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    top: u32,
-    view_h: u32,
-    content_h: u32,
-    scroll: u32,
-) {
+fn draw_scrollbar(surface: &mut Surface<'_>, top: u32, view_h: u32, content_h: u32, scroll: u32) {
     if content_h <= view_h || view_h == 0 {
         return;
     }
-    let track_x = width.saturating_sub(SCROLLBAR_W) as i32;
-    fill(
-        buffer,
-        width,
-        height,
-        top,
+    let track_x = surface.width.saturating_sub(SCROLLBAR_W) as i32;
+    surface.rect(
         track_x,
         top as i32,
         SCROLLBAR_W,
@@ -1587,47 +1521,13 @@ fn draw_scrollbar(
     let span = content_h.saturating_sub(view_h).max(1);
     let offset =
         (scroll.min(span) as u64 * view_h.saturating_sub(thumb_h) as u64 / span as u64) as u32;
-    fill(
-        buffer,
-        width,
-        height,
-        top,
+    surface.rect(
         track_x,
         (top + offset) as i32,
         SCROLLBAR_W,
         thumb_h,
         Theme::DEFAULT.slider_thumb.raw(),
     );
-}
-
-/// Copy an image's pixels into the buffer, clipped to the page area: a picture
-/// scrolled under the chrome is cut at `top`, not drawn over it.
-#[allow(clippy::too_many_arguments)]
-fn blit(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    top: u32,
-    x: i32,
-    y: i32,
-    pixels: &[u32],
-    image_w: u32,
-    image_h: u32,
-) {
-    for row in 0..image_h as i32 {
-        let py = y + row;
-        if py < top as i32 || py >= height as i32 {
-            continue;
-        }
-        let src = row as usize * image_w as usize;
-        for col in 0..image_w as i32 {
-            let px = x + col;
-            if px < 0 || px >= width as i32 {
-                continue;
-            }
-            buffer[py as usize * width as usize + px as usize] = pixels[src + col as usize];
-        }
-    }
 }
 
 /// Whether all four borders are the same width and colour, and so are one
@@ -1661,119 +1561,49 @@ fn corner_inset(row: i32, h: u32, radius: u32) -> u32 {
 }
 
 /// Fill a rectangle whose corners are rounded to `radius`.
-// Carries the destination buffer, its dimensions and the top clip as loose
-// arguments because it rasterises straight into pixels; four of them collapse
-// into one parameter the day it takes a `Surface`.
-#[allow(clippy::too_many_arguments)]
-fn fill_rounded(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    top: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    radius: u32,
-    color: u32,
-) {
+fn fill_rounded(surface: &mut Surface<'_>, rect: Rect, radius: u32, color: u32) {
     if radius == 0 {
-        fill(buffer, width, height, top, x, y, w, h, color);
+        surface.fill(rect, color);
         return;
     }
-    for row in 0..h as i32 {
-        let inset = corner_inset(row, h, radius);
-        let span = w.saturating_sub(inset * 2);
+    for row in 0..rect.height as i32 {
+        let inset = corner_inset(row, rect.height, radius);
+        let span = rect.width.saturating_sub(inset * 2);
         if span > 0 {
-            fill(
-                buffer,
-                width,
-                height,
-                top,
-                x + inset as i32,
-                y + row,
-                span,
-                1,
-                color,
-            );
+            surface.rect(rect.x + inset as i32, rect.y + row, span, 1, color);
         }
     }
 }
 
 /// Draw a rounded rectangle's outline, `thickness` pixels thick and inside the
 /// box, the way a CSS border sits inside the border box.
-#[allow(clippy::too_many_arguments)]
-fn stroke_rounded(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    top: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    radius: u32,
-    thickness: u32,
-    color: u32,
-) {
-    let inner_h = h.saturating_sub(thickness * 2);
+fn stroke_rounded(surface: &mut Surface<'_>, rect: Rect, radius: u32, thickness: u32, color: u32) {
+    let inner_h = rect.height.saturating_sub(thickness * 2);
     let inner_radius = radius.saturating_sub(thickness);
-    for row in 0..h as i32 {
-        let outer = corner_inset(row, h, radius);
-        let left = x + outer as i32;
-        let span = w.saturating_sub(outer * 2);
+    for row in 0..rect.height as i32 {
+        let outer = corner_inset(row, rect.height, radius);
+        let left = rect.x + outer as i32;
+        let span = rect.width.saturating_sub(outer * 2);
         if span == 0 {
             continue;
         }
         let inner_row = row - thickness as i32;
         if inner_row < 0 || inner_row >= inner_h as i32 {
             // A row through the top or bottom edge is solid across.
-            fill(buffer, width, height, top, left, y + row, span, 1, color);
+            surface.rect(left, rect.y + row, span, 1, color);
             continue;
         }
         // Elsewhere the row is two segments, one down each side, with the
         // inner shape's own corner deciding where each of them ends.
         let inner = corner_inset(inner_row, inner_h, inner_radius) + thickness;
         let side = inner.saturating_sub(outer).max(1);
-        fill(buffer, width, height, top, left, y + row, side, 1, color);
-        fill(
-            buffer,
-            width,
-            height,
-            top,
-            x + w.saturating_sub(inner) as i32,
-            y + row,
+        surface.rect(left, rect.y + row, side, 1, color);
+        surface.rect(
+            rect.x + rect.width.saturating_sub(inner) as i32,
+            rect.y + row,
             side,
             1,
             color,
         );
-    }
-}
-
-// Same hand-rolled surface as `fill_rounded` above.
-#[allow(clippy::too_many_arguments)]
-fn fill(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    top: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    color: u32,
-) {
-    for row in 0..h as i32 {
-        let py = y + row;
-        if py < top as i32 || py >= height as i32 {
-            continue;
-        }
-        for col in 0..w as i32 {
-            let px = x + col;
-            if px < 0 || px >= width as i32 {
-                continue;
-            }
-            buffer[py as usize * width as usize + px as usize] = color;
-        }
     }
 }
