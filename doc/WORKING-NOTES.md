@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-25
+# Working notes, sessions of 2026-08-08 to 2026-08-26
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the

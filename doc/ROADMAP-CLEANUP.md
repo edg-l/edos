@@ -232,7 +232,7 @@ Seven programs hand-roll the same short-flag loop (`gzip`, `ln`, `sort`, `tee`,
 duplication so much as inconsistency:
 
 - 29 of ~110 CLI programs accept `--help`
-- 4 honour `--` as end of options
+- 5 honour `--` as end of options
 - 9 accept `-` as stdin
 
 **Fix.** `edos_lib::args`: a small parser over short clusters, long options,
@@ -444,10 +444,11 @@ attempts to copy `size` bytes from user space address `src`"). The house style
 is `kernel/src/syscalls/io.rs:71`, where the comment on `STREAM_STACK_BUF`
 carries a measurement table and says why the constant is small on purpose.
 
-### G3. `doc/WORKING-NOTES.md` is 10,838 lines and `CLAUDE.md` says read it first (S2, E2)
+### G3. `doc/WORKING-NOTES.md` is 10,959 lines and `CLAUDE.md` says read it first (S2, E2)
 
-247 sections, 9 marked FIXED or DONE, covering 18 days. `doc/bugs/` holds 23
-post-mortems and has a `README.md` stating the format.
+250 sections, 9 marked FIXED or DONE, covering 19 days. `doc/bugs/` holds 24
+post-mortems and has a `README.md` stating the format. The line count only ever
+grows while this is open, so remeasure it rather than quoting this one.
 
 A handoff document nobody can read is not a handoff. Split it: the current state
 and the open traps stay in `WORKING-NOTES.md` and it stays short; each closed
@@ -499,7 +500,7 @@ Elf64 offsets live in a private `elf64` module instead of forty consts inside
 the function body, and the magic numbers that were bare (`8` for
 `R_X86_64_RELATIVE`, `9` for `SHT_REL`, `14` for `SHT_INIT_ARRAY`) are named.
 
-### H3. `sys_read` / `sys_write`, 353 and 328 lines (S2, E2)
+### H3. `sys_read` / `sys_write`, 402 and 374 lines (S2, E2)
 
 `kernel/src/syscalls/io.rs:668` and `:242`. One function per descriptor kind
 behind a match, rather than a match with a 300-line body. B2 touches these
