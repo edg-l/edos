@@ -154,22 +154,18 @@ impl GridLayout {
         }
     }
 
-    /// Set the padding around the grid content.
     pub fn set_padding(&mut self, padding: Insets) {
         self.padding = padding;
     }
 
-    /// Get the current padding.
     pub fn padding(&self) -> Insets {
         self.padding
     }
 
-    /// Set the spacing between rows.
     pub fn set_row_spacing(&mut self, spacing: u32) {
         self.row_spacing = spacing;
     }
 
-    /// Set the spacing between columns.
     pub fn set_col_spacing(&mut self, spacing: u32) {
         self.col_spacing = spacing;
     }
@@ -180,27 +176,22 @@ impl GridLayout {
         self.col_spacing = spacing;
     }
 
-    /// Set the bounds for the layout.
     pub fn set_bounds(&mut self, bounds: Rect) {
         self.bounds = bounds;
     }
 
-    /// Get the current bounds.
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
 
-    /// Get the number of columns.
     pub fn num_columns(&self) -> u32 {
         self.columns.len() as u32
     }
 
-    /// Get the number of rows.
     pub fn num_rows(&self) -> u32 {
         self.rows.len() as u32
     }
 
-    /// Clear all cells from the grid.
     pub fn clear(&mut self) {
         self.cells.clear();
     }

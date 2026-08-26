@@ -33,17 +33,14 @@ impl Label {
         }
     }
 
-    /// Set the label text.
     pub fn set_text(&mut self, text: &str) {
         self.text = text.to_string();
     }
 
-    /// Get the label text.
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    /// Set the text color.
     pub fn set_color(&mut self, color: u32) {
         self.color = color;
     }

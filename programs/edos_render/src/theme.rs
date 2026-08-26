@@ -211,6 +211,28 @@ impl Theme {
         editor_selection: Color::from_rgb(0x18, 0x32, 0x4F),
         editor_change: Color::from_rgb(0xE6, 0xB4, 0x50), // = title_accent
     };
+
+    /// The 16 colours SGR 30-37, 40-47, 90-97 and 100-107 name, in that order:
+    /// eight normal then eight bright. Indexed by the ANSI colour number, so
+    /// the order is fixed by the escape sequence and not by taste.
+    pub const ANSI: [Color; 16] = [
+        Color::from_rgb(0x0A, 0x0E, 0x14), // black
+        Color::from_rgb(0xF0, 0x71, 0x78), // red
+        Color::from_rgb(0xAA, 0xD9, 0x4C), // green
+        Color::from_rgb(0xE6, 0xB4, 0x50), // yellow
+        Color::from_rgb(0x59, 0xC2, 0xFF), // blue
+        Color::from_rgb(0xD2, 0xA6, 0xFF), // magenta
+        Color::from_rgb(0x95, 0xE6, 0xCB), // cyan
+        Color::from_rgb(0xBF, 0xBD, 0xB6), // white
+        Color::from_rgb(0x56, 0x5B, 0x66), // bright black
+        Color::from_rgb(0xFF, 0x6B, 0x6B), // bright red
+        Color::from_rgb(0xC2, 0xE7, 0x8C), // bright green
+        Color::from_rgb(0xFF, 0xB4, 0x54), // bright yellow
+        Color::from_rgb(0x73, 0xD0, 0xFF), // bright blue
+        Color::from_rgb(0xDF, 0xBF, 0xFF), // bright magenta
+        Color::from_rgb(0xB8, 0xE4, 0xC9), // bright cyan
+        Color::from_rgb(0xFF, 0xFF, 0xFF), // bright white
+    ];
 }
 
 /// Linear interpolation between two colors. `t=0` gives `a`, `t=255` gives `b`.

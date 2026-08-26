@@ -295,12 +295,11 @@ additionally clamped against the rows the slice really holds, and each row is
 one `fill` on a subslice. The per-pixel test is gone because the clamp is the
 bounds check.
 
-### D6. The ANSI palette is 16 literals in the terminal widget (S3, E1)
+### D6. ~~The ANSI palette is 16 literals in the terminal widget~~ (done)
 
-`programs/edos_render/src/widgets/terminal.rs` carries 16 `0xFF......`
-constants. `CLAUDE.md` says colours come from `theme::Theme::DEFAULT`. An ANSI
-palette is a legitimately different thing from chrome colours, so give it a name
-in `theme.rs` (`Theme::ANSI`) rather than leaving it inline.
+`Theme::ANSI` in `programs/edos_render/src/theme.rs` is a `[Color; 16]` indexed
+by the ANSI colour number, and the terminal's SGR handler reads it. No
+`0xFF......` literal is left in the widget.
 
 ---
 
@@ -397,23 +396,16 @@ other restarts. `Terminal` moved onto it too.
 process that produced the code. The kernel mostly honours this and reads well.
 Two pockets do not.
 
-### G2. Restate-the-signature doc comments in `edos_render` (S3, E2)
+### G2. ~~Restate-the-signature doc comments in `edos_render`~~ (mostly done)
 
-`programs/edos_render/src/widgets/layout/hbox.rs` has, consecutively: "Set the
-padding around the layout content.", "Get the current padding.", "Set the
-spacing between items.", "Get the current spacing.", "Set the bounds for the
-layout.", "Get the current bounds.", "Get the number of items in the layout.",
-"Check if the layout is empty.", "Clear all items from the layout."
+45 doc comments that said only what the signature said were deleted across ten
+widget and layout files, `linear.rs` and `grid.rs` included. The ones that state
+a constraint stayed (`set_uniform`, `cursor_byte`, `viewport_top`).
 
-None of them say anything the signature does not. `util/uaccess.rs` has the same
-voice ("This function attempts to copy `size` bytes from user space address
-`src`"). Compare `kernel/src/syscalls/io.rs:71`, where the comment on
-`STREAM_STACK_BUF` carries a measurement table and explains why the constant is
-small on purpose. That is the house style.
-
-**Fix.** Delete the ones that restate. Keep and expand the ones that state a
-constraint (`set_uniform_columns` in the same file is a good comment; it explains
-what breaks without it).
+Still open: `kernel/src/util/uaccess.rs` has the same voice ("This function
+attempts to copy `size` bytes from user space address `src`"). The house style
+is `kernel/src/syscalls/io.rs:71`, where the comment on `STREAM_STACK_BUF`
+carries a measurement table and says why the constant is small on purpose.
 
 ### G3. `doc/WORKING-NOTES.md` is 10,021 lines and `CLAUDE.md` says read it first (S2, E2)
 
@@ -425,20 +417,15 @@ and the open traps stay in `WORKING-NOTES.md` and it stays short; each closed
 investigation becomes a file in `doc/bugs/`, which is where the tree already
 says post-mortems go.
 
-### G4. Five `TODO` comments that are decisions, not notes (S3, E1)
+### G4. ~~Five `TODO` comments that are decisions, not notes~~ (done)
 
-```
-kernel/src/timer.rs        fall back to the PIT when there is no HPET
-kernel/src/apic/mod.rs     "maybe put behind a loc"
-kernel/src/main.rs         fstab
-kernel/src/thread/scheduler.rs  the 65k queue limit
-kernel/src/fs/mbr.rs       extended partitions
-```
-
-Low count, which is good. Each is either a real gap (move it to
-`engram-cli todo`, where `CLAUDE.md` says pending work lives) or something the
-code should simply say it does not support. `apic/mod.rs` is neither; resolve or
-delete it.
+All five resolved into statements of what the code does. `timer.rs` says the
+HPET is the only wall clock and the PIT is read once for calibration;
+`main.rs` says the mount set is compiled in and there is no fstab; `mbr.rs`
+says only the four primary entries are walked; `apic/mod.rs`'s "maybe put
+behind a loc" became the per-CPU rule the `&'static mut` does not carry. The
+scheduler's 65k-queue musing was deleted: the runqueues are intrusive lists and
+no such limit exists.
 
 ---
 

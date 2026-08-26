@@ -149,8 +149,9 @@ pub fn parse_mbr(device_id: u64) -> Result<Vec<Partition>, &'static str> {
         }
     }
 
-    // TODO: Handle extended partitions and logical drives
-    // For now, we only parse primary partitions
+    // Only the four primary entries. An extended partition is reported as a
+    // partition of its own and the logical drives chained inside it are not
+    // walked.
 
     Ok(partitions)
 }

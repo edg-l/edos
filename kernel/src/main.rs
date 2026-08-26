@@ -502,7 +502,8 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount procfs at {:?}: {err:?}", proc_dir);
     }
 
-    // TODO: add support for fstab someday.
+    // The mount set is compiled in: devfs, procfs and memfs at fixed points
+    // above the root chosen by `root=`. There is no fstab.
     log!("Mounted devfs + procfs, mounting memfs /tmp");
     let tmp_dir = root.join("tmp").normalize();
     let _ = fs::api::create_dir(&tmp_dir);

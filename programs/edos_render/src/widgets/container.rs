@@ -262,7 +262,6 @@ impl WidgetContainer {
         self.set_focused_id(Some(ids[pos]));
     }
 
-    /// Get the currently focused widget ID.
     pub fn focused(&self) -> Option<WidgetId> {
         self.focused
     }

@@ -49,12 +49,10 @@ impl Button {
         }
     }
 
-    /// Set the button label.
     pub fn set_label(&mut self, label: &str) {
         self.label = label.to_string();
     }
 
-    /// Get the button label.
     pub fn label(&self) -> &str {
         &self.label
     }

@@ -14,7 +14,9 @@ use crate::{
     println,
 };
 
-// TODO: Fallback to pit if HPET not found.
+// The HPET is the only wall clock. The PIT is read once, to calibrate the
+// APIC timer against, and never again; a machine without an HPET reports a
+// monotonic clock stuck at zero rather than falling back to it.
 
 pub struct TimerCalibration {
     pub ticks_per_microsecond: u64,

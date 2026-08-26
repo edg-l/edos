@@ -136,9 +136,6 @@ fn claim_idle_cpu() -> Option<usize> {
 
 pub fn init() {
     println!("Initializing scheduler");
-    // TODO: refactor queue, so it isnt limited to 65k? maybe iterate on the storage threads
-    // and use the queue as a priority queue, or that a threadid that is just a u32 or u16 and the queue is just of u16,
-    // this would need to add a different pid for user threads alongside thread id and a mapping.
     let lapic_id = unsafe { get_lapic().id() };
     let sched = Box::new(Scheduler::new(lapic_id));
 

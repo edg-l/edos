@@ -41,27 +41,22 @@ impl Checkbox {
         }
     }
 
-    /// Get the checked state.
     pub fn checked(&self) -> bool {
         self.checked
     }
 
-    /// Set the checked state.
     pub fn set_checked(&mut self, checked: bool) {
         self.checked = checked;
     }
 
-    /// Toggle the checked state.
     pub fn toggle(&mut self) {
         self.checked = !self.checked;
     }
 
-    /// Get the label.
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    /// Set the label.
     pub fn set_label(&mut self, label: &str) {
         self.label = label.to_string();
     }

@@ -92,7 +92,6 @@ impl Insets {
 
 /// Trait for widgets that can report their preferred size.
 pub trait Sizable {
-    /// Get the size hint for this widget.
     fn size_hint(&self) -> SizeHint;
 }
 

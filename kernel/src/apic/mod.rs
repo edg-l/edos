@@ -7,9 +7,14 @@ use x2apic::lapic::LocalApic;
 
 use crate::{timer::get_timer_calibration, util::per_cpu::get_percpu_data};
 
-// Get the lapic
+/// The calling CPU's own LAPIC.
+///
+/// The register block is per-CPU, so no other CPU can reach the one this
+/// returns and a lock would serialise nothing. What the `&'static mut` does
+/// not carry is the per-CPU rule: the reference names the LAPIC of the CPU the
+/// GS base was read on, so it stops being the caller's own the moment the
+/// thread can migrate. Use it inside the section that read it.
 pub fn get_lapic() -> &'static mut LocalApic {
-    // TODO: maybe put behind a loc
     unsafe { get_percpu_data().lapic.get().as_mut().unwrap() }
 }
 

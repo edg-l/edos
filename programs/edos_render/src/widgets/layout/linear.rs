@@ -143,12 +143,10 @@ impl LinearLayout {
         self.items.push(LayoutItem::spacer(weight));
     }
 
-    /// Set the padding around the layout content.
     pub fn set_padding(&mut self, padding: Insets) {
         self.padding = padding;
     }
 
-    /// Get the current padding.
     pub fn padding(&self) -> Insets {
         self.padding
     }
@@ -162,37 +160,30 @@ impl LinearLayout {
         self.uniform = uniform;
     }
 
-    /// Set the spacing between items.
     pub fn set_spacing(&mut self, spacing: u32) {
         self.spacing = spacing;
     }
 
-    /// Get the current spacing.
     pub fn spacing(&self) -> u32 {
         self.spacing
     }
 
-    /// Set the bounds for the layout.
     pub fn set_bounds(&mut self, bounds: Rect) {
         self.bounds = bounds;
     }
 
-    /// Get the current bounds.
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
 
-    /// Get the number of items in the layout.
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
-    /// Check if the layout is empty.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    /// Clear all items from the layout.
     pub fn clear(&mut self) {
         self.items.clear();
     }

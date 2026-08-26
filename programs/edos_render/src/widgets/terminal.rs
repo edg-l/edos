@@ -7,6 +7,7 @@ use edos_lib::clipboard::{self, Buffer};
 
 use super::{FocusState, Rect, Widget, WidgetEvent, char_width, text_height};
 use crate::text::Style;
+use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum EscState {
@@ -29,26 +30,6 @@ pub mod terminal_colors {
 /// over is split around it and the real gap is never smaller than this.
 pub const MIN_PADDING_X: u32 = 6;
 pub const MIN_PADDING_Y: u32 = 4;
-
-/// Standard 16 ANSI colors (Ayu Dark palette).
-const ANSI_COLORS: [u32; 16] = [
-    0xFF0A0E14, // 0: Black
-    0xFFF07178, // 1: Red
-    0xFFAAD94C, // 2: Green
-    0xFFE6B450, // 3: Yellow
-    0xFF59C2FF, // 4: Blue
-    0xFFD2A6FF, // 5: Magenta
-    0xFF95E6CB, // 6: Cyan
-    0xFFBFBDB6, // 7: White
-    0xFF565B66, // 8: Bright Black
-    0xFFFF6B6B, // 9: Bright Red
-    0xFFC2E78C, // 10: Bright Green
-    0xFFFFB454, // 11: Bright Yellow
-    0xFF73D0FF, // 12: Bright Blue
-    0xFFDFBFFF, // 13: Bright Magenta
-    0xFFB8E4C9, // 14: Bright Cyan
-    0xFFFFFFFF, // 15: Bright White
-];
 
 /// A single terminal cell with character and color attributes.
 #[derive(Clone, Copy)]
@@ -290,12 +271,10 @@ impl Terminal {
         )
     }
 
-    /// Get the number of columns.
     pub fn cols(&self) -> usize {
         self.cols
     }
 
-    /// Get the number of rows.
     pub fn rows(&self) -> usize {
         self.rows
     }
@@ -305,7 +284,6 @@ impl Terminal {
         (self.cursor_row, self.cursor_col)
     }
 
-    /// Set cursor position.
     pub fn set_cursor(&mut self, row: usize, col: usize) {
         self.cursor_row = row.min(self.rows.saturating_sub(1));
         self.cursor_col = col.min(self.cols.saturating_sub(1));
@@ -523,22 +501,22 @@ impl Terminal {
                         }
                         30..=37 => {
                             let idx = (p - 30) + if self.bold { 8 } else { 0 };
-                            self.current_fg = ANSI_COLORS[idx];
+                            self.current_fg = Theme::ANSI[idx].raw();
                         }
                         39 => {
                             self.current_fg = terminal_colors::FOREGROUND;
                         }
                         40..=47 => {
-                            self.current_bg = ANSI_COLORS[p - 40];
+                            self.current_bg = Theme::ANSI[p - 40].raw();
                         }
                         49 => {
                             self.current_bg = terminal_colors::BACKGROUND;
                         }
                         90..=97 => {
-                            self.current_fg = ANSI_COLORS[p - 90 + 8];
+                            self.current_fg = Theme::ANSI[p - 90 + 8].raw();
                         }
                         100..=107 => {
-                            self.current_bg = ANSI_COLORS[p - 100 + 8];
+                            self.current_bg = Theme::ANSI[p - 100 + 8].raw();
                         }
                         _ => {} // Unknown SGR param, ignore
                     }
@@ -710,12 +688,10 @@ impl Terminal {
         self.buffer.get(row).map(|v| v.as_slice())
     }
 
-    /// Set background color.
     pub fn set_background(&mut self, color: u32) {
         self.bg_color = color;
     }
 
-    /// Set foreground color.
     pub fn set_foreground(&mut self, color: u32) {
         self.fg_color = color;
     }

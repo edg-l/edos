@@ -52,27 +52,22 @@ impl Slider {
         }
     }
 
-    /// Get the current value.
     pub fn value(&self) -> i32 {
         self.value
     }
 
-    /// Set the value.
     pub fn set_value(&mut self, value: i32) {
         self.value = value.clamp(self.min, self.max);
     }
 
-    /// Get the minimum value.
     pub fn min(&self) -> i32 {
         self.min
     }
 
-    /// Get the maximum value.
     pub fn max(&self) -> i32 {
         self.max
     }
 
-    /// Set the range.
     pub fn set_range(&mut self, min: i32, max: i32) {
         self.min = min;
         self.max = max;

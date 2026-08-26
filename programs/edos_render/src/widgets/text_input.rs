@@ -57,12 +57,10 @@ impl TextInput {
         }
     }
 
-    /// Get the current text.
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    /// Set the text content.
     pub fn set_text(&mut self, text: &str) {
         self.text = text.to_string();
         self.cursor_pos = self.char_len();
@@ -89,12 +87,10 @@ impl TextInput {
         crate::text::char_at_width(&self.text, crate::text::Style::new(0), offset)
     }
 
-    /// Get the placeholder text.
     pub fn placeholder(&self) -> &str {
         &self.placeholder
     }
 
-    /// Set the placeholder text.
     pub fn set_placeholder(&mut self, placeholder: &str) {
         self.placeholder = placeholder.to_string();
     }
@@ -155,7 +151,6 @@ impl TextInput {
         self.cursor_pos = 0;
     }
 
-    /// Move cursor to end.
     fn move_end(&mut self) {
         self.cursor_pos = self.char_len();
     }

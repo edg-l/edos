@@ -10618,3 +10618,33 @@ screen edge, because `edos-vm`'s pointer is relative and drifts. It is covered
 anyway: every damage-driven repaint sets a clip inside the window, so
 `blit_region`'s source-origin realignment (`skip_x`/`skip_y`) runs on nearly
 every frame.
+
+## The ANSI palette, the layout doc comments, and the last five kernel TODOs
+
+`Theme::ANSI` is a `[Color; 16]` beside `Theme::DEFAULT`, indexed by the ANSI
+colour number: eight normal then eight bright, the order SGR 30-37 / 90-97 fix.
+It is separate from `DEFAULT`'s named chrome fields on purpose. Chrome colours
+are chosen; these are addressed, and a caller reaching one has an escape-code
+parameter in hand, not a role. `terminal.rs`'s SGR handler is the only reader.
+
+The palette values are unchanged from the literals they replaced, so a screenshot
+before and after is identical. Guest-verified anyway, since a wrong index would
+still render *something*: `ls /` puts directory entries in Ayu blue
+(`0x59C2FF`, ANSI 4/12) and the shell prompt in green (`0xAAD94C`, ANSI 2), both
+of which came out right.
+
+45 doc comments across ten `edos_render` files said only what the signature said
+("Set the label text.", "Get the current padding.") and were deleted. Two rules
+decided which stayed: a comment that names a constraint stays and was kept
+(`set_uniform` says what breaks without it, `cursor_byte` says what the offset
+means at the end of the text), and a comment on a trait method is not special
+(`Sizable::size_hint` said nothing the name did not).
+
+The five kernel `TODO`s in §G4 are gone, four of them rewritten as statements of
+what the code does rather than what someone might do later. The fifth is worth
+recording: `scheduler.rs`'s "refactor queue, so it isnt limited to 65k" named a
+limit that no longer exists. The runqueues are intrusive lists keyed by thread
+pointer, with no 16-bit index anywhere, so the note described a data structure
+two rewrites ago. It was deleted rather than moved to a todo. A `TODO` that has
+outlived its subject reads exactly like one that has not; grep found the text,
+only reading the code found that it was fiction.
