@@ -10582,3 +10582,39 @@ are now live. Four more were added in userspace, each naming why. Three of those
 four -- `graphics::render_text_wrapped` and `edos-web`'s `fill`/`fill_rounded` --
 are rasterisers carrying their own buffer, dimensions and clip, so the lint is
 pointing at the same missing `Surface` the toolkit already has.
+
+## `edos_render::graphics` was mostly a library nobody linked
+
+`Texture`, `DrawRequest` and `Screen` each carried their own rasteriser:
+`fill_rect`, `fill`, `clear`, `draw_line`, `draw_circle`, `fill_circle`, six
+`blit_texture_*`, five `draw_texture_*`, `capture_region`, plus a complete
+bitmap-font text engine (`TextStyle`, `TextMetrics`, `render_character_at`,
+`render_string_at`, `render_text_wrapped`, `blend_text_pixel`). Grepping the
+whole tree for each name found no caller outside `graphics.rs` itself, and the
+dead-code lint could not say so because they are `pub` in a library crate. They
+are gone: 2329 lines to 1272.
+
+What survives is what the compositor actually uses. `Texture` is the 16x16
+cursor bitmap `edos-wm` builds; `DrawRequest` is the screen's Vec-backed back
+buffer; `Screen`'s primitives are `draw_rect`, `fill`, `set_pixel`,
+`draw_styled_text`, `draw_texture_transparent` and `blit_pixels_clipped`, and
+each is now a few lines over `Screen::surface()`.
+
+`Screen::surface()` is the accessor: it ensures the back buffer, reads the
+stride (screen width in both the Vec and the shadow case) and returns a
+`Surface` with `clip_bounds()` already installed. Two consequences worth
+knowing:
+
+- `Screen::fill` honours the clip now. It did not before, which contradicted
+  `set_clip`'s own documented contract ("confine every subsequent draw").
+- `Surface::blit_region` replaced the compositor's hand-rolled clipped blit and
+  kept its row-`copy_from_slice` shape. Do not turn it into the per-pixel loop
+  `Surface::blit` used to be: it runs on every damaged rectangle of every
+  frame. `Surface::blit` is now a call to it, so the widgets got the memcpy for
+  free.
+
+The one path a headless drag cannot reach is a window clipped by the *left*
+screen edge, because `edos-vm`'s pointer is relative and drifts. It is covered
+anyway: every damage-driven repaint sets a clip inside the window, so
+`blit_region`'s source-origin realignment (`skip_x`/`skip_y`) runs on nearly
+every frame.

@@ -1,9 +1,7 @@
 use std::{fs::File, os::edos::io::FileExt};
 
-// Re-export noto-sans-mono-bitmap types for user programs
+use crate::surface::{Pixmap, Surface};
 use edos_lib::sys::{SYS_MMAP, is_err, syscall5};
-pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
-use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 use std::fmt;
 
 /// Graphics operation error type
@@ -648,314 +646,10 @@ impl From<Color> for u32 {
     }
 }
 
-/// Rectangle structure for specifying regions
-#[derive(Debug, Clone, Copy)]
-pub struct Rect {
-    pub x: u64,
-    pub y: u64,
-    pub width: u64,
-    pub height: u64,
-}
-
-impl Rect {
-    #[inline]
-    pub const fn new(x: u64, y: u64, width: u64, height: u64) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-}
-
-/// Text styling configuration
-#[derive(Debug, Clone, Copy)]
-pub struct TextStyle {
-    pub font_weight: FontWeight,
-    pub font_size: RasterHeight,
-    pub foreground: Color,
-    pub background: Option<Color>,
-}
-
-impl TextStyle {
-    /// Create a new text style with default settings
-    #[inline]
-    pub const fn new(foreground: Color) -> Self {
-        Self {
-            font_weight: noto_sans_mono_bitmap::FontWeight::Regular,
-            font_size: noto_sans_mono_bitmap::RasterHeight::Size24,
-            foreground,
-            background: None,
-        }
-    }
-
-    /// Set the font weight
-    pub const fn with_weight(mut self, weight: FontWeight) -> Self {
-        self.font_weight = weight;
-        self
-    }
-
-    /// Set the font size
-    pub const fn with_size(mut self, size: RasterHeight) -> Self {
-        self.font_size = size;
-        self
-    }
-
-    /// Set the background color (for opaque text rendering)
-    pub const fn with_background(mut self, background: Color) -> Self {
-        self.background = Some(background);
-        self
-    }
-}
-
-impl Default for TextStyle {
-    #[inline]
-    fn default() -> Self {
-        Self::new(Color::WHITE)
-    }
-}
-
-/// Text rendering metrics and character information
-#[derive(Debug, Clone, Copy)]
-pub struct TextMetrics {
-    pub char_width: u64,
-    pub char_height: u64,
-    pub line_height: u64,
-    pub baseline: u64,
-}
-
-impl TextMetrics {
-    /// Get text metrics for a specific font size
-    pub fn for_size(size: RasterHeight) -> Self {
-        let char_width = get_raster_width(noto_sans_mono_bitmap::FontWeight::Regular, size) as u64;
-        let char_height = size as u64;
-        let line_height = char_height + 2; // Add small spacing between lines
-        let baseline = (char_height * 3) / 4; // Approximate baseline position
-
-        Self {
-            char_width,
-            char_height,
-            line_height,
-            baseline,
-        }
-    }
-
-    /// Calculate the bounds of a text string
-    pub fn measure_string(&self, text: &str) -> Rect {
-        let lines: Vec<&str> = text.lines().collect();
-        let max_width = lines
-            .iter()
-            .map(|line| line.chars().count() as u64 * self.char_width)
-            .max()
-            .unwrap_or(0);
-        let height = lines.len() as u64 * self.line_height;
-
-        Rect::new(0, 0, max_width, height)
-    }
-}
-
-/// Render a character at the specified position using bitmap font
-#[inline]
-fn render_character_at(
-    pixels: &mut [u32],
-    buffer_width: u64,
-    buffer_height: u64,
-    x: u64,
-    y: u64,
-    character: char,
-    style: &TextStyle,
-) -> Result<()> {
-    // Get the rasterized character data
-    let raster = match get_raster(character, style.font_weight, style.font_size) {
-        Some(raster) => raster,
-        None => return Err(GraphicsError::UnsupportedCharacter),
-    };
-
-    let char_width = raster.width() as u64;
-    let char_height = raster.height() as u64;
-
-    // Check bounds
-    if x + char_width > buffer_width || y + char_height > buffer_height {
-        return Err(GraphicsError::OutOfBounds);
-    }
-
-    let raster_data = raster.raster();
-
-    // Render each pixel of the character
-    for char_y in 0..char_height {
-        for char_x in 0..char_width {
-            let pixel_x = x + char_x;
-            let pixel_y = y + char_y;
-            let buffer_index = (pixel_y * buffer_width + pixel_x) as usize;
-
-            if buffer_index >= pixels.len() {
-                continue;
-            }
-
-            // Get the intensity from the bitmap (0-255)
-            let intensity = raster_data[char_y as usize][char_x as usize];
-
-            if intensity == 0 {
-                // Transparent pixel - only render background if specified
-                if let Some(bg_color) = style.background {
-                    pixels[buffer_index] = bg_color.raw();
-                }
-            } else {
-                // Blend foreground based on intensity
-                let current_color = Color::from(pixels[buffer_index]);
-                let blended_color =
-                    blend_text_pixel(current_color, style.foreground, intensity, style.background);
-                pixels[buffer_index] = blended_color.raw();
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Blend a text pixel with the background based on bitmap intensity
-#[inline]
-fn blend_text_pixel(
-    background: Color,
-    foreground: Color,
-    intensity: u8,
-    explicit_bg: Option<Color>,
-) -> Color {
-    // Use explicit background if provided, otherwise use current pixel
-    let bg_color = explicit_bg.unwrap_or(background);
-
-    if intensity == 255 {
-        // Fully opaque - use foreground color
-        foreground
-    } else if intensity == 0 {
-        // Fully transparent - use background color
-        bg_color
-    } else {
-        // Blend based on intensity
-        let alpha = intensity as u32;
-        let inv_alpha = 255 - alpha;
-
-        let r = (foreground.red() as u32 * alpha + bg_color.red() as u32 * inv_alpha) / 255;
-        let g = (foreground.green() as u32 * alpha + bg_color.green() as u32 * inv_alpha) / 255;
-        let b = (foreground.blue() as u32 * alpha + bg_color.blue() as u32 * inv_alpha) / 255;
-
-        Color::from_rgb(r as u8, g as u8, b as u8)
-    }
-}
-
-/// Render a string at the specified position
-fn render_string_at(
-    pixels: &mut [u32],
-    buffer_width: u64,
-    buffer_height: u64,
-    x: u64,
-    y: u64,
-    text: &str,
-    style: &TextStyle,
-) -> Result<()> {
-    let metrics = TextMetrics::for_size(style.font_size);
-    let mut current_x = x;
-    let mut current_y = y;
-
-    for character in text.chars() {
-        if character == '\n' {
-            // Move to next line
-            current_x = x;
-            current_y += metrics.line_height;
-            continue;
-        }
-
-        if character == '\r' {
-            // Carriage return - just reset x position
-            current_x = x;
-            continue;
-        }
-
-        // Check if character would fit horizontally
-        if current_x + metrics.char_width > buffer_width {
-            // Word wrapping - move to next line
-            current_x = x;
-            current_y += metrics.line_height;
-        }
-
-        // Check if we're still within vertical bounds
-        if current_y + metrics.char_height > buffer_height {
-            break; // Stop rendering if we're out of vertical space
-        }
-
-        // Render the character
-        render_character_at(
-            pixels,
-            buffer_width,
-            buffer_height,
-            current_x,
-            current_y,
-            character,
-            style,
-        )?;
-
-        // Move to next character position
-        current_x += metrics.char_width;
-    }
-
-    Ok(())
-}
-
 /// Render multi-line text with word wrapping
 // Carries the destination buffer, its dimensions and the pen position as
 // loose arguments because it rasterises straight into pixels; four of them
 // collapse into one parameter the day it takes a `Surface`.
-#[allow(clippy::too_many_arguments)]
-fn render_text_wrapped(
-    pixels: &mut [u32],
-    buffer_width: u64,
-    buffer_height: u64,
-    x: u64,
-    y: u64,
-    text: &str,
-    style: &TextStyle,
-    wrap_width: u64,
-) -> Result<()> {
-    let metrics = TextMetrics::for_size(style.font_size);
-    let mut current_x = x;
-    let mut current_y = y;
-
-    let words: Vec<&str> = text.split_whitespace().collect();
-
-    for word in words {
-        let word_width = word.chars().count() as u64 * metrics.char_width;
-
-        // Check if word fits on current line
-        if current_x != x && current_x + word_width > x + wrap_width {
-            // Move to next line
-            current_x = x;
-            current_y += metrics.line_height;
-        }
-
-        // Check vertical bounds
-        if current_y + metrics.char_height > buffer_height {
-            break;
-        }
-
-        // Render the word
-        render_string_at(
-            pixels,
-            buffer_width,
-            buffer_height,
-            current_x,
-            current_y,
-            word,
-            style,
-        )?;
-
-        // Move past the word and add space
-        current_x += word_width + metrics.char_width; // Add space width
-    }
-
-    Ok(())
-}
-
 /// Texture struct for pixel buffer operations
 #[derive(Debug, Clone)]
 pub struct Texture {
@@ -984,27 +678,6 @@ impl Texture {
         })
     }
 
-    /// Create a texture from existing pixel buffer
-    pub fn from_buffer(width: u64, height: u64, pixels: Vec<u32>) -> Result<Self> {
-        if width == 0 || height == 0 {
-            return Err(GraphicsError::InvalidInput);
-        }
-
-        let expected_len = width
-            .checked_mul(height)
-            .ok_or(GraphicsError::InvalidInput)? as usize;
-
-        if pixels.len() != expected_len {
-            return Err(GraphicsError::InvalidInput);
-        }
-
-        Ok(Self {
-            pixels,
-            width,
-            height,
-        })
-    }
-
     /// Set a pixel at the given coordinates
     pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
         if x >= self.width || y >= self.height {
@@ -1018,180 +691,6 @@ impl Texture {
 
         self.pixels[index] = color.raw();
         Ok(())
-    }
-
-    /// Get a pixel color at the given coordinates
-    pub fn get_pixel(&self, x: u64, y: u64) -> Result<Color> {
-        if x >= self.width || y >= self.height {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        let index = (y * self.width + x) as usize;
-        if index >= self.pixels.len() {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        Ok(Color::from(self.pixels[index]))
-    }
-
-    /// Fill a rectangular area with a color
-    pub fn fill_rect(
-        &mut self,
-        x: u64,
-        y: u64,
-        width: u64,
-        height: u64,
-        color: Color,
-    ) -> Result<()> {
-        if x >= self.width || y >= self.height {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        let end_x = (x + width).min(self.width);
-        let end_y = (y + height).min(self.height);
-
-        for py in y..end_y {
-            for px in x..end_x {
-                self.set_pixel(px, py, color)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Fill the entire texture with a color
-    pub fn fill(&mut self, color: Color) {
-        let raw_color = color.raw();
-        self.pixels.fill(raw_color);
-    }
-
-    /// Clear the texture (set all pixels to black)
-    pub fn clear(&mut self) {
-        self.fill(Color::BLACK);
-    }
-
-    /// Render a character at the specified position
-    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
-        render_character_at(
-            &mut self.pixels,
-            self.width,
-            self.height,
-            x,
-            y,
-            character,
-            style,
-        )
-    }
-
-    /// Render text at the specified position
-    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
-        render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
-    }
-
-    /// Render a line of interface text, in the shell's outline face.
-    ///
-    /// Separate from `draw_text`, which is the bitmap path this is gradually
-    /// replacing: chrome goes through here, and anything that is genuinely a
-    /// character grid stays where it is.
-    pub fn draw_styled_text(&mut self, x: i32, y: i32, text: &str, style: crate::text::Style) {
-        let (width, height) = (self.width as u32, self.height as u32);
-        let mut surface = crate::surface::Surface::new(&mut self.pixels, width, height);
-        crate::text::draw(&mut surface, x, y, text, style);
-    }
-
-    /// Width of a string in the shell's outline face.
-    pub fn styled_text_width(text: &str, style: crate::text::Style) -> u32 {
-        crate::text::width(text, style)
-    }
-
-    /// Render text with word wrapping within the specified width
-    pub fn draw_text_wrapped(
-        &mut self,
-        x: u64,
-        y: u64,
-        text: &str,
-        style: &TextStyle,
-        wrap_width: u64,
-    ) -> Result<()> {
-        render_text_wrapped(
-            &mut self.pixels,
-            self.width,
-            self.height,
-            x,
-            y,
-            text,
-            style,
-            wrap_width,
-        )
-    }
-
-    /// Get text metrics for a given style
-    pub fn text_metrics(style: &TextStyle) -> TextMetrics {
-        TextMetrics::for_size(style.font_size)
-    }
-
-    /// Measure the bounds of text without rendering it
-    pub fn measure_text(text: &str, style: &TextStyle) -> Rect {
-        let metrics = TextMetrics::for_size(style.font_size);
-        metrics.measure_string(text)
-    }
-}
-
-/// Blending modes for texture operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlendMode {
-    /// Replace destination with source
-    Replace,
-    /// Blend based on RGB intensity (lighter colors have more influence)
-    IntensityBlend,
-    /// Add source to destination
-    Add,
-    /// Multiply source with destination
-    Multiply,
-}
-
-impl BlendMode {
-    /// Apply blending between source and destination colors
-    pub fn blend(self, src: Color, dst: Color) -> Color {
-        match self {
-            BlendMode::Replace => src,
-            BlendMode::IntensityBlend => {
-                // Calculate intensity (brightness) of source color
-                let src_intensity = (src.red() as u32 + src.green() as u32 + src.blue() as u32) / 3;
-                let dst_intensity = (dst.red() as u32 + dst.green() as u32 + dst.blue() as u32) / 3;
-
-                // Blend factor based on relative intensities (0-255)
-                let total_intensity = src_intensity + dst_intensity;
-                match (src_intensity * 255).checked_div(total_intensity) {
-                    None => Color::from_rgb(0, 0, 0),
-                    Some(src_factor) => {
-                        let dst_factor = 255 - src_factor;
-
-                        let r =
-                            (src.red() as u32 * src_factor + dst.red() as u32 * dst_factor) / 255;
-                        let g = (src.green() as u32 * src_factor + dst.green() as u32 * dst_factor)
-                            / 255;
-                        let b =
-                            (src.blue() as u32 * src_factor + dst.blue() as u32 * dst_factor) / 255;
-
-                        Color::from_rgb(r as u8, g as u8, b as u8)
-                    }
-                }
-            }
-            BlendMode::Add => {
-                let r = (src.red() as u32 + dst.red() as u32).min(255);
-                let g = (src.green() as u32 + dst.green() as u32).min(255);
-                let b = (src.blue() as u32 + dst.blue() as u32).min(255);
-
-                Color::from_rgb(r as u8, g as u8, b as u8)
-            }
-            BlendMode::Multiply => {
-                let r = (src.red() as u32 * dst.red() as u32) / 255;
-                let g = (src.green() as u32 * dst.green() as u32) / 255;
-                let b = (src.blue() as u32 * dst.blue() as u32) / 255;
-
-                Color::from_rgb(r as u8, g as u8, b as u8)
-            }
-        }
     }
 }
 
@@ -1234,13 +733,6 @@ impl DrawRequest {
         })
     }
 
-    /// Set the position where this DrawRequest will be drawn
-    pub fn with_position(mut self, x: u64, y: u64) -> Self {
-        self.x = x;
-        self.y = y;
-        self
-    }
-
     /// Set a pixel at the given coordinates within this DrawRequest
     #[inline(always)]
     pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
@@ -1255,329 +747,6 @@ impl DrawRequest {
 
         self.pixels[index] = color.raw();
         Ok(())
-    }
-
-    /// Get a pixel color at the given coordinates
-    pub fn get_pixel(&self, x: u64, y: u64) -> Result<Color> {
-        if x >= self.width || y >= self.height {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        let index = (y * self.width + x) as usize;
-        if index >= self.pixels.len() {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        Ok(Color::from(self.pixels[index]))
-    }
-
-    /// Fill a rectangular area with a color
-    pub fn fill_rect(
-        &mut self,
-        x: u64,
-        y: u64,
-        width: u64,
-        height: u64,
-        color: Color,
-    ) -> Result<()> {
-        if x >= self.width || y >= self.height {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        let end_x = (x + width).min(self.width);
-        let end_y = (y + height).min(self.height);
-
-        for py in y..end_y {
-            for px in x..end_x {
-                self.set_pixel(px, py, color)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Fill the entire DrawRequest with a color
-    pub fn fill(&mut self, color: Color) {
-        let raw_color = color.raw();
-        self.pixels.fill(raw_color);
-    }
-
-    /// Clear the DrawRequest (set all pixels to black)
-    pub fn clear(&mut self) {
-        self.fill(Color::BLACK);
-    }
-
-    /// Draw a line from (x1, y1) to (x2, y2) using Bresenham's algorithm
-    pub fn draw_line(&mut self, x1: u64, y1: u64, x2: u64, y2: u64, color: Color) -> Result<()> {
-        let mut x1 = x1 as i64;
-        let mut y1 = y1 as i64;
-        let x2 = x2 as i64;
-        let y2 = y2 as i64;
-
-        let dx = (x2 - x1).abs();
-        let dy = (y2 - y1).abs();
-        let sx = if x1 < x2 { 1 } else { -1 };
-        let sy = if y1 < y2 { 1 } else { -1 };
-        let mut err = dx - dy;
-
-        loop {
-            if x1 >= 0 && y1 >= 0 && x1 < self.width as i64 && y1 < self.height as i64 {
-                self.set_pixel(x1 as u64, y1 as u64, color)?;
-            }
-
-            if x1 == x2 && y1 == y2 {
-                break;
-            }
-
-            let e2 = 2 * err;
-            if e2 > -dy {
-                err -= dy;
-                x1 += sx;
-            }
-            if e2 < dx {
-                err += dx;
-                y1 += sy;
-            }
-        }
-        Ok(())
-    }
-
-    /// Draw a circle outline at (cx, cy) with given radius
-    pub fn draw_circle(&mut self, cx: u64, cy: u64, radius: u64, color: Color) -> Result<()> {
-        let cx = cx as i64;
-        let cy = cy as i64;
-        let radius = radius as i64;
-
-        let mut x = radius;
-        let mut y = 0i64;
-        let mut err = 0i64;
-
-        while x >= y {
-            // Plot 8 octants
-            let points = [
-                (cx + x, cy + y),
-                (cx + y, cy + x),
-                (cx - y, cy + x),
-                (cx - x, cy + y),
-                (cx - x, cy - y),
-                (cx - y, cy - x),
-                (cx + y, cy - x),
-                (cx + x, cy - y),
-            ];
-
-            for (px, py) in points.iter() {
-                if *px >= 0 && *py >= 0 && (*px as u64) < self.width && (*py as u64) < self.height {
-                    self.set_pixel(*px as u64, *py as u64, color)?;
-                }
-            }
-
-            if err <= 0 {
-                y += 1;
-                err += 2 * y + 1;
-            }
-            if err > 0 {
-                x -= 1;
-                err -= 2 * x + 1;
-            }
-        }
-        Ok(())
-    }
-
-    /// Fill a circle at (cx, cy) with given radius
-    pub fn fill_circle(&mut self, cx: u64, cy: u64, radius: u64, color: Color) -> Result<()> {
-        let cx = cx as i64;
-        let cy = cy as i64;
-        let radius = radius as i64;
-
-        for y in (cy - radius)..=(cy + radius) {
-            if y < 0 || y >= self.height as i64 {
-                continue;
-            }
-
-            let dy = y - cy;
-            let dy_squared = dy * dy;
-            let under_sqrt = radius * radius - dy_squared;
-
-            if under_sqrt < 0 {
-                continue;
-            }
-
-            let dx = (under_sqrt as u64).isqrt() as i64;
-
-            let start = (cx - dx).max(0) as u64;
-            let end = (cx + dx).min(self.width as i64 - 1) as u64;
-
-            if start <= end {
-                self.fill_rect(start, y as u64, end - start + 1, 1, color)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Blit a texture to this DrawRequest at the specified position
-    pub fn blit_texture(&mut self, texture: &Texture, dst_x: u64, dst_y: u64) -> Result<()> {
-        self.blit_texture_with_blend(texture, None, dst_x, dst_y, BlendMode::Replace)
-    }
-
-    /// Blit a texture region to this DrawRequest at the specified position
-    pub fn blit_texture_region(
-        &mut self,
-        texture: &Texture,
-        src_rect: Rect,
-        dst_x: u64,
-        dst_y: u64,
-    ) -> Result<()> {
-        self.blit_texture_with_blend(texture, Some(src_rect), dst_x, dst_y, BlendMode::Replace)
-    }
-
-    /// Blit a texture with intensity blending
-    pub fn blit_texture_intensity(
-        &mut self,
-        texture: &Texture,
-        dst_x: u64,
-        dst_y: u64,
-    ) -> Result<()> {
-        self.blit_texture_with_blend(texture, None, dst_x, dst_y, BlendMode::IntensityBlend)
-    }
-
-    /// Blit a texture with custom blending mode
-    pub fn blit_texture_with_blend(
-        &mut self,
-        texture: &Texture,
-        src_rect: Option<Rect>,
-        dst_x: u64,
-        dst_y: u64,
-        blend_mode: BlendMode,
-    ) -> Result<()> {
-        // Determine source region
-        let (src_x, src_y, src_width, src_height) = match src_rect {
-            Some(rect) => (rect.x, rect.y, rect.width, rect.height),
-            None => (0, 0, texture.width, texture.height),
-        };
-
-        // Bounds check source region
-        if src_x >= texture.width || src_y >= texture.height {
-            return Err(GraphicsError::OutOfBounds);
-        }
-
-        let src_end_x = (src_x + src_width).min(texture.width);
-        let src_end_y = (src_y + src_height).min(texture.height);
-
-        // Copy pixels with blending
-        for src_py in src_y..src_end_y {
-            for src_px in src_x..src_end_x {
-                let dst_px = dst_x + (src_px - src_x);
-                let dst_py = dst_y + (src_py - src_y);
-
-                // Skip if destination is out of bounds
-                if dst_px >= self.width || dst_py >= self.height {
-                    continue;
-                }
-
-                let src_color = texture.get_pixel(src_px, src_py)?;
-
-                match blend_mode {
-                    BlendMode::Replace => {
-                        self.set_pixel(dst_px, dst_py, src_color)?;
-                    }
-                    _ => {
-                        let dst_color = self.get_pixel(dst_px, dst_py)?;
-                        let blended = blend_mode.blend(src_color, dst_color);
-                        self.set_pixel(dst_px, dst_py, blended)?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Blit raw pixel data to this DrawRequest
-    pub fn blit_pixels(
-        &mut self,
-        pixels: &[u32],
-        width: u64,
-        height: u64,
-        dst_x: u64,
-        dst_y: u64,
-    ) -> Result<()> {
-        let texture = Texture::from_buffer(width, height, pixels.to_vec())?;
-        self.blit_texture(&texture, dst_x, dst_y)
-    }
-
-    /// Blit with scaling (simple nearest neighbor)
-    pub fn blit_texture_scaled(
-        &mut self,
-        texture: &Texture,
-        src_rect: Option<Rect>,
-        dst_rect: Rect,
-    ) -> Result<()> {
-        let (src_x, src_y, src_width, src_height) = match src_rect {
-            Some(rect) => (rect.x, rect.y, rect.width, rect.height),
-            None => (0, 0, texture.width, texture.height),
-        };
-
-        if src_width == 0 || src_height == 0 || dst_rect.width == 0 || dst_rect.height == 0 {
-            return Ok(());
-        }
-
-        // Simple nearest neighbor scaling
-        for dst_py in 0..dst_rect.height {
-            for dst_px in 0..dst_rect.width {
-                let src_px = src_x + (dst_px * src_width / dst_rect.width);
-                let src_py = src_y + (dst_py * src_height / dst_rect.height);
-
-                if src_px < texture.width && src_py < texture.height {
-                    let color = texture.get_pixel(src_px, src_py)?;
-                    let final_x = dst_rect.x + dst_px;
-                    let final_y = dst_rect.y + dst_py;
-
-                    if final_x < self.width && final_y < self.height {
-                        self.set_pixel(final_x, final_y, color)?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Render a character at the specified position
-    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
-        render_character_at(
-            &mut self.pixels,
-            self.width,
-            self.height,
-            x,
-            y,
-            character,
-            style,
-        )
-    }
-
-    /// Render text at the specified position
-    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
-        render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
-    }
-
-    /// Render text with word wrapping within the specified width
-    pub fn draw_text_wrapped(
-        &mut self,
-        x: u64,
-        y: u64,
-        text: &str,
-        style: &TextStyle,
-        wrap_width: u64,
-    ) -> Result<()> {
-        render_text_wrapped(
-            &mut self.pixels,
-            self.width,
-            self.height,
-            x,
-            y,
-            text,
-            style,
-            wrap_width,
-        )
     }
 }
 
@@ -1729,9 +898,9 @@ impl Screen {
     /// Ensure the back buffer is initialized (only used in non-VRAM mode).
     fn ensure_back_buffer(&mut self) -> Result<()> {
         if self.vram.is_none() && self.back_buffer.is_none() {
-            let mut buffer = DrawRequest::new(self.width() as u64, self.height() as u64)?;
-            buffer.clear();
-            self.back_buffer = Some(buffer);
+            // `DrawRequest::new` allocates zeroed pixels, so the buffer
+            // starts black without a separate clear.
+            self.back_buffer = Some(DrawRequest::new(self.width() as u64, self.height() as u64)?);
         }
         Ok(())
     }
@@ -1751,6 +920,22 @@ impl Screen {
         } else {
             None
         }
+    }
+
+    /// A [`Surface`] over the back buffer, already carrying the screen's clip.
+    ///
+    /// This is the only rasteriser a `Screen` has: the compositor and the
+    /// widgets fill rectangles, set text and blit through the same code, so a
+    /// clipped or off-screen draw behaves identically wherever it comes from.
+    /// `None` when there is no buffer to draw into.
+    pub fn surface(&mut self) -> Option<Surface<'_>> {
+        self.ensure_back_buffer().ok()?;
+        let height = self.info.height as u32;
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        let (pixels, stride) = self.pixels_mut()?;
+        let mut surface = Surface::new(pixels, stride as u32, height);
+        surface.clip = Some((cx0 as i32, cy0 as i32, cx1 as i32, cy1 as i32));
+        Some(surface)
     }
 
     /// Copy a finished region from the shadow into VRAM.
@@ -1804,15 +989,9 @@ impl Screen {
         text: &str,
         style: crate::text::Style,
     ) -> Result<()> {
-        self.ensure_back_buffer()?;
-        let height = self.info.height as u32;
-        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
-        let Some((pixels, stride)) = self.pixels_mut() else {
-            return Ok(());
-        };
-        let mut surface = crate::surface::Surface::new(pixels, stride as u32, height);
-        surface.clip = Some((cx0 as i32, cy0 as i32, cx1 as i32, cy1 as i32));
-        crate::text::draw(&mut surface, x, y, text, style);
+        if let Some(mut surface) = self.surface() {
+            crate::text::draw(&mut surface, x, y, text, style);
+        }
         Ok(())
     }
 
@@ -1825,23 +1004,9 @@ impl Screen {
         height: u64,
         color: Color,
     ) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
-
-        if let Some((pixels, stride)) = self.pixels_mut() {
-            let x0 = (x as usize).max(cx0);
-            let y0 = (y as usize).max(cy0);
-            let x1 = ((x + width) as usize).min(cx1);
-            let y1 = ((y + height) as usize).min(cy1);
-            if x1 <= x0 || y1 <= y0 {
-                return Ok(());
-            }
-            let raw = color.raw();
-            for py in y0..y1 {
-                let row_start = py * stride + x0;
-                pixels[row_start..row_start + (x1 - x0)].fill(raw);
-            }
+        let raw = color.raw();
+        if let Some(mut surface) = self.surface() {
+            surface.rect(x as i32, y as i32, width as u32, height as u32, raw);
             self.dirty = true;
         }
 
@@ -1850,22 +1015,8 @@ impl Screen {
 
     /// Fill the entire screen with a color
     pub fn fill(&mut self, color: Color) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        let screen_w = self.info.width;
-        let screen_h = self.info.height;
-
-        if let Some((pixels, stride)) = self.pixels_mut() {
-            let raw = color.raw();
-            for row in 0..screen_h {
-                for col in 0..screen_w {
-                    pixels[row * stride + col] = raw;
-                }
-            }
-            self.dirty = true;
-        }
-
-        Ok(())
+        let (w, h) = (self.info.width as u32, self.info.height as u32);
+        self.draw_rect(0, 0, w as u64, h as u64, color)
     }
 
     /// Clear the screen (fill with black)
@@ -2038,223 +1189,43 @@ impl Screen {
         self.framebuffer.track_pointer(enabled)
     }
 
-    /// Create a new DrawRequest that fits entirely on screen
-    pub fn create_draw_request(&self, width: u64, height: u64) -> Result<DrawRequest> {
-        if width > self.width() as u64 || height > self.height() as u64 {
-            return Err(GraphicsError::OutOfBounds);
-        }
-        DrawRequest::new(width, height)
-    }
-
-    /// Draw a texture directly to the screen at the specified position
-    pub fn draw_texture(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.blit_texture(texture, x, y)?;
-            self.dirty = true;
-        }
-
-        Ok(())
-    }
-
     /// Draw a texture with transparency (skip pixels with alpha=0).
     pub fn draw_texture_transparent(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
-
-        if let Some((dst_pixels, stride)) = self.pixels_mut() {
-            for src_y in 0..texture.height {
-                for src_x in 0..texture.width {
-                    let dst_x = x + src_x;
-                    let dst_y = y + src_y;
-
-                    if (dst_x as usize) < cx0
-                        || (dst_x as usize) >= cx1
-                        || (dst_y as usize) < cy0
-                        || (dst_y as usize) >= cy1
-                    {
-                        continue;
+        let (tw, th) = (texture.width as u32, texture.height as u32);
+        if let Some(mut surface) = self.surface() {
+            // A zero pixel is the transparent one, so this is per pixel
+            // rather than a row copy.
+            for row in 0..th {
+                for col in 0..tw {
+                    let pixel = texture.pixels[(row * tw + col) as usize];
+                    if pixel != 0 {
+                        surface.rect(x as i32 + col as i32, y as i32 + row as i32, 1, 1, pixel);
                     }
-
-                    let src_idx = (src_y * texture.width + src_x) as usize;
-                    let src_pixel = texture.pixels[src_idx];
-
-                    if src_pixel == 0 {
-                        continue;
-                    }
-
-                    let dst_idx = (dst_y as usize) * stride + (dst_x as usize);
-                    dst_pixels[dst_idx] = src_pixel;
                 }
             }
-
             self.dirty = true;
         }
 
-        Ok(())
-    }
-
-    /// Draw a texture region directly to the screen
-    pub fn draw_texture_region(
-        &mut self,
-        texture: &Texture,
-        src_rect: Rect,
-        x: u64,
-        y: u64,
-    ) -> Result<()> {
-        let mut draw_req = DrawRequest::new(src_rect.width, src_rect.height)?;
-        draw_req.blit_texture_region(texture, src_rect, 0, 0)?;
-        draw_req = draw_req.with_position(x, y);
-        self.framebuffer.draw(&draw_req)
-    }
-
-    /// Draw a texture with intensity blending directly to the screen
-    pub fn draw_texture_intensity(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
-        let mut draw_req = DrawRequest::new(texture.width, texture.height)?;
-        draw_req.blit_texture_intensity(texture, 0, 0)?;
-        draw_req = draw_req.with_position(x, y);
-        self.framebuffer.draw(&draw_req)
-    }
-
-    /// Draw a texture with scaling directly to the screen
-    pub fn draw_texture_scaled(&mut self, texture: &Texture, dst_rect: Rect) -> Result<()> {
-        let mut draw_req = DrawRequest::new(dst_rect.width, dst_rect.height)?;
-        draw_req.blit_texture_scaled(
-            texture,
-            None,
-            Rect::new(0, 0, dst_rect.width, dst_rect.height),
-        )?;
-        draw_req = draw_req.with_position(dst_rect.x, dst_rect.y);
-        self.framebuffer.draw(&draw_req)
-    }
-
-    /// Create a texture from the screen contents (screenshot)
-    pub fn capture_region(&self, _region: Rect) -> Result<Texture> {
-        // This would require a new syscall to read from framebuffer
-        // For now, return an error as this functionality isn't implemented
-        Err(GraphicsError::Unknown)
-    }
-
-    /// Draw text directly to the screen
-    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
-        let height = self.info.height as u64;
-        if let Some((pixels, stride)) = self.pixels_mut() {
-            render_string_at(pixels, stride as u64, height, x, y, text, style)?;
-            self.dirty = true;
-        }
-        Ok(())
-    }
-
-    /// Draw text with word wrapping directly to the screen
-    pub fn draw_text_wrapped(
-        &mut self,
-        x: u64,
-        y: u64,
-        text: &str,
-        style: &TextStyle,
-        wrap_width: u64,
-    ) -> Result<()> {
-        let height = self.info.height as u64;
-        if let Some((pixels, stride)) = self.pixels_mut() {
-            render_text_wrapped(pixels, stride as u64, height, x, y, text, style, wrap_width)?;
-            self.dirty = true;
-        }
-        Ok(())
-    }
-
-    /// Draw a single character directly to the screen
-    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
-        let height = self.info.height as u64;
-        if let Some((pixels, stride)) = self.pixels_mut() {
-            render_character_at(pixels, stride as u64, height, x, y, character, style)?;
-            self.dirty = true;
-        }
         Ok(())
     }
 
     /// Set a single pixel in the back buffer.
     pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
-        let screen_w = self.info.width as u64;
-        let screen_h = self.info.height as u64;
-
-        if x >= screen_w || y >= screen_h {
+        if x >= self.info.width as u64 || y >= self.info.height as u64 {
             return Err(GraphicsError::OutOfBounds);
         }
-
-        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
-        if (x as usize) < cx0 || (x as usize) >= cx1 || (y as usize) < cy0 || (y as usize) >= cy1 {
-            return Ok(());
-        }
-
-        if let Some((pixels, stride)) = self.pixels_mut() {
-            pixels[(y as usize) * stride + (x as usize)] = color.raw();
-            self.dirty = true;
-        }
-
-        Ok(())
-    }
-
-    /// Blit raw pixels directly to the back buffer without allocating intermediate structures.
-    /// This is an optimized path for compositing window contents.
-    pub fn blit_pixels_direct(
-        &mut self,
-        pixels: &[u32],
-        src_width: u64,
-        src_height: u64,
-        dst_x: u64,
-        dst_y: u64,
-    ) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        let screen_width = self.info.width as u64;
-        let screen_height = self.info.height as u64;
-
-        let end_x = (dst_x + src_width).min(screen_width);
-        let end_y = (dst_y + src_height).min(screen_height);
-
-        if dst_x >= screen_width || dst_y >= screen_height {
-            return Ok(());
-        }
-
-        if let Some((dst_pixels, stride)) = self.pixels_mut() {
-            for src_y in 0..src_height {
-                let screen_y = dst_y + src_y;
-                if screen_y >= end_y {
-                    break;
-                }
-
-                let src_row_start = (src_y * src_width) as usize;
-                let dst_row_start = (screen_y as usize) * stride + (dst_x as usize);
-                let copy_width = (end_x - dst_x) as usize;
-
-                if src_row_start + copy_width <= pixels.len()
-                    && dst_row_start + copy_width <= dst_pixels.len()
-                {
-                    dst_pixels[dst_row_start..dst_row_start + copy_width]
-                        .copy_from_slice(&pixels[src_row_start..src_row_start + copy_width]);
-                }
-            }
-
-            self.dirty = true;
-        }
-
-        Ok(())
+        self.draw_rect(x, y, 1, 1, color)
     }
 
     /// Blit a clipped region of raw pixels to the back buffer.
-    /// This is used for compositing windows that are partially off-screen.
     ///
-    /// - `pixels`: Source pixel buffer
-    /// - `src_width`, `src_height`: Full dimensions of the source buffer
-    /// - `src_x`, `src_y`: Offset into the source buffer to start copying from
-    /// - `dst_x`, `dst_y`: Destination position on screen
-    /// - `copy_w`, `copy_h`: Dimensions of the region to copy
-    // Source geometry, source offset, destination offset and copy extent are
-    // four independent rectangles' worth of numbers; naming a struct for each
-    // would move the same nine values one level out.
-    #[allow(clippy::too_many_arguments)]
+    /// - `pixels`, `src_width`, `src_height`: the source buffer and its full
+    ///   dimensions
+    /// - `src_x`, `src_y`: where in the source the copy starts
+    /// - `dst_x`, `dst_y`: where on screen it lands
+    /// - `copy_w`, `copy_h`: how much to copy, before clipping
+    #[allow(clippy::too_many_arguments)] // the compositor's own call shape: a
+    // source rectangle, a destination point and a size, each already a pair.
     pub fn blit_pixels_clipped(
         &mut self,
         pixels: &[u32],
@@ -2267,58 +1238,20 @@ impl Screen {
         copy_w: u64,
         copy_h: u64,
     ) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        let screen_width = self.info.width as u64;
-        let screen_height = self.info.height as u64;
-
-        if src_x >= src_width || src_y >= src_height {
-            return Ok(());
-        }
-        if dst_x >= screen_width || dst_y >= screen_height {
-            return Ok(());
-        }
-        if copy_w == 0 || copy_h == 0 {
-            return Ok(());
-        }
-
-        let actual_w = copy_w.min(src_width - src_x).min(screen_width - dst_x);
-        let actual_h = copy_h.min(src_height - src_y).min(screen_height - dst_y);
-
-        // Trim to the clip, moving the source origin by as much as the
-        // destination moved so the pixels stay aligned with where they land.
-        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
-        let skip_x = (cx0 as u64).saturating_sub(dst_x);
-        let skip_y = (cy0 as u64).saturating_sub(dst_y);
-        if skip_x >= actual_w || skip_y >= actual_h {
-            return Ok(());
-        }
-        let (src_x, src_y) = (src_x + skip_x, src_y + skip_y);
-        let (dst_x, dst_y) = (dst_x + skip_x, dst_y + skip_y);
-        let actual_w = (actual_w - skip_x).min((cx1 as u64).saturating_sub(dst_x));
-        let actual_h = (actual_h - skip_y).min((cy1 as u64).saturating_sub(dst_y));
-        if actual_w == 0 || actual_h == 0 {
-            return Ok(());
-        }
-
-        if let Some((dst_pixels, stride)) = self.pixels_mut() {
-            for row in 0..actual_h {
-                let src_row = src_y + row;
-                let dst_row = dst_y + row;
-
-                let src_start = (src_row * src_width + src_x) as usize;
-                let dst_start = (dst_row as usize) * stride + (dst_x as usize);
-                let width = actual_w as usize;
-
-                if src_start + width <= pixels.len() && dst_start + width <= dst_pixels.len() {
-                    dst_pixels[dst_start..dst_start + width]
-                        .copy_from_slice(&pixels[src_start..src_start + width]);
-                }
-            }
-
+        let src = Pixmap {
+            pixels,
+            width: src_width as u32,
+            height: src_height as u32,
+        };
+        if let Some(mut surface) = self.surface() {
+            surface.blit_region(
+                &src,
+                (src_x as u32, src_y as u32),
+                (dst_x as i32, dst_y as i32),
+                (copy_w as u32, copy_h as u32),
+            );
             self.dirty = true;
         }
-
         Ok(())
     }
 }

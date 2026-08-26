@@ -261,18 +261,25 @@ toolkit: `edos-web/src/view.rs` (6) and `ui.rs` (2) rasterise their own boxes
 and rounded boxes, `termbench` owns a bench buffer, and `wintest` has a private
 `draw_hline`. Closing those is the rest of D2.
 
-### D2. Rectangle rasterisers (S2, E2) -- partly done
+### D2. ~~Rectangle rasterisers~~ (done)
 
-The five in `edos_render` are one: `widgets::draw_rect` and `Canvas::fill` are
-`Surface::rect`. `Framebuffer::draw_rect` (`graphics.rs:128`),
-`Texture::fill_rect` (`graphics.rs:1034`) and `Screen::fill_rect`
-(`graphics.rs:1271`) still have their own, as do `edos-web`'s `fill`
-(`view.rs:1751`) and `fill_rounded` (`view.rs:1666`). Same for blitting: eight
-`blit_*` on `Screen`, one in `edos-web`, one in `imgview`.
+`Screen` has one rasteriser now: `Screen::surface()` hands out a
+`Surface` over the back buffer with the screen clip already applied, and
+`draw_rect`, `fill`, `set_pixel`, `draw_styled_text`,
+`draw_texture_transparent` and `blit_pixels_clipped` are all thin callers of
+it. `Surface::blit_region` is the one blitter -- a source rectangle, a
+destination point and a size, copied row by row -- and `Surface::blit` is a
+call to it with the whole source.
 
-`CLAUDE.md` says text goes through "one blitter". Rectangles and pixel blits
-should too. The three graphics types should become three ways of *obtaining* a
-`Surface`.
+`Framebuffer::draw_rect` is not a rasteriser: it posts a rectangle to the
+kernel through `/dev/fb` and never touches a pixel in this process, so it
+stays where it is.
+
+The rest of the item dissolved rather than being converted: `Texture`,
+`DrawRequest` and `Screen` carried a bitmap-font text engine and eighteen
+blit/fill/draw primitives that the whole tree never called. `graphics.rs` went
+from 2329 lines to 1272. What is left of `Texture` is the cursor bitmap
+edos-wm builds, and what is left of `DrawRequest` is the screen's back buffer.
 
 ### D3. ~~`draw_rect` bounds-checks per pixel after clamping~~ (done)
 

@@ -197,22 +197,76 @@ impl Surface<'_> {
     /// Draw `pixels`, a `w` x `h` opaque image, with its top-left at
     /// (`x`, `y`).
     pub fn blit(&mut self, x: i32, y: i32, w: u32, h: u32, pixels: &[u32]) {
+        let src = Pixmap {
+            pixels,
+            width: w,
+            height: h,
+        };
+        self.blit_region(&src, (0, 0), (x, y), (w, h));
+    }
+
+    /// Copy a `size` rectangle of `src`, taken from `from`, to `to`.
+    ///
+    /// The one pixel blitter: a whole image, a window's damaged region and a
+    /// partially off-screen window all come through here, so they clip alike.
+    /// Rows are copied whole rather than pixel by pixel, which is what the
+    /// compositor needs on every frame.
+    pub fn blit_region(
+        &mut self,
+        src: &Pixmap<'_>,
+        from: (u32, u32),
+        to: (i32, i32),
+        size: (u32, u32),
+    ) {
+        if self.width == 0 || src.width == 0 {
+            return;
+        }
+        // Rows either buffer really holds, which is what bounds the copy; a
+        // surface or pixmap claiming more than its slice carries is clamped
+        // here rather than caught per pixel.
+        let src_rows = (src.pixels.len() / src.width as usize) as i64;
+        let dst_rows = (self.pixels.len() / self.width as usize) as i64;
+        let (mut sx, mut sy) = (from.0 as i64, from.1 as i64);
+        let (mut dx, mut dy) = (to.0 as i64, to.1 as i64);
+        let mut w = (size.0 as i64).min(src.width as i64 - sx);
+        let mut h = (size.1 as i64).min(src_rows.min(src.height as i64) - sy);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
+        let (mut x0, mut y0) = (0i64, 0i64);
+        let (mut x1, mut y1) = (self.width as i64, (self.height as i64).min(dst_rows));
+        if let Some((cx0, cy0, cx1, cy1)) = self.clip {
+            x0 = x0.max(cx0 as i64);
+            y0 = y0.max(cy0 as i64);
+            x1 = x1.min(cx1 as i64);
+            y1 = y1.min(cy1 as i64);
+        }
+        // Move the source origin by as much as the destination moved, so the
+        // pixels stay aligned with where they land.
+        let (skip_x, skip_y) = ((x0 - dx).max(0), (y0 - dy).max(0));
+        sx += skip_x;
+        sy += skip_y;
+        dx += skip_x;
+        dy += skip_y;
+        w = (w - skip_x).min(x1 - dx);
+        h = (h - skip_y).min(y1 - dy);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
         for row in 0..h {
-            let py = y + row as i32;
-            if py < 0 || py >= self.height as i32 {
-                continue;
-            }
-            for col in 0..w {
-                let px = x + col as i32;
-                if px < 0 || px >= self.width as i32 {
-                    continue;
-                }
-                let src = (row * w + col) as usize;
-                let dst = (py as u32 * self.width + px as u32) as usize;
-                if let (Some(&value), Some(slot)) = (pixels.get(src), self.pixels.get_mut(dst)) {
-                    *slot = value;
-                }
-            }
+            let s = ((sy + row) * src.width as i64 + sx) as usize;
+            let d = ((dy + row) * self.width as i64 + dx) as usize;
+            self.pixels[d..d + w as usize].copy_from_slice(&src.pixels[s..s + w as usize]);
         }
     }
+}
+
+/// An off-surface rectangle of pixels: a texture, a window's own buffer, a
+/// decoded image.
+pub struct Pixmap<'a> {
+    pub pixels: &'a [u32],
+    pub width: u32,
+    pub height: u32,
 }
