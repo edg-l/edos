@@ -10891,9 +10891,13 @@ and two helpers taking a `Rect`.
 Two things fall out that are worth knowing before touching this again:
 
 - A function that borrows the surface for part of a frame must put the clip
-  back. `view::draw` and `ui::toolbar` save `surface.clip`, narrow it, and
-  restore it, because the caller draws the address bar into the same surface
-  afterwards and would otherwise inherit the page's clip.
+  back, because the caller draws the address bar into the same surface
+  afterwards and would otherwise inherit the page's clip. `Surface::clipped`
+  returns a `ClipGuard` that restores on drop, which is what `view::draw` and
+  `ui::toolbar` use; saving `surface.clip` into a local and assigning it back at
+  the end of the block is correct only while nothing in between can return
+  early, and a leaked clip blanks everything drawn after it rather than
+  failing.
 - `Surface::rect` clamps the far edges in `i64` and bounds writes by
   `pixels.len() / width`, which the hand-rolled `fill` did not. Nothing in the
   browser relied on the old behaviour, but the difference is real for a rect

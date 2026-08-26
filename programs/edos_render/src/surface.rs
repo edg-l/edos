@@ -61,9 +61,31 @@ impl<'a> Surface<'a> {
     }
 }
 
+impl<'a> Surface<'a> {
+    /// Restrict drawing to `(x, y, width, height)` for as long as the returned
+    /// guard lives, then put back whatever clip was in force before.
+    ///
+    /// Drawing goes through the guard, which derefs to the surface. This is the
+    /// way to clip a region and hand it to code that may return early: saving
+    /// [`Surface::clip`] by hand and restoring it at the end of the block is
+    /// correct only while nothing between the two can leave, and a leaked clip
+    /// silently blanks everything drawn after it.
+    pub fn clipped(&mut self, x: i32, y: i32, width: u32, height: u32) -> ClipGuard<'_, 'a> {
+        let saved = self.clip;
+        self.clip_to(x, y, width, height);
+        ClipGuard {
+            surface: self,
+            saved,
+        }
+    }
+}
+
 impl Surface<'_> {
     /// Restrict drawing to `(x, y, width, height)`, intersected with any clip
-    /// already in force.
+    /// already in force, until something else changes it.
+    ///
+    /// Prefer [`Surface::clipped`] where the restriction covers a block rather
+    /// than the rest of the surface's life.
     pub fn clip_to(&mut self, x: i32, y: i32, width: u32, height: u32) {
         let want = (
             x,
@@ -269,4 +291,33 @@ pub struct Pixmap<'a> {
     pub pixels: &'a [u32],
     pub width: u32,
     pub height: u32,
+}
+
+/// A clip in force for a block, restoring the previous one when dropped.
+///
+/// Derefs to the [`Surface`] it borrows, so a clipped region draws through the
+/// same calls an unclipped one does.
+pub struct ClipGuard<'s, 'a> {
+    surface: &'s mut Surface<'a>,
+    saved: Option<(i32, i32, i32, i32)>,
+}
+
+impl<'a> core::ops::Deref for ClipGuard<'_, 'a> {
+    type Target = Surface<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.surface
+    }
+}
+
+impl<'a> core::ops::DerefMut for ClipGuard<'_, 'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.surface
+    }
+}
+
+impl Drop for ClipGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.surface.clip = self.saved;
+    }
 }

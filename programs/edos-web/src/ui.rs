@@ -762,8 +762,7 @@ fn toolbar(surface: &mut Surface<'_>, toolbar_h: u32, bottom: u32, chrome: &Chro
             notice_h,
             Theme::DEFAULT.title_inactive_bottom.raw(),
         );
-        let outer_clip = surface.clip;
-        surface.clip_to(0, toolbar_h as i32, width, notice_h);
+        let surface = &mut surface.clipped(0, toolbar_h as i32, width, notice_h);
         text::draw(
             surface,
             PAGE_PAD as i32,
@@ -771,7 +770,6 @@ fn toolbar(surface: &mut Surface<'_>, toolbar_h: u32, bottom: u32, chrome: &Chro
             status,
             notice_style(),
         );
-        surface.clip = outer_clip;
     }
 }
 

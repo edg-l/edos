@@ -1355,8 +1355,7 @@ fn tag_style(run: &Run, base: Style) -> Style {
 pub fn draw(layout: &Layout, surface: &mut Surface<'_>, top: u32, scroll: u32) {
     let (width, height) = (surface.width, surface.height);
     let view_h = height.saturating_sub(top);
-    let outer_clip = surface.clip;
-    surface.clip_to(0, top as i32, width, view_h);
+    let surface = &mut surface.clipped(0, top as i32, width, view_h);
     let rule_color = Theme::DEFAULT.window_border_highlight.raw();
 
     for decor in &layout.decor {
@@ -1501,7 +1500,6 @@ pub fn draw(layout: &Layout, surface: &mut Surface<'_>, top: u32, scroll: u32) {
     }
 
     draw_scrollbar(surface, top, view_h, layout.height, scroll);
-    surface.clip = outer_clip;
 }
 
 /// The thumb, drawn only when there is something to scroll.
