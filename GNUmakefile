@@ -403,6 +403,13 @@ check: programs
 host-tests:
 	scripts/host-tests
 
+# What the kernel would call dead if the `dead_code` allows were gone. Takes
+# every allow away, builds each feature set, prints the warnings and restores
+# the tree. Judgement, not a gate: run it before a release.
+.PHONY: dead-code
+dead-code:
+	scripts/dead-code-sweep
+
 # $(1) = output ISO, $(2) = staging directory, $(3) = partition GUID the
 # cmdline's root= names. Only the GUID differs between the two ISOs this tree
 # builds, and substituting it here keeps limine.conf a single tracked file

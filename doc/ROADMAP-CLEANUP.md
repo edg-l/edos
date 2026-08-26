@@ -520,12 +520,14 @@ buffer, dimensions and clip -- `graphics::render_text_wrapped` and `edos-web`'s
 `fill`/`fill_rounded`. Those three collapse to one parameter each the day they
 take a `Surface`, which is the rest of D2.
 
-### I4. A dead-code sweep that is not a lint suppression (S2, E1)
+### I4. ~~A dead-code sweep that is not a lint suppression~~ (done)
 
-The E-section measurement is a shell one-liner plus four `cargo check` runs. Make
-it a `make dead-code` target: replace the allows with an inert `cfg_attr`, build
-each feature set, print the warnings, restore. Run it before a release rather
-than every commit.
+`make dead-code` (`scripts/dead-code-sweep`). It neutralises every `dead_code`
+allow in `kernel/src` with `#[cfg_attr(any(), ...)]`, checks the default build
+and every feature Cargo.toml declares, prints what the compiler then calls
+unused, and restores the tree from a copy taken before the first edit -- on a
+signal too, and without running git, so a dirty tree is safe. It reports the ten
+survivors E1 annotated and nothing else.
 
 ### I5. Deny `clippy::undocumented_unsafe_blocks` in the kernel (S2, E3)
 

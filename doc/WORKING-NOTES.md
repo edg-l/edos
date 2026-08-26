@@ -10730,3 +10730,22 @@ hooks a running AML interpreter calls in a loop.
 
 Verified by boot, not only by the gates: `make test AUDIODEV=none` is 58/58,
 which exercises ACPI table parsing, the uptime refactor and the boot log.
+
+## `make dead-code` is the sweep the E-section measurement was done by hand
+
+`scripts/dead-code-sweep` is ROADMAP-CLEANUP I4: it makes every
+`#[allow(dead_code)]` in `kernel/src` inert, checks the default build and every
+feature `kernel/Cargo.toml` declares, prints what the compiler then calls
+unused, and restores the tree. Two details that matter if it is ever changed:
+
+- The neutraliser is `#[cfg_attr(any(), allow(dead_code))]`, an attribute whose
+  condition is never true. It also rewrites the `cfg_attr(not(feature = ...))`
+  spelling, so a feature-gated item is reported against the feature sets that
+  actually build it rather than being invisible everywhere.
+- Restoration is from a copy taken before the first edit, run from an
+  `EXIT INT TERM` trap. It never runs git, because a sweep that recovered with
+  `git checkout` would eat uncommitted work on any tree but a clean one.
+
+It is not a commit gate. An item can be genuinely uncalled and still be the
+right thing to keep, which is why E1's ten survivors carry a written reason
+each; the target is for reading before a release.

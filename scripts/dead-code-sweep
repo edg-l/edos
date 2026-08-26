@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#
+# Report what the kernel would call dead if the `dead_code` allows were gone.
+#
+# An `#[allow(dead_code)]` is a claim that an item has to stay even though
+# nothing calls it. The claim is only checkable by taking the allow away, and
+# taking it away by hand across a tree is how a stale one survives for a year.
+# This neutralises every one of them at once -- `#[cfg_attr(any(), ...)]` is an
+# attribute whose condition is never true -- builds each feature set, prints
+# what the compiler then says is unused, and puts the tree back.
+#
+# It is a pre-release sweep, not a commit gate: the output needs judgement,
+# since an item can be genuinely unused today and still be the right thing to
+# keep. `doc/ROADMAP-CLEANUP.md` E1 is one pass of this read by hand.
+#
+# The tree is restored on any exit, including a signal, from a copy taken
+# before the first edit. It never runs git, so a dirty tree is safe.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+kernel=kernel
+target=x86_64-unknown-none
+
+mapfile -t files < <(grep -rl 'allow(dead_code)' "$kernel/src" | sort)
+if [[ ${#files[@]} -eq 0 ]]; then
+    echo "no dead_code allows in $kernel/src"
+    exit 0
+fi
+
+backup=$(mktemp -d)
+restore() {
+    for f in "${files[@]}"; do
+        cp "$backup/$(echo "$f" | tr / _)" "$f"
+    done
+    rm -rf "$backup"
+}
+trap restore EXIT INT TERM
+
+for f in "${files[@]}"; do
+    cp "$f" "$backup/$(echo "$f" | tr / _)"
+done
+
+# Both spellings the kernel uses: the bare allow, and the `cfg_attr` that names
+# the feature which makes an item live. The second is inert under `any()` too,
+# so a feature-gated item is reported against the feature sets that build it.
+sed -i -E \
+    -e 's/#\[allow\(dead_code\)\]/#[cfg_attr(any(), allow(dead_code))]/' \
+    -e 's/#\[cfg_attr\([^]]*allow\(dead_code\)\)\]/#[cfg_attr(any(), allow(dead_code))]/' \
+    "${files[@]}"
+
+features=$(sed -n '/^\[features\]/,/^\[/p' "$kernel/Cargo.toml" |
+    sed -n 's/^\([a-z0-9-]*\) *=.*/\1/p' | grep -v '^default$')
+
+sweep() {
+    local label=$1
+    shift
+    echo "=== $label ==="
+    (cd "$kernel" &&
+        RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" \
+            cargo check --quiet --target "$target" --message-format=short "$@" 2>&1) |
+        grep -E 'never used|never read|never constructed|is never' || echo "  (nothing)"
+}
+
+sweep default
+for f in $features; do
+    sweep "--features $f" --features "$f"
+done
