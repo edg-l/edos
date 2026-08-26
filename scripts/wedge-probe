@@ -44,6 +44,29 @@ RUNS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 # few minutes; the tally is reported per ISO.
 ISOS = [i for i in os.environ.get("WEDGE_ISOS", "edos-nvme-hostile.iso").split(",") if i]
 
+# Kernel globals worth reading out of a wedged guest, by mangled-name suffix.
+# Each is sampled twice a couple of seconds apart, because the question these
+# answer is not what the value is but whether it is still moving: a machine
+# whose switch count is frozen is deadlocked, and one whose switch count
+# advances while nothing reaches the log is live-locked, and the two want
+# opposite investigations.
+# Overridable, because the kernel in the target directory is not necessarily
+# the kernel that booted: `edos-vm start` rebuilds any image it can `make`,
+# and a specially built ISO handed to it by its make-target name is rebuilt
+# with default flags. Give a feature build its own name, keep a copy of its
+# ELF, and point WEDGE_KERNEL at that copy.
+KERNEL_ELF = os.environ.get(
+    "WEDGE_KERNEL",
+    os.path.join(REPO, "kernel/target/x86_64-unknown-none/debug/edos-kernel"),
+)
+SYMBOLS = [
+    "debug5stall8SWITCHES",
+    "thread9scheduler13IDLE_CPU_MASK",
+    "nvme8watchdog13NVME_INFLIGHT",
+    "nvme8watchdog15WATCHDOG_RESETS",
+    "nvme5stats22INSTALLED_DURING_RESET",
+]
+
 MODE = os.environ.get("WEDGE_MODE", "pause")
 MODE_ARGS = (["--on-reset", "pause", "--qemu-log", "qemu-reset.log"]
              if MODE == "pause" else ["--on-reset", "exit"])
@@ -61,6 +84,34 @@ def qmp(command, **payload):
 
 def hmp(line):
     return qmp("human-monitor-command", **{"command-line": line})
+
+
+def symbol_addrs():
+    """Mangled-suffix -> virtual address, for the symbols named above."""
+    out = {}
+    r = subprocess.run(["nm", KERNEL_ELF], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        addr, _, name = parts
+        for want in SYMBOLS:
+            if name.endswith(want):
+                out[want] = "0x" + addr
+    return out
+
+
+def sample_counters(addrs):
+    """Read every symbol twice, a couple of seconds apart."""
+    def once():
+        return {w: hmp(f"x /1gx {a}") for w, a in addrs.items()}
+    first = once()
+    time.sleep(2)
+    second = once()
+    lines = []
+    for want in addrs:
+        lines.append(f"{want}\n  t0 {first[want]}\n  t1 {second[want]}")
+    return "\n".join(lines)
 
 
 def fresh_disk():
@@ -108,8 +159,11 @@ def one(n, iso):
     tag = f"run{n:02d}-{os.path.basename(iso).removesuffix('.iso')}-{verdict}"
     probe = ""
     if verdict != "pass":
+        addrs = symbol_addrs()
         probe = "\n".join([
             "=== query-status ===", qmp("query-status"),
+            "=== counters, sampled twice ===",
+            sample_counters(addrs) if addrs else "(no symbols resolved)",
             "=== info registers -a ===", hmp("info registers -a"),
             "=== info cpus ===", hmp("info cpus"),
         ])
