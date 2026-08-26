@@ -21,6 +21,7 @@
 | Packages | `grab` (the package manager, lib + CLI), `edos-grab` (its GUI) |
 | Web | `edos-web` (fetches a URL, parses the HTML, lays it out in a window, follows links) |
 | Audio | `play` |
+| Profiling | `profile` (samples every CPU from the timer tick; `scripts/profile-resolve` symbolizes on the host, see `doc/profiling.md`) |
 | Images | `imgview` (BMP and SVG viewer), `screenshot` (writes what the display is showing to a BMP; a pointer that appears in it is one the compositor drew, and one that does not is the display's own plane) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
@@ -434,14 +435,15 @@ panel, the terminal and every widget at once. What lives in it:
 | Module | What it owns |
 |---|---|
 | `font` | Outline faces loaded from `/share/fonts` through `fontdue`, and the glyph cache. Lato for chrome, JetBrains Mono for character grids. Falls back to the built-in bitmap face when a file is missing, so a bad install costs type rather than the session. |
-| `text` | The one blitter and the one measurement path, so the window manager, the panel and the widgets agree on where a glyph sits and how wide a string is. |
+| `surface` | `Surface<'a>`: a pixel buffer, its dimensions and a clip rectangle, and every drawing operation as a method on it. `Widget::draw` takes one, `Screen::surface()` hands one out over the back buffer, and nothing else rasterises. |
+| `text` | The one glyph blitter and the one measurement path, so the window manager, the panel and the widgets agree on where a glyph sits and how wide a string is. |
 | `icons` | 16x16 monochrome masks, tinted at draw time so an icon takes the colour of its state. Hand-authored: a desktop with eight icons does not need a theme, a lookup path and a cache, each of which can be missing at boot. |
 | `image` | A BMP decoder (24- and 32-bit, uncompressed) and a bilinear scale-to-cover. BMP because it is the one raster format a machine can write without a library and this OS can read without one. Used for wallpapers; an image viewer would use the same two functions. |
 | `metrics` | One spacing scale derived from a single unit, and the shared control height. |
 | `theme` | Every colour in the shell. |
 | `widgets` | Controls, layout, and the terminal grid. |
 | `window` | Window syscall wrappers. The shapes they exchange are `libs/window-abi`, re-exported here. |
-| `graphics` | Framebuffer, textures, `Screen`. |
+| `graphics` | `Framebuffer` (posts rectangles to the kernel through `/dev/fb` and touches no pixel in this process), `Texture`, and `Screen`, which owns the back buffer that `Screen::surface()` draws into. |
 
 One thing that breaks silently rather than loudly:
 
