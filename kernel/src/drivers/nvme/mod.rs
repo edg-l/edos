@@ -141,7 +141,7 @@ pub(crate) fn status_to_block_error(status: u16) -> Result<(), BlockError> {
 /// them before giving up on this sweep. More than one because a submitter
 /// can install a command after the scan, and a losing pass costs only
 /// another walk of the slot array.
-const FAIL_ALL_PASSES: usize = 4;
+pub(crate) const FAIL_ALL_PASSES: usize = 4;
 
 /// How a command reached [`retire_op`], which decides whether its buffer is
 /// safe to release.

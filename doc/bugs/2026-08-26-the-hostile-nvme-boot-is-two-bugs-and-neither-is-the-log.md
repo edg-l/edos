@@ -8,9 +8,14 @@
   a command's buffer before the controller had stopped, so the device finished
   the command into memory the allocator had already handed on. Writeup:
   `2026-08-26-the-device-was-still-writing-into-the-buffer.md`.
-- **Shape A is still open**: the machine alive with nothing runnable. Read the
-  shape-A section below and skip the heap-corruption sections, which are
-  superseded.
+- **Shape A is FIXED, and its description here was wrong.** `reset_state`
+  cleared the command slots in a second pass that dropped whatever the first
+  pass had not seen, so a command was destroyed without being retired and its
+  submitter parked on a handle nobody held. The machine is **not** deadlocked
+  with nothing runnable: read out of a wedged guest, its context-switch
+  counter advances by about a thousand a second. Writeup:
+  `2026-08-26-the-reset-dropped-a-command-instead-of-failing-it.md`. Skip the
+  shape-A and heap-corruption sections below, which are superseded.
 
 The instruments are `scripts/wedge-probe`, `scripts/wedge-resolve` and
 `edos-vm --on-reset pause --qemu-log`. Two corrections to them, both of which
@@ -88,6 +93,17 @@ Both shape-B captures land in the same three log lines of AHCI controller
 discovery, at 0.185 s to 0.19 s, with zero watchdog firings; a healthy boot's
 control log shows `Device ID`, `BAR5` and `IRQ Line` at that exact point. Two
 independent failures landing inside three lines is not a uniform wedge point.
+
+### SUPERSEDED: shape A, the guest is alive, and nothing is runnable
+
+*The register dump below is real; the conclusion drawn from it is not. Four
+vCPUs caught in `run_idle` at one instant is a sample, not a state. Reading
+the kernel's own switch counter out of the guest -- `nm` for the address,
+`x /1gx` over QMP, twice -- shows it advancing by ~2000 in two seconds. The
+machine was live-locked in the watchdog's own millisecond sleep, not
+deadlocked, and the thread that was stuck was stuck on a handle whose command
+had been dropped. See
+`2026-08-26-the-reset-dropped-a-command-instead-of-failing-it.md`.*
 
 ### Shape A: the guest is alive, and nothing is runnable
 

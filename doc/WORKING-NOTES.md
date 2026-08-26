@@ -8856,10 +8856,19 @@ Two related traps in the same path:
   Post-mortem: `doc/bugs/2026-08-26-the-device-was-still-writing-into-the-buffer.md`.
   AHCI had the same shape (`fail_all_ncq_slots` before `restart_port` stopped
   the engine) and the same fix, counted as `failed_while_running`.
-- **A reset cannot assume the command slots stay empty.** The watchdog fails
-  every outstanding op while the controller is disabled, but nothing excludes a
-  submitter from installing a new command in the window between that pass and
-  the queue rebuild.
+- **A reset cannot assume the command slots stay empty, and clearing a slot is
+  not the same as emptying it.** The watchdog fails every outstanding op while
+  the controller is disabled, but nothing excludes a submitter from installing
+  a new command in the window between that pass and the queue rebuild -- and
+  that window is the busy one, because the fail-all pass wakes every waiter
+  with `Io` and `block_io`'s retry re-issues from those same threads at once.
+  `installed_during_reset` reads in the thousands on one hostile boot.
+  `NvmeQueue::reset_state` therefore **takes** each op out of its slot and
+  retires it, looped until a pass finds nothing new; it used to scan and then
+  overwrite the slots with `None`, which destroyed anything installed between
+  the two passes -- no command id freed, no handle completed, and a submitter
+  parked on a completion nobody owed it for the rest of the boot. Post-mortem:
+  `doc/bugs/2026-08-26-the-reset-dropped-a-command-instead-of-failing-it.md`.
   `DmaBuffer` has no `Drop`, so clearing a slot any other way strands that
   command's bounce buffer and PRP list page. `NvmeQueue::reset_state` therefore
   retires whatever it finds through the ordinary `retire_op` sequence rather

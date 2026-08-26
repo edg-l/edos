@@ -52,6 +52,19 @@ pub static PRP_PAGES_DISCONTIGUOUS: AtomicU64 = AtomicU64::new(0);
 /// path may only abandon a command once `CC.EN` is clear and `CSTS.RDY` has
 /// dropped (NVMe 2.0 3.5.1). `make nvme-check`'s watchdog case asserts it.
 pub static ABANDONED_WHILE_LIVE: AtomicU64 = AtomicU64::new(0);
+/// Commands installed at a command id the queue no longer considers
+/// allocated, which means a reset freed it while its submitter still held it.
+pub static CID_NOT_HELD_AT_INSTALL: AtomicU64 = AtomicU64::new(0);
+/// Commands installed over a slot that already held a live op. Each one is an
+/// `NvmeOp` dropped without completing its handle, so its waiter parks
+/// forever with nothing outstanding for the watchdog to find.
+pub static SLOT_OVERWRITTEN: AtomicU64 = AtomicU64::new(0);
+/// Commands `NvmeQueue::reset_state` found still installed, which means a
+/// submitter issued them after the caller's own fail-all pass. Non-zero is
+/// expected and is not a defect -- nothing excludes a submitter from a reset
+/// -- but it measures how often that window is entered, and it used to be the
+/// window in which an op was dropped rather than retired.
+pub static INSTALLED_DURING_RESET: AtomicU64 = AtomicU64::new(0);
 
 pub fn bump(counter: &AtomicU64, n: u64) {
     counter.fetch_add(n, Ordering::Relaxed);
@@ -72,6 +85,7 @@ pub fn render() -> String {
          max_inflight={} commands_submitted={} split_requests={} split_commands={} \
          bounced_requests={} flushes={} flushes_elided={} command_errors={} \
          prp_pages={} prp_pages_discontiguous={} abandoned_while_live={} \
+         cid_not_held_at_install={} slot_overwritten={} installed_during_reset={} \
          watchdog_firings={} watchdog_completions={} resets={} timeout_ms={} \
          mdts_bytes={} vwc={}\n",
         controllers,
@@ -90,6 +104,9 @@ pub fn render() -> String {
         get(&PRP_PAGES),
         get(&PRP_PAGES_DISCONTIGUOUS),
         get(&ABANDONED_WHILE_LIVE),
+        get(&CID_NOT_HELD_AT_INSTALL),
+        get(&SLOT_OVERWRITTEN),
+        get(&INSTALLED_DURING_RESET),
         get(&watchdog::WATCHDOG_FIRINGS),
         get(&watchdog::WATCHDOG_COMPLETIONS),
         get(&watchdog::WATCHDOG_RESETS),

@@ -15,12 +15,13 @@ use crate::{
         block_io::BlockError,
         dma::{DmaBuffer, dma},
         nvme::{
-            NvmeError, Retire,
+            FAIL_ALL_PASSES, NvmeError, Retire,
             cancel_op::NvmeOp,
             regs::{self, CompletionQueueEntry, SubmissionQueueEntry},
             stats,
         },
     },
+    log,
     memory::mapper::memory_mapper,
     ranked_lock,
     thread::waitqueue::WaitQueue,
@@ -249,12 +250,32 @@ impl NvmeQueue {
 
     /// Install `op` at `cid`'s slot for the IRQ dispatcher, the watchdog and
     /// cancel to find it by command id.
+    ///
+    /// Two things are counted here rather than assumed, because a submitter
+    /// holds its command id across a heap allocation and an SQE build, and a
+    /// reset in that window declares every id free (`reset_state`). If it then
+    /// hands this one to a second submitter, the op already in the slot is
+    /// dropped without ever completing its handle and its waiter parks for
+    /// good -- with nothing outstanding, so the watchdog sweeps silently and
+    /// the machine simply goes idle. Both counters must stay zero.
     pub fn install_op(&self, cid: u8, op: Arc<NvmeOp>) {
-        **ranked_lock!(
+        if self.free_cids.load(Ordering::Acquire) & (1u64 << cid) == 0 {
+            stats::bump(&stats::CID_NOT_HELD_AT_INSTALL, 1);
+        }
+        let previous = ranked_lock!(
             RANK_NVME_CMD,
             "NvmeQueue.cmd_slots",
             self.cmd_slots[cid as usize]
-        ) = Some(op);
+        )
+        .replace(op);
+        if let Some(lost) = previous {
+            stats::bump(&stats::SLOT_OVERWRITTEN, 1);
+            log!(
+                "nvme: cid {} installed over a live op on queue {}",
+                cid,
+                lost.qid
+            );
+        }
     }
 
     /// Clone the op installed at `cid`, or `None` if the slot is empty (a
@@ -307,20 +328,39 @@ impl NvmeQueue {
     /// Locks are taken one at a time and in rank order (`cmd_slots` 182,
     /// `cq` 186, `sq` 192); nothing here needs two of them at once.
     pub fn reset_state(&self) {
-        // Anything still installed is failed through the ordinary reclaim
-        // sequence rather than dropped: `DmaBuffer` has no `Drop`, so
-        // clearing a slot any other way strands that command's bounce
-        // buffer and PRP list page. The caller has already declared the
-        // queue hung, so failing a straggler a submitter installed after
-        // its own fail-all pass is the same answer, arrived at later.
-        for op in self.outstanding_ops() {
-            crate::drivers::nvme::retire_op(self, op, Err(BlockError::Io), Retire::Abandoned);
-        }
-        // A slot whose op lost the reclaim race to a concurrent completion
-        // has had its resources taken already, so clearing it strands
-        // nothing.
-        for slot in &self.cmd_slots {
-            **ranked_lock!(RANK_NVME_CMD, "NvmeQueue.cmd_slots", slot) = None;
+        // Every slot is emptied by TAKING its op and retiring it, never by
+        // overwriting it with `None`. Scanning and then clearing in two
+        // passes is what this used to do, and a command installed between
+        // the two was dropped rather than retired: no `inflight_dec`, no
+        // command id freed, no handle completed, so its submitter parked on
+        // that handle for good. That window is not rare, it is the busy one
+        // -- the caller's fail-all pass has just woken every waiter with
+        // `Io`, and `block_io`'s retry re-issues from those threads
+        // immediately.
+        //
+        // `retire_op` returns without touching anything if the op is already
+        // terminal, so a slot whose op lost the reclaim race to a concurrent
+        // completion costs one no-op call rather than a stranded buffer.
+        // Looped because a submitter can install into a slot this pass has
+        // already walked past.
+        for _ in 0..FAIL_ALL_PASSES {
+            let mut emptied = 0u64;
+            for slot in &self.cmd_slots {
+                let op = ranked_lock!(RANK_NVME_CMD, "NvmeQueue.cmd_slots", slot).take();
+                if let Some(op) = op {
+                    emptied += 1;
+                    crate::drivers::nvme::retire_op(
+                        self,
+                        op,
+                        Err(BlockError::Io),
+                        Retire::Abandoned,
+                    );
+                }
+            }
+            if emptied == 0 {
+                break;
+            }
+            stats::bump(&stats::INSTALLED_DURING_RESET, emptied);
         }
         {
             let mut cq = ranked_lock!(RANK_NVME_CQ, "NvmeQueue.cq", self.cq);

@@ -114,7 +114,14 @@ still complete into it -- see
 caller cannot run it at the wrong time, and `abandoned_while_live` counts it
 if one ever does. Asserting the slot table is empty at reset time is wrong and
 was tried: nothing excludes a submitter from installing a command in that
-window, which is why `NvmeQueue::reset_state` fails stragglers of its own.
+window, which is why `NvmeQueue::reset_state` fails stragglers of its own --
+by **taking** each op out of its slot and retiring it, never by overwriting
+the slot with `None`. A cleared slot is a command dropped rather than failed:
+no command id freed, no `DmaBuffer` returned, no handle completed, and a
+submitter parked for the rest of the boot on a completion nobody owes it.
+`installed_during_reset` counts what that loop finds, and reads in the
+thousands on a `nvme_timeout_ms=0` boot -- see
+`doc/bugs/2026-08-26-the-reset-dropped-a-command-instead-of-failing-it.md`.
 
 A reset fails commands the device would have completed, so **whatever waits on
 a block handle re-issues it**. `block_io::{read,write,flush,read_batch}_blocking`
@@ -169,6 +176,8 @@ One line of `key=value` pairs, in the shape of `/proc/ahci_stats`.
 | `prp_pages` | pages a PRP entry addressed beyond PRP1, each one translated separately |
 | `prp_pages_discontiguous` | those of them whose frame was not the first page's frame plus the page index. See the gate below: a boot that leaves this at zero has not exercised the translation |
 | `abandoned_while_live` | commands failed without a completion while `CSTS.RDY` was still set. **Must be zero**: each one is a buffer released while the controller could still write into it, which is a use-after-free the device performs. `make nvme-check` asserts it |
+| `installed_during_reset` | commands a reset found still installed after the caller's own fail-all pass. Thousands per boot at `nvme_timeout_ms=0` and not a defect; it measures how often a submitter races a reset, which is the window an op used to be dropped in |
+| `cid_not_held_at_install`, `slot_overwritten` | **must be zero.** A reset frees every command id, so one taken from a submitter that still held it would be handed to a second submitter and installed over a live op, dropping it without completing its handle |
 | `watchdog_firings` | sweeps that found a command past its deadline |
 | `watchdog_completions` | commands the watchdog found already complete in the CQ — each one is an interrupt that was lost |
 | `resets` | controller resets performed |
