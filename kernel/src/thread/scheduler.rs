@@ -681,6 +681,8 @@ impl Scheduler {
             if self.has_work.load(Ordering::Acquire) {
                 break;
             }
+            #[cfg(feature = "stall-dump")]
+            crate::debug::stall::poll();
 
             // Poll for stealable work on an exponential backoff, so an idle CPU
             // that finds nothing keeps halting rather than spinning — unless it
@@ -1030,6 +1032,8 @@ impl Scheduler {
             "context_switch_to: thread {} not Running",
             next.id.0
         );
+        #[cfg(feature = "stall-dump")]
+        crate::debug::stall::note_switch();
 
         // Set as current. Update cpu FIRST so the old CPU's
         // save_current_thread sees the migration and bails out.
