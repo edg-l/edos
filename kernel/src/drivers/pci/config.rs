@@ -106,7 +106,6 @@ pub fn read_bar_phys(addr: PciAddress, bar_index: u8) -> x86_64::PhysAddr {
     }
 }
 
-#[expect(unused)]
 pub fn pci_write_u8(addr: PciAddress, offset: u8, value: u8) {
     let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);

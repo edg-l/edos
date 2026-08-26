@@ -10693,3 +10693,40 @@ Verified in a guest, not only by the gates: `make guest-check` is 18/18 with
 mmap mode` and renders (so `mmap_physical` returns the aperture the raw
 `syscall5` did), and `fsbench -q -m 1 /var` still reports both mmap workloads
 (`mmap store 4MiB + msync`, `mmap load 4MiB faulted in`) with real numbers.
+
+## ROADMAP-CLEANUP E5: the twelve kernel `unimplemented!()` were all one file
+
+Every `todo!()`/`unimplemented!()` in `kernel/src` lived in the `acpi::Handler`
+impl (`kernel/src/acpi/handler.rs`): the six PCI config accessors, the three
+timing hooks, and the three AML mutex hooks. None is reachable today, because
+the kernel parses static tables and never runs the AML interpreter (`power.rs`
+maps the DSDT and scans it by hand), but the trait is one method away from a
+kernel panic the day anything does.
+
+What they are now:
+
+- PCI config access goes through the existing `drivers::pci::config` helpers.
+  `acpi::PciAddress` carries a segment group and a 16-bit offset, and the
+  0xCF8/0xCFC pair can express neither a non-zero segment nor an offset above
+  0xFF; those need the MCFG mapping this kernel does not have. `legacy_config`
+  is the one place that decides, so a read answers all-ones (what the bus
+  returns for an absent device) and a write is dropped, once, with a log line.
+- `nanos_since_boot` reads `timer::uptime_nanos`, which is new and is now what
+  `uptime_us` divides down, so the two cannot drift.
+- `stall` spins and `sleep` parks. ACPI 6.5 §5.5.2.4.1 says a stall must not
+  give up the processor, which is the whole difference between them.
+  `thread_sleep` returns immediately when no thread is running, so `sleep`
+  falls back to spinning before the scheduler exists.
+- AML mutexes are a fixed 128-entry table of `(owner, depth)` atomics indexed by
+  handle, not an allocation: the DSDT declares them once and never frees them.
+  They are reentrant per ACPI 6.5 §19.6.2, which is why the depth is there.
+
+Two things fell out of it. `pci_write_u8` carried `#[expect(unused)]` and now
+has a caller, and the `Handler` impl carried a blanket `#[expect(unused)]` that
+existed only because twelve method bodies ignored their parameters; both are
+gone, so `kernel/src` has no blanket suppression of any kind left. The
+per-access `println!` in every read/write hook went with them — those are the
+hooks a running AML interpreter calls in a loop.
+
+Verified by boot, not only by the gates: `make test AUDIODEV=none` is 58/58,
+which exercises ACPI table parsing, the uptime refactor and the boot log.

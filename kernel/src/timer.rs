@@ -364,13 +364,16 @@ pub fn init_boot_time() {
     BOOT_TIME.call_once(Instant::now);
 }
 
+/// Time since boot in nanoseconds, zero until [`init_boot_time`] has run.
+pub fn uptime_nanos() -> u64 {
+    BOOT_TIME
+        .get()
+        .map_or(0, |boot| boot.elapsed().as_nanos() as u64)
+}
+
 /// Get time elapsed since boot in microseconds
 pub fn uptime_us() -> u64 {
-    if let Some(boot_instant) = BOOT_TIME.get() {
-        boot_instant.elapsed().as_micros() as u64
-    } else {
-        0
-    }
+    uptime_nanos() / 1_000
 }
 
 /// The wall clock, pinned to the monotonic counter at a single point in time.

@@ -328,15 +328,16 @@ was restored afterwards.
 E1 through E4 are closed. Ten bare `#[allow(dead_code)]` survive in the kernel,
 each on a single item and each with a doc comment saying why it stays, plus
 three `cfg_attr(not(feature = ...))` naming the feature that makes the item
-live. There are no blanket allows over a struct or an `impl` block and no
-`allow(unused)` anywhere in `kernel/src`.
+live. There are no blanket allows over a struct or an `impl` block, no
+`allow(unused)` and no `expect(unused)` anywhere in `kernel/src`.
 
-### E5. 12 `todo!()` / `unimplemented!()` in the kernel (S2, E2)
+### E5. ~~12 `todo!()` / `unimplemented!()` in the kernel~~ (done)
 
-`grep -rn 'todo!(\|unimplemented!(' kernel/src`. Each one panics the kernel if
-reached. Either implement it, or return the errno that says the operation is not
-supported. A `todo!()` on a syscall path is a denial of service any user can
-reach.
+All twelve were `Handler` methods in `kernel/src/acpi/handler.rs`, and all
+twelve are implemented: PCI config access routes to the 0xCF8/0xCFC helpers,
+`nanos_since_boot` reads the monotonic clock, `stall` spins and `sleep` parks,
+and AML mutexes are a fixed reentrant table. `grep -rn 'todo!(\|unimplemented!('
+kernel/src` is empty.
 
 ---
 

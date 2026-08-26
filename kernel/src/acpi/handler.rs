@@ -1,21 +1,32 @@
-use core::ptr::NonNull;
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use acpi::{Handle, Handler, PhysicalMapping};
 use x86_64::{PhysAddr, VirtAddr, instructions::port::Port, structures::paging::PageTableFlags};
 
 use crate::{
+    drivers::pci::{
+        config::{
+            pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u8, pci_write_u16, pci_write_u32,
+        },
+        structures::PciAddress,
+    },
     memory::{
         mapper::memory_mapper,
         valloc::{vfree, vmalloc},
     },
     println,
+    thread::scheduler::{current_thread_id, thread_sleep, thread_yield},
+    timer::{Instant, uptime_nanos},
 };
 
 #[derive(Debug, Clone)]
 pub struct AcpiHandler;
 
 // ACPI handler manages its own "virtual address space", this is why using the physical address mapping isnt correct here, and we need to actually map
-#[expect(unused)]
 impl Handler for AcpiHandler {
     unsafe fn map_physical_region<T>(
         &self,
@@ -72,140 +83,239 @@ impl Handler for AcpiHandler {
     }
 
     fn read_u8(&self, address: usize) -> u8 {
-        println!("reading {address:x}");
         unsafe { *(address as *const u8) }
     }
 
     fn read_u16(&self, address: usize) -> u16 {
-        println!("reading {address:x}");
         unsafe { *(address as *const u16) }
     }
 
     fn read_u32(&self, address: usize) -> u32 {
-        println!("reading {address:x}");
         unsafe { *(address as *const u32) }
     }
 
     fn read_u64(&self, address: usize) -> u64 {
-        println!("reading {address:x}");
         unsafe { *(address as *const u64) }
     }
 
     fn write_u8(&self, address: usize, value: u8) {
-        println!("writing {address:x}");
         unsafe {
             *(address as *mut u8) = value;
         }
     }
 
     fn write_u16(&self, address: usize, value: u16) {
-        println!("writing {address:x}");
         unsafe {
             *(address as *mut u16) = value;
         }
     }
 
     fn write_u32(&self, address: usize, value: u32) {
-        println!("writing {address:x}");
         unsafe {
             *(address as *mut u32) = value;
         }
     }
 
     fn write_u64(&self, address: usize, value: u64) {
-        println!("writing {address:x}");
         unsafe {
             *(address as *mut u64) = value;
         }
     }
 
     fn read_io_u8(&self, port: u16) -> u8 {
-        println!("read port {port}");
         unsafe { Port::new(port).read() }
     }
 
     fn read_io_u16(&self, port: u16) -> u16 {
-        println!("read port {port}");
         unsafe { Port::new(port).read() }
     }
 
     fn read_io_u32(&self, port: u16) -> u32 {
-        println!("read port {port}");
         unsafe { Port::new(port).read() }
     }
 
     fn write_io_u8(&self, port: u16, value: u8) {
-        println!("write port {port}");
         unsafe { Port::new(port).write(value) }
     }
 
     fn write_io_u16(&self, port: u16, value: u16) {
-        println!("write port {port}");
         unsafe { Port::new(port).write(value) }
     }
 
     fn write_io_u32(&self, port: u16, value: u32) {
-        println!("write port {port}");
         unsafe { Port::new(port).write(value) }
     }
 
     fn read_pci_u8(&self, address: acpi::PciAddress, offset: u16) -> u8 {
-        println!("called read pci 8");
-        unimplemented!()
+        match legacy_config(address, offset) {
+            Some((addr, offset)) => pci_read_u8(addr, offset),
+            None => !0,
+        }
     }
 
     fn read_pci_u16(&self, address: acpi::PciAddress, offset: u16) -> u16 {
-        println!("called read_pci_u16");
-        unimplemented!()
+        match legacy_config(address, offset) {
+            Some((addr, offset)) => pci_read_u16(addr, offset),
+            None => !0,
+        }
     }
 
     fn read_pci_u32(&self, address: acpi::PciAddress, offset: u16) -> u32 {
-        println!("called read_pci_u32");
-        unimplemented!()
+        match legacy_config(address, offset) {
+            Some((addr, offset)) => pci_read_u32(addr, offset),
+            None => !0,
+        }
     }
 
     fn write_pci_u8(&self, address: acpi::PciAddress, offset: u16, value: u8) {
-        println!("called write_pci_u8");
-        unimplemented!()
+        if let Some((addr, offset)) = legacy_config(address, offset) {
+            pci_write_u8(addr, offset, value);
+        }
     }
 
     fn write_pci_u16(&self, address: acpi::PciAddress, offset: u16, value: u16) {
-        println!("called write_pci_u16");
-        unimplemented!()
+        if let Some((addr, offset)) = legacy_config(address, offset) {
+            pci_write_u16(addr, offset, value);
+        }
     }
 
     fn write_pci_u32(&self, address: acpi::PciAddress, offset: u16, value: u32) {
-        println!("called write_pci_u32");
-        unimplemented!()
+        if let Some((addr, offset)) = legacy_config(address, offset) {
+            pci_write_u32(addr, offset, value);
+        }
     }
 
     fn nanos_since_boot(&self) -> u64 {
-        println!("called nanos_since_boot");
-        unimplemented!()
+        uptime_nanos()
     }
 
     fn stall(&self, microseconds: u64) {
-        println!("called stall");
-        unimplemented!()
+        // ACPI 6.5 §5.5.2.4.1: a stall must not give up the processor, which
+        // is why this spins where `sleep` parks.
+        let deadline = Instant::now() + Duration::from_micros(microseconds);
+        while Instant::now() < deadline {
+            core::hint::spin_loop();
+        }
     }
 
     fn sleep(&self, milliseconds: u64) {
-        println!("calledsleep");
-        unimplemented!()
+        let dt = Duration::from_millis(milliseconds);
+        if current_thread_id().is_some() {
+            thread_sleep(dt);
+        } else {
+            // Firmware can ask for a sleep before the scheduler exists, and
+            // `thread_sleep` returns immediately when no thread is running.
+            let deadline = Instant::now() + dt;
+            while Instant::now() < deadline {
+                core::hint::spin_loop();
+            }
+        }
     }
 
     fn create_mutex(&self) -> Handle {
-        println!("called create_mutex");
-        unimplemented!()
+        let index = AML_MUTEX_COUNT.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            index < AML_MUTEXES.len(),
+            "AML declares more than {} mutexes",
+            AML_MUTEXES.len()
+        );
+        Handle(index as u32)
     }
 
     fn acquire(&self, mutex: Handle, timeout: u16) -> Result<(), acpi::aml::AmlError> {
-        println!("called acquire");
-        unimplemented!()
+        let owner = owner_key();
+        let slot = aml_mutex(mutex);
+
+        // ACPI 6.5 §19.6.2: AML mutexes are reentrant for their owner, so a
+        // second acquire by the same thread only deepens the count.
+        if slot.owner.load(Ordering::Relaxed) == owner {
+            slot.depth.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        let deadline = (timeout != INDEFINITE_TIMEOUT)
+            .then(|| Instant::now() + Duration::from_millis(timeout as u64));
+        loop {
+            if slot
+                .owner
+                .compare_exchange(NO_OWNER, owner, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                slot.depth.store(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(acpi::aml::AmlError::MutexAcquireTimeout);
+            }
+            if current_thread_id().is_some() {
+                thread_yield();
+            } else {
+                core::hint::spin_loop();
+            }
+        }
     }
 
     fn release(&self, mutex: Handle) {
-        println!("called release");
-        unimplemented!()
+        let slot = aml_mutex(mutex);
+        if slot.depth.fetch_sub(1, Ordering::Relaxed) == 1 {
+            slot.owner.store(NO_OWNER, Ordering::Release);
+        }
     }
+}
+
+/// The PCI address and config-space offset the 0xCF8/0xCFC pair can reach, or
+/// `None` for the two things it cannot: a non-zero segment group, and the
+/// extended config space above 256 bytes. Both need the MCFG mapping this
+/// kernel does not have, so a read answers all-ones — what the bus returns for
+/// a device that is not there — and a write is dropped.
+fn legacy_config(address: acpi::PciAddress, offset: u16) -> Option<(PciAddress, u8)> {
+    if address.segment() != 0 || offset > 0xFF {
+        println!(
+            "ACPI: PCI segment {} offset {offset:#x} needs MCFG, which this kernel does not map",
+            address.segment()
+        );
+        return None;
+    }
+    Some((
+        PciAddress {
+            bus: address.bus(),
+            device: address.device(),
+            function: address.function(),
+        },
+        offset as u8,
+    ))
+}
+
+/// A mutex the AML interpreter created, held by at most one thread at a time.
+struct AmlMutex {
+    /// The owning thread's id plus one, or [`NO_OWNER`].
+    owner: AtomicU64,
+    /// How many times the owner acquired it without releasing.
+    depth: AtomicU32,
+}
+
+const NO_OWNER: u64 = 0;
+
+/// `Handler::acquire`'s "wait forever" timeout.
+const INDEFINITE_TIMEOUT: u16 = 0xFFFF;
+
+/// Mutexes are declared by the DSDT and never freed, so they are a fixed table
+/// indexed by handle rather than an allocation the interpreter has to track.
+static AML_MUTEXES: [AmlMutex; 128] = [const {
+    AmlMutex {
+        owner: AtomicU64::new(NO_OWNER),
+        depth: AtomicU32::new(0),
+    }
+}; 128];
+
+static AML_MUTEX_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn aml_mutex(handle: Handle) -> &'static AmlMutex {
+    &AML_MUTEXES[handle.0 as usize]
+}
+
+/// The current thread's identity as an owner, distinct from [`NO_OWNER`]. Code
+/// running before the scheduler exists is one owner, since it is one thread.
+fn owner_key() -> u64 {
+    current_thread_id().map_or(1, |tid| tid.0 + 2)
 }
