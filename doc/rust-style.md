@@ -67,13 +67,40 @@ Coverage in `kernel/src`, measured 2026-08-26:
 | `unsafe impl` | 38 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
 So the block half is at roughly 6% and the contract half at roughly half. The
-two halves are `ROADMAP-CLEANUP.md` I5, and they are different work: the lint
-`clippy::undocumented_unsafe_blocks` finds the first and finds nothing about the
-second.
+two are `ROADMAP-CLEANUP.md` I5, and they are different work: the lint
+`clippy::undocumented_unsafe_blocks` finds blocks and `unsafe impl`, and finds
+nothing about an undocumented `unsafe fn`, whose contract has no lintable form.
 
 `unsafe` marks a risk of undefined behaviour and nothing else. A function that is
 merely dangerous to call is a safe function with a `# Panics` section or a
 `Result`, not an `unsafe fn`.
+
+## Traits
+
+There are seven traits in `kernel/src` and three across `programs/`, so this tree
+has no trait-design problem and no rules are invented for one. `FileSystem`,
+`AsyncBlockDevice`, `DevFsDevice`, `NetDevice`, `PageCacheOps`, `Pollable` and
+`CancellableOp` all exist for runtime polymorphism over a set decided by what is
+mounted or enumerated, which is why they are reached through `dyn` at 68 sites
+rather than as generic bounds. Library guidance that ranks generics above `dyn`
+is answering a different question; a generic parameter cannot express "whichever
+filesystem this mount turned out to be". Do not convert them.
+
+The obligation that does bind here comes from the other direction, from traits
+this tree implements rather than declares. `kernel/src` declares no `unsafe
+trait` and writes 38 `unsafe impl`: 18 `Send`, 14 `Sync`, plus `GlobalAlloc` and
+`FrameAllocator`. Two of the 38 carry a `// SAFETY:` comment.
+
+A bare `unsafe impl Send for T {}` is a claim that no data race can arise from
+moving `T` between threads, made by hand, in a preemptive SMP kernel with
+work-stealing, where the compiler has stopped checking. It is the one shape both
+ANSSI and the library guidance name as the canonical unsound shortcut, and the
+argument behind each is exactly the kind that decays silently when the type
+later grows a field. Every `unsafe impl` states its argument in a `// SAFETY:`
+comment above it, naming what provides the exclusion:
+`allocator.rs:130` is the model ("only accessed by its owning CPU with IRQs
+off"). `clippy::undocumented_unsafe_blocks` covers impls as well as blocks, so
+this half is gated by the same lint.
 
 ## `#[expect]`, not `#[allow]`
 

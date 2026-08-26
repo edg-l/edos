@@ -598,22 +598,28 @@ survivors E1 annotated and nothing else.
 name only the first. `doc/rust-style.md` states the rule and the sources; the
 counts below are the gap, measured 2026-08-26 with the commands recorded there.
 
-**I5a, the blocks.** 767 `unsafe { ... }` blocks against 46 `// SAFETY:`
-comments, so about 6%. `clippy::undocumented_unsafe_blocks` is the gate, and it
-is concentrated in `usb/xhci/mod.rs` (77 `unsafe`), `ahci/port.rs` (39),
-`thread/scheduler.rs` (33), `virtio/gpu.rs` (33) and `syscalls/mod.rs` (31).
-Turning it on at once produces hundreds of findings and would be abandoned, so
-enable it per module, `memory/` and `syscalls/` first, where the safety argument
-is about user input and is the one worth writing down.
+**I5a, the blocks and the impls.** 767 `unsafe { ... }` blocks against 46
+`// SAFETY:` comments, so about 6%, concentrated in `usb/xhci/mod.rs` (77
+`unsafe`), `ahci/port.rs` (39), `thread/scheduler.rs` (33), `virtio/gpu.rs` (33)
+and `syscalls/mod.rs` (31). `clippy::undocumented_unsafe_blocks` is the gate and
+it covers `unsafe impl` too, which is where the worse ratio is: 38 `unsafe impl`
+(18 `Send`, 14 `Sync`, `GlobalAlloc`, `FrameAllocator`) and **2** carry an
+argument. A bare `unsafe impl Send for T {}` is a hand-made claim that no data
+race can arise, in a preemptive SMP kernel with work-stealing, and it is the
+claim most likely to stop being true when the type later grows a field. Start
+there: 36 sites, each one line of reasoning, and it is the highest
+soundness-per-edit work in this section. Then the blocks, per module, `memory/`
+and `syscalls/` first, since turning the lint on tree-wide at once produces
+hundreds of findings and would be abandoned.
 
 **I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
-sections, plus 38 `unsafe impl`. No lint finds these: a caller of an
-undocumented `unsafe fn` has nothing to uphold and cannot be reviewed. This half
-is independent of I5a and is the smaller of the two.
+sections. No lint finds these and none can: a caller of an undocumented
+`unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
+the smaller of the two.
 
-**Done when** the lint is denied in `memory/` and `syscalls/` with no
-suppressions, and every `unsafe fn` and `unsafe impl` in those two modules
-carries a `# Safety` section.
+**Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
+comment, the lint is denied in `memory/` and `syscalls/` with no suppressions,
+and every `unsafe fn` in those two modules carries a `# Safety` section.
 
 ### I6. A `[lints]` table, and what goes in it (S3, E1)
 
