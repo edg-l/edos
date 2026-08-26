@@ -8,12 +8,16 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-26.** 23 of the 31 entries are struck; G2 is struck with
+**State as of 2026-08-26.** 23 of the 32 entries are struck; G2 is struck with
 a named remainder. What is open, in the order the evidence suggests: B2 and B3
 (the syscall convention and its dispatcher, the largest remaining item by far),
-C2 (no argument parser), H1/H3/H4 (three long functions), G3 (split
-`WORKING-NOTES.md`), and the three gates I2, I5. The numbers each entry quotes
-were remeasured on this date.
+C2 (no argument parser), H1 and H3 (two long functions), G3 (split
+`WORKING-NOTES.md`), and the three gates I2, I5, I6. The numbers each entry
+quotes were remeasured on this date.
+
+The conventions these entries are written against, and the sources behind them,
+are `doc/rust-style.md`. I5 and I6 are its measurements; the rest of this file
+predates it and does not depend on it.
 
 ## How to use this file
 
@@ -106,6 +110,13 @@ neither can hold a private copy that rots".
 emitting both the dispatch arm and the `SyscallInfo` row. A new syscall then
 becomes one line that cannot be added to the dispatcher and forgotten in the
 table, which is the failure the table's own doc comment warns about.
+
+Constrain it to that and no more: the macro emits the arm and the row, declares
+no items of its own, and does not write or alter the `sys_*` signature, which
+stays where a reader can see it. A macro that also generated the wrapper would
+be a second place for the dispatcher and `strace` to disagree, in a new way. The
+test a dispatch table passes and most macros do not is that a reader knows
+exactly what it expands to and simply does not want to type it 124 times.
 
 **Done when** adding a syscall touches one table and `syscall_handler` is under
 150 lines.
@@ -581,14 +592,54 @@ unused, and restores the tree from a copy taken before the first edit -- on a
 signal too, and without running git, so a dirty tree is safe. It reports the ten
 survivors E1 annotated and nothing else.
 
-### I5. Deny `clippy::undocumented_unsafe_blocks` in the kernel (S2, E3)
+### I5. Document the kernel's unsafe, both halves (S2, E3)
 
-902 `unsafe` occurrences in `kernel/src`, concentrated in
-`usb/xhci/mod.rs` (77), `ahci/port.rs` (39), `thread/scheduler.rs` (33),
-`virtio/gpu.rs` (33), `syscalls/mod.rs` (31). Turning the lint on at once would
-produce hundreds of findings, so gate it per-module: enable it in `memory/` and
-`syscalls/` first, where the safety argument is about user input and is the one
-worth writing down.
+`unsafe` is documented twice, for two different readers, and this entry used to
+name only the first. `doc/rust-style.md` states the rule and the sources; the
+counts below are the gap, measured 2026-08-26 with the commands recorded there.
+
+**I5a, the blocks.** 767 `unsafe { ... }` blocks against 46 `// SAFETY:`
+comments, so about 6%. `clippy::undocumented_unsafe_blocks` is the gate, and it
+is concentrated in `usb/xhci/mod.rs` (77 `unsafe`), `ahci/port.rs` (39),
+`thread/scheduler.rs` (33), `virtio/gpu.rs` (33) and `syscalls/mod.rs` (31).
+Turning it on at once produces hundreds of findings and would be abandoned, so
+enable it per module, `memory/` and `syscalls/` first, where the safety argument
+is about user input and is the one worth writing down.
+
+**I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
+sections, plus 38 `unsafe impl`. No lint finds these: a caller of an
+undocumented `unsafe fn` has nothing to uphold and cannot be reviewed. This half
+is independent of I5a and is the smaller of the two.
+
+**Done when** the lint is denied in `memory/` and `syscalls/` with no
+suppressions, and every `unsafe fn` and `unsafe impl` in those two modules
+carries a `# Safety` section.
+
+### I6. A `[lints]` table, and what goes in it (S3, E1)
+
+There is no `[lints]` table in any manifest in the tree. Clippy runs at its
+default level under `-D warnings`, which is why I5's lint has to be enabled
+somewhere before it can be enabled per module.
+
+**Fix.** A `[lints.clippy]` table carrying `undocumented_unsafe_blocks`,
+`unnecessary_safety_comment`, `unnecessary_safety_doc` and
+`allow_attributes_without_reason`, and nothing else; `doc/rust-style.md` records
+what was rejected and why. The two `unnecessary_*` lints are why this is a set:
+without them the cheapest way to satisfy I5a is a comment that says nothing.
+
+`allow_attributes_without_reason` is a mechanical conversion, not an audit. The
+35 `#[allow(` in `kernel/src` and the 17 in `programs/` already carry their
+reason as a comment above the attribute (`allocator.rs:161`, `per_cpu.rs:96`,
+`block_page_cache.rs:143`); the lint requires it in the `reason = "..."` field,
+where a lint can check it.
+
+Same manifests, same sitting: `programs/edos-taskbar`, `programs/edos-terminal`
+and `programs/wintest` are still `edition = "2021"` while the other 129 programs,
+the kernel and all eight libs are on 2024. None of the three contains `unsafe`,
+so this is drift rather than a hole.
+
+**Done when** the table exists, the tree is clean under it, and
+`grep -c 'edition = "2021"' programs/*/Cargo.toml` is zero.
 
 ---
 
@@ -636,10 +687,22 @@ writing rather than only at review time.
   comment asserting what a number means.
 - Something drawn goes through a surface, not through a `(buffer, width, height)`
   triple.
-- `#[allow(dead_code)]` goes on the item, never on an `impl` block or a module,
-  and carries a reason. Prefer `#[cfg_attr(not(feature = "x"), allow(dead_code))]`
-  when a feature is what makes the item live.
 - No plan, phase, session or task vocabulary in a comment. Name the behaviour.
+- `unsafe` is documented twice and the two are not interchangeable: `// SAFETY:`
+  on the block says why this operation upholds a contract, `# Safety` on the item
+  says what the contract is. An `unsafe fn` that does unsafe things needs both.
+- `#[expect(..., reason = "...")]` over `#[allow]`, so a suppression cannot
+  outlive the code that needed it, and on the item rather than on an `impl` block
+  or a module. `allow` stays for the three cases where the lint fires
+  inconsistently: conditional compilation
+  (`#[cfg_attr(not(feature = "x"), allow(dead_code))]` when a feature is what
+  makes the item live), inside a macro, and architecture-specific warnings.
+- A function that can panic says so in `# Panics`, and an intentional panic
+  carries the values in its message. In this tree that message is what reaches
+  `run_log.txt`, so it outranks a comment saying the same thing.
+
+`doc/rust-style.md` carries these with their sources and the numbers behind
+them.
 
 ---
 
