@@ -8,10 +8,9 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-26.** 24 of the 32 entries are struck; G2 is struck with
-a named remainder. What is open, in the order the evidence suggests: B2 (the
-syscall error convention, the largest remaining item by far, and now sitting on
-B3's table), C2 (no argument parser), H1 and H3 (two long functions), G3 (split
+**State as of 2026-08-26.** 25 of the 32 entries are struck; G2 is struck with
+a named remainder. What is open, in the order the evidence suggests: C2 (no
+argument parser), H1 and H3 (two long functions), G3 (split
 `WORKING-NOTES.md`), and the three gates I2, I5, I6. The numbers each entry
 quotes were remeasured on this date.
 
@@ -65,38 +64,46 @@ lists in step instead.
 
 ---
 
-## B. The syscall layer has no error convention
+## B. ~~The syscall layer has no error convention~~ (done)
 
-124 syscalls (`grep -c 'const SYS_' kernel/src/syscalls/mod.rs`) and exactly 6
-functions in `kernel/src/syscalls/` return `Result<_, Errno>`. The other ~118
-set the errno by hand and return a sentinel:
+It had one written out 477 times. 124 syscalls, of which exactly 6 returned
+`Result<_, Errno>`; the other ~118 set the errno by hand and returned a
+sentinel, measured on 2026-08-26 as 477 `errno = Errno::` assignments (97 of
+them the `Errno::Clear` reset at function entry) and 253 `!0u64` literals under
+`kernel/src/syscalls/`.
 
-```
-477   `errno = Errno::` assignments under kernel/src/syscalls/
- 97   of them the `Errno::Clear` reset at function entry
-253   `!0u64` literals under kernel/src/syscalls/
-```
-
-This is the same defect `CLAUDE.md` documents on the userspace side ("a return
+This was the same defect `CLAUDE.md` documents on the userspace side ("a return
 in `[-4095, -1]` is an error and anything else is a result"), seen from the
-kernel: every syscall body re-implements the protocol, so every syscall body can
-get it wrong, and 380 hand-written assignments is the surface area.
+kernel: every syscall body re-implemented the protocol, so every syscall body
+could get it wrong. All six entries below are closed; B2 and B3 were the two
+that carried it, and they landed together because both live in
+`syscalls/mod.rs`.
 
-### B2. Syscall bodies should return `Result<u64, Errno>` (S2, E3)
+### B2. ~~Syscall bodies should return `Result<u64, Errno>`~~ (done)
 
-**Fix.** Every `sys_*` returns `Result<u64, Errno>`. One conversion in the
-dispatcher does what all 477 assignments do now (`fail_with` in
-`syscalls/mod.rs` is the seed): `Ok(v)` clears the errno and
-returns `v`, `Err(e)` sets it and returns `!0u64`. The `?` operator then replaces
-every `match ... { Err(_) => { info.lock().errno = ...; return !0u64 } }` block
-in the tree.
+Every `sys_*` answers `Result<u64, Errno>`. `SyscallRet::into_rax` in
+`syscalls/mod.rs` does once what 477 `errno = Errno::` assignments did by hand,
+and `fail_with` is the one place that names the reporting convention: set the
+thread's errno, answer with the negated code. `grep -rc 'errno = Errno::'
+kernel/src/syscalls/` is 0 and `!0u64` appears nowhere in the directory.
 
-Do it one file at a time, smallest first: `sync.rs` (6 assignments), `shm.rs`
-(18), `memory.rs` (30), `window.rs` (49), `fs.rs` (57), `net.rs` (88), `io.rs`
-(126), `mod.rs` (86). Each file is its own commit and each is green on its own.
+The entry-time `errno = Errno::Clear` went with them, 97 of the 477. Nothing
+clears errno on success now, which is what POSIX says of it and what `edos_rt`
+already assumed: it reads the field only once a call has reported an error.
+That also retired the dispatcher's `if ctx.rax == u64::MAX` substitution and
+its "returned -1 with no errno set" log, both of which existed because a body
+could fail without saying why. A `Result` cannot.
 
-**Done when** `grep -rc 'errno = Errno::' kernel/src/syscalls/` is one site (the
-dispatcher) and `!0u64` appears only there.
+Shared helpers moved with their files rather than staying half-converted:
+`on_cwd_path` and `on_dir_path` (fs.rs, twelve path syscalls), `claim_range`
+and `current_user_thread` (memory.rs, shared with shm.rs), `socket_arg`,
+`socket_arg_nonblock` and `write_sockaddr_out` (net.rs, eleven socket calls).
+
+Two defects the conversion surfaced, both of which had been reporting a failure
+nothing could read: `sys_shm_size` returned -1 with no errno at all, and
+`sys_sync` could not fail yet was called from `power::quiesce` for its effect —
+now split into `sync_all`, which does the work, and `sys_sync`, which is the
+syscall over it.
 
 ### B3. ~~`syscall_handler` is an 831-line register-unpacking match~~ (done)
 
@@ -508,11 +515,14 @@ Elf64 offsets live in a private `elf64` module instead of forty consts inside
 the function body, and the magic numbers that were bare (`8` for
 `R_X86_64_RELATIVE`, `9` for `SHT_REL`, `14` for `SHT_INIT_ARRAY`) are named.
 
-### H3. `sys_read` / `sys_write`, 402 and 374 lines (S2, E2)
+### H3. `sys_read` / `sys_write`, 316 and 289 lines (S2, E2)
 
-`kernel/src/syscalls/io.rs:668` and `:242`. One function per descriptor kind
-behind a match, rather than a match with a 300-line body. B2 touches these
-anyway.
+`kernel/src/syscalls/io.rs:622` and `:242`. One function per descriptor kind
+behind a match, rather than a match with a 300-line body.
+
+B2 was expected to close this and did not: it took 86 lines out of the pair by
+deleting their error bookkeeping, which is real but is not the split. The match
+over descriptor kinds is what is long, and each arm is still written inline.
 
 ### H4. ~~`edos-wm`'s `main`, 607 lines~~ (done)
 

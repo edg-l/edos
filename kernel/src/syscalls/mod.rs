@@ -77,10 +77,19 @@ use crate::thread::scheduler::{
     thread_sleep, thread_yield,
 };
 
-/// Set the caller's errno and return the `-1` every failing syscall reports.
-pub(super) fn fail_with(errno: Errno) -> u64 {
+/// Report a failing syscall: the negated errno, which is what every C library
+/// expects. A return in `[-4095, -1]` is an error code and anything else is a
+/// result, and bounding the window is what lets a call answer with a pointer or
+/// a count that has its top bit set without being read as a failure.
+///
+/// The thread's errno field is set as well: `SYS_ERRNO` still answers from it,
+/// and a runtime that has not moved off that call keeps working. It is
+/// meaningful only immediately after a failure — nothing clears it on success,
+/// which is what POSIX says of errno and what `edos_rt` already assumes, since
+/// it reads the field only once a call has reported an error.
+fn fail_with(errno: Errno) -> u64 {
     current_thread_info().lock().errno = errno;
-    !0u64
+    (errno as u64).wrapping_neg()
 }
 
 /// Properly decrement refcounts when a FileDescriptor is removed from a table
@@ -519,13 +528,11 @@ fn reg<T: FromReg>(value: u64) -> T {
     T::from_reg(value)
 }
 
-/// How a syscall's return value becomes `rax`.
+/// How a syscall's answer becomes `rax`.
 ///
-/// `Result<u64, Errno>` is what a syscall body answers: the dispatcher does
-/// once what every body used to do by hand, which is set the errno and report
-/// the failure. The integer forms are the older convention — a body that sets
-/// the errno itself and returns a bare `-1` — and they exist only until the
-/// last file has moved off it.
+/// Every `sys_*` returns `Result<u64, Errno>`, so this is the one place that
+/// knows how a failure is reported. Each body used to do it itself: set the
+/// errno, return a bare `-1`, and hope the caller tested the right sentinel.
 trait SyscallRet {
     fn into_rax(self) -> u64;
 }
@@ -536,29 +543,6 @@ impl SyscallRet for Result<u64, Errno> {
             Ok(value) => value,
             Err(errno) => fail_with(errno),
         }
-    }
-}
-
-impl SyscallRet for u64 {
-    fn into_rax(self) -> u64 {
-        self
-    }
-}
-
-macro_rules! sentinel_ret {
-    ($($t:ty),*) => {
-        $(impl SyscallRet for $t {
-            fn into_rax(self) -> u64 {
-                self as u64
-            }
-        })*
-    };
-}
-sentinel_ret!(i64, i32);
-
-impl SyscallRet for () {
-    fn into_rax(self) -> u64 {
-        0
     }
 }
 
@@ -676,32 +660,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         trace::record_enter(call);
     }
 
-    // `dispatch` overwrites `ctx.rax` with the result, so the number has to
-    // be kept if anything after it wants to name the call.
-    let syscall_number = ctx.rax;
-
     dispatch(ctx);
-
-    // A failure leaves the entry as a negated errno, which is what every C
-    // library expects: a return in `[-4095, -1]` is an error code and anything
-    // else is a result. Bounding the window is what lets a call return a
-    // pointer or a count with its top bit set without being read as a failure.
-    //
-    // The substitution happens here rather than in each implementation because
-    // all of them already report failure the same way — a bare `-1` with the
-    // code left on the thread — so there is one place to change instead of 117.
-    // The thread's errno stays set as well: `SYS_ERRNO` still answers from it,
-    // and a runtime that has not moved off that call keeps working.
-    if ctx.rax == u64::MAX {
-        let mut code = current_thread_info().lock().errno;
-        if code == Errno::Clear {
-            // A path that failed without saying why. Reporting UNKNOWN is worse
-            // than the truth and better than -1, which a libc reads as EPERM.
-            log!("syscall {syscall_number} returned -1 with no errno set");
-            code = Errno::UNKNOWN;
-        }
-        ctx.rax = (code as u64).wrapping_neg();
-    }
 
     if let Some(call) = &traced_call {
         trace::record_exit(call, ctx.rax);
@@ -723,8 +682,8 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     sigframe::deliver_pending_handler(ctx);
 }
 
-pub fn sys_errno() -> u64 {
-    current_thread_info().lock().errno as u64
+pub fn sys_errno() -> Result<u64, Errno> {
+    Ok(current_thread_info().lock().errno as u64)
 }
 
 /// Writes nanoseconds since the Unix epoch as a little-endian `u64` into the
@@ -734,27 +693,21 @@ pub fn sys_errno() -> u64 {
 /// boot, so the call costs a counter read rather than the several port
 /// round-trips an RTC read takes, and it carries a date and sub-second
 /// resolution that a raw RTC reading does not.
-fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_clock_gettime(buf_ptr: *mut u8) -> Result<u64, Errno> {
     if buf_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let Some(nanos) = crate::timer::wall_clock_nanos() else {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     };
 
     let data = nanos.to_le_bytes();
     if !unsafe { try_copy_to_user(buf_ptr, data.as_ptr(), 8) } {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    0
+    Ok(0)
 }
 
 /// Steps the wall clock to the nanoseconds since the Unix epoch held in the
@@ -764,27 +717,21 @@ fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
 /// HPET ticks, so the clock is only ever as good as one one-second-resolution
 /// sample; this is how a time client corrects it. Only the wall clock moves —
 /// the monotonic counter durations are measured against is untouched.
-fn sys_clock_settime(buf_ptr: *const u8) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_clock_settime(buf_ptr: *const u8) -> Result<u64, Errno> {
     if buf_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let Some(nanos) = (unsafe { try_read_user(buf_ptr as *const u64) }) else {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     };
 
     if !crate::timer::set_wall_clock_nanos(nanos) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     log!("clock: wall clock stepped to {} ns since the epoch", nanos);
-    0
+    Ok(0)
 }
 
 /// Error codes as userspace sees them.
@@ -983,8 +930,8 @@ impl From<FsError> for Errno {
     }
 }
 
-fn sys_getpid() -> u64 {
-    current_thread_info().lock().pid
+fn sys_getpid() -> Result<u64, Errno> {
+    Ok(current_thread_info().lock().pid)
 }
 
 /// The calling thread's id, which is the process id only when the process has
@@ -1118,26 +1065,22 @@ fn sched_attr_target(tid: u64) -> Option<Arc<Thread>> {
 /// share and not a lockout. The slice is clamped rather than rejected on both
 /// sides, so a program written against a different scheduler's range gets the
 /// nearest thing this one will serve instead of an error it has no answer for.
-fn sys_sched_setattr(tid: u64, attr_ptr: *const SchedAttr) -> u64 {
-    current_thread_info().lock().errno = Errno::Clear;
-
+fn sys_sched_setattr(tid: u64, attr_ptr: *const SchedAttr) -> Result<u64, Errno> {
     let Some(attr) = (unsafe { try_read_user(attr_ptr) }) else {
-        return fail_with(Errno::EFAULT);
+        return Err(Errno::EFAULT);
     };
     let Some(thread) = sched_attr_target(tid) else {
-        return fail_with(Errno::ESRCH);
+        return Err(Errno::ESRCH);
     };
 
     thread.set_slice_ns(attr.slice_ns);
     thread.set_priority(attr.priority.min(u8::MAX as u32) as u8);
-    0
+    Ok(0)
 }
 
-fn sys_sched_getattr(tid: u64, attr_ptr: *mut SchedAttr) -> u64 {
-    current_thread_info().lock().errno = Errno::Clear;
-
+fn sys_sched_getattr(tid: u64, attr_ptr: *mut SchedAttr) -> Result<u64, Errno> {
     let Some(thread) = sched_attr_target(tid) else {
-        return fail_with(Errno::ESRCH);
+        return Err(Errno::ESRCH);
     };
     let attr = SchedAttr {
         priority: thread.priority() as u32,
@@ -1145,9 +1088,9 @@ fn sys_sched_getattr(tid: u64, attr_ptr: *mut SchedAttr) -> u64 {
         slice_ns: thread.request_ns(),
     };
     if !unsafe { try_write_user(attr_ptr, attr) } {
-        return fail_with(Errno::EFAULT);
+        return Err(Errno::EFAULT);
     }
-    0
+    Ok(0)
 }
 
 /// `waitpid` flags. Blocking is the low bit; `UNTRACED` asks to hear about a
@@ -1160,11 +1103,8 @@ const WAIT_UNTRACED: u64 = 2;
 /// code: an exit status is a byte, this is not.
 const STATUS_STOPPED: i32 = 0x1_0000;
 
-fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
+fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> Result<u64, Errno> {
     use crate::thread::thread::EXITED_THREADS;
-
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
 
     let target = ThreadId(pid);
     let block = flags & WAIT_BLOCK != 0;
@@ -1181,10 +1121,9 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     // Fast path: already exited
     if let Some(code) = take_thread_exit_code(target) {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
-        return pid;
+        return Ok(pid);
     }
 
     // A stopped child is reported before the blocking wait, because it is not
@@ -1192,14 +1131,13 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     // never come back.
     if has_stopped() {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
-        return pid;
+        return Ok(pid);
     }
 
     if !block {
-        return 0;
+        return Ok(0);
     }
 
     // Register as waiter so record_thread_exit wakes us. `stop_if_signalled`
@@ -1227,40 +1165,34 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     if current_thread_killed() {
         // The value never reaches userspace: this thread dies at the syscall
         // return boundary, which is the whole point of getting back to it.
-        info.lock().errno = Errno::EINTR;
-        return !0u64;
+        return Err(Errno::EINTR);
     }
 
     if !EXITED_THREADS.has_exited(target) {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
-        return pid;
+        return Ok(pid);
     }
 
     // Now consume the exit code
     if let Some(code) = take_thread_exit_code(target) {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
-        return pid;
+        return Ok(pid);
     }
 
     // Should not happen - we were woken because it exited
-    0
+    Ok(0)
 }
 
-fn sys_sleep_ms(milliseconds: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_sleep_ms(milliseconds: u64) -> Result<u64, Errno> {
     let duration = Duration::from_millis(milliseconds);
 
     thread_sleep(duration);
 
-    0
+    Ok(0)
 }
 
 /// `reboot(cmd)`: stop the machine. Only returns on an unknown command, and
@@ -1270,18 +1202,12 @@ fn sys_sleep_ms(milliseconds: u64) -> u64 {
 /// EDOS has no user ids, so there is no privilege to check: the guard against
 /// a stray program stopping the machine is that `reboot` is not something a
 /// program calls by accident.
-fn sys_reboot(cmd: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_reboot(cmd: u64) -> Result<u64, Errno> {
     match cmd {
         REBOOT_POWER_OFF => power::power_off(),
         REBOOT_RESTART => power::reboot(),
         REBOOT_HALT => power::halt(),
-        _ => {
-            info.lock().errno = Errno::EINVAL;
-            !0u64
-        }
+        _ => Err(Errno::EINVAL),
     }
 }
 
@@ -1293,27 +1219,22 @@ pub struct Timespec {
     pub tv_nsec: i64,
 }
 
-/// nanosleep(req, rem) -> 0 on success, -1 on error.
+/// Sleep until at least `req` has elapsed.
 ///
-/// Sleeps until at least `req` has elapsed. A sleep ends on any wake, not only
-/// on its deadline, so the remaining time is re-slept rather than reported: the
-/// call returning is a promise the request was honoured.
+/// A sleep ends on any wake, not only on its deadline, so the remaining time is
+/// re-slept rather than reported: the call returning is a promise the request
+/// was honoured.
 ///
 /// `rem` is accepted for the POSIX signature and never written. A signal EDOS
 /// delivers to a sleeping thread either is ignored or kills it, so the EINTR
 /// case a caller would read the remainder for cannot happen.
-fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> Result<u64, Errno> {
     let Some(req) = (unsafe { try_read_user(req_ptr) }) else {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     };
 
     if req.tv_sec < 0 || !(0..1_000_000_000).contains(&req.tv_nsec) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let deadline =
@@ -1333,26 +1254,20 @@ fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> u64 {
         exit_if_killed();
     }
 
-    0
+    Ok(0)
 }
 
-fn sys_monotonic_time() -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_monotonic_time() -> Result<u64, Errno> {
     // HPET-driven uptime is monotonic with microsecond resolution.
     let micros = crate::timer::uptime_us();
-    micros.saturating_mul(1_000)
+    Ok(micros.saturating_mul(1_000))
 }
 
-fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
+fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> Result<u64, Errno> {
     let info = current_thread_info();
 
-    info.lock().errno = Errno::Clear;
-
     if pipefd_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     // Create new pipe
@@ -1388,17 +1303,14 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
             table.close_fd(read_fd);
             table.close_fd(write_fd);
         }
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    0 // Success
+    Ok(0)
 }
 
-fn sys_dup(oldfd: u64) -> u64 {
+fn sys_dup(oldfd: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-
-    info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
     let mut table = fd_table.lock();
@@ -1407,8 +1319,7 @@ fn sys_dup(oldfd: u64) -> u64 {
         Some(fd) => fd.clone(),
         None => {
             drop(table);
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1419,7 +1330,7 @@ fn sys_dup(oldfd: u64) -> u64 {
     // of status flags. Copying is as close as a table that has no such object
     // gets: the two agree until something calls F_SETFL on one of them.
     table.set_nonblock(new_fd, nonblock);
-    new_fd
+    Ok(new_fd)
 }
 
 // fcntl commands (values match Linux).
@@ -1440,72 +1351,64 @@ const FD_CLOEXEC: u64 = 1;
 /// POSIX.1-2024 requires of `F_SETFL` beyond `O_APPEND`; the access mode and
 /// the creation flags are ignored there rather than refused, since a caller
 /// that reads flags with `F_GETFL` and writes them back must not fail.
-fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let fd_table = info.lock().fd_table.clone();
     let mut table = fd_table.lock();
 
     if table.get_fd(fd).is_none() {
         drop(table);
-        info.lock().errno = Errno::EBADF;
-        return -1;
+        return Err(Errno::EBADF);
     }
 
     match cmd {
         F_GETFD => {
             if table.is_cloexec(fd) {
-                FD_CLOEXEC as i64
+                Ok(FD_CLOEXEC)
             } else {
-                0
+                Ok(0)
             }
         }
         F_SETFD => {
             table.set_cloexec(fd, arg & FD_CLOEXEC != 0);
-            0
+            Ok(0)
         }
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let Some(desc) = table.get_fd(fd).cloned() else {
                 drop(table);
-                info.lock().errno = Errno::EBADF;
-                return -1;
+                return Err(Errno::EBADF);
             };
             desc.inc_refcount();
             let nonblock = table.is_nonblock(fd);
             let new_fd = table.allocate_fd_from(desc, arg);
             table.set_cloexec(new_fd, cmd == F_DUPFD_CLOEXEC);
             table.set_nonblock(new_fd, nonblock);
-            new_fd as i64
+            Ok(new_fd)
         }
         F_GETFL => {
             let Some(desc) = table.get_fd(fd) else {
                 drop(table);
-                info.lock().errno = Errno::EBADF;
-                return -1;
+                return Err(Errno::EBADF);
             };
             let mut flags = descriptor_open_flags(desc);
             if table.is_nonblock(fd) {
                 flags |= O_NONBLOCK;
             }
-            flags as i64
+            Ok(flags)
         }
         F_SETFL => {
             table.set_nonblock(fd, arg & O_NONBLOCK != 0);
-            0
+            Ok(0)
         }
         _ => {
             drop(table);
-            info.lock().errno = Errno::EINVAL;
-            -1
+            Err(Errno::EINVAL)
         }
     }
 }
 
-fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
+fn sys_dup2(oldfd: u64, newfd: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-
-    info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
 
@@ -1513,8 +1416,7 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     let old_fd_descriptor = match fd_table.lock().get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1531,7 +1433,7 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     table.insert_fd(newfd, old_fd_descriptor);
     table.set_nonblock(newfd, nonblock);
 
-    newfd // Success - return the new fd number
+    Ok(newfd)
 }
 
 /// Parse a null-terminated pointer array from userspace into a Vec of byte strings.
@@ -1600,7 +1502,7 @@ fn do_spawn(
     stdout_fd: u64,
     stderr_fd: u64,
     depth: u32,
-) -> u64 {
+) -> Result<u64, Errno> {
     use crate::{fs::api as fs_api, thread::util::queue_spawn_thread};
 
     let spawn_start = crate::timer::Instant::now();
@@ -1615,8 +1517,7 @@ fn do_spawn(
         Ok(fi) => fi,
         Err(_) => {
             x86_64::instructions::interrupts::disable();
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1627,8 +1528,7 @@ fn do_spawn(
         Ok(data) => data,
         Err(_) => {
             x86_64::instructions::interrupts::disable();
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1650,8 +1550,7 @@ fn do_spawn(
             Some(s) if !s.is_empty() => s.trim(),
             _ => {
                 x86_64::instructions::interrupts::disable();
-                info.lock().errno = Errno::ENOEXEC;
-                return !0u64;
+                return Err(Errno::ENOEXEC);
             }
         };
         let interp_arg: Option<&str> = tokens.next().map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -1668,8 +1567,7 @@ fn do_spawn(
             Ok(p) => p,
             Err(_) => {
                 x86_64::instructions::interrupts::disable();
-                info.lock().errno = Errno::ENOEXEC;
-                return !0u64;
+                return Err(Errno::ENOEXEC);
             }
         };
 
@@ -1704,8 +1602,7 @@ fn do_spawn(
     // Reject files that are neither ELF nor shebang
     if !probe.starts_with(b"\x7fELF") {
         x86_64::instructions::interrupts::disable();
-        info.lock().errno = Errno::ENOEXEC;
-        return !0u64;
+        return Err(Errno::ENOEXEC);
     }
 
     // Resolve the inode for file-backed ELF loading. The inode Arc is held for
@@ -1714,8 +1611,7 @@ fn do_spawn(
         Ok(ino) => ino,
         Err(_) => {
             x86_64::instructions::interrupts::disable();
-            info.lock().errno = Errno::ENOEXEC;
-            return !0u64;
+            return Err(Errno::ENOEXEC);
         }
     };
 
@@ -1750,8 +1646,7 @@ fn do_spawn(
         Err(e) => {
             log!("UserThread creation failed: {:?}", e);
             x86_64::instructions::interrupts::disable();
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1810,7 +1705,7 @@ fn do_spawn(
 
     x86_64::instructions::interrupts::disable();
 
-    child_pid
+    Ok(child_pid)
 }
 
 fn sys_spawn(
@@ -1819,7 +1714,7 @@ fn sys_spawn(
     stdin_fd: u64,
     stdout_fd: u64,
     stderr_fd: u64,
-) -> u64 {
+) -> Result<u64, Errno> {
     use crate::fs::path::Path;
 
     const MAX_PATH_LEN: usize = 1024;
@@ -1829,34 +1724,27 @@ fn sys_spawn(
 
     let info = current_thread_info();
 
-    info.lock().errno = Errno::Clear;
-
     if path_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let path_bytes = match copy_user_c_string(path_ptr, MAX_PATH_LEN) {
         Ok(bytes) if !bytes.is_empty() => bytes,
         Ok(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         Err(UAccessError::Fault) => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
         Err(UAccessError::TooLong) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
     let path_str = match core::str::from_utf8(&path_bytes) {
         Ok(s) => s,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1872,8 +1760,7 @@ fn sys_spawn(
     let path = match resolve_path(path_str, &io::current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1882,10 +1769,7 @@ fn sys_spawn(
 
     match parse_user_string_array(argv_ptr, MAX_ARGC, MAX_ARG_LEN, MAX_ARG_TOTAL) {
         Ok(args) => argv_storage.extend(args),
-        Err(errno) => {
-            info.lock().errno = errno;
-            return !0u64;
-        }
+        Err(errno) => return Err(errno),
     }
 
     // path_str lifetime ends with path_bytes; copy it as an owned string before calling do_spawn
@@ -1902,7 +1786,7 @@ fn sys_spawn(
     )
 }
 
-fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
+fn sys_spawn2(args_ptr: *const SpawnArgs) -> Result<u64, Errno> {
     use crate::fs::path::Path;
 
     const MAX_PATH_LEN: usize = 1024;
@@ -1915,47 +1799,38 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
 
     let info = current_thread_info();
 
-    info.lock().errno = Errno::Clear;
-
     if args_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let args: SpawnArgs = match unsafe { try_read_user(args_ptr) } {
         Some(a) => a,
         None => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     };
 
     if args.path.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let path_bytes = match copy_user_c_string(args.path, MAX_PATH_LEN) {
         Ok(bytes) if !bytes.is_empty() => bytes,
         Ok(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         Err(UAccessError::Fault) => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
         Err(UAccessError::TooLong) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
     let path_str = match core::str::from_utf8(&path_bytes) {
         Ok(s) => s,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1971,8 +1846,7 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
     let path = match resolve_path(path_str, &io::current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1981,20 +1855,10 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
 
     match parse_user_string_array(args.argv, MAX_ARGC, MAX_ARG_LEN, MAX_ARG_TOTAL) {
         Ok(args_vec) => argv_storage.extend(args_vec),
-        Err(errno) => {
-            info.lock().errno = errno;
-            return !0u64;
-        }
+        Err(errno) => return Err(errno),
     }
 
-    let envp_storage =
-        match parse_user_string_array(args.envp, MAX_ENVC, MAX_ENV_LEN, MAX_ENV_TOTAL) {
-            Ok(env) => env,
-            Err(errno) => {
-                info.lock().errno = errno;
-                return !0u64;
-            }
-        };
+    let envp_storage = parse_user_string_array(args.envp, MAX_ENVC, MAX_ENV_LEN, MAX_ENV_TOTAL)?;
 
     let path_str_owned = path_str.to_string();
     do_spawn(
@@ -2030,7 +1894,7 @@ fn sys_execve(
     path_ptr: *const u8,
     argv: *const *const u8,
     envp: *const *const u8,
-) -> u64 {
+) -> Result<u64, Errno> {
     use crate::{
         fs::api as fs_api,
         memory::frame_allocator::frame_allocator,
@@ -2049,15 +1913,11 @@ fn sys_execve(
     const MAX_ENV_TOTAL: usize = 32 * 1024;
 
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let Some(thread) = current_thread() else {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     };
     let Some(user_arc) = thread.user.clone() else {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     };
 
     x86_64::instructions::interrupts::enable();
@@ -2067,19 +1927,16 @@ fn sys_execve(
     let path_bytes = match copy_user_c_string(path_ptr, MAX_PATH_LEN) {
         Ok(bytes) => bytes,
         Err(_) => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     };
     let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     };
     let path = match io::resolve_path(path_str, &io::current_cwd(&info)) {
         Ok(p) => p,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -2087,24 +1944,14 @@ fn sys_execve(
     argv_storage.push(format!("{path}").as_bytes().to_vec());
     match parse_user_string_array(argv, MAX_ARGC, MAX_ARG_LEN, MAX_ARG_TOTAL) {
         Ok(args) => argv_storage.extend(args),
-        Err(errno) => {
-            info.lock().errno = errno;
-            return !0u64;
-        }
+        Err(errno) => return Err(errno),
     }
-    let envp_storage = match parse_user_string_array(envp, MAX_ENVC, MAX_ENV_LEN, MAX_ENV_TOTAL) {
-        Ok(env) => env,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return !0u64;
-        }
-    };
+    let envp_storage = parse_user_string_array(envp, MAX_ENVC, MAX_ENV_LEN, MAX_ENV_TOTAL)?;
 
     let inode = match fs_api::resolve_inode(&path) {
         Ok(ino) => ino,
         Err(_) => {
-            info.lock().errno = Errno::ENOENT;
-            return !0u64;
+            return Err(Errno::ENOENT);
         }
     };
 
@@ -2117,8 +1964,7 @@ fn sys_execve(
         Ok(image) => image,
         Err(e) => {
             log!("execve: loading {path} failed: {e:?}");
-            info.lock().errno = Errno::ENOEXEC;
-            return !0u64;
+            return Err(Errno::ENOEXEC);
         }
     };
 
@@ -2128,8 +1974,7 @@ fn sys_execve(
         // The load succeeded but a sibling will not stop. Give the new image
         // back rather than unmap an address space someone may still be running.
         release_user_mappings_of_image(image);
-        info.lock().errno = Errno::EAGAIN;
-        return !0u64;
+        return Err(Errno::EAGAIN);
     }
 
     // --- 4. Point of no return ---
@@ -2202,7 +2047,7 @@ fn sys_execve(
         rsp: user_stack_pointer,
     };
 
-    0
+    Ok(0)
 }
 
 struct LoadedImageParts {
@@ -2324,20 +2169,18 @@ fn sys_clone(
     arg: u64,
     _flags: u64,
     child_stack: u64,
-) -> u64 {
+) -> Result<u64, Errno> {
     let parent_thread = match current_thread() {
         Some(t) => t,
         None => {
-            current_thread_info().lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
     let parent_user = match &parent_thread.user {
         Some(u) => u,
         None => {
-            current_thread_info().lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -2351,7 +2194,7 @@ fn sys_clone(
         // Claim the range before mapping it. Threads of one process share an
         // address space, so two concurrent spawns searching for a free range
         // without claiming it would both land on the same stack.
-        let stack_bottom = match crate::syscalls::memory::claim_range(
+        let stack_bottom = crate::syscalls::memory::claim_range(
             parent_user,
             &parent_info,
             0,
@@ -2359,10 +2202,7 @@ fn sys_clone(
             VmaProt::READ | VmaProt::WRITE,
             VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
             VmaBacking::Stack,
-        ) {
-            Ok(addr) => addr,
-            Err(errno) => return fail_with(errno),
-        };
+        )?;
 
         // Map the stack
         let page_flags =
@@ -2378,8 +2218,7 @@ fn sys_clone(
             let user_read = parent_user.read();
             ranked_lock!(RANK_VMAS, "sys_clone::stack_unclaim", user_read.vmas)
                 .remove(&stack_bottom);
-            parent_info.lock().errno = Errno::ENOMEM;
-            return !0u64;
+            return Err(Errno::ENOMEM);
         }
 
         let top = (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT - 1);
@@ -2450,8 +2289,7 @@ fn sys_clone(
                     drop(manager_guard);
                 }
                 kthread_stack_free(kernel_stack_top);
-                current_thread_info().lock().errno = Errno::ENOMEM;
-                return !0u64;
+                return Err(Errno::ENOMEM);
             }
         }
     };
@@ -2561,10 +2399,10 @@ fn sys_clone(
         crate::window::shell::grant(child_id.0);
     }
 
-    child_id.0
+    Ok(child_id.0)
 }
 
-fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
+fn sys_fork(parent_ctx: &mut SyscallContext) -> Result<u64, Errno> {
     use core::sync::atomic::AtomicUsize;
     use x86_64::structures::paging::OffsetPageTable;
 
@@ -2577,16 +2415,14 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let parent_thread = match current_thread() {
         Some(t) => t,
         None => {
-            current_thread_info().lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
     let parent_user = match &parent_thread.user {
         Some(u) => u,
         None => {
-            current_thread_info().lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -2611,8 +2447,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             None => {
                 drop(parent_vmas);
                 drop(parent_user_read);
-                current_thread_info().lock().errno = Errno::ENOMEM;
-                return -1;
+                return Err(Errno::ENOMEM);
             }
         }
     };
@@ -2864,7 +2699,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     // Restore parent's address space before returning to userspace.
     unsafe { Cr3::write(parent_cr3.0, parent_cr3.1) };
 
-    child_id.0 as i64
+    Ok(child_id.0)
 }
 
 /// Longest path a syscall accepts, NUL excluded.
@@ -2938,33 +2773,27 @@ fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccess
 ///   - r10: timeout in milliseconds (u64); 0 uses a default of 5000 ms
 ///
 /// Returns RTT in microseconds on success, or u64::MAX on timeout / error.
-fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> Result<u64, Errno> {
     if dst_ip_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let dst_ip = match unsafe { try_read_user(dst_ip_ptr) } {
         Some(ip) => ip,
         None => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     };
 
     // Check that the net stack is initialized.
     if crate::net::stack::NET_STACK.get().is_none() {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let timeout_ms = if timeout_ms == 0 { 5000 } else { timeout_ms };
     let timeout = Duration::from_millis(timeout_ms);
 
-    crate::net::stack::syscall_ping(dst_ip, id, seq, timeout).unwrap_or(!0u64)
+    crate::net::stack::syscall_ping(dst_ip, id, seq, timeout).ok_or(Errno::ETIMEDOUT)
 }
 
 /// SYS_NETINFO: write network interface information as text into a user buffer.
@@ -2974,13 +2803,9 @@ fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u
 ///   - rsi: buffer length in bytes
 ///
 /// Returns the number of bytes written on success, or u64::MAX on error.
-fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> Result<u64, Errno> {
     if buf_ptr.is_null() || buf_len == 0 || !access_ok(buf_ptr as u64, buf_len) {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let text = {
@@ -3033,8 +2858,7 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
     let bytes = text.as_bytes();
     let copy_len = bytes.len().min(buf_len);
     if !unsafe { try_copy_to_user(buf_ptr, bytes.as_ptr(), copy_len) } {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
-    copy_len as u64
+    Ok(copy_len as u64)
 }

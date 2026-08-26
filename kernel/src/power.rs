@@ -21,7 +21,7 @@ use x86_64::instructions::{
 use crate::{
     acpi::{acpi_tables, handler::AcpiHandler},
     println,
-    syscalls::io::sys_sync,
+    syscalls::io::sync_all,
 };
 
 /// SLP_EN in PM1_CNT: writing it with SLP_TYP starts the transition.
@@ -80,7 +80,7 @@ pub fn reboot() -> ! {
 }
 
 /// Get the filesystems to a state the next boot does not have to repair, and
-/// stop taking new work. Interrupts stay on: `sys_sync` commits the journal
+/// stop taking new work. Interrupts stay on: `sync_all` commits the journal
 /// and waits for the writeback path, which parks.
 fn quiesce(what: &str) {
     debug_assert!(
@@ -88,7 +88,7 @@ fn quiesce(what: &str) {
         "power::quiesce called with interrupts disabled"
     );
     println!("{what}: syncing filesystems");
-    sys_sync();
+    sync_all();
     println!("{what}: filesystems synced");
     // After the sync, so anything the filesystems just wrote is inside the
     // cache this commits, and before the power transition, which gives the

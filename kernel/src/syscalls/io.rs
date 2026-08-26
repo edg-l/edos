@@ -239,24 +239,18 @@ pub(super) fn resolve_path(
     }
 }
 
-pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
+pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     if count == 0 {
         if !fd_is_open(&fd_table, fd) {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
+            return Err(Errno::EBADF);
         }
-        return 0;
+        return Ok(0);
     }
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     interrupts::enable();
@@ -267,17 +261,11 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
                 match tty::write_from_user(buffer_ptr, count) {
-                    Some(n) => n as u64,
-                    None => {
-                        info.lock().errno = Errno::EFAULT;
-                        !0u64
-                    }
+                    Some(n) => Ok(n as u64),
+                    None => Err(Errno::EFAULT),
                 }
             }
-            StandardStream::Stdin => {
-                info.lock().errno = Errno::EINVAL;
-                !0u64
-            }
+            StandardStream::Stdin => Err(Errno::EINVAL),
         },
         Some(FileDescriptor::PipeWrite(pipe) | FileDescriptor::PipeReadWrite(pipe)) => {
             // Copy out of user space before taking the pipe lock: a user copy can
@@ -288,8 +276,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             let mut heap = Vec::new();
             let data = stage_buffer(&mut inline, &mut heap, count);
             if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, data.len()) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
             let probe = sched_prof::record(Stage::PipeCopyIn, probe);
 
@@ -328,8 +315,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     if sent > 0 {
                         break Some(sent);
                     }
-                    info.lock().errno = Errno::EAGAIN;
-                    return !0u64;
+                    return Err(Errno::EAGAIN);
                 }
 
                 // Room for what is left, or a reader going away so the write
@@ -342,14 +328,13 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                         .is_none_or(|guard| guard.write_ready(remaining))
                 };
                 if writer_wq.wait_until_killable(ready) == WaitOutcome::Killed {
-                    info.lock().errno = Errno::EINTR;
-                    return !0u64;
+                    return Err(Errno::EINTR);
                 }
             };
             let probe = sched_prof::record(Stage::PipeWrite, probe);
             sched_prof::record(Stage::PipeFlush, probe);
             match written {
-                Some(written) => written as u64,
+                Some(written) => Ok(written as u64),
                 None => {
                     // POSIX: both, and in this order. The signal is what
                     // terminates a producer that never checks its return
@@ -360,31 +345,25 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                             crate::thread::signal::SIGPIPE,
                         );
                     }
-                    info.lock().errno = Errno::EPIPE;
-                    !0u64
+                    Err(Errno::EPIPE)
                 }
             }
         }
-        Some(FileDescriptor::PipeRead(_)) => {
-            info.lock().errno = Errno::EINVAL;
-            !0u64
-        }
+        Some(FileDescriptor::PipeRead(_)) => Err(Errno::EINVAL),
         Some(FileDescriptor::PtyMaster(pty)) => {
             let Some(data) = copy_in(buffer_ptr, count) else {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             };
             let (written, notif) = {
                 let mut guard = ranked_lock!(RANK_PTY, "sys_write::pty_master", pty);
                 guard.master_write(&data)
             };
             notif.flush();
-            written as u64
+            Ok(written as u64)
         }
         Some(FileDescriptor::PtySlave(pty)) => {
             let Some(data) = copy_in(buffer_ptr, count) else {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             };
 
             // The output ring is bounded, so a program with more than the
@@ -418,8 +397,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     if sent > 0 {
                         break Some(sent);
                     }
-                    info.lock().errno = Errno::EAGAIN;
-                    return !0u64;
+                    return Err(Errno::EAGAIN);
                 }
 
                 // Killable: a full terminal whose master never reads is a wait
@@ -427,18 +405,16 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 // not be killed while it waited.
                 let ready = || pty.try_lock().is_none_or(|guard| guard.slave_write_ready());
                 if write_wq.wait_until_killable(ready) == WaitOutcome::Killed {
-                    info.lock().errno = Errno::EINTR;
-                    return !0u64;
+                    return Err(Errno::EINTR);
                 }
             };
             match written {
-                Some(written) => written as u64,
+                Some(written) => Ok(written as u64),
                 None => {
                     // POSIX: writing to a terminal whose master side is gone is
                     // EIO. No SIGPIPE — that belongs to pipes and sockets, and
                     // a terminal hangup is not a broken pipe.
-                    info.lock().errno = Errno::EIO;
-                    !0u64
+                    Err(Errno::EIO)
                 }
             }
         }
@@ -449,8 +425,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             let fs = match file.fs.as_ref() {
                 Some(f) => f,
                 None => {
-                    info.lock().errno = Errno::EINVAL;
-                    return !0u64;
+                    return Err(Errno::EINVAL);
                 }
             };
             let op = vfs::VfsOp::from_open_file(
@@ -474,14 +449,13 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                         ..file
                     });
                     fd_table.lock().replace_fd(fd, new_fd);
-                    written
+                    Ok(written)
                 }
                 Err(e) => {
                     // The filesystem's own code, not EINVAL for everything: a
                     // full device and a bad argument are not the same failure,
                     // and a caller that has to tell them apart has only this.
-                    info.lock().errno = Errno::from(e);
-                    !0u64
+                    Err(Errno::from(e))
                 }
             }
         }
@@ -499,8 +473,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 let conn = match sock.lock().tcp_conn.clone() {
                     Some(c) => c,
                     None => {
-                        info.lock().errno = Errno::ENOTCONN;
-                        return !0u64;
+                        return Err(Errno::ENOTCONN);
                     }
                 };
 
@@ -509,21 +482,19 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 match state {
                     TcpState::Established | TcpState::CloseWait => {}
                     _ => {
-                        info.lock().errno = Errno::EPIPE;
-                        return !0u64;
+                        return Err(Errno::EPIPE);
                     }
                 }
 
                 let mut data = vec![0u8; count];
                 if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
+                    return Err(Errno::EFAULT);
                 }
 
                 let (segments, bytes_sent) = conn.lock().build_data_segments(&data);
                 if segments.is_empty() {
                     // Window full: return 0 so caller can retry
-                    return 0;
+                    return Ok(0);
                 }
 
                 let remote_ip = conn.lock().remote_ip;
@@ -531,7 +502,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 for seg in &segments {
                     let _ = stack.send_ip(remote_ip, ipv4::IpProtocol::Tcp, seg);
                 }
-                bytes_sent as u64
+                Ok(bytes_sent as u64)
             } else {
                 // UDP write: send to stored remote_addr
                 let remote = sock.lock().remote_addr;
@@ -539,42 +510,28 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     Some(dst) => {
                         let mut data = vec![0u8; count];
                         if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
-                            info.lock().errno = Errno::EFAULT;
-                            return !0u64;
+                            return Err(Errno::EFAULT);
                         }
                         let src_port = sock.lock().local_addr.map(|a| a.port).unwrap_or(0);
                         match net_stack()
                             .lock()
                             .send_udp(src_port, dst.ip, dst.port, &data)
                         {
-                            Ok(()) => count as u64,
-                            Err(_) => {
-                                info.lock().errno = Errno::EIO;
-                                !0u64
-                            }
+                            Ok(()) => Ok(count as u64),
+                            Err(_) => Err(Errno::EIO),
                         }
                     }
-                    None => {
-                        info.lock().errno = Errno::EINVAL;
-                        !0u64
-                    }
+                    None => Err(Errno::EINVAL),
                 }
             }
         }
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            !0u64
-        }
+        None => Err(Errno::EINVAL),
     }
 }
 
-pub fn sys_close(fd: u64) -> i32 {
+pub fn sys_close(fd: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     interrupts::enable();
     let result = fd_table.lock().close_fd(fd);
@@ -585,7 +542,7 @@ pub fn sys_close(fd: u64) -> i32 {
                 guard.close_reader()
             };
             notif.flush();
-            0
+            Ok(0)
         }
         Some(FileDescriptor::PipeWrite(pipe)) => {
             let notif = {
@@ -593,7 +550,7 @@ pub fn sys_close(fd: u64) -> i32 {
                 guard.close_writer()
             };
             notif.flush();
-            0
+            Ok(0)
         }
         Some(FileDescriptor::PipeReadWrite(pipe)) => {
             let notif = {
@@ -603,23 +560,23 @@ pub fn sys_close(fd: u64) -> i32 {
                 guard.notify_ends()
             };
             notif.flush();
-            0
+            Ok(0)
         }
         Some(FileDescriptor::PtyMaster(pty)) => {
             let notif = ranked_lock!(RANK_PTY, "sys_close::pty_master", pty).close_master();
             notif.flush();
-            0
+            Ok(0)
         }
         Some(FileDescriptor::PtySlave(pty)) => {
             let notif = ranked_lock!(RANK_PTY, "sys_close::pty_slave", pty).close_slave();
             notif.flush();
-            0
+            Ok(0)
         }
         Some(FileDescriptor::Socket(sock)) => {
             let mut s = sock.lock();
             s.refcount = s.refcount.saturating_sub(1);
             if s.refcount > 0 {
-                return 0;
+                return Ok(0);
             }
             s.closed = true;
             let notif = s.notify_pollers();
@@ -655,35 +612,26 @@ pub fn sys_close(fd: u64) -> i32 {
                     None => conn.lock().abort(),
                 }
             }
-            0
+            Ok(0)
         }
-        Some(_) => 0,
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Some(_) => Ok(0),
+        None => Err(Errno::EINVAL),
     }
 }
 
-pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
+pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     if count == 0 {
         if !fd_is_open(&fd_table, fd) {
-            info.lock().errno = Errno::EBADF;
-            return -1;
+            return Err(Errno::EBADF);
         }
-        return 0;
+        return Ok(0);
     }
 
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     // The fd table is a BlockingMutex, so it must not be acquired under the
@@ -696,24 +644,17 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdin => {
                 // Stdin reads from keyboard - still needs intermediate buffer
-                let kernel_data = match read_from_stdin(count, nonblock) {
-                    Ok(data) => data,
-                    Err(code) => return code,
-                };
+                let kernel_data = read_from_stdin(count, nonblock)?;
                 let bytes_to_copy = kernel_data.len().min(count);
                 if bytes_to_copy == 0 {
-                    return 0;
+                    return Ok(0);
                 }
                 if !unsafe { try_copy_to_user(buffer_ptr, kernel_data.as_ptr(), bytes_to_copy) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return -1;
+                    return Err(Errno::EFAULT);
                 }
-                bytes_to_copy as i64
+                Ok(bytes_to_copy as u64)
             }
-            StandardStream::Stdout | StandardStream::Stderr => {
-                info.lock().errno = Errno::EINVAL;
-                -1
-            }
+            StandardStream::Stdout | StandardStream::Stderr => Err(Errno::EINVAL),
         },
         Some(FileDescriptor::PipeRead(pipe) | FileDescriptor::PipeReadWrite(pipe)) => {
             let mut inline = [0u8; STREAM_STACK_BUF];
@@ -740,20 +681,18 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 
                 if taken > 0 {
                     if !copy_out(buffer_ptr, &data[..taken]) {
-                        info.lock().errno = Errno::EFAULT;
-                        break -1;
+                        break Err(Errno::EFAULT);
                     }
                     sched_prof::record(Stage::PipeCopyOut, probe);
-                    break taken as i64;
+                    break Ok(taken as u64);
                 }
                 if at_eof {
-                    break 0; // EOF: no data and all writers closed
+                    break Ok(0); // EOF: no data and all writers closed
                 }
                 // An empty pipe with a writer still on it is the wait a
                 // non-blocking reader asked not to take.
                 if nonblock {
-                    info.lock().errno = Errno::EAGAIN;
-                    break -1;
+                    break Err(Errno::EAGAIN);
                 }
                 // No data but writer still open: park until woken by write/close.
                 // The predicate runs with interrupts off, so it probes the lock
@@ -767,15 +706,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 if wq.wait_until_killable(|| pipe.try_lock().is_none_or(|guard| guard.readable()))
                     == WaitOutcome::Killed
                 {
-                    info.lock().errno = Errno::EINTR;
-                    break -1;
+                    break Err(Errno::EINTR);
                 }
             }
         }
-        Some(FileDescriptor::PipeWrite(_)) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Some(FileDescriptor::PipeWrite(_)) => Err(Errno::EINVAL),
         Some(FileDescriptor::PtyMaster(pty)) => {
             // Master reads are non-blocking: return 0 immediately when no data
             // is available. The master side is typically used in a poll loop
@@ -796,16 +731,14 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 // the terminal's poll loop has always read, and which conflates
                 // no-data-yet with end of file.
                 if nonblock {
-                    info.lock().errno = Errno::EAGAIN;
-                    return -1;
+                    return Err(Errno::EAGAIN);
                 }
-                return 0;
+                return Ok(0);
             }
             if !copy_out(buffer_ptr, &data[..taken]) {
-                info.lock().errno = Errno::EFAULT;
-                return -1;
+                return Err(Errno::EFAULT);
             }
-            taken as i64
+            Ok(taken as u64)
         }
         Some(FileDescriptor::PtySlave(pty)) => {
             let mut inline = [0u8; STREAM_STACK_BUF];
@@ -825,21 +758,19 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 match result {
                     PtySlaveRead::Data(taken) => {
                         if !copy_out(buffer_ptr, &data[..taken]) {
-                            info.lock().errno = Errno::EFAULT;
-                            break -1;
+                            break Err(Errno::EFAULT);
                         }
-                        break taken as i64;
+                        break Ok(taken as u64);
                     }
                     // Ctrl-D: a zero-length read, which is how POSIX spells EOF.
-                    PtySlaveRead::Eof => break 0,
+                    PtySlaveRead::Eof => break Ok(0),
                     PtySlaveRead::WouldBlock => {}
                 }
                 if hangup {
-                    break 0;
+                    break Ok(0);
                 }
                 if nonblock {
-                    info.lock().errno = Errno::EAGAIN;
-                    break -1;
+                    break Err(Errno::EAGAIN);
                 }
                 // Ctrl+C on a terminal read is the ordinary case for this:
                 // the thread is killed and nothing else will ever make the
@@ -849,8 +780,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         .is_none_or(|guard| !guard.input_buf.is_empty() || guard.closed_master)
                 }) == WaitOutcome::Killed
                 {
-                    info.lock().errno = Errno::EINTR;
-                    break -1;
+                    break Err(Errno::EINTR);
                 }
             }
         }
@@ -871,21 +801,19 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         Ok(n) => {
                             let bytes_to_copy = n.min(count);
                             if bytes_to_copy == 0 {
-                                return 0;
+                                return Ok(0);
                             }
                             (bytes_to_copy, ra) // devfs doesn't mutate ra
                         }
                         Err(e) => {
-                            info.lock().errno = Errno::from(crate::fs::Error::from(e));
-                            return -1;
+                            return Err(Errno::from(crate::fs::Error::from(e)));
                         }
                     }
                 } else {
                     let fs = match file.fs.as_ref() {
                         Some(f) => f,
                         None => {
-                            info.lock().errno = Errno::EINVAL;
-                            return -1;
+                            return Err(Errno::EINVAL);
                         }
                     };
                     let op = vfs::VfsOp::from_open_file(
@@ -902,8 +830,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                             // a caller told "invalid argument" for a failed
                             // fill or a bad address has no way back to what
                             // actually went wrong.
-                            info.lock().errno = Errno::from(e);
-                            return -1;
+                            return Err(Errno::from(e));
                         }
                     }
                 };
@@ -914,7 +841,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 ..file
             });
             fd_table.lock().replace_fd(fd, new_fd);
-            bytes_read as i64
+            Ok(bytes_read as u64)
         }
         Some(FileDescriptor::Socket(sock)) => {
             use crate::net::socket::SOCK_STREAM;
@@ -926,8 +853,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 let conn = match sock.lock().tcp_conn.clone() {
                     Some(c) => c,
                     None => {
-                        info.lock().errno = Errno::ENOTCONN;
-                        return -1;
+                        return Err(Errno::ENOTCONN);
                     }
                 };
                 // `wait_until` parks once and returns; it does not guarantee the
@@ -950,27 +876,24 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     // An established connection with an empty receive buffer is
                     // the wait; a closed one falls through to the EOF below.
                     if nonblock {
-                        info.lock().errno = Errno::EAGAIN;
-                        return -1;
+                        return Err(Errno::EAGAIN);
                     }
                     if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
-                        info.lock().errno = Errno::EINTR;
-                        return -1;
+                        return Err(Errno::EINTR);
                     }
                 };
 
                 if c.rx_buffer.is_empty() {
-                    return 0; // EOF
+                    return Ok(0); // EOF
                 }
                 let bytes_to_read = count.min(c.rx_buffer.len());
                 let data: Vec<u8> = c.rx_buffer.drain(..bytes_to_read).collect();
                 drop(c);
 
                 if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_read) } {
-                    info.lock().errno = Errno::EFAULT;
-                    return -1;
+                    return Err(Errno::EFAULT);
                 }
-                bytes_to_read as i64
+                Ok(bytes_to_read as u64)
             } else {
                 // UDP: blocking receive from rx_queue
                 // Same contract as the TCP path above: loop on the condition.
@@ -984,18 +907,16 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         break;
                     }
                     if nonblock {
-                        info.lock().errno = Errno::EAGAIN;
-                        return -1;
+                        return Err(Errno::EAGAIN);
                     }
                     if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
-                        info.lock().errno = Errno::EINTR;
-                        return -1;
+                        return Err(Errno::EINTR);
                     }
                 }
                 let data_opt = {
                     let mut s = sock.lock();
                     if s.closed && s.rx_queue.is_empty() {
-                        return 0;
+                        return Ok(0);
                     }
                     s.rx_queue.pop_front().map(|(d, _src)| d)
                 };
@@ -1003,55 +924,45 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     Some(data) => {
                         let bytes_to_copy = data.len().min(count);
                         if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
-                            info.lock().errno = Errno::EFAULT;
-                            return -1;
+                            return Err(Errno::EFAULT);
                         }
-                        bytes_to_copy as i64
+                        Ok(bytes_to_copy as u64)
                     }
-                    None => 0,
+                    None => Ok(0),
                 }
             }
         }
-        None => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        None => Err(Errno::EINVAL),
     }
 }
 
-pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> Result<u64, Errno> {
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     // Validate before short-circuiting: a zero-length request still carries a
     // flag word, and answering 0 for one this kernel does not implement tells
     // the caller a flag was honoured that never was.
     if count > MAX_RANDOM_LEN || flags != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let mut kernel_buffer = vec![0u8; count];
     random::fill_bytes(&mut kernel_buffer);
 
     if !unsafe { try_copy_to_user(buffer_ptr, kernel_buffer.as_ptr(), kernel_buffer.len()) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    kernel_buffer.len() as i64
+    Ok(kernel_buffer.len() as u64)
 }
 
-fn read_from_stdin(max_count: usize, nonblock: bool) -> Result<alloc::vec::Vec<u8>, i64> {
+fn read_from_stdin(max_count: usize, nonblock: bool) -> Result<alloc::vec::Vec<u8>, Errno> {
     use alloc::vec::Vec;
     use pc_keyboard::{KeyCode, KeyState};
 
@@ -1070,8 +981,7 @@ fn read_from_stdin(max_count: usize, nonblock: bool) -> Result<alloc::vec::Vec<u
                 Some(event) => event,
                 None => {
                     if kernel_buffer.is_empty() {
-                        current_thread_info().lock().errno = Errno::EAGAIN;
-                        return Err(-1);
+                        return Err(Errno::EAGAIN);
                     }
                     break;
                 }
@@ -1145,19 +1055,21 @@ fn read_from_stdin(max_count: usize, nonblock: bool) -> Result<alloc::vec::Vec<u
     Ok(kernel_buffer)
 }
 
-/// openat(dirfd, path, path_len, flags) -> fd, or -1 on error
+/// Open a path relative to a directory descriptor and answer with the fd.
 ///
 /// The `*at` form of `open`, taking the path as pointer plus length rather
 /// than NUL-terminated. `flags` are `open`'s.
-pub fn sys_openat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) -> i64 {
+pub fn sys_openat(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    flags: u64,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let path = match super::fs::read_user_path_at(dirfd, path_ptr, path_len) {
         Ok(path) => path,
         Err(err) => {
-            info.lock().errno = err;
-            return -1;
+            return Err(err);
         }
     };
 
@@ -1205,14 +1117,17 @@ pub fn descriptor_open_flags(desc: &FileDescriptor) -> u64 {
 }
 
 /// Open an already-resolved absolute path.
-fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64) -> i64 {
+fn open_resolved(
+    info: &Arc<IrqSpinlock<UserThreadInfo>>,
+    path: Path,
+    flags: u64,
+) -> Result<u64, Errno> {
     // A flag this kernel does not implement is refused rather than ignored:
     // silently dropping O_EXCL or O_DIRECTORY hands back a descriptor whose
     // semantics are not the ones the caller asked for. Access mode 3 has no
     // meaning either.
     if flags & !OPEN_FLAGS_SUPPORTED != 0 || flags & 0x3 == 0x3 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     // Verify file exists; support create flag.
@@ -1247,8 +1162,7 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
                 && existing.kind == FileKind::File
                 && let Err(e) = fs_api::truncate(&path, 0)
             {
-                info.lock().errno = Errno::from(e);
-                return -1;
+                return Err(Errno::from(e));
             }
         }
         Err(e) => {
@@ -1258,8 +1172,7 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
                 match fs_api::create_file(&path) {
                     Ok(()) | Err(FsError::AlreadyExists) => {}
                     Err(e) => {
-                        info.lock().errno = Errno::from(e);
-                        return -1;
+                        return Err(Errno::from(e));
                     }
                 }
                 // `create_file` follows the symbolic links on the path, so the
@@ -1269,8 +1182,7 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
                     path = resolved;
                 }
             } else {
-                info.lock().errno = Errno::from(e);
-                return -1;
+                return Err(Errno::from(e));
             }
         }
     }
@@ -1286,8 +1198,7 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         // Keyed by inode, so the two ends find each other through the name
         // rather than through the path each of them spelled.
         let Some(ino) = inode.as_ref().map(|i| i.ino) else {
-            info.lock().errno = Errno::EIO;
-            return -1;
+            return Err(Errno::EIO);
         };
         let mount_id = cached_op.as_ref().map(|c| c.mount_id).unwrap_or(0);
         // This blocks for the peer unless O_NONBLOCK, so it runs with no lock
@@ -1298,12 +1209,9 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
                 let mut table = table.lock();
                 let fd = table.allocate_fd(desc);
                 table.set_nonblock(fd, nonblock);
-                fd as i64
+                Ok(fd)
             }
-            Err(errno) => {
-                info.lock().errno = errno;
-                -1
-            }
+            Err(errno) => Err(errno),
         };
     }
 
@@ -1322,36 +1230,35 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
     let mut table = table.lock();
     let fd = table.allocate_fd(desc);
     table.set_nonblock(fd, nonblock);
-    fd as i64
+    Ok(fd as u64)
 }
 
-pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
+pub fn sys_list_dir(
+    path_ptr: *const u8,
+    buffer_ptr: *mut u8,
+    buffer_size: usize,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if path_ptr.is_null() || buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     if buffer_size == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
     let path_str = match copy_user_path(&mut buf, path_ptr) {
         Ok(s) => s,
         Err(e) => {
-            info.lock().errno = e;
-            return -1;
+            return Err(e);
         }
     };
 
     let path = match resolve_path(path_str, &current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1360,17 +1267,13 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     let files = match fs_api::list_files(&path) {
         Ok(files) => files,
         Err(e) => {
-            info.lock().errno = Errno::from(e);
-            return -1;
+            return Err(Errno::from(e));
         }
     };
 
     match write_dir_entries(&files, buffer_ptr, buffer_size, 0) {
-        Ok(written) => written as i64,
-        Err(e) => {
-            info.lock().errno = e;
-            -1
-        }
+        Ok(written) => Ok(written as u64),
+        Err(e) => Err(e),
     }
 }
 
@@ -1430,21 +1333,17 @@ pub fn sys_getdents(
     buffer_ptr: *mut u8,
     buffer_size: usize,
     start: usize,
-) -> i64 {
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     let cwd = current_cwd(&info);
     let path = match super::fs::read_user_path_with_len(path_ptr, path_len, &cwd) {
         Ok(p) => p,
         Err(e) => {
-            info.lock().errno = e;
-            return -1;
+            return Err(e);
         }
     };
 
@@ -1452,40 +1351,32 @@ pub fn sys_getdents(
     let files = match fs_api::list_files(&path) {
         Ok(files) => files,
         Err(e) => {
-            info.lock().errno = Errno::from(e);
-            return -1;
+            return Err(Errno::from(e));
         }
     };
 
     if start >= files.len() {
-        return 0;
+        return Ok(0);
     }
 
     match write_dir_entries(&files, buffer_ptr, buffer_size, start) {
         // A zero-byte result with entries left means the buffer can never hold
         // the next one; reporting 0 would read as "end of directory" and the
         // caller would silently lose the tail.
-        Ok(0) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
-        Ok(written) => written as i64,
-        Err(e) => {
-            info.lock().errno = e;
-            -1
-        }
+        Ok(0) => Err(Errno::EINVAL),
+        Ok(written) => Ok(written as u64),
+        Err(e) => Err(e),
     }
 }
 
-pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
+pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> Result<u64, Errno> {
     // Cache info before interrupts::enable() to avoid stale per-CPU scheduler
     // reference after thread migration. After enable, use `info` (Arc) directly
     // and call sched() freshly for sleep/park operations.
     let info = current_thread_info();
 
     if fds_ptr.is_null() && count != 0 {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     // `None` is an unbounded wait; a zero timeout returns without ever waiting.
@@ -1497,13 +1388,12 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     let immediate = timeout_ms == 0;
 
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     const MAX_POLL_FDS: usize = 1024;
     if count > MAX_POLL_FDS {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     // Both per-descriptor arrays stay on the stack at the counts poll is
@@ -1523,8 +1413,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
     if !unsafe { try_copy_from_user(fds.as_mut_ptr() as *mut u8, fds_ptr as *const u8, fds_bytes) }
     {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     let copy_back = |entries: &[SelectFd]| unsafe {
@@ -1535,11 +1424,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     // hundred bytes, so an inline array of them costs more to initialise and
     // drop than the single allocation it would save.
     let descriptors = {
-        let fd_table = {
-            let mut guard = info.lock();
-            guard.errno = Errno::Clear;
-            guard.fd_table.clone()
-        };
+        let fd_table = info.lock().fd_table.clone();
         let table = fd_table.lock();
         fds.iter()
             .map(|entry| table.get_fd(entry.fd).cloned())
@@ -1549,8 +1434,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     let thread_weak = match current_thread_weak() {
         Some(w) => w,
         None => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
     // One allocation of slots for the whole call, holding the waiter too.
@@ -1753,11 +1637,10 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     cleanup_poll_contexts(&contexts);
 
     if !copy_back(fds) {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    ready as i64
+    Ok(ready as u64)
 }
 
 fn refresh_poll_contexts(set: &PollSet, contexts: &[PollContext], fds: &mut [SelectFd]) -> usize {
@@ -1780,26 +1663,21 @@ fn cleanup_poll_contexts(contexts: &[PollContext]) {
     }
 }
 
-pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
+pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     if size == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     // `size` is the caller's claim about its own buffer. A claim that cannot
     // describe any user buffer is a bad pointer, not a large one, and must be
     // refused before it is compared against the path length below.
     if !access_ok(buffer_ptr as u64, size) {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     // Get current working directory as string
@@ -1808,38 +1686,31 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
 
     // Need space for string + null terminator
     if cwd_bytes.len() + 1 > size {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     if !unsafe { try_copy_to_user(buffer_ptr, cwd_bytes.as_ptr(), cwd_bytes.len()) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     if !unsafe { try_write_user(buffer_ptr.add(cwd_bytes.len()), 0u8) } {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    (cwd_bytes.len() + 1) as i64
+    Ok((cwd_bytes.len() + 1) as u64)
 }
 
-pub fn sys_chdir(path_ptr: *const u8) -> i64 {
+pub fn sys_chdir(path_ptr: *const u8) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if path_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
     let path_str = match copy_user_path(&mut buf, path_ptr) {
         Ok(s) => s,
         Err(e) => {
-            info.lock().errno = e;
-            return -1;
+            return Err(e);
         }
     };
 
@@ -1847,8 +1718,7 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     let new_path = match resolve_path(path_str, &current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -1862,20 +1732,18 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
         match fs_api::file_info(&new_path) {
             Ok(file) => {
                 if file.kind != crate::fs::FileKind::Directory {
-                    info.lock().errno = Errno::EINVAL;
-                    return -1;
+                    return Err(Errno::EINVAL);
                 }
             }
             Err(_) => {
-                info.lock().errno = Errno::EINVAL;
-                return -1;
+                return Err(Errno::EINVAL);
             }
         }
     }
 
     // Update the current working directory
     set_current_cwd(&info, new_path);
-    0
+    Ok(0)
 }
 
 const SEEK_SET: u32 = 0;
@@ -1891,13 +1759,9 @@ const SEEK_END: u32 = 2;
 ///
 /// Readahead state is taken by value and dropped, so a positional read does not
 /// steer the sequential-access heuristic of whoever owns the descriptor.
-pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64 {
+pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     // See sys_read: the fd table is a BlockingMutex and several threads share
     // one table, so interrupts have to be back on before it is acquired.
@@ -1905,39 +1769,33 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
     let fd_info = fd_table.lock().get_fd(fd).cloned();
 
     let Some(FileDescriptor::FsFile(file)) = fd_info else {
-        info.lock().errno = match fd_info {
+        return Err(match fd_info {
             None => Errno::EBADF,
             Some(_) => Errno::ESPIPE,
-        };
-        return -1;
+        });
     };
 
     // A transfer of no bytes answers only once the descriptor has been
     // resolved; see `fd_is_open`.
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     let offset = offset as usize;
 
     if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path) {
         return match device.read_to_user(offset, count, buffer_ptr) {
-            Ok(n) => n.min(count) as i64,
-            Err(e) => {
-                info.lock().errno = Errno::from(crate::fs::Error::from(e));
-                -1
-            }
+            Ok(n) => Ok(n.min(count) as u64),
+            Err(e) => Err(Errno::from(crate::fs::Error::from(e))),
         };
     }
 
     let Some(fs) = file.fs.as_ref() else {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     };
     let op = vfs::VfsOp::from_open_file(
         fs.clone(),
@@ -1949,11 +1807,8 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
 
     let mut ra = file.ra;
     match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
-        Ok(n) => n as i64,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Ok(n) => Ok(n as u64),
+        Err(_) => Err(Errno::EINVAL),
     }
 }
 
@@ -1963,13 +1818,9 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
 /// `O_APPEND` is not consulted: POSIX specifies that pwrite writes at the given
 /// offset regardless, and a positional write that silently lands somewhere else
 /// would defeat the point of the call.
-pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> i64 {
+pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     // See sys_read: the fd table is a BlockingMutex and several threads share
     // one table, so interrupts have to be back on before it is acquired.
@@ -1977,30 +1828,27 @@ pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> 
     let fd_info = fd_table.lock().get_fd(fd).cloned();
 
     let Some(FileDescriptor::FsFile(file)) = fd_info else {
-        info.lock().errno = match fd_info {
+        return Err(match fd_info {
             None => Errno::EBADF,
             Some(_) => Errno::ESPIPE,
-        };
-        return -1;
+        });
     };
 
     // A transfer of no bytes answers only once the descriptor has been
     // resolved; see `fd_is_open`.
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
     let capped_count = count.min(MAX_WRITE_SIZE);
 
     let Some(fs) = file.fs.as_ref() else {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     };
     let op = vfs::VfsOp::from_open_file(
         fs.clone(),
@@ -2010,11 +1858,8 @@ pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> 
     );
 
     match vfs::write_from_user(&op, offset as usize, buffer_ptr, capped_count, false) {
-        Ok(written) => written as i64,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Ok(written) => Ok(written),
+        Err(_) => Err(Errno::EINVAL),
     }
 }
 
@@ -2066,114 +1911,82 @@ fn copy_in_iovecs(iov_ptr: *const IoVec, iovcnt: usize) -> Result<Vec<IoVec>, Er
 /// Each buffer is a separate underlying read, so the buffers are filled in
 /// order but the sequence is not atomic against a concurrent reader on the
 /// same descriptor.
-pub fn sys_readv(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
+pub fn sys_readv(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     // An empty vector, or one whose buffers are all empty, never reaches
     // `sys_read`, so the descriptor is validated here instead.
     if !fd_is_open(&fd_table, fd) {
-        info.lock().errno = Errno::EBADF;
-        return -1;
+        return Err(Errno::EBADF);
     }
 
     if iovcnt == 0 {
-        return 0;
+        return Ok(0);
     }
-    let iovs = match copy_in_iovecs(iov_ptr, iovcnt) {
-        Ok(iovs) => iovs,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
+    let iovs = copy_in_iovecs(iov_ptr, iovcnt)?;
 
-    let mut total: i64 = 0;
+    let mut total = 0u64;
     for iov in &iovs {
         if iov.len == 0 {
             continue;
         }
         let want = iov.len as usize;
-        let n = sys_read(fd, iov.base as *mut u8, want);
-        if n < 0 {
+        let n = match sys_read(fd, iov.base as *mut u8, want) {
+            Ok(n) => n,
             // POSIX: an error after a partial transfer is reported as that
             // partial count, and the error is left for the next call to raise.
-            if total > 0 {
-                info.lock().errno = Errno::Clear;
-                return total;
-            }
-            return n;
-        }
+            Err(errno) if total == 0 => return Err(errno),
+            Err(_) => return Ok(total),
+        };
         total += n;
         if (n as usize) < want {
             break;
         }
     }
-    total
+    Ok(total)
 }
 
 /// Write a list of buffers in order, stopping at the first short write. See
 /// [`sys_readv`] for the return convention; the same non-atomicity applies, so
 /// a `writev` to a pipe shared with another writer can interleave at a buffer
 /// boundary.
-pub fn sys_writev(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
+pub fn sys_writev(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     // See `sys_readv`: an all-empty vector never reaches `sys_write`.
     if !fd_is_open(&fd_table, fd) {
-        info.lock().errno = Errno::EBADF;
-        return -1;
+        return Err(Errno::EBADF);
     }
 
     if iovcnt == 0 {
-        return 0;
+        return Ok(0);
     }
-    let iovs = match copy_in_iovecs(iov_ptr, iovcnt) {
-        Ok(iovs) => iovs,
-        Err(errno) => {
-            info.lock().errno = errno;
-            return -1;
-        }
-    };
+    let iovs = copy_in_iovecs(iov_ptr, iovcnt)?;
 
-    let mut total: i64 = 0;
+    let mut total = 0u64;
     for iov in &iovs {
         if iov.len == 0 {
             continue;
         }
         let want = iov.len as usize;
-        let n = sys_write(fd, iov.base as *const u8, want);
-        if n == !0u64 {
-            if total > 0 {
-                info.lock().errno = Errno::Clear;
-                return total;
-            }
-            return -1;
-        }
-        total += n as i64;
+        let n = match sys_write(fd, iov.base as *const u8, want) {
+            Ok(n) => n,
+            Err(errno) if total == 0 => return Err(errno),
+            Err(_) => return Ok(total),
+        };
+        total += n;
         if (n as usize) < want {
             break;
         }
     }
-    total
+    Ok(total)
 }
 
-pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
+pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> Result<u64, Errno> {
     let info = current_thread_info();
-    let fd_table = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
-        guard.fd_table.clone()
-    };
+    let fd_table = info.lock().fd_table.clone();
 
     let file = {
         let fd_guard = fd_table.lock();
@@ -2181,8 +1994,7 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
             Some(FileDescriptor::FsFile(f)) => f.clone(),
             _ => {
                 drop(fd_guard);
-                info.lock().errno = Errno::EINVAL;
-                return -1;
+                return Err(Errno::EINVAL);
             }
         }
     };
@@ -2194,21 +2006,18 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
             let size = match fs_api::file_info(&file.path) {
                 Ok(finfo) => finfo.size as i64,
                 Err(_) => {
-                    info.lock().errno = Errno::EINVAL;
-                    return -1;
+                    return Err(Errno::EINVAL);
                 }
             };
             size + offset
         }
         _ => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
     if new_offset < 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let new_fd = FileDescriptor::FsFile(FsFile {
@@ -2217,18 +2026,17 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
     });
     fd_table.lock().replace_fd(fd, new_fd);
 
-    new_offset
+    Ok(new_offset as u64)
 }
 
-/// Returns 1 if the fd refers to a terminal (StandardStream), 0 otherwise.
-pub fn sys_isatty(fd: u64) -> u64 {
+/// Whether the descriptor names a terminal.
+pub fn sys_isatty(fd: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
     let guard = info.lock();
     let fd_table = guard.fd_table.lock();
     match fd_table.get_fd(fd) {
-        Some(FileDescriptor::StandardStream(_)) => 1,
-        Some(FileDescriptor::PtySlave(_)) => 1,
-        _ => 0,
+        Some(FileDescriptor::StandardStream(_)) | Some(FileDescriptor::PtySlave(_)) => Ok(1),
+        _ => Ok(0),
     }
 }
 
@@ -2250,36 +2058,26 @@ fn pty_of_fd(fd: u64) -> Option<alloc::sync::Arc<BlockingMutex<crate::thread::pt
 /// This is what makes a job "foreground": the line discipline aims Ctrl+C and
 /// Ctrl+Z at whichever group holds the terminal, so a shell resuming a job in
 /// the foreground gives it the terminal first and takes it back afterwards.
-pub fn sys_tcsetpgrp(fd: u64, pgid: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_tcsetpgrp(fd: u64, pgid: u64) -> Result<u64, Errno> {
     let Some(pty) = pty_of_fd(fd) else {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     };
     ranked_lock!(RANK_PTY, "tcsetpgrp", pty).foreground_pgid = Some(pgid);
-    0
+    Ok(0)
 }
 
 /// The process group holding the terminal, or 0 if none does.
-pub fn sys_tcgetpgrp(fd: u64) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_tcgetpgrp(fd: u64) -> Result<u64, Errno> {
     let Some(pty) = pty_of_fd(fd) else {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     };
-    ranked_lock!(RANK_PTY, "tcgetpgrp", pty)
+    Ok(ranked_lock!(RANK_PTY, "tcgetpgrp", pty)
         .foreground_pgid
-        .unwrap_or(0)
+        .unwrap_or(0))
 }
 
-pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
+pub fn sys_ftruncate(fd: u64, size: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let path = {
         let guard = info.lock();
         let fd_table = guard.fd_table.lock();
@@ -2288,26 +2086,20 @@ pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
             _ => {
                 drop(fd_table);
                 drop(guard);
-                info.lock().errno = Errno::EINVAL;
-                return -1;
+                return Err(Errno::EINVAL);
             }
         }
     };
 
     interrupts::enable();
     match fs_api::truncate(&path, size) {
-        Ok(()) => 0,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        Ok(()) => Ok(0),
+        Err(_) => Err(Errno::EINVAL),
     }
 }
 
-pub fn sys_fsync(fd: u64) -> i32 {
+pub fn sys_fsync(fd: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     let (path, inode) = {
         let guard = info.lock();
         let fd_table = guard.fd_table.lock();
@@ -2316,8 +2108,7 @@ pub fn sys_fsync(fd: u64) -> i32 {
             _ => {
                 drop(fd_table);
                 drop(guard);
-                info.lock().errno = Errno::EINVAL;
-                return -1;
+                return Err(Errno::EINVAL);
             }
         }
     };
@@ -2329,8 +2120,7 @@ pub fn sys_fsync(fd: u64) -> i32 {
         // fsync reaches userspace as a bare errno, and without the kind here
         // there is nothing to attribute it to.
         log!("sys_fsync: flush_file({}) error: {:?}", path, e);
-        info.lock().errno = Errno::from(e);
-        return -1;
+        return Err(Errno::from(e));
     }
     let flushed = crate::timer::Instant::now();
 
@@ -2338,8 +2128,7 @@ pub fn sys_fsync(fd: u64) -> i32 {
     for journal in BlockPageCache::global().all_journals() {
         if let Err(e) = journal.force_commit_and_wait() {
             log!("sys_fsync: journal commit error: {:?}", e);
-            info.lock().errno = Errno::EIO;
-            return -1;
+            return Err(Errno::EIO);
         }
     }
     let done = crate::timer::Instant::now();
@@ -2355,15 +2144,23 @@ pub fn sys_fsync(fd: u64) -> i32 {
             done.duration_since(flushed).as_millis()
         );
     }
-    0
+    Ok(0)
 }
 
 /// An fsync taking at least this long is logged with its breakdown.
 const FSYNC_SLOW_MS: u128 = 1_000;
 
-/// Flush all dirty block cache pages to disk. Always succeeds from the
-/// caller's perspective (errors are logged by the writeback thread).
-pub fn sys_sync() {
+/// `sync(2)`: flush every dirty block-cache page to disk.
+pub fn sys_sync() -> Result<u64, Errno> {
+    sync_all();
+    Ok(0)
+}
+
+/// The work behind [`sys_sync`], for the callers that are not a syscall.
+///
+/// Always succeeds from the caller's perspective; errors are logged by the
+/// writeback thread.
+pub fn sync_all() {
     debug_assert!(
         x86_64::instructions::interrupts::are_enabled(),
         "sys_sync called with interrupts disabled"
@@ -2430,29 +2227,24 @@ pub fn sys_sync() {
     }
 }
 
-pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
+pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if old_path_ptr.is_null() || new_path_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
     let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
     let old_path_str = match copy_user_path(&mut buf, old_path_ptr) {
         Ok(s) => s,
         Err(e) => {
-            info.lock().errno = e;
-            return -1;
+            return Err(e);
         }
     };
 
     let old_path = match resolve_path(old_path_str, &current_cwd(&info)) {
         Ok(p) => p,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
@@ -2460,41 +2252,29 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
     let new_path_str = match copy_user_path(&mut buf2, new_path_ptr) {
         Ok(s) => s,
         Err(e) => {
-            info.lock().errno = e;
-            return -1;
+            return Err(e);
         }
     };
 
     let new_path = match resolve_path(new_path_str, &current_cwd(&info)) {
         Ok(p) => p,
         Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
+            return Err(Errno::EINVAL);
         }
     };
 
-    // Bridged to the sentinel convention until this file answers Result.
-    match super::fs::rename_resolved(&old_path, &new_path) {
-        Ok(_) => 0,
-        Err(errno) => {
-            info.lock().errno = errno;
-            -1
-        }
-    }
+    super::fs::rename_resolved(&old_path, &new_path)
 }
 
 /// Opens a PTY master/slave pair and writes the two fd numbers to user space.
 ///
 /// The user pointer must point to a `[u64; 2]` buffer that receives
-/// `[master_fd, slave_fd]`.  Returns 0 on success, `!0u64` on error.
-pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> u64 {
+/// `[master_fd, slave_fd]`.
+pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> Result<u64, Errno> {
     let info = current_thread_info();
 
-    info.lock().errno = Errno::Clear;
-
     if pipefd_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let pty = Arc::new(BlockingMutex::new(Pty::new()));
@@ -2520,9 +2300,8 @@ pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> u64 {
             table.close_fd(master_fd);
             table.close_fd(slave_fd);
         }
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    0
+    Ok(0)
 }
