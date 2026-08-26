@@ -124,7 +124,7 @@ partition table (`fs/mod.rs:628`), and `devfs/block.rs` names nodes from
 `ahci::api::list_devices` beside the NVMe and ramdisk id ranges. Neither is a
 type; both want an `AsyncBlockDevice` method instead, which is its own item.
 
-### B5. ~~`Error::IoError` is the catch-all for 136 sites~~ (mostly done)
+### B5. ~~`Error::IoError` is the catch-all for 136 sites~~ (done)
 
 `fs::Error::IoError` no longer stands in for a cause the code already knows.
 Every filesystem site now names one: a full disk is `NoSpace`, a bad user
@@ -138,12 +138,16 @@ the driver's own error instead of EIO. `Error::IoError` across `kernel/src` is
 (`graphics::Error`, `AhciError`, `DevFsError`, `HdaError`); `kernel/src/fs` has
 one left, the honest `DevFsError::IoError => fs::Error::IoError` conversion.
 
-**Still open.** The remaining `map_err(|_| ...)` closures are 65, all outside
-`kernel/src/fs`: `drivers/usb/xhci/mod.rs` (9), `thread/thread.rs` (5),
-`drivers/virtio/gpu.rs` (4), `fs/gpt.rs` and `fs/mbr.rs` (10, all to `&'static
-str`), plus singles. `gpt.rs`/`mbr.rs` are the worthwhile ones: they discard a
-`BlockError` into a string literal, so a partition scan that fails on a real
-device reports "Failed to read GPT header" with no cause.
+`parse_gpt` and `parse_mbr` answer `gpt::PartitionError` rather than `&'static
+str`, so a failed partition scan carries the block layer's cause instead of a
+string literal, and a table refused for its signature is distinguishable from
+one refused for I/O. The duplicated `read_sectors_vec` (and its ignored `_buf`
+parameter) is one `gpt::read_sectors`.
+
+`map_err(|_| ...)` across `kernel/src` is 59. What is left discards nothing the
+receiving variant does not already name, except in `drivers/usb/xhci/mod.rs`
+(9), `fs/memfs/mod.rs` (9) and `drivers/virtio/gpu.rs` (4), which are their own
+items if they are ever worth doing.
 
 ### B6. ~~`BlockError::from_code` silently invents a variant~~ (done)
 

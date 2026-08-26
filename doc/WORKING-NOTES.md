@@ -10783,8 +10783,31 @@ EIO). What changed at the syscall boundary, all of it user-visible:
   `map_err(|_| Error::IoError)` closure. `block_io::lookup` returning `None` is
   `BlockError::DeviceGone`, not EIO.
 
-Still open, and it is all outside `kernel/src/fs`: 65 `map_err(|_| ...)`
-closures remain. `fs/gpt.rs` and `fs/mbr.rs` hold 10 of them and are the ones
-worth doing, because they discard a `BlockError` into a `&'static str`, so a
-partition scan that fails on a real device reports "Failed to read GPT header"
-with no cause at all.
+### The partition scanner names its failures
+
+`parse_gpt` and `parse_mbr` answered `Result<_, &'static str>`, so a read that
+failed on a real device was reported as "Failed to read GPT header" with the
+`BlockError` thrown away. Both now answer `gpt::PartitionError`, which carries
+the block layer's cause (`read of 8 sector(s) at lba 34: command timeout`) and
+distinguishes a structural refusal from an I/O one: `Signature` for a table
+without its magic, `Truncated` for one shorter than its own layout, `Malformed`
+for bytes that will not cast. `scan_device` in `fs/mod.rs` logs them unchanged;
+only the text improved.
+
+The two files also carried the same `read_sectors_vec` verbatim, with a `_buf:
+Vec<u8>` parameter every one of the seven call sites passed `Vec::new()` for and
+the body ignored. There is one `gpt::read_sectors(device_id, lba, sectors)` now,
+`mbr` uses it, and `EFS_MAGIC` is declared once instead of twice.
+
+Every disk the tree builds carries a GPT, so a normal boot only ever walks the
+success path. To watch the failure path, attach a disk with no partition table
+at all: `dd if=/dev/zero of=~/.cache/edos/blank.img bs=1M count=8` and
+`scripts/edos-vm start --extra-disk ~/.cache/edos/blank.img`. The scan then logs
+`GPT parsing failed on device 2: GPT header carries no signature, trying MBR`
+and the boot continues normally.
+
+`map_err(|_| ...)` across `kernel/src` is 65 -> 59. The four left under `fs/` are
+the `bytemuck` casts, where the discarded error genuinely says nothing the
+variant does not already name. The rest are in `fs/memfs` (9),
+`drivers/usb/xhci` (9), `thread/thread.rs` (5), `syscalls/fs.rs` (4),
+`fs/devfs/block.rs` (4) and `drivers/virtio/gpu.rs` (4).

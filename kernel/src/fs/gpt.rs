@@ -3,21 +3,48 @@ use crate::{
     fs::fat32::structures::Fat32BootSector,
     log,
 };
+use alloc::{format, string::String, vec::Vec};
+use bytemuck::{Pod, Zeroable, try_from_bytes};
+use thiserror::Error;
 
-fn read_sectors_vec(
+/// Why a partition table did not parse. A failed read carries the block
+/// layer's own cause, so a scan of a dying disk reports the timeout or the
+/// vanished device rather than a bare "could not read".
+#[derive(Debug, Error)]
+pub enum PartitionError {
+    #[error("read of {sectors} sector(s) at lba {lba}: {source}")]
+    Read {
+        lba: u64,
+        sectors: u16,
+        source: BlockError,
+    },
+    #[error("{0} carries no signature")]
+    Signature(&'static str),
+    #[error("{0} is shorter than its own layout")]
+    Truncated(&'static str),
+    #[error("{0} does not fit the bytes read for it")]
+    Malformed(&'static str),
+}
+
+/// Read `sectors` 512-byte sectors starting at `lba`. Both partition-table
+/// parsers and their filesystem probes go through here, so every read failure
+/// names the same cause.
+pub(super) fn read_sectors(
     device_id: u64,
     lba: u64,
     sectors: u16,
-    _buf: Vec<u8>,
-) -> Result<Vec<u8>, BlockError> {
-    let byte_count = sectors as usize * 512;
-    let mut buf = alloc::vec![0u8; byte_count];
-    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
-    block_io::read_blocking(&dev, lba, &mut buf)?;
+) -> Result<Vec<u8>, PartitionError> {
+    let mut buf = alloc::vec![0u8; sectors as usize * 512];
+    block_io::lookup(device_id)
+        .ok_or(BlockError::DeviceGone)
+        .and_then(|dev| block_io::read_blocking(&dev, lba, &mut buf))
+        .map_err(|source| PartitionError::Read {
+            lba,
+            sectors,
+            source,
+        })?;
     Ok(buf)
 }
-use alloc::{format, string::String, vec::Vec};
-use bytemuck::{Pod, Zeroable, try_from_bytes};
 
 /// GPT Header structure (LBA 1)
 #[repr(C, packed)]
@@ -271,22 +298,21 @@ impl GptPartitionEntry {
 }
 
 /// Parse GPT from a device
-pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
+pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, PartitionError> {
     // Read GPT header from LBA 1
     log!("reading sector for gpt");
-    let gpt_data =
-        read_sectors_vec(device_id, 1, 1, Vec::new()).map_err(|_| "Failed to read GPT header")?;
+    let gpt_data = read_sectors(device_id, 1, 1)?;
 
     log!("read gpt sector");
     if gpt_data.len() < core::mem::size_of::<GptHeader>() {
-        return Err("GPT data too small");
+        return Err(PartitionError::Truncated("GPT header"));
     }
 
     let gpt_header = try_from_bytes::<GptHeader>(&gpt_data[0..core::mem::size_of::<GptHeader>()])
-        .map_err(|_| "Failed to parse GPT header")?;
+        .map_err(|_| PartitionError::Malformed("GPT header"))?;
 
     if !gpt_header.is_valid() {
-        return Err("Invalid GPT signature");
+        return Err(PartitionError::Signature("GPT header"));
     }
 
     // Calculate how many sectors we need to read for partition entries
@@ -294,13 +320,11 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     let sectors_needed = (gpt_header.num_partition_entries as usize).div_ceil(entries_per_sector);
 
     // Read partition entries
-    let partition_data = read_sectors_vec(
+    let partition_data = read_sectors(
         device_id,
         gpt_header.partition_entry_lba,
         sectors_needed as u16,
-        Vec::new(),
-    )
-    .map_err(|_| "Failed to read partition entries")?;
+    )?;
 
     log!("data");
 
@@ -317,7 +341,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
         let entry = try_from_bytes::<GptPartitionEntry>(
             &partition_data[entry_offset..entry_offset + core::mem::size_of::<GptPartitionEntry>()],
         )
-        .map_err(|_| "Failed to parse partition entry")?;
+        .map_err(|_| PartitionError::Malformed("GPT partition entry"))?;
 
         if entry.is_used() {
             let filesystem = detect_filesystem(device_id, entry.starting_lba)?;
@@ -342,17 +366,17 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
 }
 
 /// EFS superblock magic: "EFS!" in little-endian (0x45465321)
-const EFS_MAGIC: u32 = 0x45465321;
+pub(super) const EFS_MAGIC: u32 = 0x45465321;
 
 /// Detect filesystem type by reading the first sector of a partition
 fn detect_filesystem(
     device_id: u64,
     partition_start_lba: u64,
-) -> Result<Option<FilesystemType>, &'static str> {
+) -> Result<Option<FilesystemType>, PartitionError> {
     // Check for EFS first: superblock is at block 1 (4 KiB blocks = 8 sectors).
     // Read 8 sectors starting at partition_start_lba + 8.
     let efs_lba = partition_start_lba + 8;
-    if let Ok(efs_data) = read_sectors_vec(device_id, efs_lba, 8, Vec::new())
+    if let Ok(efs_data) = read_sectors(device_id, efs_lba, 8)
         && efs_data.len() >= 4
     {
         let magic = u32::from_le_bytes([efs_data[0], efs_data[1], efs_data[2], efs_data[3]]);
@@ -362,8 +386,7 @@ fn detect_filesystem(
     }
 
     // Read first sector of partition
-    let sector_data = read_sectors_vec(device_id, partition_start_lba, 1, Vec::new())
-        .map_err(|_| "Failed to read partition boot sector")?;
+    let sector_data = read_sectors(device_id, partition_start_lba, 1)?;
 
     if sector_data.len() < core::mem::size_of::<Fat32BootSector>() {
         return Ok(Some(FilesystemType::Unknown));
@@ -372,7 +395,7 @@ fn detect_filesystem(
     // Try to parse as FAT32 boot sector
     let boot_sector =
         try_from_bytes::<Fat32BootSector>(&sector_data[0..core::mem::size_of::<Fat32BootSector>()])
-            .map_err(|_| "Failed to parse boot sector")?;
+            .map_err(|_| PartitionError::Malformed("FAT32 boot sector"))?;
 
     if boot_sector.is_fat32() {
         Ok(Some(FilesystemType::Fat32))

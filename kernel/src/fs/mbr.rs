@@ -1,22 +1,8 @@
 use crate::{
-    drivers::block_io::{self, BlockError},
     fs::fat32::structures::Fat32BootSector,
-    fs::gpt::{FilesystemType, Partition, PartitionType},
+    fs::gpt::{EFS_MAGIC, FilesystemType, Partition, PartitionError, PartitionType, read_sectors},
     log,
 };
-
-fn read_sectors_vec(
-    device_id: u64,
-    lba: u64,
-    sectors: u16,
-    _buf: Vec<u8>,
-) -> Result<Vec<u8>, BlockError> {
-    let byte_count = sectors as usize * 512;
-    let mut buf = alloc::vec![0u8; byte_count];
-    let dev = block_io::lookup(device_id).ok_or(BlockError::DeviceGone)?;
-    block_io::read_blocking(&dev, lba, &mut buf)?;
-    Ok(buf)
-}
 use alloc::{format, string::String, vec::Vec};
 use bytemuck::{Pod, Zeroable, try_from_bytes};
 
@@ -112,20 +98,19 @@ impl MbrPartitionEntry {
 }
 
 /// Parse MBR from a device
-pub fn parse_mbr(device_id: u64) -> Result<Vec<Partition>, &'static str> {
+pub fn parse_mbr(device_id: u64) -> Result<Vec<Partition>, PartitionError> {
     // Read MBR from LBA 0
-    let mbr_data =
-        read_sectors_vec(device_id, 0, 1, Vec::new()).map_err(|_| "Failed to read MBR")?;
+    let mbr_data = read_sectors(device_id, 0, 1)?;
 
     if mbr_data.len() < core::mem::size_of::<MbrHeader>() {
-        return Err("MBR data too small");
+        return Err(PartitionError::Truncated("MBR"));
     }
 
     let mbr_header = try_from_bytes::<MbrHeader>(&mbr_data[0..core::mem::size_of::<MbrHeader>()])
-        .map_err(|_| "Failed to parse MBR header")?;
+        .map_err(|_| PartitionError::Malformed("MBR"))?;
 
     if !mbr_header.is_valid() {
-        return Err("Invalid MBR signature");
+        return Err(PartitionError::Signature("MBR"));
     }
 
     let mut partitions = Vec::new();
@@ -156,17 +141,13 @@ pub fn parse_mbr(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     Ok(partitions)
 }
 
-/// EFS superblock magic: "EFS!" in little-endian (0x45465321)
-const EFS_MAGIC: u32 = 0x45465321;
-
 /// Detect filesystem type by reading the first sector of a partition
 fn detect_filesystem(
     device_id: u64,
     partition_start_lba: u64,
-) -> Result<Option<FilesystemType>, &'static str> {
+) -> Result<Option<FilesystemType>, PartitionError> {
     // Read first sector of partition
-    let sector_data = read_sectors_vec(device_id, partition_start_lba, 1, Vec::new())
-        .map_err(|_| "Failed to read partition boot sector")?;
+    let sector_data = read_sectors(device_id, partition_start_lba, 1)?;
 
     if sector_data.len() < 512 {
         return Ok(Some(FilesystemType::Unknown));
@@ -180,7 +161,7 @@ fn detect_filesystem(
 
     // Check for EFS first: superblock is at block 1 (4 KiB blocks = 8 sectors).
     let efs_lba = partition_start_lba + 8;
-    if let Ok(efs_data) = read_sectors_vec(device_id, efs_lba, 8, Vec::new())
+    if let Ok(efs_data) = read_sectors(device_id, efs_lba, 8)
         && efs_data.len() >= 4
     {
         let magic = u32::from_le_bytes([efs_data[0], efs_data[1], efs_data[2], efs_data[3]]);
@@ -241,7 +222,7 @@ fn detect_ntfs(sector_data: &[u8]) -> Option<FilesystemType> {
 fn detect_iso9660(
     device_id: u64,
     partition_start_lba: u64,
-) -> Result<Option<FilesystemType>, &'static str> {
+) -> Result<Option<FilesystemType>, PartitionError> {
     // ISO 9660 Primary Volume Descriptor is at sector 16 (relative to partition start)
     // But for hybrid ISOs, we need to check if this partition actually contains ISO data
     let iso_check_lba = partition_start_lba + 16;
@@ -253,8 +234,7 @@ fn detect_iso9660(
     );
 
     // Read sector 16 relative to partition start
-    let iso_sector = read_sectors_vec(device_id, iso_check_lba, 1, Vec::new())
-        .map_err(|_| "Failed to read ISO 9660 volume descriptor sector")?;
+    let iso_sector = read_sectors(device_id, iso_check_lba, 1)?;
 
     if iso_sector.len() < 512 {
         return Ok(None);
@@ -277,8 +257,7 @@ fn detect_iso9660(
     if partition_start_lba > 0 {
         // Try reading ISO signature directly from partition start + common ISO offsets
         for offset in [0, 16, 32] {
-            if let Ok(test_sector) =
-                read_sectors_vec(device_id, partition_start_lba + offset, 1, Vec::new())
+            if let Ok(test_sector) = read_sectors(device_id, partition_start_lba + offset, 1)
                 && test_sector.len() >= 6
                 && &test_sector[1..6] == b"CD001"
                 && test_sector[0] == 0x01
