@@ -58,7 +58,7 @@ make test-headless    # kernel sched-test suite; `make test` needs a desktop
                       # session for its PipeWire audio backend, this does not
 make storage-check    # scripts/fs-regression (EFS then FAT32) + scripts/fsbench-run
 make guest-check      # the guest's own suites -- iotest, socktest, mmaptest and
-                      # fourteen more -- in one boot, judged by their exit codes
+                      # fifteen more -- in one boot, judged by their exit codes
 make nvme-check       # scripts/nvme-check: an NVMe-root boot, a SATA+NVMe
                       # coexistence boot, the logical_block_size=4096 refusal,
                       # edos-install onto a blank NVMe image, and the watchdog
