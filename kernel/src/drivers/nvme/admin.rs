@@ -316,16 +316,29 @@ impl NvmeController {
     }
 
     /// Take the controller through a full reset (NVMe 2.0 3.5.1): disable,
-    /// wait for `CSTS.RDY` to drop, reinitialise both queue pairs in host
-    /// memory, re-enable, then renegotiate the queue count and recreate the
-    /// I/O queue pair on the device -- the controller forgot both when it
-    /// was disabled.
+    /// wait for `CSTS.RDY` to drop, fail every outstanding command,
+    /// reinitialise both queue pairs in host memory, re-enable, then
+    /// renegotiate the queue count and recreate the I/O queue pair on the
+    /// device -- the controller forgot both when it was disabled.
     ///
-    /// The caller is expected to have failed every outstanding command
-    /// first; `NvmeQueue::reset_state` fails whatever a submitter installed
-    /// in the window since, so no command's bounce buffer or PRP list page
-    /// is stranded either way.
-    pub fn reset_controller(&self) -> Result<(), NvmeError> {
+    /// `fail_all` is the caller's fail-every-outstanding-command pass, and
+    /// it is a parameter rather than something the caller runs first
+    /// **because the order is the correctness argument**. Failing a command
+    /// releases its buffer, and that buffer is usually not a `dma()` page:
+    /// `build_transfer` describes the caller's own pages whenever it can, so
+    /// the device writes straight into a page-cache frame or a kernel-heap
+    /// `Vec`. Release one while `CSTS.RDY` is still set and the controller
+    /// may still complete the command it was given, into memory the
+    /// allocator has since handed to somebody else -- a use-after-free whose
+    /// writer is the device, which no CPU-side check can see. Clearing
+    /// `CC.EN` and waiting for `CSTS.RDY` to drop is what makes the
+    /// controller stop touching host memory, so it happens first and
+    /// `fail_all` does not run at all if it fails.
+    ///
+    /// `NvmeQueue::reset_state` fails whatever a submitter installed in the
+    /// window since, so no command's bounce buffer or PRP list page is
+    /// stranded either way.
+    pub fn reset_controller(&self, fail_all: impl FnOnce()) -> Result<(), NvmeError> {
         {
             // Held only across the register-level transition: the admin
             // commands below take it themselves, and `BlockingMutex` is not
@@ -334,6 +347,8 @@ impl NvmeController {
             let timeout = self.controller_timeout();
             unsafe { ptr::write_volatile(&raw mut (*self.regs).cc, 0) };
             wait_csts(self.regs, regs::CSTS_RDY, false, timeout)?;
+
+            fail_all();
 
             self.admin_queue.reset_state();
             if let Some(queue) = self.io_queue() {

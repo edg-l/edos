@@ -4,7 +4,8 @@
 //! ----------------
 //! `BlockIoHandle::wait()` is indefinite. Hardware completion is normally driven by the IRQ dispatcher in
 //! `ahci_driver_main`, or, on a drive error, by the TFES path
-//! (`fail_all_ncq_slots` + `restart_port`). If a SATA drive hangs without
+//! (`restart_port`, which stops the engine and then fails every in-flight
+//! op through `fail_all_ncq_slots`). If a SATA drive hangs without
 //! either an IRQ or a TFES (bad sector retry exhaustion, firmware bug,
 //! link glitch without a CRC error), the waiter blocks forever.
 //!
@@ -28,8 +29,9 @@
 //! Racing a restart against a submit
 //! ---------------------------------
 //! A restart round and a submit in progress cover each other by ordering.
-//! The restarter bumps `reset_generation` *before* `fail_all_ncq_slots`,
-//! and the submitter re-reads it *after* storing `issued`. Either the
+//! The restarter bumps `reset_generation` *before* the fail-all pass
+//! `restart_port` runs, and the submitter re-reads it *after* storing
+//! `issued`. Either the
 //! submitter observes the bump and completes its own slot, or its
 //! `issued` store precedes the fail-all pass, which then fails the op.
 //! Neither leaves an op pending for a later sweep to find.
@@ -87,6 +89,19 @@ pub static WATCHDOG_FIRINGS: AtomicU64 = AtomicU64::new(0);
 
 /// Total number of port restarts triggered by the watchdog.
 pub static WATCHDOG_RESTARTS: AtomicU64 = AtomicU64::new(0);
+
+/// Fail-all passes that ran while `PxCMD.CR` was still set, so the HBA could
+/// still have been writing into the buffers those commands were released
+/// with.
+///
+/// This must stay at zero. Failing a command releases its buffer, which is
+/// usually the caller's own memory -- a page-cache frame or a kernel-heap
+/// `Vec` -- rather than anything this driver owns, and an engine that has
+/// not stopped may still complete the command into it after the allocator
+/// has handed that memory to somebody else. Clearing `PxCMD.ST` and waiting
+/// for `PxCMD.CR` to clear (AHCI 1.3.1 10.1.2) is what stops the engine, so
+/// it comes first.
+pub static FAILED_WHILE_RUNNING: AtomicU64 = AtomicU64::new(0);
 
 /// NCQ commands currently issued and not yet completed, across all ports.
 pub static NCQ_INFLIGHT: AtomicU64 = AtomicU64::new(0);

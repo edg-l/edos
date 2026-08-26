@@ -103,10 +103,18 @@ resources and is a leaf.
 in-flight commands against `nvme_timeout_ms`, and **drains the completion queue
 before declaring anything hung** — that is what distinguishes a lost interrupt
 (counted as `watchdog_completions`) from a wedged controller. A real timeout
-resets the controller: disable, re-enable, rebuild the queues, and retire every
-straggler through `retire_op`. Asserting the slot table is empty at reset time
-is wrong and was tried: nothing excludes a submitter from installing a command
-in that window.
+resets the controller, and **the order inside that reset is a correctness
+constraint, not a sequence of steps**: disable, wait for `CSTS.RDY` to drop,
+*then* fail every outstanding command, then rebuild the queues and re-enable.
+Failing a command releases its buffer, which is normally the caller's own
+memory rather than a `dma()` page, and a controller that has not stopped may
+still complete into it -- see
+`doc/bugs/2026-08-26-the-device-was-still-writing-into-the-buffer.md`.
+`reset_controller` therefore takes the fail-all pass as an argument, so a
+caller cannot run it at the wrong time, and `abandoned_while_live` counts it
+if one ever does. Asserting the slot table is empty at reset time is wrong and
+was tried: nothing excludes a submitter from installing a command in that
+window, which is why `NvmeQueue::reset_state` fails stragglers of its own.
 
 A reset fails commands the device would have completed, so **whatever waits on
 a block handle re-issues it**. `block_io::{read,write,flush,read_batch}_blocking`
@@ -160,6 +168,7 @@ One line of `key=value` pairs, in the shape of `/proc/ahci_stats`.
 | `command_errors` | completions with a non-zero status |
 | `prp_pages` | pages a PRP entry addressed beyond PRP1, each one translated separately |
 | `prp_pages_discontiguous` | those of them whose frame was not the first page's frame plus the page index. See the gate below: a boot that leaves this at zero has not exercised the translation |
+| `abandoned_while_live` | commands failed without a completion while `CSTS.RDY` was still set. **Must be zero**: each one is a buffer released while the controller could still write into it, which is a use-after-free the device performs. `make nvme-check` asserts it |
 | `watchdog_firings` | sweeps that found a command past its deadline |
 | `watchdog_completions` | commands the watchdog found already complete in the CQ — each one is an interrupt that was lost |
 | `resets` | controller resets performed |

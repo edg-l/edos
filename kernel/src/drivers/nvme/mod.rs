@@ -143,6 +143,25 @@ pub(crate) fn status_to_block_error(status: u16) -> Result<(), BlockError> {
 /// another walk of the slot array.
 const FAIL_ALL_PASSES: usize = 4;
 
+/// How a command reached [`retire_op`], which decides whether its buffer is
+/// safe to release.
+///
+/// A command's DMA does not end when its handle leaves `Pending` (see the
+/// buffer lifetime contract in [`block_io`]): the device either posts a
+/// completion or the controller is disabled, and nothing else stops it
+/// writing. So the two ways in are not interchangeable, and the difference
+/// is counted rather than asserted -- see [`stats::ABANDONED_WHILE_LIVE`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Retire {
+    /// The device posted a completion for this command, so it is done with
+    /// the buffer whatever the status says.
+    Completed,
+    /// The command is being failed without a completion. Legal only once
+    /// `CC.EN` is clear and `CSTS.RDY` has dropped, which is what makes the
+    /// controller stop touching host memory (NVMe 2.0 3.5.1).
+    Abandoned,
+}
+
 /// Retire a terminal op through the one reclaim sequence this driver has:
 /// copy a bounced read back when it succeeded, return the bounce buffer and
 /// the PRP list page to `dma()`, drop the cancel hookup, clear the command
@@ -154,7 +173,31 @@ const FAIL_ALL_PASSES: usize = 4;
 /// op without double-freeing a cid or handing the same `DmaBuffer` back
 /// twice. `DmaBuffer` has no `Drop`: skipping this and letting the last
 /// `Arc<NvmeOp>` fall strands its DMA memory for the life of the boot.
-pub(crate) fn retire_op(queue: &queue::NvmeQueue, op: Arc<NvmeOp>, result: Result<(), BlockError>) {
+pub(crate) fn retire_op(
+    queue: &queue::NvmeQueue,
+    op: Arc<NvmeOp>,
+    result: Result<(), BlockError>,
+    how: Retire,
+) {
+    // Releasing a buffer the controller can still write into is a
+    // use-after-free whose writer is the device, so it is counted where it
+    // would happen rather than left to be reasoned about. Logged once: a
+    // regression here fires on every reset, and `nvme_timeout_ms=0` resets
+    // often enough to evict the rest of the ring buffer.
+    if how == Retire::Abandoned
+        && let Some(controller) = op.controller.upgrade()
+        && controller.csts() & regs::CSTS_RDY != 0
+    {
+        stats::bump(&stats::ABANDONED_WHILE_LIVE, 1);
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if !REPORTED.swap(true, Ordering::Relaxed) {
+            log!(
+                "nvme: cid {} on queue {} released while CSTS.RDY was still set",
+                op.cid,
+                op.qid
+            );
+        }
+    }
     // `None` once the handle has already been completed elsewhere: a
     // cancelled op told its waiter `Cancelled` at cancel time and is only
     // here to have its reserved resources returned now the device is
@@ -255,7 +298,7 @@ impl NvmeController {
         if result.is_err() {
             stats::bump(&stats::COMMAND_ERRORS, 1);
         }
-        retire_op(queue, op, result);
+        retire_op(queue, op, result, Retire::Completed);
     }
 
     /// One watchdog pass over this controller's I/O queue.
@@ -309,37 +352,35 @@ impl NvmeController {
             if fatal { ", CSTS.CFS set" } else { "" }
         );
 
-        // Every outstanding op is failed through the same reclaim sequence
-        // a completion uses, before the reset: clearing the slots any other
-        // way would strand each op's bounce buffer and PRP list page, since
-        // `DmaBuffer` has no `Drop`.
+        drop(outstanding);
+        // Every outstanding op is failed through the same reclaim sequence a
+        // completion uses -- clearing the slots any other way would strand
+        // each op's bounce buffer and PRP list page, since `DmaBuffer` has no
+        // `Drop` -- and `reset_controller` runs this only once the controller
+        // is disabled and `CSTS.RDY` has dropped. It is the caller's pass and
+        // not the reset's own so that the reset's precondition is the thing
+        // that sequences it; `reset_controller`'s doc has the argument.
         //
         // Re-scanned rather than reusing the snapshot above, and in a loop:
         // nothing stops a submitter from installing a command between the
-        // scan and the reset, and that command is killed by the reset too,
-        // so it has to be failed here or it waits forever for a completion
-        // the controller will never post. A slot can also be momentarily
-        // occupied by an op the dispatcher is already retiring, which the
-        // next pass sees gone.
-        drop(outstanding);
-        for _ in 0..FAIL_ALL_PASSES {
-            for op in queue.outstanding_ops() {
-                retire_op(queue, op, Err(BlockError::Io));
+        // scan and here, and that command is killed by the reset too, so it
+        // has to be failed or it waits forever for a completion the
+        // controller will never post. A slot can also be momentarily occupied
+        // by an op the dispatcher is already retiring, which the next pass
+        // sees gone; whatever survives all four is failed by
+        // `NvmeQueue::reset_state`.
+        let fail_all = || {
+            for _ in 0..FAIL_ALL_PASSES {
+                for op in queue.outstanding_ops() {
+                    retire_op(queue, op, Err(BlockError::Io), Retire::Abandoned);
+                }
+                if queue.cmd_slots_empty() {
+                    break;
+                }
             }
-            if queue.cmd_slots_empty() {
-                break;
-            }
-        }
-        if !queue.cmd_slots_empty() {
-            // Resetting now would clear the slots and strand their DMA
-            // memory. Skipping costs a tick: the next sweep tries again,
-            // and the commands that are still installed are still hung.
-            log!("nvme: watchdog could not quiesce the queue, deferring the reset");
-            self.end_restart();
-            return;
-        }
+        };
 
-        match self.reset_controller() {
+        match self.reset_controller(fail_all) {
             Ok(()) => {
                 watchdog::WATCHDOG_RESETS.fetch_add(1, Ordering::Relaxed);
                 log!("nvme: controller reset complete");

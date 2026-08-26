@@ -517,8 +517,8 @@ impl Procfs {
 
     fn render_ahci_stats() -> String {
         use crate::drivers::ahci::watchdog::{
-            NCQ_INFLIGHT, NCQ_MAX_INFLIGHT, NCQ_STRANDED, NCQ_TIMEOUT_MS, WATCHDOG_FIRINGS,
-            WATCHDOG_RESTARTS,
+            FAILED_WHILE_RUNNING, NCQ_INFLIGHT, NCQ_MAX_INFLIGHT, NCQ_STRANDED, NCQ_TIMEOUT_MS,
+            WATCHDOG_FIRINGS, WATCHDOG_RESTARTS,
         };
         let firings = WATCHDOG_FIRINGS.load(Ordering::Relaxed);
         let restarts = WATCHDOG_RESTARTS.load(Ordering::Relaxed);
@@ -526,9 +526,11 @@ impl Procfs {
         let timeout_ms = NCQ_TIMEOUT_MS.load(Ordering::Relaxed);
         let inflight = NCQ_INFLIGHT.load(Ordering::Relaxed);
         let max_inflight = NCQ_MAX_INFLIGHT.load(Ordering::Relaxed);
+        let failed_while_running = FAILED_WHILE_RUNNING.load(Ordering::Relaxed);
         format!(
             "firings={firings} restarts={restarts} stranded={stranded} timeout_ms={timeout_ms} \
-             ncq_inflight={inflight} ncq_max_inflight={max_inflight}\n"
+             ncq_inflight={inflight} ncq_max_inflight={max_inflight} \
+             failed_while_running={failed_while_running}\n"
         )
     }
 

@@ -8842,9 +8842,24 @@ admin completion asynchronously.
 
 Two related traps in the same path:
 
+- **A reset stops the controller before it fails anything, and the order is
+  the correctness argument.** Failing a command releases its buffer, and on the
+  ordinary path that buffer is the caller's own memory rather than a `dma()`
+  page: `build_transfer` describes the caller's pages whenever `build_prp` can,
+  so the device writes straight into a page-cache frame or a kernel-heap `Vec`.
+  Release one while `CSTS.RDY` is still set and the controller finishes the
+  command into memory the allocator has since handed to somebody else. That was
+  the kernel-heap corruption behind the hostile boot's `LinkedList::pop` #GP,
+  and it fired on 557 of 558 resets. `reset_controller` therefore takes the
+  fail-all pass as an argument -- disable, wait for `CSTS.RDY`, *then* fail --
+  and `abandoned_while_live` in `/proc/nvme_stats` counts any that is not.
+  Post-mortem: `doc/bugs/2026-08-26-the-device-was-still-writing-into-the-buffer.md`.
+  AHCI had the same shape (`fail_all_ncq_slots` before `restart_port` stopped
+  the engine) and the same fix, counted as `failed_while_running`.
 - **A reset cannot assume the command slots stay empty.** The watchdog fails
-  every outstanding op before resetting, but nothing excludes a submitter from
-  installing a new command in the window between that pass and the reset.
+  every outstanding op while the controller is disabled, but nothing excludes a
+  submitter from installing a new command in the window between that pass and
+  the queue rebuild.
   `DmaBuffer` has no `Drop`, so clearing a slot any other way strands that
   command's bounce buffer and PRP list page. `NvmeQueue::reset_state` therefore
   retires whatever it finds through the ordinary `retire_op` sequence rather

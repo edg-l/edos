@@ -145,10 +145,8 @@ impl Completion {
 
 /// In-flight tracker for one NVMe command (admin or NVM).
 pub struct NvmeOp {
-    #[expect(
-        dead_code,
-        reason = "read by the watchdog sweep to reach the controller a stale op belongs to"
-    )]
+    /// The controller this command was issued to, so a retirement can ask
+    /// whether the device is still able to touch the buffer.
     pub controller: Weak<NvmeController>,
     pub qid: u16,
     pub cid: u8,

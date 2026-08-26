@@ -294,6 +294,18 @@ def case_watchdog():
     failed = re.search(r"block: (?:read|batched read|write|flush)[^\n]*failed[^\n]*", log)
     ok &= report("no I/O reported failed", failed is None,
                  f"the retry window ran out: {failed.group(0) if failed else ''}")
+
+    # The reset path may only release a command's buffer once `CC.EN` is clear
+    # and `CSTS.RDY` has dropped. Anything earlier hands a page-cache frame or
+    # a kernel-heap `Vec` back to its owner while the controller can still
+    # write into it, which is a use-after-free the device performs and no
+    # CPU-side check can see; it corrupted the kernel heap for weeks before it
+    # was named. The kernel counts it in `/proc/nvme_stats` and says so once in
+    # the log, which is what this reads: the ring evicts most of a hostile
+    # boot, but the first line survives because it is printed before the flood.
+    ok &= report("no buffer released while the controller was ready",
+                 "released while CSTS.RDY was still set" not in log,
+                 "the fail-all pass ran before the controller was disabled")
     stop()
     return ok
 

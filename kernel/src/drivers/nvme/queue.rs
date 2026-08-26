@@ -15,7 +15,7 @@ use crate::{
         block_io::BlockError,
         dma::{DmaBuffer, dma},
         nvme::{
-            NvmeError,
+            NvmeError, Retire,
             cancel_op::NvmeOp,
             regs::{self, CompletionQueueEntry, SubmissionQueueEntry},
             stats,
@@ -314,7 +314,7 @@ impl NvmeQueue {
         // queue hung, so failing a straggler a submitter installed after
         // its own fail-all pass is the same answer, arrived at later.
         for op in self.outstanding_ops() {
-            crate::drivers::nvme::retire_op(self, op, Err(BlockError::Io));
+            crate::drivers::nvme::retire_op(self, op, Err(BlockError::Io), Retire::Abandoned);
         }
         // A slot whose op lost the reclaim race to a concurrent completion
         // has had its resources taken already, so clearing it strands

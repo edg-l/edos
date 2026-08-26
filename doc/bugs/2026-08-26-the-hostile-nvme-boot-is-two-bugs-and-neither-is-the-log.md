@@ -2,10 +2,33 @@
 
 ## Status
 
-**Not fixed.** This writeup corrects the diagnosis and leaves two separate
-defects open, each now with a signature that tells it apart from the other in
-one command. The instruments are `scripts/wedge-probe`, `scripts/wedge-resolve`
-and `edos-vm --on-reset pause --qemu-log`.
+**Half fixed.** The two defects this writeup separates had different causes.
+
+- **Shape B and the heap corruption are FIXED.** Both recovery paths released
+  a command's buffer before the controller had stopped, so the device finished
+  the command into memory the allocator had already handed on. Writeup:
+  `2026-08-26-the-device-was-still-writing-into-the-buffer.md`.
+- **Shape A is still open**: the machine alive with nothing runnable. Read the
+  shape-A section below and skip the heap-corruption sections, which are
+  superseded.
+
+The instruments are `scripts/wedge-probe`, `scripts/wedge-resolve` and
+`edos-vm --on-reset pause --qemu-log`. Two corrections to them, both of which
+invalidate numbers recorded here:
+
+1. **`--on-reset pause` never worked on this host.** QEMU's `RebootAction` has
+   only `none` and `shutdown`, so `-action reboot=pause` is refused and takes
+   the whole `start` with it. Every "pause" run measured here was a guest that
+   never booted -- which is what the "12-run clean streak under pause" and the
+   pause arm of the interleaved A/B actually were. Now spelled
+   `reboot=shutdown` plus `shutdown=pause`.
+2. **`wedge-probe` compares two builds by alternating them**
+   (`WEDGE_ISOS=a.iso,b.iso`), because a batch boundary and a change in the
+   host are the same shape in the results.
+
+And one measurement discipline, learned again here: **a `cargo check` on the
+host while the probe runs contaminates it.** A 20-run batch read 2 wedges in
+its first 10 and 5 in the next 6, with builds running beside the second half.
 
 ## Symptom
 
@@ -119,6 +142,15 @@ writes to it and the case's duration is set by how much journal there is to
 replay, so consecutive runs against one image measure an increasingly churned
 filesystem rather than a kernel.
 
+## SUPERSEDED: the kernel heap free list is corrupt
+
+*The observation below is correct and the diagnosis that follows it was
+wrong in its last step. The corruption was real and it was not a CPU-side
+use-after-free: the writer was the NVMe controller, finishing a command into
+a buffer the watchdog had already released. See
+`2026-08-26-the-device-was-still-writing-into-the-buffer.md`. Kept for the
+#GP reading, which is how a heap-corruption fault is recognised.*
+
 ## The real lead: the kernel heap free list is corrupt
 
 A 20-boot run caught a third outcome the earlier captures had not: a guest that
@@ -173,7 +205,7 @@ argument, and the numbers are what to trust when a fourth candidate appears.
 |---|---|---|
 | a command installed across a reset is never failed | post-reset pass that logs each one | fired **0** times in 20 boots; shape A still occurred |
 | the heap is corrupted by a double free | `heap-poison`: magic in each freed block's tail, panic on a second free | fired **0** times; race intact at 3/20 |
-| the device DMAs into a page the watchdog already freed | quarantine: withhold those pages from the allocator | **5**/20, no better than baseline |
+| the device DMAs into a page the watchdog already freed | quarantine: withhold those pages from the allocator | **5**/20, no better than baseline -- **and the hypothesis was right**: the quarantine covered the bounce buffer and PRP page, which the common path never allocates, and not the caller's own memory, which is what the device was given |
 
 The middle row is the one worth reading twice, because the first attempt at it
 lied. Poisoning the whole block on free took the failure from roughly one boot

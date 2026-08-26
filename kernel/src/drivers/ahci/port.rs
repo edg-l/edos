@@ -439,8 +439,21 @@ impl AhciPort {
     /// next OR-write of the same bit is a hardware no-op and the drive never
     /// retriggers. We issue a COMRESET whenever residual SACT/CI bits are
     /// observed after the stop, which is exactly the NCQ-timeout case.
-    fn restart_port(&self) -> Result<(), AhciError> {
+    ///
+    /// `fail_all` is the caller's fail-every-in-flight-op pass, and it is a
+    /// parameter rather than something the caller runs first **because the
+    /// order is the correctness argument**. Failing an op releases its
+    /// buffer, and that buffer is the caller's own memory -- a page-cache
+    /// frame or a kernel-heap `Vec` -- not anything this driver owns. Release
+    /// one while `PxCMD.CR` is still set and the engine may still complete
+    /// the command into memory the allocator has since handed to somebody
+    /// else: a use-after-free whose writer is the HBA, which no CPU-side
+    /// check can see. `stop_port` clears `PxCMD.ST` and waits for `PxCMD.CR`
+    /// (AHCI 1.3.1 10.1.2), which is what stops the engine, so it happens
+    /// first and `fail_all` does not run at all if it fails.
+    fn restart_port(&self, fail_all: impl FnOnce()) -> Result<(), AhciError> {
         Self::stop_port(self.port_regs)?;
+        fail_all();
         unsafe {
             let residual_sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
             let residual_ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
@@ -1161,10 +1174,10 @@ impl AhciPort {
 // completion copy (pool-path reads only), calls `handle.complete()`, and
 // frees the slot.
 //
-// TFES and COMRESET error recovery also live in the dispatcher: every
-// in-flight op is failed with `Io`, then `restart_port` bumps
-// `reset_generation` so any stale-SACT race is caught at the
-// `complete_ncq_slot` start-gen check.
+// TFES and COMRESET error recovery also live in the dispatcher:
+// `begin_restart` bumps `reset_generation` so any stale-SACT race is caught
+// at the `complete_ncq_slot` start-gen check, then `restart_port` stops the
+// engine and fails every in-flight op with `Io` once it is stopped.
 // ---------------------------------------------------------------------------
 
 impl AhciPort {
@@ -1551,6 +1564,20 @@ impl AhciPort {
     }
 
     fn fail_all_ncq_slots(&self, err: BlockError) {
+        // Releasing a buffer the engine can still write into is a
+        // use-after-free whose writer is the HBA, so it is counted where it
+        // would happen rather than left to be reasoned about. Logged once: a
+        // regression here fires on every restart.
+        if unsafe { ptr::read_volatile(&raw const (*self.port_regs).cmd) } & PORT_CMD_CR != 0 {
+            crate::drivers::ahci::watchdog::FAILED_WHILE_RUNNING.fetch_add(1, Ordering::Relaxed);
+            static REPORTED: AtomicBool = AtomicBool::new(false);
+            if !REPORTED.swap(true, Ordering::Relaxed) {
+                log!(
+                    "AHCI port {}: failing in-flight slots with PxCMD.CR still set",
+                    self.port_idx
+                );
+            }
+        }
         for slot in 0..AHCI_CMD_SLOTS {
             let op = {
                 ranked_lock!(
@@ -1678,20 +1705,20 @@ impl AhciPort {
                 );
             }
 
-            // Acquire the `restarting` CAS guard FIRST, then fail-all + restart.
-            // If a TFES IRQ races us and wins the CAS, we skip entirely; its
-            // `fail_all_ncq_slots` walks the whole slot array, so nothing is
-            // lost. Doing `fail_all` outside the guard would let a new
+            // Acquire the `restarting` CAS guard FIRST, then restart, whose
+            // own stop-then-fail order is what keeps the HBA off the buffers
+            // it releases. If a TFES IRQ races us and wins the CAS, we skip
+            // entirely; its `fail_all_ncq_slots` walks the whole slot array,
+            // so nothing is lost. Failing outside the guard would let a new
             // submitter install a fresh op into a slot we just cleared, and a
-            // concurrent caller's second `fail_all` pass would clobber it.
+            // concurrent caller's second fail-all pass would clobber it.
             if self
                 .restarting
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 self.begin_restart();
-                self.fail_all_ncq_slots(BlockError::Io);
-                let _ = self.restart_port();
+                let _ = self.restart_port(|| self.fail_all_ncq_slots(BlockError::Io));
                 self.end_restart();
                 crate::drivers::ahci::watchdog::WATCHDOG_RESTARTS.fetch_add(1, Ordering::Relaxed);
             }
@@ -1715,21 +1742,20 @@ impl AhciPort {
                 tfd & 0xFF,
                 (tfd >> 8) & 0xFF
             );
-            // Acquire the `restarting` CAS guard FIRST, then fail-all + restart.
-            // If the watchdog kthread races us and wins the CAS, we skip
-            // entirely; its `fail_all_ncq_slots` walks the whole slot array,
-            // so nothing is lost. Doing `fail_all` outside the guard would
-            // let a new submitter install a fresh op into a slot we just
-            // cleared, and a concurrent caller's second `fail_all` pass would
-            // clobber it.
+            // Acquire the `restarting` CAS guard FIRST, then restart, whose
+            // own stop-then-fail order is what keeps the HBA off the buffers
+            // it releases. If the watchdog kthread races us and wins the CAS,
+            // we skip entirely; its `fail_all_ncq_slots` walks the whole slot
+            // array, so nothing is lost. Failing outside the guard would let
+            // a new submitter install a fresh op into a slot we just cleared,
+            // and a concurrent caller's second fail-all pass would clobber it.
             if self
                 .restarting
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 self.begin_restart();
-                self.fail_all_ncq_slots(BlockError::Io);
-                let _ = self.restart_port();
+                let _ = self.restart_port(|| self.fail_all_ncq_slots(BlockError::Io));
                 self.end_restart();
             }
             return;
