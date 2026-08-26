@@ -10836,3 +10836,44 @@ writable segments rather than assumed to be the only one.
 `resolve_reloc_segment` returns an index rather than a `&LoadSegment`: the
 `RelocTable` build wants `image.relocs` by value, and a reference into
 `image.segments` held across that point makes the partial move unborrowable.
+
+## The cleanup run's closing measurements
+
+`doc/ROADMAP-CLEANUP.md` was worked from the top over one night. 21 of its 31
+entries are struck; D1 and G2 are struck with a named remainder. What follows
+is what the run moved, measured on 2026-08-26 so that the next reader does not
+re-derive it.
+
+Gate state, run whole on the final pass and green: `make test AUDIODEV=none`
+58/58 on four CPUs and again on one, `make guest-check` 18/18, `make
+host-tests` 164, kernel check and clippy at zero warnings.
+
+Counts the work invalidated, old -> new:
+
+```
+TODO/FIXME/HACK/XXX in Rust           5 -> 0      G4
+colour literals outside theme.rs     28 -> 7      D6 took the ANSI palette
+buffer: &mut [u32] signatures        55 -> 12     D1, D2; 9 of the 12 are edos-web
+functions with 7+ parameters         45 -> 29     D1, D2, I3
+!0u64 under kernel/src/syscalls     255 -> 253    unchanged in substance; B2 is open
+errno = Errno:: under syscalls      477 -> 477    B2 is the item that moves this
+unwrap() in the kernel               84 -> 84
+unwrap() across userspace           107 -> 106
+Rust lines (tokei, code)            143k -> 140k
+```
+
+Two of those deserve reading as a pair. `buffer: &mut [u32]` and the
+seven-or-more-parameter count are the same defect counted twice, and both are
+now one cluster rather than a spread: `programs/edos-web` never adopted
+`edos_render::Surface`, so `view.rs` and `ui.rs` still rasterise their own
+boxes with `(buffer, width, height, top)` by hand. Porting that one crate
+closes H5 and D1's remainder together, and nothing else in the tree is left in
+that shape.
+
+The largest untouched item is B2/B3, and its size is worth stating plainly
+before anyone starts: 477 hand-written errno assignments across nine files,
+380 of them real (the other 97 are the `Errno::Clear` reset at entry), plus an
+831-line dispatch match that writes the argument shapes out a second time
+beside `table.rs`. It is a project, not a sitting, and the roadmap's
+smallest-first order (`sync.rs` at 6 assignments, then `shm.rs` at 18) is the
+way in.

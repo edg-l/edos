@@ -8,6 +8,14 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
+**State as of 2026-08-26.** 21 of the 31 entries are struck; D1 and G2 are
+struck with a named remainder. What is open, in the order the evidence
+suggests: B2 and B3 (the syscall convention and its dispatcher, the largest
+remaining item by far), C2 (no argument parser), H1/H3/H4 (three long
+functions), H5 and D1's remainder (both close by porting `edos-web` to
+`Surface`), G3 (split `WORKING-NOTES.md`), and the three gates I2, I5.
+The numbers each entry quotes were remeasured on this date.
+
 ## How to use this file
 
 Each item says **where**, **what is wrong**, **the fix**, and **done when**.
@@ -63,7 +71,7 @@ set the errno by hand and return a sentinel:
 ```
 477   `errno = Errno::` assignments under kernel/src/syscalls/
  97   of them the `Errno::Clear` reset at function entry
-255   `!0u64` literals under kernel/src/syscalls/
+253   `!0u64` literals under kernel/src/syscalls/
 ```
 
 This is the same defect `CLAUDE.md` documents on the userspace side ("a return
@@ -258,14 +266,16 @@ now.
 
 ## D. Rendering has no surface type, so 55 signatures carry one by hand
 
-`edos_render` has a `Surface<'a>` (`programs/edos_render/src/text.rs:52`), used
-by the text blitter and nothing else. Everything that draws a rectangle threads
-`(buffer, buffer_width, buffer_height)` through by hand instead. 55 signatures
-take `buffer: &mut [u32]`, including the `Widget` trait itself
-(`widgets/mod.rs:84`).
+`edos_render` had a `Surface<'a>` (`programs/edos_render/src/text.rs:52`) used
+by the text blitter and nothing else, while everything that drew a rectangle
+threaded `(buffer, buffer_width, buffer_height)` through by hand: 55 signatures
+took `buffer: &mut [u32]`, the `Widget` trait among them. That is what put 45
+functions on seven or more parameters and what kept
+`clippy::too_many_arguments` suppressed globally.
 
-This is why the tree has 45 functions with seven or more parameters, and why
-`clippy::too_many_arguments` had to be turned off globally.
+D1 and D2 closed the toolkit half. 12 `buffer: &mut [u32]` signatures are left,
+9 of them in `edos-web`, which never adopted `Surface`; the global allow is off
+and 29 functions take seven or more parameters (H5).
 
 ### D1. ~~One surface type, threaded through `Widget::draw`~~ (mostly done)
 
@@ -433,9 +443,9 @@ attempts to copy `size` bytes from user space address `src`"). The house style
 is `kernel/src/syscalls/io.rs:71`, where the comment on `STREAM_STACK_BUF`
 carries a measurement table and says why the constant is small on purpose.
 
-### G3. `doc/WORKING-NOTES.md` is 10,021 lines and `CLAUDE.md` says read it first (S2, E2)
+### G3. `doc/WORKING-NOTES.md` is 10,838 lines and `CLAUDE.md` says read it first (S2, E2)
 
-220 sections, 9 marked FIXED or DONE, covering 17 days. `doc/bugs/` holds 24
+247 sections, 9 marked FIXED or DONE, covering 18 days. `doc/bugs/` holds 23
 post-mortems and has a `README.md` stating the format.
 
 A handoff document nobody can read is not a handoff. Split it: the current state
@@ -462,7 +472,7 @@ these are listed by whether the function does more than one job, not by size.
 
 ### H1. `xhci_driver_main`, 755 lines (S2, E2)
 
-`kernel/src/drivers/usb/xhci/mod.rs:1170`. Controller reset, port enumeration,
+`kernel/src/drivers/usb/xhci/mod.rs:1171`. Controller reset, port enumeration,
 descriptor fetch, class dispatch and the event loop in one body, with 77 `unsafe`
 blocks in the file. Split along the phases it already names in comments.
 
@@ -490,7 +500,7 @@ the function body, and the magic numbers that were bare (`8` for
 
 ### H3. `sys_read` / `sys_write`, 353 and 328 lines (S2, E2)
 
-`kernel/src/syscalls/io.rs:695` and `:267`. One function per descriptor kind
+`kernel/src/syscalls/io.rs:668` and `:242`. One function per descriptor kind
 behind a match, rather than a match with a 300-line body. B2 touches these
 anyway.
 
@@ -634,15 +644,16 @@ Recorded so nobody spends the time again.
 
 - **Clippy** is at zero across the kernel's default, `sched-test`, `trace` and
   `sched-prof` builds. The kernel is genuinely warning-free.
-- **`TODO`/`FIXME`/`HACK`/`XXX`** total 5 across 143k lines of Rust. Unusually
-  low; not a problem area.
+- **`TODO`/`FIXME`/`HACK`/`XXX`** were 5 across 140k lines of Rust and are now
+  0: G4 turned all five into statements of what the code does.
 - **Colour literals**: 28 `0xFF......` constants outside `theme.rs`, 16 of them
-  the terminal's ANSI palette (D6). The theme discipline is otherwise held.
+  the terminal's ANSI palette, now 7 -- D6 moved the palette into
+  `Theme::ANSI`. The theme discipline is otherwise held.
 - **MSI-X setup** is already shared through `drivers::msi::enable_msix_for_device`;
   the five PCI drivers do not each re-implement it.
 - **procfs** is table-driven (`GLOBAL_FILES`, `PROCESS_FILES` as `(name, render)`
   pairs). Adding a file is one row, as `CLAUDE.md` claims.
-- **`unwrap()` density** is 84 in the kernel and 107 across 133 userspace
+- **`unwrap()` density** is 84 in the kernel and 106 across 130 userspace
   programs. Low enough that a sweep is not worth a roadmap entry; check them
   where you are already working.
 - **`libs/window-abi`** does what it is supposed to do. It is the model for A1,
