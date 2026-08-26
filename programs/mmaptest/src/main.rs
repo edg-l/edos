@@ -103,13 +103,12 @@ fn test1(dir: &str) {
     let file = File::open(&path).unwrap_or_else(|e| fail(1, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
-    let ptr = mmap(core::ptr::null_mut(), PAGE, PROT_READ, MAP_PRIVATE, fd, 0);
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(1, dir, "mmap returned null/MAP_FAILED");
-    }
+    let ptr = mmap(core::ptr::null_mut(), PAGE, PROT_READ, MAP_PRIVATE, fd, 0)
+        .unwrap_or_else(|e| fail(1, dir, &format!("mmap: {e:?}")))
+        .as_ptr();
 
     let mapped: Vec<u8> = unsafe { core::slice::from_raw_parts(ptr, PAGE as usize).to_vec() };
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
 
     if mapped != expected {
         fail(
@@ -154,10 +153,9 @@ fn test2(dir: &str) {
         MAP_PRIVATE,
         fd,
         0,
-    );
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(2, dir, "mmap returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(2, dir, &format!("mmap: {e:?}")))
+    .as_ptr();
 
     // Write 'B' via private mapping
     unsafe { ptr.write(b'B') };
@@ -170,7 +168,7 @@ fn test2(dir: &str) {
         );
     }
 
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
 
     // File on disk must still start with 'A'
     let disk_byte = fs::read(&path).unwrap_or_else(|e| fail(2, dir, &format!("re-read: {}", e)))[0];
@@ -210,19 +208,17 @@ fn test3(dir: &str) {
         MAP_SHARED,
         fd,
         0,
-    );
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(3, dir, "mmap returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(3, dir, &format!("mmap: {e:?}")))
+    .as_ptr();
 
     unsafe { ptr.write(b'C') };
 
-    let ret = unsafe { msync(ptr, PAGE, MS_SYNC) };
-    if ret != 0 {
-        fail(3, dir, &format!("msync returned {}", ret));
+    if let Err(e) = unsafe { msync(ptr, PAGE, MS_SYNC) } {
+        fail(3, dir, &format!("msync failed: {e:?}"));
     }
 
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
 
     let disk_byte = fs::read(&path).unwrap_or_else(|e| fail(3, dir, &format!("re-read: {}", e)))[0];
     if disk_byte != b'C' {
@@ -268,7 +264,9 @@ fn test4(dir: &str) {
         MAP_SHARED,
         fd_a,
         0,
-    );
+    )
+    .unwrap_or_else(|e| fail(4, dir, &format!("mmap A: {e:?}")))
+    .as_ptr();
     let ptr_b = mmap(
         core::ptr::null_mut(),
         PAGE,
@@ -276,14 +274,9 @@ fn test4(dir: &str) {
         MAP_SHARED,
         fd_b,
         0,
-    );
-
-    if ptr_a.is_null() || ptr_a as usize == usize::MAX {
-        fail(4, dir, "mmap A returned null/MAP_FAILED");
-    }
-    if ptr_b.is_null() || ptr_b as usize == usize::MAX {
-        fail(4, dir, "mmap B returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(4, dir, &format!("mmap B: {e:?}")))
+    .as_ptr();
 
     // Write 'D' via mapping A
     unsafe { ptr_a.write(b'D') };
@@ -291,8 +284,8 @@ fn test4(dir: &str) {
     // Read via mapping B -- must see 'D' (same page cache frame)
     let seen = unsafe { ptr_b.read() };
 
-    munmap(ptr_a, PAGE);
-    munmap(ptr_b, PAGE);
+    let _ = munmap(ptr_a, PAGE);
+    let _ = munmap(ptr_b, PAGE);
 
     if seen != b'D' {
         fail(
@@ -331,10 +324,9 @@ fn test5(dir: &str) {
         MAP_PRIVATE,
         fd,
         0,
-    );
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(5, dir, "mmap returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(5, dir, &format!("mmap: {e:?}")))
+    .as_ptr();
 
     // First page (in-file) must be readable
     let first = unsafe { ptr.read() };
@@ -345,7 +337,7 @@ fn test5(dir: &str) {
     // Fork a child; the child accesses the second page (past EOF), which must
     // trigger a kill (exit code 11 in EDOS).
     let child_pid = process::fork().unwrap_or_else(|e| {
-        munmap(ptr, PAGE * 2);
+        let _ = munmap(ptr, PAGE * 2);
         fail(5, dir, &format!("fork failed: {e:?}"))
     });
 
@@ -361,7 +353,7 @@ fn test5(dir: &str) {
 
     // Parent: wait for the child
     let exit_code = process::waitpid(child_pid);
-    munmap(ptr, PAGE * 2);
+    let _ = munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
         check_touch(5, dir, unsafe { ptr.add(PAGE as usize) });
@@ -400,10 +392,9 @@ fn test6(dir: &str) {
         MAP_SHARED,
         fd,
         0,
-    );
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(6, dir, "mmap returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(6, dir, &format!("mmap: {e:?}")))
+    .as_ptr();
 
     // Both pages accessible before truncation
     let b0 = unsafe { ptr.read() };
@@ -418,7 +409,7 @@ fn test6(dir: &str) {
 
     // Fork a child to access the now-truncated second page
     let child_pid = process::fork().unwrap_or_else(|e| {
-        munmap(ptr, PAGE * 2);
+        let _ = munmap(ptr, PAGE * 2);
         fail(6, dir, &format!("fork failed: {e:?}"))
     });
 
@@ -432,7 +423,7 @@ fn test6(dir: &str) {
     }
 
     let exit_code = process::waitpid(child_pid);
-    munmap(ptr, PAGE * 2);
+    let _ = munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
         check_touch(6, dir, unsafe { ptr.add(PAGE as usize) });
@@ -471,19 +462,17 @@ fn test7(dir: &str) {
         MAP_SHARED,
         fd,
         0,
-    );
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(7, dir, "mmap returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(7, dir, &format!("mmap: {e:?}")))
+    .as_ptr();
 
     unsafe { ptr.write(b'Z') };
 
-    let ret = unsafe { msync(ptr, PAGE, MS_SYNC) };
-    if ret != 0 {
-        fail(7, dir, &format!("msync returned {}", ret));
+    if let Err(e) = unsafe { msync(ptr, PAGE, MS_SYNC) } {
+        fail(7, dir, &format!("msync failed: {e:?}"));
     }
 
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
 
     // fsync via std (file is still open)
     file.sync_all()
@@ -532,13 +521,12 @@ fn test8(dir: &str) {
         MAP_PRIVATE,
         fd,
         0,
-    );
-    if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(8, dir, "mmap returned null/MAP_FAILED");
-    }
+    )
+    .unwrap_or_else(|e| fail(8, dir, &format!("mmap: {e:?}")))
+    .as_ptr();
 
     let child_pid = process::fork().unwrap_or_else(|e| {
-        munmap(ptr, PAGE);
+        let _ = munmap(ptr, PAGE);
         fail(8, dir, &format!("fork failed: {e:?}"))
     });
 
@@ -557,7 +545,7 @@ fn test8(dir: &str) {
 
     let exit_code = process::waitpid(child_pid);
     if exit_code != 0 {
-        munmap(ptr, PAGE);
+        let _ = munmap(ptr, PAGE);
         // The child is not supposed to fault here at all, so say which address
         // it was working from: a child holding an address its parent does not
         // is a different bug from one the kernel refused to fill.
@@ -579,7 +567,7 @@ fn test8(dir: &str) {
 
     // Parent view: byte 0 must still be 'A' (COW isolation).
     let parent_byte = unsafe { core::ptr::read_volatile(ptr) };
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
     if parent_byte != b'A' {
         fail(
             8,
@@ -632,24 +620,22 @@ fn test9(dir: &str) {
         .unwrap_or_else(|e| fail(9, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
-    let ptr = mmap(
+    // A filesystem without page-cache mmap is a skip, not a failure.
+    let Ok(ptr) = mmap(
         core::ptr::null_mut(),
         PAGE * 2,
         PROT_READ | PROT_WRITE,
         MAP_SHARED,
         fd,
         0,
-    );
-
-    // If this filesystem does not support page-cache mmap, mmap returns MAP_FAILED.
-    // Skip gracefully rather than failing.
-    if ptr.is_null() || ptr as usize == usize::MAX {
+    ) else {
         drop(file);
         // Clean up the file we created; ignore errors (file may be gone).
         let _ = fs::remove_file(&path);
         println!("SKIP test 9 [{}]: mmap not supported on this fs", dir);
         return;
-    }
+    };
+    let ptr = ptr.as_ptr();
 
     // Write 'V' at offset 0 through the mapping while the file is still linked.
     unsafe { core::ptr::write_volatile(ptr, b'V') };
@@ -661,7 +647,7 @@ fn test9(dir: &str) {
     // The mapping must still read 'V' after unlink (inode is pinned).
     let still_v = unsafe { core::ptr::read_volatile(ptr) };
     if still_v != b'V' {
-        munmap(ptr, PAGE * 2);
+        let _ = munmap(ptr, PAGE * 2);
         fail(
             9,
             dir,
@@ -673,13 +659,12 @@ fn test9(dir: &str) {
     }
 
     // msync the dirty page -- flush_page must succeed even for orphaned inode.
-    let ret = unsafe { msync(ptr, PAGE * 2, MS_SYNC) };
-    if ret != 0 {
-        munmap(ptr, PAGE * 2);
-        fail(9, dir, &format!("msync after unlink returned {}", ret));
+    if let Err(e) = unsafe { msync(ptr, PAGE * 2, MS_SYNC) } {
+        let _ = munmap(ptr, PAGE * 2);
+        fail(9, dir, &format!("msync after unlink failed: {e:?}"));
     }
 
-    munmap(ptr, PAGE * 2);
+    let _ = munmap(ptr, PAGE * 2);
     drop(file);
 
     // After munmap (last unpin), the path must not be accessible.
@@ -783,21 +768,23 @@ fn test11(dir: &str) {
     ];
 
     for (name, addr, length) in cases {
-        let p = mmap(
+        if let Ok(p) = mmap(
             addr as *mut u8,
             length,
             PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS,
             -1,
             0,
-        );
-        if p as u64 != u64::MAX {
+        ) {
             fail(
                 11,
                 dir,
                 &format!(
                     "mmap({}, addr={:#x}, len={:#x}) returned {:p}, expected failure",
-                    name, addr, length, p
+                    name,
+                    addr,
+                    length,
+                    p.as_ptr()
                 ),
             );
         }
@@ -834,13 +821,18 @@ fn test12(dir: &str) {
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1,
         0,
-    );
-    if ptr as u64 == u64::MAX {
-        fail(12, dir, "mmap of one anonymous page failed");
-    }
+    )
+    .unwrap_or_else(|e| {
+        fail(
+            12,
+            dir,
+            &format!("mmap of one anonymous page failed: {e:?}"),
+        )
+    })
+    .as_ptr();
     unsafe { core::ptr::write_volatile(ptr, 0x11) };
 
-    if mprotect(ptr, PAGE, PROT_READ) != 0 {
+    if mprotect(ptr, PAGE, PROT_READ).is_err() {
         fail(12, dir, "mprotect to PROT_READ failed");
     }
     if unsafe { core::ptr::read_volatile(ptr) } != 0x11 {
@@ -853,7 +845,7 @@ fn test12(dir: &str) {
     // Back to writable. The page is shared with nothing now, but it carried
     // COW_BIT while the child above was alive, so this also covers restoring
     // write permission to a page that has been through a fork.
-    if mprotect(ptr, PAGE, PROT_READ | PROT_WRITE) != 0 {
+    if mprotect(ptr, PAGE, PROT_READ | PROT_WRITE).is_err() {
         fail(12, dir, "mprotect back to PROT_READ|PROT_WRITE failed");
     }
     unsafe { core::ptr::write_volatile(ptr, 0x22) };
@@ -874,12 +866,16 @@ fn test12(dir: &str) {
         ("unmapped range", unmapped as *mut u8, PAGE, PROT_READ),
     ];
     for (name, addr, len, prot) in bad {
-        if mprotect(addr, len, prot) == 0 {
-            fail(12, dir, &format!("mprotect({name}) succeeded, expected -1"));
+        if mprotect(addr, len, prot).is_ok() {
+            fail(
+                12,
+                dir,
+                &format!("mprotect({name}) succeeded, expected a refusal"),
+            );
         }
     }
 
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
     pass(
         12,
         dir,
@@ -903,10 +899,15 @@ fn test13(dir: &str) {
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1,
         0,
-    );
-    if ptr as u64 == u64::MAX {
-        fail(13, dir, "mmap of one PROT_READ page failed");
-    }
+    )
+    .unwrap_or_else(|e| {
+        fail(
+            13,
+            dir,
+            &format!("mmap of one PROT_READ page failed: {e:?}"),
+        )
+    })
+    .as_ptr();
     // Fault it in read-only, so fork has a present PTE to mark.
     if unsafe { core::ptr::read_volatile(ptr) } != 0 {
         fail(13, dir, "anonymous page was not zero-filled");
@@ -916,7 +917,7 @@ fn test13(dir: &str) {
         fail(13, dir, "a forked child wrote to a PROT_READ mapping");
     }
 
-    munmap(ptr, PAGE);
+    let _ = munmap(ptr, PAGE);
     pass(13, dir, "a COW page stays as unwritable as its VMA");
 }
 

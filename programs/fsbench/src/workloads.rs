@@ -349,18 +349,20 @@ pub fn write_mmap(dir: &str, bytes: u64, budget: Budget) -> Report {
             return run.finish();
         }
     };
-    let ptr = mmap(
+    let ptr = match mmap(
         core::ptr::null_mut(),
         bytes,
         PROT_READ | PROT_WRITE,
         MAP_SHARED,
         file.as_raw_fd(),
         0,
-    );
-    if ptr.is_null() || ptr as isize == -1 {
-        run.fail("mmap failed".to_string());
-        return run.finish();
-    }
+    ) {
+        Ok(p) => p.as_ptr(),
+        Err(e) => {
+            run.fail(format!("mmap failed: {e:?}"));
+            return run.finish();
+        }
+    };
 
     while run.keep_going() {
         let done = run.op(bytes, || {
@@ -368,16 +370,13 @@ pub fn write_mmap(dir: &str, bytes: u64, budget: Budget) -> Report {
             for (i, slot) in dst.iter_mut().enumerate() {
                 *slot = byte_at(2, i as u64);
             }
-            match unsafe { msync(ptr, bytes, MS_SYNC) } {
-                0 => Ok(()),
-                e => Err(format!("msync returned {e}")),
-            }
+            unsafe { msync(ptr, bytes, MS_SYNC) }.map_err(|e| format!("msync failed: {e:?}"))
         });
         if done.is_none() {
             break;
         }
     }
-    munmap(ptr, bytes);
+    let _ = munmap(ptr, bytes);
     run.finish()
 }
 
@@ -555,10 +554,9 @@ pub fn read_mmap(dir: &str, bytes: u64, budget: Budget) -> Report {
         // the latency column covered only the memory sweep, and the two
         // disagreed by a factor of sixty.
         let done = run.op(len, || -> Result<(), String> {
-            let ptr = mmap(core::ptr::null_mut(), len, PROT_READ, MAP_SHARED, fd, 0);
-            if ptr.is_null() || ptr as isize == -1 {
-                return Err("mmap failed".to_string());
-            }
+            let ptr = mmap(core::ptr::null_mut(), len, PROT_READ, MAP_SHARED, fd, 0)
+                .map_err(|e| format!("mmap failed: {e:?}"))?
+                .as_ptr();
             let src = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
             let mut sum = 0u64;
             for &b in src {
@@ -566,7 +564,7 @@ pub fn read_mmap(dir: &str, bytes: u64, budget: Budget) -> Report {
             }
             // Keep the loop from being optimized away without printing.
             core::hint::black_box(sum);
-            munmap(ptr, len);
+            let _ = munmap(ptr, len);
             Ok(())
         });
         if done.is_none() {

@@ -550,20 +550,6 @@ pub fn pty_set_canonical(fd: u64) {
     let _ = ioctl(fd, PTY_IOCTL_SET_CANONICAL, 0);
 }
 
-/// Map memory, answering the mapped virtual address.
-///
-/// A failing syscall returns a negated errno, which is indistinguishable from a
-/// plausible address once it is in a `u64`; the `Result` is what keeps a caller
-/// from mapping at one.
-pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, phys_addr: u64) -> Result<u64, Errno> {
-    sys::sys_result(unsafe { sys::syscall5(sys::SYS_MMAP, addr, length, prot, flags, phys_addr) })
-}
-
-/// Unmap memory.
-pub fn munmap(addr: u64, length: u64) -> Result<(), Errno> {
-    sys::sys_ok(unsafe { sys::syscall2(sys::SYS_MUNMAP, addr, length) })
-}
-
 /// Poll stdin for readability with the given timeout.
 /// Returns true if stdin has data available.
 pub fn poll_stdin(timeout_ms: u64) -> bool {

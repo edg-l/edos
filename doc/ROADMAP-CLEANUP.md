@@ -203,7 +203,7 @@ The `-> i64` and `-> u64` signatures counted here in `mounts.rs`, `net.rs`,
 `procinfo.rs`, `profile.rs` and `trace.rs` are genuine values (byte totals, a
 dropped-record count, an errno a `NetError` already carries), not failures in
 disguise, and those modules already answer `Option` or `bool` where they can
-fail. `mem.rs` returns `i32`, which C3 covers.
+fail. `mem.rs` returned `i32`, which C3 closed.
 
 **Done.** No `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a sentinel
 `u64`.
@@ -225,18 +225,24 @@ above first; the rest follow as each program is next touched.
 **Done when** a new coreutil gets `--help` and `--` without writing either, and
 the three counts above are all "every CLI program".
 
-### C3. `edos_lib::mem` returns `u64::MAX as *mut u8` (S3, E3)
+### C3. ~~`edos_lib::mem` returns `u64::MAX as *mut u8`~~ (done)
 
-`programs/edos_lib/src/mem.rs:48`. A sentinel pointer. `mmap` should answer
-`Result<NonNull<u8>, Errno>` and `munmap`/`mprotect`/`msync` `Result<(), Errno>`,
-matching the rest of `edos_lib` after C1.
+`mmap` answers `Result<NonNull<u8>, Errno>` and `munmap`/`mprotect`/`msync`
+answer `Result<(), Errno>`. `NonNull` is load-bearing rather than decorative:
+the syscall's failure and a null address are both plausible-looking `u64`s, and
+the type is what stops either reaching a `.read()`.
 
-Re-sized from E1 to E3 by measurement: the wrapper change is ten lines, but
-`mmaptest/src/main.rs` breaks in 90 places and `fsbench/src/workloads.rs` in 11.
-Both use the returned pointer arithmetically (`.add`, `.read`, `.write`) and each
-site carries its own failure message, so it is a call-site rewrite of two
-programs, not a signature change. `mmaptest` is a guest suite, so `make
-guest-check` has to run after it.
+The call-site count in the original entry was wrong -- 46 sites across the two
+programs, not 101 -- because it counted every line mentioning a pointer the
+mapping produced rather than every line that had to change.
+
+Two duplicates went with it. `io::mmap`/`io::munmap` were a second, uncalled
+wrapper pair whose fifth parameter was named `phys_addr` when the kernel reads
+that register as a descriptor unless `MAP_PHYSICAL` is set; they are deleted,
+and the physical form is `mem::mmap_physical`, which sets the flag itself so the
+overload cannot be got wrong. `edos_render/src/graphics.rs` had its own
+`PROT_*`/`MAP_*` constants and a raw `syscall5`; it calls `mem::mmap_physical`
+now.
 
 ---
 

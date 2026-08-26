@@ -1,7 +1,7 @@
 use std::{fs::File, os::edos::io::FileExt};
 
 use crate::surface::{Pixmap, Surface};
-use edos_lib::sys::{SYS_MMAP, is_err, syscall5};
+use edos_lib::mem::{self, MAP_PRIVATE, MAP_WRITE_COMBINING, PROT_READ, PROT_WRITE};
 use std::fmt;
 
 /// Graphics operation error type
@@ -54,12 +54,6 @@ pub const MAX_FLIP_RECTS: usize = 16;
 const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 const FB_IOCTL_TRACK_POINTER: u64 = 0x4642_000C;
-
-const PROT_READ: u32 = 0x1;
-const PROT_WRITE: u32 = 0x2;
-const MAP_PRIVATE: u32 = 0x02;
-const MAP_PHYSICAL: u32 = 0x40;
-const MAP_WRITE_COMBINING: u32 = 0x80;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -270,20 +264,15 @@ impl Framebuffer {
             return Err(GraphicsError::Unknown);
         }
 
-        let ptr = unsafe {
-            syscall5(
-                SYS_MMAP,
-                0,
-                info.total_size,
-                (PROT_READ | PROT_WRITE) as u64,
-                (MAP_PRIVATE | MAP_PHYSICAL | MAP_WRITE_COMBINING) as u64,
-                info.phys_addr,
-            )
-        } as *mut u32;
-
-        if ptr.is_null() || is_err(ptr as u64) {
-            return Err(GraphicsError::Fault);
-        }
+        let ptr = mem::mmap_physical(
+            info.total_size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_WRITE_COMBINING,
+            info.phys_addr,
+        )
+        .map_err(|_| GraphicsError::Fault)?
+        .as_ptr()
+        .cast::<u32>();
 
         let page_pixels = info.page_size as usize / core::mem::size_of::<u32>();
         let pitch_pixels = info.pitch as usize / core::mem::size_of::<u32>();

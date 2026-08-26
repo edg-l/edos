@@ -10656,3 +10656,40 @@ places and `fsbench/src/workloads.rs` in 11: both do pointer arithmetic on the
 result (`.add`, `.read`, `.write`) and each site prints its own failure message,
 so the conversion is a rewrite of two programs. Measured, then reverted; the
 roadmap entry now says E3.
+
+## `mmap` answers a `NonNull`, and the second mmap wrapper is gone
+
+`edos_lib::mem::mmap` returns `Result<NonNull<u8>, Errno>`; `munmap`,
+`mprotect` and `msync` return `Result<(), Errno>`. `NonNull` rather than
+`*mut u8` because the syscall has two ways to hand back something that is not a
+mapping -- a negated errno, which is a plausible address once it is in a `u64`,
+and a null one -- and the type is what stops either reaching a `.read()`. The
+old wrapper collapsed the first into `u64::MAX` and left every caller to spell
+out `ptr.is_null() || ptr as usize == usize::MAX`, which two of the fourteen
+call sites wrote differently from the other twelve.
+
+The roadmap sized this at 101 call sites and it was 46. The measurement had
+counted every line that mentioned a pointer some mapping produced, not every
+line that had to change; the pointer-arithmetic uses (`.add`, `.read`,
+`.write`) are unaffected because `as_ptr()` hands the raw pointer straight
+back. Take a call-site count from the lines that name the *function*, not from
+the lines that name its result.
+
+Two duplicates fell out of it:
+
+- `io::mmap`/`io::munmap` were a second wrapper pair with no callers anywhere in
+  the tree. `io::mmap`'s fifth parameter was named `phys_addr`, but the kernel
+  reads that register as a file descriptor unless `MAP_PHYSICAL` is set
+  (`kernel/src/syscalls/memory.rs:148`), so the name was true only for a flag
+  the function never set. The physical form is now `mem::mmap_physical`, which
+  sets the flag itself, so the overload cannot be got wrong from outside.
+- `edos_render/src/graphics.rs` declared its own `PROT_READ`, `PROT_WRITE`,
+  `MAP_PRIVATE`, `MAP_PHYSICAL` and `MAP_WRITE_COMBINING` and issued a raw
+  `syscall5`. It calls `mem::mmap_physical` now, and `MAP_PHYSICAL` and
+  `MAP_WRITE_COMBINING` live beside the other flags in `mem.rs`.
+
+Verified in a guest, not only by the gates: `make guest-check` is 18/18 with
+`mmaptest`'s thirteen cases included, the desktop still reports `screen: VRAM
+mmap mode` and renders (so `mmap_physical` returns the aperture the raw
+`syscall5` did), and `fsbench -q -m 1 /var` still reports both mmap workloads
+(`mmap store 4MiB + msync`, `mmap load 4MiB faulted in`) with real numbers.
