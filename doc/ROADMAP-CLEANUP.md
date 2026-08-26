@@ -225,9 +225,18 @@ above first; the rest follow as each program is next touched.
 **Done when** a new coreutil gets `--help` and `--` without writing either, and
 the three counts above are all "every CLI program".
 
-### C3. `edos_lib::mem` returns `u64::MAX as *mut u8` (S3, E1)
+### C3. `edos_lib::mem` returns `u64::MAX as *mut u8` (S3, E3)
 
-`programs/edos_lib/src/mem.rs:48`. A sentinel pointer. `Option<NonNull<u8>>`.
+`programs/edos_lib/src/mem.rs:48`. A sentinel pointer. `mmap` should answer
+`Result<NonNull<u8>, Errno>` and `munmap`/`mprotect`/`msync` `Result<(), Errno>`,
+matching the rest of `edos_lib` after C1.
+
+Re-sized from E1 to E3 by measurement: the wrapper change is ten lines, but
+`mmaptest/src/main.rs` breaks in 90 places and `fsbench/src/workloads.rs` in 11.
+Both use the returned pointer arithmetically (`.add`, `.read`, `.write`) and each
+site carries its own failure message, so it is a call-site rewrite of two
+programs, not a signature change. `mmaptest` is a guest suite, so `make
+guest-check` has to run after it.
 
 ---
 

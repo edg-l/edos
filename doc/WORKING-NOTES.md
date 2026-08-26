@@ -10648,3 +10648,11 @@ pointer, with no 16-bit index anywhere, so the note described a data structure
 two rewrites ago. It was deleted rather than moved to a todo. A `TODO` that has
 outlived its subject reads exactly like one that has not; grep found the text,
 only reading the code found that it was fiction.
+
+`edos_lib::mem` is the last sentinel in `edos_lib` (`mmap` returns
+`u64::MAX as *mut u8`) and it is not the ten-line change the roadmap sized it
+as. Converting `mmap` to `Result<NonNull<u8>, Errno>` breaks `mmaptest` in 90
+places and `fsbench/src/workloads.rs` in 11: both do pointer arithmetic on the
+result (`.add`, `.read`, `.write`) and each site prints its own failure message,
+so the conversion is a rewrite of two programs. Measured, then reverted; the
+roadmap entry now says E3.
