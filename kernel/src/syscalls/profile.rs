@@ -7,7 +7,7 @@ use edos_profile_abi::{Sample, Stats, ctl};
 
 use crate::{
     profile::{self as sampler, MAX_READ_BATCH},
-    syscalls::{Errno, current_thread_id, current_thread_info, fail_with},
+    syscalls::{Errno, current_thread_id},
     util::uaccess::try_copy_to_user,
 };
 
@@ -15,24 +15,19 @@ use crate::{
 ///
 /// `START` returns the period actually in force, which is the requested one
 /// clamped to what the sampler accepts.
-pub fn sys_profile_ctl(op: u64, arg: u64) -> u64 {
-    current_thread_info().lock().errno = Errno::Clear;
-
+pub fn sys_profile_ctl(op: u64, arg: u64) -> Result<u64, Errno> {
     let Some(caller) = current_thread_id() else {
-        return fail_with(Errno::EINVAL);
+        return Err(Errno::EINVAL);
     };
 
     match op {
-        ctl::START => match sampler::start(caller.0, arg) {
-            Ok(period) => period,
-            Err(()) => fail_with(Errno::EBUSY),
-        },
+        ctl::START => sampler::start(caller.0, arg).map_err(|()| Errno::EBUSY),
         ctl::STOP => {
             if sampler::owner_tid() != caller.0 {
-                return fail_with(Errno::EPERM);
+                return Err(Errno::EPERM);
             }
             sampler::stop();
-            0
+            Ok(0)
         }
         ctl::STATS => {
             let stats = sampler::stats();
@@ -43,9 +38,9 @@ pub fn sys_profile_ctl(op: u64, arg: u64) -> u64 {
                     core::mem::size_of::<Stats>(),
                 )
             };
-            if ok { 0 } else { fail_with(Errno::EFAULT) }
+            if ok { Ok(0) } else { Err(Errno::EFAULT) }
         }
-        _ => fail_with(Errno::EINVAL),
+        _ => Err(Errno::EINVAL),
     }
 }
 
@@ -53,11 +48,9 @@ pub fn sys_profile_ctl(op: u64, arg: u64) -> u64 {
 /// `timeout_ms` if none are waiting.
 ///
 /// Returns the number of samples written, which is 0 on timeout.
-pub fn sys_profile_read(dst: *mut Sample, max: u64, timeout_ms: u64) -> u64 {
-    current_thread_info().lock().errno = Errno::Clear;
-
+pub fn sys_profile_read(dst: *mut Sample, max: u64, timeout_ms: u64) -> Result<u64, Errno> {
     if dst.is_null() || max == 0 {
-        return fail_with(Errno::EINVAL);
+        return Err(Errno::EINVAL);
     }
     let max = (max as usize).min(MAX_READ_BATCH);
 
@@ -66,10 +59,10 @@ pub fn sys_profile_read(dst: *mut Sample, max: u64, timeout_ms: u64) -> u64 {
     // else parking below adds a second waiter to a queue this keeps at depth
     // one.
     let Some(caller) = current_thread_id() else {
-        return fail_with(Errno::EINVAL);
+        return Err(Errno::EINVAL);
     };
     if sampler::owner_tid() != caller.0 {
-        return fail_with(Errno::EPERM);
+        return Err(Errno::EPERM);
     }
 
     if timeout_ms > 0 {
@@ -78,18 +71,18 @@ pub fn sys_profile_read(dst: *mut Sample, max: u64, timeout_ms: u64) -> u64 {
 
     let mut batch: Vec<Sample> = Vec::new();
     if batch.try_reserve_exact(max).is_err() {
-        return fail_with(Errno::ENOMEM);
+        return Err(Errno::ENOMEM);
     }
     if sampler::drain(&mut batch, max) == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let bytes = core::mem::size_of_val(batch.as_slice());
     if !unsafe { try_copy_to_user(dst as *mut u8, batch.as_ptr() as *const u8, bytes) } {
         // The samples are already out of the ring; a profiler that hands the
         // kernel an unwritable buffer loses them, which is its own doing.
-        return fail_with(Errno::EFAULT);
+        return Err(Errno::EFAULT);
     }
 
-    batch.len() as u64
+    Ok(batch.len() as u64)
 }

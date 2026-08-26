@@ -14,10 +14,14 @@ use x86_64::instructions::interrupts;
 pub const IOCTL_FLAG_READ: u64 = 1;
 pub const IOCTL_FLAG_WRITE: u64 = 1 << 1;
 
-pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) -> i64 {
+pub fn sys_ioctl(
+    fd: u64,
+    request: u64,
+    arg: u64,
+    arg_len: usize,
+    flags: u64,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     // Bind the lookup to a `let` before matching on it: temporaries in a match
     // scrutinee live until the end of the match, so matching on
     // `info.lock()...` directly would hold the thread-info IrqSpinlock while an
@@ -28,20 +32,15 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
     let descriptor = match looked_up {
         Some(desc) => desc,
         None => {
-            info.lock().errno = Errno::EBADF;
-            return -1;
+            return Err(Errno::EBADF);
         }
     };
 
     match descriptor {
         FileDescriptor::PtyMaster(pty_arc) | FileDescriptor::PtySlave(pty_arc) => {
-            match ranked_lock!(RANK_PTY, "sys_ioctl::pty", pty_arc).ioctl_with(request, arg) {
-                Ok(val) => val as i64,
-                Err(()) => {
-                    info.lock().errno = Errno::EINVAL;
-                    -1
-                }
-            }
+            ranked_lock!(RANK_PTY, "sys_ioctl::pty", pty_arc)
+                .ioctl_with(request, arg)
+                .map_err(|()| Errno::EINVAL)
         }
         FileDescriptor::FsFile(file) => {
             let copy_in = flags & IOCTL_FLAG_READ != 0;
@@ -54,14 +53,12 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
 
             if need_buffer {
                 if arg == 0 {
-                    info.lock().errno = Errno::EFAULT;
-                    return -1;
+                    return Err(Errno::EFAULT);
                 }
 
                 let user_ptr = arg as *mut u8;
                 if user_ptr.is_null() {
-                    info.lock().errno = Errno::EFAULT;
-                    return -1;
+                    return Err(Errno::EFAULT);
                 }
 
                 let mut buffer: Vec<u8> = vec![0u8; arg_len];
@@ -71,8 +68,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                         try_copy_from_user(buffer.as_mut_ptr(), user_ptr as *const u8, arg_len)
                     }
                 {
-                    info.lock().errno = Errno::EFAULT;
-                    return -1;
+                    return Err(Errno::EFAULT);
                 }
 
                 interrupts::enable();
@@ -91,15 +87,11 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                         if copy_out
                             && !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) }
                         {
-                            info.lock().errno = Errno::EFAULT;
-                            return -1;
+                            return Err(Errno::EFAULT);
                         }
-                        value
+                        Ok(value as u64)
                     }
-                    Err(err) => {
-                        info.lock().errno = Errno::from(err);
-                        -1
-                    }
+                    Err(err) => Err(Errno::from(err)),
                 }
             } else {
                 interrupts::enable();
@@ -114,17 +106,11 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                 };
 
                 match result {
-                    Ok(value) => value,
-                    Err(err) => {
-                        info.lock().errno = Errno::from(err);
-                        -1
-                    }
+                    Ok(value) => Ok(value as u64),
+                    Err(err) => Err(Errno::from(err)),
                 }
             }
         }
-        _ => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
+        _ => Err(Errno::EINVAL),
     }
 }

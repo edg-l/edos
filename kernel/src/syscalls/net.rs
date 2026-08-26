@@ -44,22 +44,19 @@ const RECV_FLAGS: u64 = MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT;
 ///
 /// A caller with room for less than a whole `sockaddr_in` gets a truncated
 /// address and the untruncated length, which is how it learns it was truncated.
-/// Returns false once the caller's errno is set.
-fn write_sockaddr_out(addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32, addr: SocketAddr) -> bool {
+fn write_sockaddr_out(
+    addr_ptr: *mut SockAddrIn,
+    addr_len_ptr: *mut u32,
+    addr: SocketAddr,
+) -> Result<(), Errno> {
     if addr_ptr.is_null() {
-        return true;
+        return Ok(());
     }
     let full = core::mem::size_of::<SockAddrIn>();
     let capacity = if addr_len_ptr.is_null() {
         full
     } else {
-        match unsafe { try_read_user(addr_len_ptr) } {
-            Some(capacity) => capacity as usize,
-            None => {
-                current_thread_info().lock().errno = Errno::EFAULT;
-                return false;
-            }
-        }
+        unsafe { try_read_user(addr_len_ptr) }.ok_or(Errno::EFAULT)? as usize
     };
 
     let sockaddr = SockAddrIn {
@@ -72,29 +69,27 @@ fn write_sockaddr_out(addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32, addr: S
         unsafe { core::slice::from_raw_parts(&sockaddr as *const SockAddrIn as *const u8, full) };
     let copied = capacity.min(full);
     if copied > 0 && !unsafe { try_copy_to_user(addr_ptr as *mut u8, bytes.as_ptr(), copied) } {
-        current_thread_info().lock().errno = Errno::EFAULT;
-        return false;
+        return Err(Errno::EFAULT);
     }
     if !addr_len_ptr.is_null() && !unsafe { try_write_user(addr_len_ptr, full as u32) } {
-        current_thread_info().lock().errno = Errno::EFAULT;
-        return false;
+        return Err(Errno::EFAULT);
     }
-    true
+    Ok(())
 }
 
-/// The socket a descriptor names, or `EBADF` recorded on the calling thread.
+/// The socket a descriptor names, or `EBADF`.
 ///
 /// Eleven socket calls open with this lookup and the same refusal. Written out
 /// each time it is eleven places for the descriptor table's clone-then-lock
 /// order, or the code a non-socket descriptor is refused with, to drift.
-fn socket_arg(info: &Arc<IrqSpinlock<UserThreadInfo>>, fd: u64) -> Option<Arc<Mutex<Socket>>> {
+fn socket_arg(
+    info: &Arc<IrqSpinlock<UserThreadInfo>>,
+    fd: u64,
+) -> Result<Arc<Mutex<Socket>>, Errno> {
     let fd_table = info.lock().fd_table.clone();
     match fd_table.lock().get_fd(fd).cloned() {
-        Some(FileDescriptor::Socket(sock)) => Some(sock),
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            None
-        }
+        Some(FileDescriptor::Socket(sock)) => Ok(sock),
+        _ => Err(Errno::EBADF),
     }
 }
 
@@ -103,60 +98,47 @@ fn socket_arg(info: &Arc<IrqSpinlock<UserThreadInfo>>, fd: u64) -> Option<Arc<Mu
 fn socket_arg_nonblock(
     info: &Arc<IrqSpinlock<UserThreadInfo>>,
     fd: u64,
-) -> Option<(Arc<Mutex<Socket>>, bool)> {
+) -> Result<(Arc<Mutex<Socket>>, bool), Errno> {
     let fd_table = info.lock().fd_table.clone();
     let (desc, nonblock) = fd_table.lock().get_fd_nonblock(fd);
     match desc {
-        Some(FileDescriptor::Socket(sock)) => Some((sock, nonblock)),
-        _ => {
-            info.lock().errno = Errno::EBADF;
-            None
-        }
+        Some(FileDescriptor::Socket(sock)) => Ok((sock, nonblock)),
+        _ => Err(Errno::EBADF),
     }
 }
 
-pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> u64 {
+pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if domain != AF_INET as u64 {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let sock = match sock_type as u32 {
         SOCK_DGRAM => Arc::new(Mutex::new(Socket::new_udp())),
         SOCK_STREAM => Arc::new(Mutex::new(Socket::new_tcp())),
         _ => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
     };
     let fd_table = info.lock().fd_table.clone();
 
-    fd_table.lock().allocate_fd(FileDescriptor::Socket(sock))
+    Ok(fd_table.lock().allocate_fd(FileDescriptor::Socket(sock)))
 }
 
-pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
+pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<SockAddrIn>() as u64 {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let addr: SockAddrIn = match unsafe { try_read_user(addr_ptr) } {
         Some(a) => a,
         None => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     };
 
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     let port = u16::from_be(addr.port);
     let ip = addr.addr;
@@ -168,8 +150,7 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         (s.closed, s.sock_type)
     };
     if closed {
-        info.lock().errno = Errno::EBADF;
-        return !0u64;
+        return Err(Errno::EBADF);
     }
 
     let proto = if sock_type == SOCK_DGRAM { 17u8 } else { 6u8 };
@@ -179,16 +160,14 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         match allocate_ephemeral_port(proto, sock_arc.clone()) {
             Some(p) => p,
             None => {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
         }
     } else {
         // Explicit port: register in port table.
         let mut table = ranked_lock!(RANK_PORT_TABLE, "sys_bind", port_table());
         if table.contains_key(&(proto, port)) {
-            info.lock().errno = Errno::EADDRINUSE;
-            return !0u64;
+            return Err(Errno::EADDRINUSE);
         }
         table.insert((proto, port), sock_arc.clone());
         port
@@ -200,29 +179,23 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         port: bind_port,
     });
     s.state = SocketState::Bound;
-    0
+    Ok(0)
 }
 
-pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
+pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<SockAddrIn>() as u64 {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let addr: SockAddrIn = match unsafe { try_read_user(addr_ptr) } {
         Some(a) => a,
         None => {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
+            return Err(Errno::EFAULT);
         }
     };
 
-    let Some((sock_arc, nonblock)) = socket_arg_nonblock(&info, fd) else {
-        return !0u64;
-    };
+    let (sock_arc, nonblock) = socket_arg_nonblock(&info, fd)?;
 
     let port = u16::from_be(addr.port);
     let ip = addr.addr;
@@ -230,8 +203,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
     let sock_type = {
         let s = ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc);
         if s.closed {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
+            return Err(Errno::EBADF);
         }
         s.sock_type
     };
@@ -244,19 +216,14 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
             let mut s = ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc);
             match s.take_connect_error() {
                 Errno::Clear => {}
-                err => {
-                    info.lock().errno = err;
-                    return !0u64;
-                }
+                err => return Err(err),
             }
             match s.state {
                 SocketState::Connected => {
-                    info.lock().errno = Errno::EISCONN;
-                    return !0u64;
+                    return Err(Errno::EISCONN);
                 }
                 SocketState::Connecting => {
-                    info.lock().errno = Errno::EALREADY;
-                    return !0u64;
+                    return Err(Errno::EALREADY);
                 }
                 _ => {}
             }
@@ -278,16 +245,14 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
                         ep
                     }
                     None => {
-                        info.lock().errno = Errno::EINVAL;
-                        return !0u64;
+                        return Err(Errno::EINVAL);
                     }
                 }
             } else {
                 match ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).local_addr {
                     Some(a) => a.port,
                     None => {
-                        info.lock().errno = Errno::EINVAL;
-                        return !0u64;
+                        return Err(Errno::EINVAL);
                     }
                 }
             }
@@ -331,21 +296,19 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
                 TcpState::Established => {
                     ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).state =
                         SocketState::Connected;
-                    return 0;
+                    return Ok(0);
                 }
                 TcpState::Closed => {
                     ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack())
                         .tcp_connections
                         .remove(&(local_sa, remote_sa));
                     ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).tcp_conn = None;
-                    info.lock().errno = Errno::ECONNREFUSED;
-                    return !0u64;
+                    return Err(Errno::ECONNREFUSED);
                 }
                 _ => {
                     ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).state =
                         SocketState::Connecting;
-                    info.lock().errno = Errno::EINPROGRESS;
-                    return !0u64;
+                    return Err(Errno::EINPROGRESS);
                 }
             }
         }
@@ -364,15 +327,14 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         let state = ranked_lock!(RANK_TCP_CONN, "sys_connect", conn_arc).state;
         if state == TcpState::Established {
             ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).state = SocketState::Connected;
-            0
+            Ok(0)
         } else {
             // Connection failed, clean up
             ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack())
                 .tcp_connections
                 .remove(&(local_sa, remote_sa));
             ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc).tcp_conn = None;
-            info.lock().errno = Errno::ECONNREFUSED;
-            !0u64
+            Err(Errno::ECONNREFUSED)
         }
     } else {
         // UDP connect: just set remote_addr
@@ -389,15 +351,14 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
                     s.state = SocketState::Bound;
                 }
                 None => {
-                    info.lock().errno = Errno::EINVAL;
-                    return !0u64;
+                    return Err(Errno::EINVAL);
                 }
             }
         }
         let mut s = ranked_lock!(RANK_SOCKET, "sys_connect", sock_arc);
         s.remote_addr = Some(SocketAddr { ip, port });
         s.state = SocketState::Connected;
-        0
+        Ok(0)
     }
 }
 
@@ -408,31 +369,25 @@ pub fn sys_sendto(
     flags: u64,
     addr_ptr: *const SockAddrIn,
     addr_len: u64,
-) -> u64 {
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if buf_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     // A send never blocks here, so MSG_DONTWAIT is already the behaviour; every
     // other flag is refused rather than ignored.
     if flags & !MSG_DONTWAIT != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     // A transfer of no bytes answers only once the descriptor is known to be a
     // socket, so that a closed one still reports EBADF.
     let count = len as usize;
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     // Determine destination address
@@ -440,8 +395,7 @@ pub fn sys_sendto(
         let addr: SockAddrIn = match unsafe { try_read_user(addr_ptr) } {
             Some(a) => a,
             None => {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
         };
         SocketAddr {
@@ -453,8 +407,7 @@ pub fn sys_sendto(
         match ranked_lock!(RANK_SOCKET, "sys_sendto", sock_arc).remote_addr {
             Some(a) => a,
             None => {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
         }
     };
@@ -464,8 +417,7 @@ pub fn sys_sendto(
     let count = count.min(MAX_SENDTO_SIZE);
     let mut data = alloc::vec![0u8; count];
     if !unsafe { crate::util::uaccess::try_copy_from_user(data.as_mut_ptr(), buf_ptr, count) } {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     // Get source port, auto-binding if needed
@@ -481,8 +433,7 @@ pub fn sys_sendto(
             )
         };
         if closed {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
+            return Err(Errno::EBADF);
         }
         if needs_bind {
             match allocate_ephemeral_port(proto, sock_arc.clone()) {
@@ -496,8 +447,7 @@ pub fn sys_sendto(
                     ep
                 }
                 None => {
-                    info.lock().errno = Errno::EINVAL;
-                    return !0u64;
+                    return Err(Errno::EINVAL);
                 }
             }
         } else {
@@ -511,11 +461,8 @@ pub fn sys_sendto(
         .lock()
         .send_udp(src_port, dst.ip, dst.port, &data);
     match result {
-        Ok(()) => count as u64,
-        Err(_) => {
-            info.lock().errno = Errno::EIO;
-            !0u64
-        }
+        Ok(()) => Ok(count as u64),
+        Err(_) => Err(Errno::EIO),
     }
 }
 
@@ -526,31 +473,25 @@ pub fn sys_recvfrom(
     flags: u64,
     addr_ptr: *mut SockAddrIn,
     addr_len_ptr: *mut u32,
-) -> u64 {
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if buf_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     // A flag we do not implement is refused rather than ignored: silently
     // dropping MSG_PEEK would consume the datagram the caller asked to leave.
     if flags & !RECV_FLAGS != 0 {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
-    let Some((sock_arc, nonblock)) = socket_arg_nonblock(&info, fd) else {
-        return !0u64;
-    };
+    let (sock_arc, nonblock) = socket_arg_nonblock(&info, fd)?;
 
     // A transfer of no bytes answers only once the descriptor is known to be a
     // socket, so that a closed one still reports EBADF.
     let count = len as usize;
     if count == 0 {
-        return 0;
+        return Ok(0);
     }
 
     // `wait_until` returns on any wake, not only when the condition holds: a
@@ -574,8 +515,7 @@ pub fn sys_recvfrom(
         // MSG_DONTWAIT is this call asking not to wait; O_NONBLOCK is the
         // descriptor having asked once for every call on it.
         if flags & MSG_DONTWAIT != 0 || nonblock {
-            info.lock().errno = Errno::EAGAIN;
-            return !0u64;
+            return Err(Errno::EAGAIN);
         }
         // SO_RCVTIMEO, so a datagram that never arrives costs the caller its
         // timeout rather than the thread. The remaining time comes off the
@@ -584,22 +524,20 @@ pub fn sys_recvfrom(
             Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
                 Some(remaining) => Some(remaining),
                 None => {
-                    info.lock().errno = Errno::EAGAIN;
-                    return !0u64;
+                    return Err(Errno::EAGAIN);
                 }
             },
             None => None,
         };
         if rx_wq.wait_until_timeout(ready, remaining) == WaitOutcome::TimedOut {
-            info.lock().errno = Errno::EAGAIN;
-            return !0u64;
+            return Err(Errno::EAGAIN);
         }
     }
 
     let (data, src) = {
         let mut s = ranked_lock!(RANK_SOCKET, "sys_recvfrom", sock_arc);
         if s.closed && s.rx_queue.is_empty() {
-            return 0;
+            return Ok(0);
         }
         // MSG_PEEK leaves the datagram queued, so the copy below works on a
         // clone and the next receive sees the same entry.
@@ -611,37 +549,30 @@ pub fn sys_recvfrom(
         match entry {
             Some(entry) => entry,
             None => {
-                return 0;
+                return Ok(0);
             }
         }
     };
 
     let bytes_to_copy = data.len().min(count);
     if !unsafe { try_copy_to_user(buf_ptr, data.as_ptr(), bytes_to_copy) } {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    if !write_sockaddr_out(addr_ptr, addr_len_ptr, src) {
-        return !0u64;
-    }
+    write_sockaddr_out(addr_ptr, addr_len_ptr, src)?;
 
     // MSG_TRUNC reports what the datagram held rather than what fitted, which
     // is the only way a caller learns the tail it did not get was discarded.
     if flags & MSG_TRUNC != 0 {
-        data.len() as u64
+        Ok(data.len() as u64)
     } else {
-        bytes_to_copy as u64
+        Ok(bytes_to_copy as u64)
     }
 }
 
-pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
+pub fn sys_listen(fd: u64, backlog: u32) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     // Validate and read the bound address under the socket lock, then release
     // it. The port table ranks below the socket, and `handle_tcp` takes them in
@@ -649,16 +580,13 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
     let local_addr = {
         let s = ranked_lock!(RANK_SOCKET, "sys_listen", sock_arc);
         if s.sock_type != SOCK_STREAM {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         if s.closed {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
+            return Err(Errno::EBADF);
         }
         if s.state == SocketState::Unbound {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         s.local_addr
     };
@@ -681,31 +609,28 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
         if let Some(local_addr) = local_addr {
             unbind_port(&sock_arc, (6u8, local_addr.port));
         }
-        info.lock().errno = Errno::EBADF;
-        return !0u64;
+        return Err(Errno::EBADF);
     }
     s.listening = true;
     s.backlog = if backlog == 0 { 1 } else { backlog };
-    0
+    Ok(0)
 }
 
-pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
+pub fn sys_accept(
+    fd: u64,
+    addr_ptr: *mut SockAddrIn,
+    addr_len_ptr: *mut u32,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let Some((sock_arc, nonblock)) = socket_arg_nonblock(&info, fd) else {
-        return !0u64;
-    };
+    let (sock_arc, nonblock) = socket_arg_nonblock(&info, fd)?;
 
     {
         let s = ranked_lock!(RANK_SOCKET, "sys_accept", sock_arc);
         if s.sock_type != SOCK_STREAM || !s.listening {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
+            return Err(Errno::EINVAL);
         }
         if s.closed {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
+            return Err(Errno::EBADF);
         }
     }
 
@@ -728,23 +653,20 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
         }
         // An idle listener is the wait a non-blocking accept declined.
         if nonblock {
-            info.lock().errno = Errno::EAGAIN;
-            return !0u64;
+            return Err(Errno::EAGAIN);
         }
         // Killable: a listener with no client coming is waiting on something
         // no amount of local progress supplies, so this is where a killed
         // server has to be let go of.
         if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
-            info.lock().errno = Errno::EINTR;
-            return !0u64;
+            return Err(Errno::EINTR);
         }
     }
 
     let new_sock_arc = {
         let mut s = ranked_lock!(RANK_SOCKET, "sys_accept", sock_arc);
         if s.closed {
-            info.lock().errno = Errno::EBADF;
-            return !0u64;
+            return Err(Errno::EBADF);
         }
         // Find first Established entry
         let pos = s.accept_queue.iter().position(|conn_sock| {
@@ -753,8 +675,7 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
         match pos {
             Some(i) => s.accept_queue.remove(i).unwrap(),
             None => {
-                info.lock().errno = Errno::EAGAIN;
-                return !0u64;
+                return Err(Errno::EAGAIN);
             }
         }
     };
@@ -762,19 +683,17 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
     // Write remote address to caller if requested
     if !addr_ptr.is_null() {
         let remote_addr = ranked_lock!(RANK_SOCKET, "sys_accept", new_sock_arc).remote_addr;
-        if let Some(remote) = remote_addr
-            && !write_sockaddr_out(addr_ptr, addr_len_ptr, remote)
-        {
-            return !0u64;
+        if let Some(remote) = remote_addr {
+            write_sockaddr_out(addr_ptr, addr_len_ptr, remote)?;
         }
     }
 
     // Allocate a new fd for the connected socket
 
     let fd_table = info.lock().fd_table.clone();
-    fd_table
+    Ok(fd_table
         .lock()
-        .allocate_fd(FileDescriptor::Socket(new_sock_arc))
+        .allocate_fd(FileDescriptor::Socket(new_sock_arc)))
 }
 
 /// Timeval struct matching the C layout for SO_RCVTIMEO/SO_SNDTIMEO.
@@ -806,24 +725,18 @@ const SO_BROADCAST: i32 = 6;
 const TCP_NODELAY: i32 = 1;
 const IP_TTL: i32 = 2;
 
-pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
+pub fn sys_shutdown(fd: u64, how: u64) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     let how = how as i32;
     if !(0..=2).contains(&how) {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
+        return Err(Errno::EINVAL);
     }
 
     let s = ranked_lock!(RANK_SOCKET, "sys_shutdown", sock_arc);
     if s.closed {
-        info.lock().errno = Errno::EBADF;
-        return !0u64;
+        return Err(Errno::EBADF);
     }
 
     // For TCP, send FIN if shutting down write side
@@ -839,32 +752,32 @@ pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
                 let mut stack = ranked_lock!(RANK_NET_STACK, "sys_shutdown", stack_mutex);
                 let _ = stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
             }
-            return 0;
+            return Ok(0);
         }
     }
 
-    0
+    Ok(0)
 }
 
-pub fn sys_setsockopt(fd: u64, level: i32, optname: i32, val_ptr: *const u8, val_len: u32) -> u64 {
+pub fn sys_setsockopt(
+    fd: u64,
+    level: i32,
+    optname: i32,
+    val_ptr: *const u8,
+    val_len: u32,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     match (level, optname) {
         (SOL_SOCKET, SO_RCVTIMEO) | (SOL_SOCKET, SO_SNDTIMEO) => {
             if val_len < core::mem::size_of::<Timeval>() as u32 {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
             let tv: Timeval = match unsafe { try_read_user(val_ptr as *const Timeval) } {
                 Some(v) => v,
                 None => {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
+                    return Err(Errno::EFAULT);
                 }
             };
             let dur = if tv.tv_sec == 0 && tv.tv_usec == 0 {
@@ -878,38 +791,35 @@ pub fn sys_setsockopt(fd: u64, level: i32, optname: i32, val_ptr: *const u8, val
             } else {
                 s.send_timeout = dur;
             }
-            0
+            Ok(0)
         }
         (SOL_SOCKET, SO_LINGER) => {
             if val_len < core::mem::size_of::<LingerVal>() as u32 {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
             // Accept but don't implement linger behavior
-            0
+            Ok(0)
         }
         (IPPROTO_TCP, TCP_NODELAY) => {
             if val_len < 4 {
-                info.lock().errno = Errno::EINVAL;
-                return !0u64;
+                return Err(Errno::EINVAL);
             }
             let val: i32 = match unsafe { try_read_user(val_ptr as *const i32) } {
                 Some(v) => v,
                 None => {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
+                    return Err(Errno::EFAULT);
                 }
             };
             ranked_lock!(RANK_SOCKET, "sys_setsockopt", sock_arc).nodelay = val != 0;
-            0
+            Ok(0)
         }
         // Accept SO_REUSEADDR and SO_BROADCAST silently (no-op)
-        (SOL_SOCKET, SO_REUSEADDR) | (SOL_SOCKET, SO_BROADCAST) => 0,
+        (SOL_SOCKET, SO_REUSEADDR) | (SOL_SOCKET, SO_BROADCAST) => Ok(0),
         // Accept IP_TTL silently (no-op)
-        (IPPROTO_IP, IP_TTL) => 0,
+        (IPPROTO_IP, IP_TTL) => Ok(0),
         _ => {
             // Unknown option: return success to not break callers
-            0
+            Ok(0)
         }
     }
 }
@@ -920,13 +830,9 @@ pub fn sys_getsockopt(
     optname: i32,
     val_ptr: *mut u8,
     val_len_ptr: *mut u32,
-) -> u64 {
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     match (level, optname) {
         (SOL_SOCKET, SO_RCVTIMEO) | (SOL_SOCKET, SO_SNDTIMEO) => {
@@ -948,16 +854,14 @@ pub fn sys_getsockopt(
             };
             drop(s);
             if !unsafe { try_write_user(val_ptr as *mut Timeval, tv) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null()
                 && !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<Timeval>() as u32) }
             {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
-            0
+            Ok(0)
         }
         (SOL_SOCKET, SO_LINGER) => {
             let linger = LingerVal {
@@ -965,16 +869,14 @@ pub fn sys_getsockopt(
                 l_linger: 0,
             };
             if !unsafe { try_write_user(val_ptr as *mut LingerVal, linger) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null()
                 && !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<LingerVal>() as u32) }
             {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
-            0
+            Ok(0)
         }
         (IPPROTO_TCP, TCP_NODELAY) => {
             let val: i32 = if ranked_lock!(RANK_SOCKET, "sys_getsockopt", sock_arc).nodelay {
@@ -983,14 +885,12 @@ pub fn sys_getsockopt(
                 0
             };
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
-            0
+            Ok(0)
         }
         (SOL_SOCKET, SO_ERROR) => {
             // The outcome of a non-blocking connect, which is the only pending
@@ -998,71 +898,60 @@ pub fn sys_getsockopt(
             let val: i32 =
                 ranked_lock!(RANK_SOCKET, "sys_getsockopt", sock_arc).take_connect_error() as i32;
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
-            0
+            Ok(0)
         }
         _ => {
             // Unknown: return 0 as value
             let val: i32 = 0;
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
+                return Err(Errno::EFAULT);
             }
-            0
+            Ok(0)
         }
     }
 }
 
-pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
+pub fn sys_getpeername(
+    fd: u64,
+    addr_ptr: *mut SockAddrIn,
+    addr_len_ptr: *mut u32,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if addr_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     let remote = ranked_lock!(RANK_SOCKET, "sys_getpeername", sock_arc).remote_addr;
     match remote {
         Some(addr) => {
-            if !write_sockaddr_out(addr_ptr, addr_len_ptr, addr) {
-                return !0u64;
-            }
-            0
+            write_sockaddr_out(addr_ptr, addr_len_ptr, addr)?;
+            Ok(0)
         }
-        None => {
-            info.lock().errno = Errno::ENOTCONN;
-            !0u64
-        }
+        None => Err(Errno::ENOTCONN),
     }
 }
 
-pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
+pub fn sys_getsockname(
+    fd: u64,
+    addr_ptr: *mut SockAddrIn,
+    addr_len_ptr: *mut u32,
+) -> Result<u64, Errno> {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
     if addr_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
-    let Some(sock_arc) = socket_arg(&info, fd) else {
-        return !0u64;
-    };
+    let sock_arc = socket_arg(&info, fd)?;
 
     let local = ranked_lock!(RANK_SOCKET, "sys_getsockname", sock_arc).local_addr;
     // An unbound socket answers with the wildcard address rather than an error.
@@ -1070,10 +959,8 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
         ip: [0; 4],
         port: 0,
     });
-    if !write_sockaddr_out(addr_ptr, addr_len_ptr, addr) {
-        return !0u64;
-    }
-    0
+    write_sockaddr_out(addr_ptr, addr_len_ptr, addr)?;
+    Ok(0)
 }
 
 /// Write the resolver address into a caller-supplied `[u8; 4]`.
@@ -1086,25 +973,19 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
 /// it is alive. Checking that here, on the read, is what lets a caching
 /// resolver die without taking name resolution down with it: the next lookup
 /// sees the owner gone and goes back to the address DHCP learned.
-pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> Result<u64, Errno> {
     if addr_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let Some(dns) = crate::net::stack::effective_resolver() else {
-        info.lock().errno = Errno::ENOTCONN;
-        return !0u64;
+        return Err(Errno::ENOTCONN);
     };
 
     if !unsafe { try_write_user(addr_ptr, dns) } {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
-    0
+    Ok(0)
 }
 
 /// Point the system resolver at `addr`, or clear the override when `addr` is
@@ -1117,28 +998,21 @@ pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> u64 {
 ///
 /// Any process may call this. There is no privilege model here to hang it on,
 /// and the same is true of every other configuration syscall in this kernel.
-pub fn sys_setdns(addr_ptr: *const [u8; 4]) -> u64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
+pub fn sys_setdns(addr_ptr: *const [u8; 4]) -> Result<u64, Errno> {
     if addr_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     }
 
     let Some(addr) = (unsafe { try_read_user(addr_ptr) }) else {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
+        return Err(Errno::EFAULT);
     };
 
     let Some(stack) = crate::net::stack::NET_STACK.get() else {
-        info.lock().errno = Errno::ENOTCONN;
-        return !0u64;
+        return Err(Errno::ENOTCONN);
     };
 
     let Some(tid) = current_thread_id() else {
-        info.lock().errno = Errno::ESRCH;
-        return !0u64;
+        return Err(Errno::ESRCH);
     };
 
     let mut s = ranked_lock!(RANK_NET_STACK, "sys_setdns", stack);
@@ -1147,5 +1021,5 @@ pub fn sys_setdns(addr_ptr: *const [u8; 4]) -> u64 {
     } else {
         Some((addr, tid))
     };
-    0
+    Ok(0)
 }
