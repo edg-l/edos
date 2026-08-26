@@ -36,6 +36,14 @@ RUNS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 # takes QEMU with it. `pause` freezes it instead and keeps QMP answering. The
 # two are run alternating because the failure is intermittent and the host is
 # not identical from one minute to the next.
+# Two builds are compared by alternating them run for run rather than by
+# running one batch after the other: this failure is intermittent and the host
+# is not identical from one minute to the next, so a batch boundary and a
+# change in the host are the same shape in the results. Set
+# `WEDGE_ISOS=a.iso,b.iso` and every ISO named gets the same share of every
+# few minutes; the tally is reported per ISO.
+ISOS = [i for i in os.environ.get("WEDGE_ISOS", "edos-nvme-hostile.iso").split(",") if i]
+
 MODE = os.environ.get("WEDGE_MODE", "pause")
 MODE_ARGS = (["--on-reset", "pause", "--qemu-log", "qemu-reset.log"]
              if MODE == "pause" else ["--on-reset", "exit"])
@@ -62,14 +70,14 @@ def fresh_disk():
         raise SystemExit("nvme-disk.img build failed:\n" + r.stdout + r.stderr)
 
 
-def one(n):
+def one(n, iso):
     fresh_disk()
     # Truncate first. `SERIAL` is one shared path, so a run whose guest never
     # started would otherwise be judged against the PREVIOUS run's log and
     # reported as a wedge -- with that run's timestamps, which is the only
     # thing that gives it away.
     open(SERIAL, "w").close()
-    r = sh(VM, "start", "--iso", "edos-nvme-hostile.iso",
+    r = sh(VM, "start", "--iso", iso,
            "--nvme-disk", "nvme-disk.img", "--no-sata",
            *MODE_ARGS, timeout=180)
     if r.returncode != 0:
@@ -97,7 +105,7 @@ def one(n):
             verdict = "WEDGE"
             break
 
-    tag = f"run{n:02d}-{verdict}"
+    tag = f"run{n:02d}-{os.path.basename(iso).removesuffix('.iso')}-{verdict}"
     probe = ""
     if verdict != "pass":
         probe = "\n".join([
@@ -124,13 +132,16 @@ def one(n):
 
 
 if __name__ == "__main__":
-    tally = {}
+    tally = {iso: {} for iso in ISOS}
     for i in range(1, RUNS + 1):
+        iso = ISOS[(i - 1) % len(ISOS)]
         try:
-            v = one(i)
+            v = one(i, iso)
         except Exception as e:
             v = f"error:{e}"
-            print(f"run{i:02d} {v}")
+            print(f"run{i:02d} {iso} {v}")
             sh(VM, "stop", timeout=60)
-        tally[v] = tally.get(v, 0) + 1
-    print("\ntally:", tally)
+        tally[iso][v] = tally[iso].get(v, 0) + 1
+    print()
+    for iso, t in tally.items():
+        print(f"tally {iso}: {t}")

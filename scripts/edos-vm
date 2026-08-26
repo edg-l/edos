@@ -474,8 +474,13 @@ def cmd_start(args):
     # writes its marker with `emergency_write` before anything else, so a boot
     # that dies leaving no marker did not panic, and there is nothing in the
     # log to work from.
+    # QEMU's RebootAction has only `none` and `shutdown`, so the freeze is
+    # spelled in two steps: turn the reset into a shutdown request, then pause
+    # on that instead of powering off. `reboot=pause` is refused outright and
+    # takes the whole `start` with it, which reads as a guest that wedged
+    # before its first serial byte.
     if args.on_reset == "pause":
-        qemu += ["-action", "reboot=pause", "-action", "shutdown=pause"]
+        qemu += ["-action", "reboot=shutdown", "-action", "shutdown=pause"]
     else:
         qemu += ["-no-reboot"]
     if args.qemu_log:
