@@ -1,11 +1,10 @@
 //! Horizontal slider widget.
 
-use super::{
-    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-};
+use super::{FocusState, Rect, Widget, WidgetEvent, colors};
 use crate::metrics::{
     CONTROL_HEIGHT, SLIDER_THUMB_HEIGHT, SLIDER_THUMB_WIDTH, SLIDER_TRACK_HEIGHT,
 };
+use crate::surface::Surface;
 use crate::theme::Theme;
 
 /// A horizontal value slider.
@@ -125,13 +124,10 @@ impl Widget for Slider {
         self.y = y;
     }
 
-    fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+    fn draw(&self, surface: &mut Surface<'_>) {
         // Draw track
         let track_y = self.y + (CONTROL_HEIGHT as i32 - SLIDER_TRACK_HEIGHT as i32) / 2;
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.rect(
             self.x,
             track_y,
             self.width,
@@ -142,10 +138,7 @@ impl Widget for Slider {
         // Draw filled portion of track
         let thumb_center = self.thumb_x() + SLIDER_THUMB_WIDTH as i32 / 2;
         let filled_width = (thumb_center - self.x) as u32;
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.rect(
             self.x,
             track_y,
             filled_width,
@@ -155,15 +148,7 @@ impl Widget for Slider {
 
         // Draw focus ring if focused
         if self.focus.focused {
-            draw_focus_ring(
-                buffer,
-                buffer_width,
-                buffer_height,
-                self.x,
-                self.y,
-                self.width,
-                CONTROL_HEIGHT,
-            );
+            surface.focus_ring(self.x, self.y, self.width, CONTROL_HEIGHT);
         }
 
         // Draw thumb
@@ -174,20 +159,14 @@ impl Widget for Slider {
         } else {
             Theme::DEFAULT.slider_thumb.raw()
         };
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.rect(
             self.thumb_x(),
             self.thumb_y(),
             SLIDER_THUMB_WIDTH,
             SLIDER_THUMB_HEIGHT,
             thumb_color,
         );
-        draw_rect_outline(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.rect_outline(
             self.thumb_x(),
             self.thumb_y(),
             SLIDER_THUMB_WIDTH,

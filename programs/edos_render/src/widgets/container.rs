@@ -1,6 +1,7 @@
 //! Widget container that manages a collection of widgets.
 
 use super::{Widget, WidgetEvent, WidgetId};
+use crate::surface::Surface;
 use crate::window::{WindowEvent, WindowEventType};
 use edos_lib::{
     clipboard::{self, Buffer},
@@ -67,10 +68,10 @@ impl WidgetContainer {
             .map(|(_, w)| &mut **w)
     }
 
-    /// Draw all widgets to the buffer.
-    pub fn draw_all(&self, buffer: &mut [u32], width: u32, height: u32) {
+    /// Draw all widgets onto `surface`.
+    pub fn draw_all(&self, surface: &mut Surface<'_>) {
         for (_, widget) in &self.widgets {
-            widget.draw(buffer, width, height);
+            widget.draw(surface);
         }
     }
 

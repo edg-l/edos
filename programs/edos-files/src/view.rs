@@ -7,9 +7,10 @@
 use edos_render::font::{Weight, size};
 use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, TEXT_CELL_HEIGHT, space};
+use edos_render::surface::Surface;
 use edos_render::text::{self, Style, elide};
 use edos_render::theme::Theme;
-use edos_render::widgets::{Canvas, Rect};
+use edos_render::widgets::Rect;
 
 use crate::model::{Entry, Kind, Place, Volume, format_size};
 
@@ -284,7 +285,7 @@ fn entry_icon(entry: &Entry) -> &'static icons::Mask {
 
 /// Draw the navigation strip: the three buttons and the path.
 pub fn draw_toolbar(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     layout: &Layout,
     crumbs: &[(String, String)],
     can_go_back: bool,
@@ -359,7 +360,7 @@ pub fn draw_toolbar(
 
 /// Draw the places rail and the meter for the volume in view.
 pub fn draw_rail(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     layout: &Layout,
     places: &[Place],
     active: Option<usize>,
@@ -503,7 +504,7 @@ pub fn draw_rail(
 }
 
 /// Draw the column headings above the listing.
-pub fn draw_header(canvas: &mut Canvas, layout: &Layout) {
+pub fn draw_header(canvas: &mut Surface, layout: &Layout) {
     let theme = &Theme::DEFAULT;
     let columns = Columns::new(layout.list);
     canvas.fill(layout.header, theme.input_bg.raw());
@@ -563,7 +564,7 @@ impl Span {
 /// against: the column answers "what is big in here", not "what is big in the
 /// abstract".
 pub fn draw_list(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     layout: &Layout,
     entries: &[Entry],
     selected: usize,
@@ -681,7 +682,7 @@ pub fn draw_list(
 
 /// Draw one size bar: a track showing the column's full span, and a fill at
 /// `position` along it.
-fn draw_gauge(canvas: &mut Canvas, row: Rect, x: i32, position: f32) {
+fn draw_gauge(canvas: &mut Surface, row: Rect, x: i32, position: f32) {
     let theme = &Theme::DEFAULT;
     let track_y = row.y + (row.height as i32 - 1) / 2;
     canvas.hline(x, track_y, GAUGE_W, theme.input_border.raw());
@@ -696,7 +697,7 @@ fn draw_gauge(canvas: &mut Canvas, row: Rect, x: i32, position: f32) {
 /// Draw the details pane: what the selected row is, and what it is worth
 /// knowing about it.
 pub fn draw_details(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     pane: Rect,
     title: &str,
     subtitle: &str,
@@ -733,7 +734,7 @@ pub fn draw_details(
                     continue;
                 }
                 let index = dst_y as usize * canvas.width as usize + dst_x as usize;
-                if let Some(pixel) = canvas.buf.get_mut(index) {
+                if let Some(pixel) = canvas.pixels.get_mut(index) {
                     *pixel = pixels[(row * thumb_w + col) as usize];
                 }
             }
@@ -762,7 +763,7 @@ pub fn draw_details(
 
 /// The keys, at the foot of the details pane. A machine with no manual should
 /// say what it responds to.
-fn draw_hints(canvas: &mut Canvas, pane: Rect) {
+fn draw_hints(canvas: &mut Surface, pane: Rect) {
     const HINTS: [(&str, &str); 6] = [
         ("Enter", "open"),
         ("Backspace", "up one level"),
@@ -798,7 +799,7 @@ fn draw_hints(canvas: &mut Canvas, pane: Rect) {
 /// Draw the status strip: what is in the directory on the left, what it is
 /// stored on at the right.
 pub fn draw_status(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     layout: &Layout,
     message: &str,
     warning: bool,

@@ -25,7 +25,7 @@ use edos_render::window::{Window, WindowEvent, WindowEventType};
 use grab::Progress;
 use grab_index::Package;
 
-use edos_render::widgets::Canvas;
+use edos_render::surface::Surface;
 use view::Layout;
 
 /// Opening size.
@@ -546,7 +546,7 @@ impl App {
         let Some(buf) = self.window.buffer_mut() else {
             return;
         };
-        let mut canvas = Canvas { buf, width, height };
+        let mut canvas = Surface::new(buf, width, height);
         canvas.fill(
             Rect::new(0, 0, width, height),
             Theme::DEFAULT.background.raw(),
@@ -613,7 +613,7 @@ impl App {
         );
         view::draw_status(&mut canvas, layout.status, &status, status_failed);
 
-        self.widgets.draw_all(canvas.buf, width, height);
+        self.widgets.draw_all(&mut canvas);
         self.window.swap_buffers();
     }
 }

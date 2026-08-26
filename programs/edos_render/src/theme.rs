@@ -223,38 +223,6 @@ pub const fn lerp_color(a: Color, b: Color, t: u8) -> Color {
     Color::from_rgb(r as u8, g as u8, b_ch as u8)
 }
 
-/// Fill a rectangle with a vertical gradient from `top_color` to `bottom_color`.
-pub fn draw_gradient_v(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    top_color: Color,
-    bottom_color: Color,
-) {
-    use crate::widgets::draw_rect;
-    if h == 0 {
-        return;
-    }
-    for row in 0..h {
-        let t = ((row as u64 * 255) / (h as u64 - 1).max(1)) as u8;
-        let color = lerp_color(top_color, bottom_color, t);
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
-            x,
-            y + row as i32,
-            w,
-            1,
-            color.raw(),
-        );
-    }
-}
-
 /// Draw a vertical gradient directly to a `Screen` from `top_color` to `bottom_color`.
 pub fn draw_gradient_v_screen(
     screen: &mut Screen,

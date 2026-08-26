@@ -9,9 +9,10 @@
 use edos_render::font::Weight;
 use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, space};
+use edos_render::surface::Surface;
 use edos_render::text::{self, Style, elide};
 use edos_render::theme::Theme;
-use edos_render::widgets::{Canvas, Rect, char_width, text_width};
+use edos_render::widgets::{Rect, char_width, text_width};
 
 use crate::buffer::{Buffer, Position};
 use crate::syntax::{self, TokenKind};
@@ -288,7 +289,7 @@ fn close_glyph(color: u32) -> Style {
 /// while hovered, dim otherwise — so the control is always reachable even on
 /// a tab that never stops being dirty.
 pub fn draw_tabs(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     rect: Rect,
     labels: &[String],
     dirty: &[bool],
@@ -352,7 +353,7 @@ pub fn draw_tabs(
 /// currently visible in `tree`. `open_path`, when it names a row, gets the
 /// `list_selected` fill the way a listing marks the selected row.
 pub fn draw_sidebar(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     rect: Rect,
     root_name: &str,
     tree: &Tree,
@@ -428,7 +429,7 @@ pub fn draw_sidebar(
 /// colour comes from the token covering it; only the colour, never the
 /// geometry, moves.
 pub fn draw_pane(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     layout: &Layout,
     buffer: &mut Buffer,
     find_matches: &[(Position, usize)],
@@ -609,7 +610,7 @@ pub fn draw_pane(
 /// the last command — save, undo, redo — drawn in `warning` when it is a
 /// failure.
 pub fn draw_status(
-    canvas: &mut Canvas,
+    canvas: &mut Surface,
     layout: &Layout,
     name: &str,
     language: &str,
@@ -656,7 +657,7 @@ pub fn draw_status(
 /// `TextInput` and draws itself, through `WidgetContainer::draw_all`. Read
 /// as a count rather than an error even when it names a failure — the bar
 /// has no warning colour of its own — so it draws in `label_text`.
-pub fn draw_prompt(canvas: &mut Canvas, rect: Rect, label: &str, report: &str) {
+pub fn draw_prompt(canvas: &mut Surface, rect: Rect, label: &str, report: &str) {
     let theme = &Theme::DEFAULT;
     canvas.fill(rect, theme.input_bg.raw());
     canvas.hline(rect.x, rect.y, rect.width, theme.input_border.raw());

@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use edos_render::font::{Family, Weight, size};
 use edos_render::metrics::space;
-use edos_render::text::{self, Style, Surface, fit_prefix};
+use edos_render::surface::Surface;
+use edos_render::text::{self, Style, fit_prefix};
 use edos_render::theme::Theme;
 
 use crate::css::{self, Align, Sides};

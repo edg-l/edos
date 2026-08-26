@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 use edos_lib::keymap::{Modifiers, keycode, map_keycode, update_modifiers};
 use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, space};
-use edos_render::text::{self, Style, Surface};
+use edos_render::surface::Surface;
+use edos_render::text::{self, Style};
 use edos_render::theme::Theme;
-use edos_render::widgets::{TextInput, Widget, WidgetEvent, draw_rect};
+use edos_render::widgets::{TextInput, Widget, WidgetEvent};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
 use crate::css::Viewport;
@@ -659,7 +660,7 @@ impl Browser {
 
         // The toolbar is drawn last so a page scrolled under it is covered.
         toolbar(buffer, width, height, toolbar_h, top, &chrome);
-        address.draw(buffer, width, height);
+        address.draw(&mut Surface::new(buffer, width, height));
         self.window.swap_buffers();
     }
 }
@@ -750,10 +751,7 @@ fn toolbar(
         // The icon is centred in a slot the size of the address bar's height,
         // so the hit test is the slot and the drawing cannot disagree with it.
         let inset = (CONTROL_HEIGHT - icons::SIZE as u32) / 2;
-        icons::draw(
-            buffer,
-            width,
-            height,
+        Surface::new(buffer, width, height).icon(
             button_x(index) + inset as i32,
             y + inset as i32,
             mask,
@@ -762,10 +760,7 @@ fn toolbar(
     }
 
     if let Some(status) = &chrome.status {
-        draw_rect(
-            buffer,
-            width,
-            height,
+        Surface::new(buffer, width, height).rect(
             0,
             toolbar_h as i32,
             width,
@@ -815,10 +810,7 @@ fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: 
         title,
     );
 
-    draw_rect(
-        buffer,
-        width,
-        height,
+    Surface::new(buffer, width, height).rect(
         track_x,
         track_y,
         track_w,
@@ -833,10 +825,7 @@ fn loading_view(buffer: &mut [u32], width: u32, height: u32, top: u32, loading: 
     let span = track_w - band;
     let step = (elapsed.as_millis() as u32 / 4) % (span * 2).max(1);
     let offset = if step < span { step } else { span * 2 - step };
-    draw_rect(
-        buffer,
-        width,
-        height,
+    Surface::new(buffer, width, height).rect(
         track_x + offset as i32,
         track_y,
         band,

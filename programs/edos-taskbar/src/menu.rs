@@ -11,8 +11,10 @@
 use edos_lib::io::klog_dump;
 use edos_lib::process::{reboot, spawn, REBOOT_HALT, REBOOT_POWER_OFF, REBOOT_RESTART};
 use edos_render::icons;
+use edos_render::surface::Surface;
+use edos_render::text::Style;
 use edos_render::theme::Theme;
-use edos_render::widgets::{draw_rect, draw_rect_outline, draw_text, text_height, text_width};
+use edos_render::widgets::{text_height, text_width};
 use edos_render::window::{
     flags::FLAG_UNDECORATED, property, window_set, Window, WindowEvent, WindowEventType,
     WindowListEntry,
@@ -271,17 +273,15 @@ impl Menu {
         let w = window.width;
         let h = window.height;
         if let Some(buf) = window.buffer_mut() {
-            draw_rect(buf, w, h, 0, 0, w, h, Theme::DEFAULT.background.raw());
-            draw_rect_outline(buf, w, h, 0, 0, w, h, Theme::DEFAULT.input_border.raw());
+            let surface = &mut Surface::new(buf, w, h);
+            surface.rect(0, 0, w, h, Theme::DEFAULT.background.raw());
+            surface.rect_outline(0, 0, w, h, Theme::DEFAULT.input_border.raw());
 
             for (index, row) in ROWS.iter().enumerate() {
                 let y = row_y(index);
                 let is_hovered = self.hovered == Some(index);
                 if is_hovered {
-                    draw_rect(
-                        buf,
-                        w,
-                        h,
+                    surface.rect(
                         PAD,
                         y,
                         w - PAD as u32 * 2,
@@ -295,25 +295,19 @@ impl Menu {
                     Theme::DEFAULT.text_primary
                 };
                 let icon_y = y + (ROW_HEIGHT as i32 - icons::SIZE as i32) / 2;
-                icons::draw(buf, w, h, PAD + 10, icon_y, row.icon, ink.raw());
+                surface.icon(PAD + 10, icon_y, row.icon, ink.raw());
                 let text_y = y + (ROW_HEIGHT as i32 - text_height() as i32) / 2;
-                draw_text(
-                    buf,
-                    w,
-                    h,
+                surface.text(
                     PAD + 10 + icons::SIZE as i32 + 10,
                     text_y,
                     row.label,
-                    ink.raw(),
+                    Style::new(ink.raw()),
                 );
                 let _ = text_width(row.label);
             }
 
             let rule_y = row_y(FIRST_POWER_ROW) - RULE_GAP - RULE as i32;
-            draw_rect(
-                buf,
-                w,
-                h,
+            surface.rect(
                 PAD,
                 rule_y,
                 w - PAD as u32 * 2,

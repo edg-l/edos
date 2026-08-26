@@ -10535,3 +10535,30 @@ so a blanket `!= N` → `!= Ok(N)` rewrite corrupts them, and a `let x = open(..
 whose guard is folded into `unwrap_or_else` leaves any later `x as i64` reading
 as a cast on the wrong type. Both were caught by the compiler, but only because
 the whole workspace was rechecked rather than the one crate being edited.
+
+## `edos_render::surface::Surface` is the one rasteriser
+
+Every drawing operation in the toolkit is a method on `Surface`, which owns the
+pixels, the width, the height and an optional clip. `Widget::draw` takes
+`&mut Surface<'_>`, and so do `WidgetContainer::draw_all` and `Terminal`'s
+`draw_changed`/`scroll_pixels`. There is no `widgets::draw_rect`,
+`theme::draw_gradient_v` or `Canvas` any more: `Canvas` carried the same three
+fields and the same methods as `Surface`, which is why programs that held one
+now hold a `Surface` and nothing else changed.
+
+Two things fall out of the move that are easy to miss:
+
+- `Surface::rect` intersects the clip. The old free function did not know the
+  clip existed, so a widget drawing inside a clipped region painted its ground
+  outside it and only the glyphs were cut.
+- `Surface::text` returns the width it drew, which is what `Canvas::text` did
+  and what a caller laying out a run beside it needs. `draw_text` returned
+  nothing and every such caller re-measured with `text_width`.
+
+`Surface` lives in its own module rather than in `text.rs` because `text.rs`
+draws *into* one; the file that owns the type and the file that owns the glyph
+blitter being the same file is what made `Canvas` look necessary.
+
+Twelve `buffer: &mut [u32]` parameters are left, all outside the toolkit:
+`edos-web` rasterises its own boxes and rounded boxes, `termbench` owns a bench
+buffer, and `wintest` has a private `draw_hline`. Those are the rest of D2.

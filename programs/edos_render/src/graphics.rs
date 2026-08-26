@@ -1090,7 +1090,7 @@ impl Texture {
     /// character grid stays where it is.
     pub fn draw_styled_text(&mut self, x: i32, y: i32, text: &str, style: crate::text::Style) {
         let (width, height) = (self.width as u32, self.height as u32);
-        let mut surface = crate::text::Surface::new(&mut self.pixels, width, height);
+        let mut surface = crate::surface::Surface::new(&mut self.pixels, width, height);
         crate::text::draw(&mut surface, x, y, text, style);
     }
 
@@ -1806,7 +1806,7 @@ impl Screen {
         let Some((pixels, stride)) = self.pixels_mut() else {
             return Ok(());
         };
-        let mut surface = crate::text::Surface::new(pixels, stride as u32, height);
+        let mut surface = crate::surface::Surface::new(pixels, stride as u32, height);
         surface.clip = Some((cx0 as i32, cy0 as i32, cx1 as i32, cy1 as i32));
         crate::text::draw(&mut surface, x, y, text, style);
         Ok(())

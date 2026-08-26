@@ -6,7 +6,7 @@
 //! installed, and falls back to the bitmap face otherwise.
 
 use crate::font::{self, Family, Weight};
-use crate::graphics::Color;
+use crate::surface::Surface;
 
 /// How a run of text is set: face, weight, size, colour.
 #[derive(Debug, Clone, Copy)]
@@ -45,58 +45,6 @@ impl Style {
     pub const fn with_px(mut self, px: u32) -> Self {
         self.px = px;
         self
-    }
-}
-
-/// A pixel buffer to draw into.
-pub struct Surface<'a> {
-    pub pixels: &'a mut [u32],
-    pub width: u32,
-    pub height: u32,
-    /// Bounds drawing is confined to, as `(x0, y0, x1, y1)` with the far edges
-    /// exclusive. `None` is the whole surface.
-    pub clip: Option<(i32, i32, i32, i32)>,
-}
-
-impl<'a> Surface<'a> {
-    /// A surface covering the whole buffer.
-    pub fn new(pixels: &'a mut [u32], width: u32, height: u32) -> Self {
-        Self {
-            pixels,
-            width,
-            height,
-            clip: None,
-        }
-    }
-
-    fn blend(&mut self, x: i32, y: i32, color: u32, coverage: u8) {
-        if coverage == 0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            return;
-        }
-        if let Some((x0, y0, x1, y1)) = self.clip
-            && (x < x0 || x >= x1 || y < y0 || y >= y1)
-        {
-            return;
-        }
-        let idx = (y as u32 * self.width + x as u32) as usize;
-        let Some(dst) = self.pixels.get_mut(idx) else {
-            return;
-        };
-        if coverage == 255 {
-            *dst = color;
-            return;
-        }
-        let bg = Color::from(*dst);
-        let fg = Color::from(color);
-        let a = coverage as u32;
-        let inv = 255 - a;
-        let mix = |f: u8, b: u8| ((f as u32 * a + b as u32 * inv) / 255) as u8;
-        *dst = Color::from_rgb(
-            mix(fg.red(), bg.red()),
-            mix(fg.green(), bg.green()),
-            mix(fg.blue(), bg.blue()),
-        )
-        .raw();
     }
 }
 

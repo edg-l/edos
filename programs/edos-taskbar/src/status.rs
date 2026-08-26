@@ -10,10 +10,10 @@ use std::fs;
 
 use edos_lib::io as eio;
 use edos_render::metrics::{space, CONTROL_HEIGHT};
+use edos_render::surface::Surface;
+use edos_render::text::Style;
 use edos_render::theme::Theme;
-use edos_render::widgets::{
-    draw_rect, draw_rect_outline, draw_text, text_height, Slider, Widget, WidgetEvent,
-};
+use edos_render::widgets::{text_height, Slider, Widget, WidgetEvent};
 use edos_render::window::{
     flags::FLAG_UNDECORATED, property, window_set, Window, WindowEvent, WindowEventType,
     WindowListEntry,
@@ -206,75 +206,61 @@ impl StatusPopups {
         let w = popup.window.width;
         let h = popup.window.height;
         if let Some(buf) = popup.window.buffer_mut() {
-            draw_rect(buf, w, h, 0, 0, w, h, Theme::DEFAULT.background.raw());
-            draw_rect_outline(buf, w, h, 0, 0, w, h, Theme::DEFAULT.input_border.raw());
+            let surface = &mut Surface::new(buf, w, h);
+            surface.rect(0, 0, w, h, Theme::DEFAULT.background.raw());
+            surface.rect_outline(0, 0, w, h, Theme::DEFAULT.input_border.raw());
 
             let title = match kind {
                 Kind::Volume => "Volume",
                 Kind::Network => "Network",
             };
-            draw_text(
-                buf,
-                w,
-                h,
+            surface.text(
                 PAD,
                 PAD,
                 title,
-                Theme::DEFAULT.text_placeholder.raw(),
+                Style::new(Theme::DEFAULT.text_placeholder.raw()),
             );
 
             match kind {
                 Kind::Volume => {
-                    self.volume.draw(buf, w, h);
+                    self.volume.draw(surface);
                     let label = if self.volume_available {
                         format!("{}%", self.volume.value())
                     } else {
                         String::from("no audio device")
                     };
-                    draw_text(
-                        buf,
-                        w,
-                        h,
+                    surface.text(
                         PAD,
                         PAD + text_height() as i32
                             + space(2) as i32
                             + CONTROL_HEIGHT as i32
                             + space(2) as i32,
                         &label,
-                        Theme::DEFAULT.text_primary.raw(),
+                        Style::new(Theme::DEFAULT.text_primary.raw()),
                     );
                 }
                 Kind::Network => {
                     let mut y = PAD + text_height() as i32 + space(2) as i32;
                     if self.net.is_empty() {
-                        draw_text(
-                            buf,
-                            w,
-                            h,
+                        surface.text(
                             PAD,
                             y,
                             "no interface",
-                            Theme::DEFAULT.text_placeholder.raw(),
+                            Style::new(Theme::DEFAULT.text_placeholder.raw()),
                         );
                     }
                     for (key, value) in &self.net {
-                        draw_text(
-                            buf,
-                            w,
-                            h,
+                        surface.text(
                             PAD,
                             y,
                             key,
-                            Theme::DEFAULT.text_placeholder.raw(),
+                            Style::new(Theme::DEFAULT.text_placeholder.raw()),
                         );
-                        draw_text(
-                            buf,
-                            w,
-                            h,
+                        surface.text(
                             PAD + 80,
                             y,
                             value,
-                            Theme::DEFAULT.text_primary.raw(),
+                            Style::new(Theme::DEFAULT.text_primary.raw()),
                         );
                         y += text_height() as i32 + space(1) as i32;
                     }

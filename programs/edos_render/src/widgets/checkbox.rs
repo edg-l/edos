@@ -1,10 +1,9 @@
 //! Checkbox widget with label.
 
-use super::{
-    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-    draw_text, text_height, text_width,
-};
+use super::{FocusState, Rect, Widget, WidgetEvent, colors, text_height, text_width};
 use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
+use crate::surface::Surface;
+use crate::text::Style;
 use edos_lib::keymap::keycode;
 
 /// A toggleable checkbox with a label.
@@ -86,7 +85,7 @@ impl Widget for Checkbox {
         self.y = y;
     }
 
-    fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+    fn draw(&self, surface: &mut Surface<'_>) {
         // Draw checkbox box background
         let bg_color = if !self.focus.enabled {
             colors::CONTROL_DISABLED
@@ -96,28 +95,11 @@ impl Widget for Checkbox {
             colors::INPUT_BG
         };
 
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.box_y(),
-            CHECKBOX_BOX,
-            CHECKBOX_BOX,
-            bg_color,
-        );
+        surface.rect(self.x, self.box_y(), CHECKBOX_BOX, CHECKBOX_BOX, bg_color);
 
         // Draw focus ring if focused
         if self.focus.focused {
-            draw_focus_ring(
-                buffer,
-                buffer_width,
-                buffer_height,
-                self.x,
-                self.box_y(),
-                CHECKBOX_BOX,
-                CHECKBOX_BOX,
-            );
+            surface.focus_ring(self.x, self.box_y(), CHECKBOX_BOX, CHECKBOX_BOX);
         }
 
         // Draw border
@@ -130,10 +112,7 @@ impl Widget for Checkbox {
         } else {
             colors::INPUT_BORDER
         };
-        draw_rect_outline(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.rect_outline(
             self.x,
             self.box_y(),
             CHECKBOX_BOX,
@@ -143,10 +122,7 @@ impl Widget for Checkbox {
 
         // Draw check mark if checked
         if self.checked {
-            draw_rect(
-                buffer,
-                buffer_width,
-                buffer_height,
+            surface.rect(
                 self.x + CHECKBOX_INSET as i32,
                 self.box_y() + CHECKBOX_INSET as i32,
                 CHECKBOX_BOX - CHECKBOX_INSET * 2,
@@ -158,18 +134,15 @@ impl Widget for Checkbox {
         // Draw label
         let label_x = self.x + CHECKBOX_BOX as i32 + LABEL_GAP as i32;
         let label_y = self.y + (CONTROL_HEIGHT as i32 - text_height() as i32) / 2;
-        draw_text(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.text(
             label_x,
             label_y,
             &self.label,
-            if self.focus.enabled {
+            Style::new(if self.focus.enabled {
                 colors::TEXT
             } else {
                 colors::TEXT_DISABLED
-            },
+            }),
         );
     }
 

@@ -3,6 +3,7 @@ pub mod graphics;
 pub mod icons;
 pub mod image;
 pub mod metrics;
+pub mod surface;
 pub mod text;
 pub mod theme;
 pub mod widgets;

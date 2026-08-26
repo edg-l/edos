@@ -242,35 +242,37 @@ take `buffer: &mut [u32]`, including the `Widget` trait itself
 This is why the tree has 45 functions with seven or more parameters, and why
 `clippy::too_many_arguments` had to be turned off globally.
 
-### D1. One surface type, threaded through `Widget::draw` (S2, E2)
+### D1. ~~One surface type, threaded through `Widget::draw`~~ (mostly done)
 
-`programs/edos_render/src/widgets/mod.rs:177`:
+`Surface` moved out of `text.rs` into `programs/edos_render/src/surface.rs` and
+became the receiver for every drawing operation: `rect`, `rect_outline`,
+`focus_ring`, `gradient_v`, `fill`, `hline`, `outline`, `text`, `text_in`,
+`text_right`, `icon`, `blit`, and `clip_to`. `Widget::draw` takes
+`&mut Surface<'_>`; so do `WidgetContainer::draw_all` and `Terminal`'s
+`draw_changed`. The free `widgets::draw_*` functions, `theme::draw_gradient_v`
+and `Canvas` are gone -- `Canvas` was the same three fields with the same
+methods, so programs that had one now hold a `Surface`.
 
-```rust
-pub fn draw_rect(buffer: &mut [u32], buffer_width: u32, buffer_height: u32,
-                 x: i32, y: i32, width: u32, height: u32, color: u32)
-```
+`rect` intersects the clip, which the free function never saw, so a clipped
+widget no longer paints its ground outside the clip.
 
-**Fix.** Extend `text::Surface` to own the clip and the stride, make it the
-receiver: `surface.rect(rect, color)`. `Widget::draw(&self, surface: &mut Surface)`.
-Every eight-parameter drawing call in `edos_render`, `edos-wm`, `edos-taskbar`,
-`edos-files`, `edos-procview` and `edos-web` collapses.
+**Still open:** 12 `buffer: &mut [u32]` parameters remain, all outside the
+toolkit: `edos-web/src/view.rs` (6) and `ui.rs` (2) rasterise their own boxes
+and rounded boxes, `termbench` owns a bench buffer, and `wintest` has a private
+`draw_hline`. Closing those is the rest of D2.
 
-**Done when** `grep -c 'buffer: &mut \[u32\]' ` over `programs/` is 0 and the
-global `too_many_arguments` allow can come off (see I3).
+### D2. Rectangle rasterisers (S2, E2) -- partly done
 
-### D2. Five independent rectangle rasterisers (S2, E2)
-
-`Framebuffer::draw_rect` (`graphics.rs:128`), `Texture::fill_rect`
-(`graphics.rs:1034`), `Screen::fill_rect` (`graphics.rs:1271`),
-`widgets::draw_rect` (`widgets/mod.rs:177`), `Canvas::fill`
-(`widgets/canvas.rs:31`), plus `edos-web`'s own `fill` (`view.rs:1751`) and
-`fill_rounded` (`view.rs:1666`). Same for blitting: eight `blit_*` on `Screen`,
-one in `Canvas`, one in `edos-web`, one in `imgview`.
+The five in `edos_render` are one: `widgets::draw_rect` and `Canvas::fill` are
+`Surface::rect`. `Framebuffer::draw_rect` (`graphics.rs:128`),
+`Texture::fill_rect` (`graphics.rs:1034`) and `Screen::fill_rect`
+(`graphics.rs:1271`) still have their own, as do `edos-web`'s `fill`
+(`view.rs:1751`) and `fill_rounded` (`view.rs:1666`). Same for blitting: eight
+`blit_*` on `Screen`, one in `edos-web`, one in `imgview`.
 
 `CLAUDE.md` says text goes through "one blitter". Rectangles and pixel blits
-should too. This falls out of D1: once a surface exists, the rasteriser lives on
-it and the three types become three ways of *obtaining* a surface.
+should too. The three graphics types should become three ways of *obtaining* a
+`Surface`.
 
 ### D3. ~~`draw_rect` bounds-checks per pixel after clamping~~ (done)
 

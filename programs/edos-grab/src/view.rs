@@ -7,9 +7,10 @@
 use edos_render::font::Weight;
 use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, space};
+use edos_render::surface::Surface;
 use edos_render::text::Style;
 use edos_render::theme::Theme;
-use edos_render::widgets::{Canvas, Rect, text_height, text_width};
+use edos_render::widgets::{Rect, text_height, text_width};
 
 /// `text` cut to `limit` pixels in the interface face, which is the only face
 /// this program sets its chrome in.
@@ -136,7 +137,7 @@ fn centre(height: u32) -> i32 {
 
 /// Draw a button, and say nothing about whether it was hit — that is the
 /// layout's job, from the same rectangle.
-pub fn draw_button(canvas: &mut Canvas<'_>, rect: Rect, label: &str, enabled: bool, hover: bool) {
+pub fn draw_button(canvas: &mut Surface<'_>, rect: Rect, label: &str, enabled: bool, hover: bool) {
     let theme = Theme::DEFAULT;
     let background = match (enabled, hover) {
         (false, _) => theme.control_disabled,
@@ -163,7 +164,7 @@ pub fn draw_button(canvas: &mut Canvas<'_>, rect: Rect, label: &str, enabled: bo
 /// One package row: icon, name, version, and the summary under them.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_row(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut Surface<'_>,
     rect: Rect,
     name: &str,
     version: &str,
@@ -188,10 +189,7 @@ pub fn draw_row(
             let y = icon_y + (ICON.saturating_sub(h) / 2) as i32;
             canvas.blit(x, y, w, h, pixels);
         }
-        None => icons::draw(
-            canvas.buf,
-            canvas.width,
-            canvas.height,
+        None => canvas.icon(
             icon_x + (ICON.saturating_sub(icons::SIZE as u32) / 2) as i32,
             icon_y + (ICON.saturating_sub(icons::SIZE as u32) / 2) as i32,
             &icons::APPS,
@@ -238,7 +236,7 @@ pub fn draw_row(
 
 /// The detail pane for the selected package, or the invitation to select one.
 pub fn draw_detail(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut Surface<'_>,
     rect: Rect,
     package: Option<&grab_index::Package>,
     installed: Option<&str>,
@@ -316,7 +314,7 @@ pub fn draw_detail(
 }
 
 /// The progress strip along the foot: the last thing an operation said.
-pub fn draw_status(canvas: &mut Canvas<'_>, rect: Rect, message: &str, failed: bool) {
+pub fn draw_status(canvas: &mut Surface<'_>, rect: Rect, message: &str, failed: bool) {
     let theme = Theme::DEFAULT;
     canvas.fill(rect, theme.input_bg.raw());
     let colour = if failed {

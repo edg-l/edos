@@ -17,6 +17,7 @@ use std::time::Duration;
 use edos_lib::keymap::{Modifiers, map_keycode, update_modifiers};
 use edos_render::image::{Image, ImageError, Svg, decode_raster, looks_like_svg};
 use edos_render::metrics::{TEXT_CELL_HEIGHT, space};
+use edos_render::surface::Surface;
 use edos_render::theme::Theme;
 use edos_render::widgets::{Label, Widget, colors};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
@@ -286,7 +287,7 @@ fn main() {
                 &footer,
                 colors::LABEL_TEXT,
             )
-            .draw(buf, w, h);
+            .draw(&mut Surface::new(buf, w, h));
         }
         window.swap_buffers();
         std::thread::sleep(Duration::from_millis(16));

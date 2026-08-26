@@ -9,6 +9,8 @@
 //! those is a thing that can be missing at boot.
 
 /// Edge length of every icon, in pixels.
+use crate::surface::Surface;
+
 pub const SIZE: usize = 16;
 
 /// A 16x16 coverage mask. `1` is ink, `0` is nothing; drawn at whatever colour
@@ -419,34 +421,14 @@ pub const STOP: Mask = [
     0b0000000000000000,
 ];
 
-/// Draw an icon into a pixel buffer with its top-left corner at (`x`, `y`).
-pub fn draw(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    mask: &Mask,
-    color: u32,
-) {
+/// Draw an icon mask with its top-left corner at (`x`, `y`).
+pub fn draw(surface: &mut Surface<'_>, x: i32, y: i32, mask: &Mask, color: u32) {
     for (row, bits) in mask.iter().enumerate() {
-        let py = y + row as i32;
-        if py < 0 || py >= buffer_height as i32 {
-            continue;
-        }
         for col in 0..SIZE {
             // Bit 15 is the leftmost pixel, so the literal in the source reads
             // the same way round as the icon looks.
-            if bits & (1 << (SIZE - 1 - col)) == 0 {
-                continue;
-            }
-            let px = x + col as i32;
-            if px < 0 || px >= buffer_width as i32 {
-                continue;
-            }
-            let idx = (py as u32 * buffer_width + px as u32) as usize;
-            if let Some(dst) = buffer.get_mut(idx) {
-                *dst = color;
+            if bits & (1 << (SIZE - 1 - col)) != 0 {
+                surface.rect(x + col as i32, y + row as i32, 1, 1, color);
             }
         }
     }

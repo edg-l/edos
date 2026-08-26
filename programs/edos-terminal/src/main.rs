@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use edos_lib::process::{self, ChildProcess};
+use edos_render::surface::Surface;
 use edos_render::widgets::{Terminal, Widget};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
@@ -58,7 +59,7 @@ fn main() {
     {
         let (w, h, slot) = (window.width, window.height, window.back_index());
         if let Some(buf) = window.buffer_mut() {
-            terminal.draw_changed(slot, buf, w, h);
+            terminal.draw_changed(slot, &mut Surface::new(buf, w, h));
         }
     }
 
@@ -245,7 +246,7 @@ fn main() {
             let (w, h, slot) = (window.width, window.height, window.back_index());
             let changed = window
                 .buffer_mut()
-                .and_then(|buf| terminal.draw_changed(slot, buf, w, h));
+                .and_then(|buf| terminal.draw_changed(slot, &mut Surface::new(buf, w, h)));
             if let Some(rect) = changed {
                 window.swap_buffers_damaged(rect.x, rect.y, rect.width, rect.height);
             }

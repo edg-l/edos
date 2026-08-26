@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use edos_render::metrics::{space, CONTROL_HEIGHT, TEXT_CELL_HEIGHT};
+use edos_render::surface::Surface;
 use edos_render::widgets::layout::{Alignment, Insets, LinearLayout, SizePolicy};
 use edos_render::widgets::{
     Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer, WidgetEvent,
@@ -398,18 +399,21 @@ fn main() {
         let h = window.height;
         if let Some(buf) = window.buffer_mut() {
             // Draw all managed widgets
-            widgets.draw_all(buf, w, h);
+            widgets.draw_all(&mut Surface::new(buf, w, h));
 
             // Draw dynamic labels for slider values
             let value_x = CONTENT_X + SLIDER_ROW_W as i32 + GROUP_GAP as i32;
             let vol_text = format!("{}%", volume);
-            Label::new(value_x, row_text_y(ROW_VOLUME), &vol_text).draw(buf, w, h);
+            Label::new(value_x, row_text_y(ROW_VOLUME), &vol_text)
+                .draw(&mut Surface::new(buf, w, h));
 
             let bright_text = format!("{}%", brightness);
-            Label::new(value_x, row_text_y(ROW_BRIGHTNESS), &bright_text).draw(buf, w, h);
+            Label::new(value_x, row_text_y(ROW_BRIGHTNESS), &bright_text)
+                .draw(&mut Surface::new(buf, w, h));
 
             let speed_text = format!("{}%", speed);
-            Label::new(value_x, row_text_y(ROW_SPEED), &speed_text).draw(buf, w, h);
+            Label::new(value_x, row_text_y(ROW_SPEED), &speed_text)
+                .draw(&mut Surface::new(buf, w, h));
 
             // Draw status message
             Label::with_color(
@@ -418,7 +422,7 @@ fn main() {
                 &status_message,
                 text_color,
             )
-            .draw(buf, w, h);
+            .draw(&mut Surface::new(buf, w, h));
 
             // Draw separator lines
             let rule = edos_render::widgets::colors::INPUT_BORDER;
@@ -451,7 +455,7 @@ fn main() {
                 "Tab: focus | Enter: submit | Arrows: adjust slider",
                 hint_color,
             )
-            .draw(buf, w, h);
+            .draw(&mut Surface::new(buf, w, h));
         }
 
         window.swap_buffers();

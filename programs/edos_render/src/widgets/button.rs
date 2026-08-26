@@ -1,10 +1,9 @@
 //! Clickable button widget.
 
-use super::{
-    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-    draw_text, text_height, text_width,
-};
+use super::{FocusState, Rect, Widget, WidgetEvent, colors, text_height, text_width};
 use crate::metrics::{CONTROL_HEIGHT, CONTROL_PAD_X};
+use crate::surface::Surface;
+use crate::text::Style;
 use edos_lib::keymap::keycode;
 
 /// A clickable button with a label.
@@ -71,23 +70,17 @@ impl Widget for Button {
         self.y = y;
     }
 
-    fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+    fn draw(&self, surface: &mut Surface<'_>) {
         // Choose background color based on state
         if !self.focus.enabled {
-            draw_rect(
-                buffer,
-                buffer_width,
-                buffer_height,
+            surface.rect(
                 self.x,
                 self.y,
                 self.width,
                 self.height,
                 colors::CONTROL_DISABLED,
             );
-            draw_rect_outline(
-                buffer,
-                buffer_width,
-                buffer_height,
+            surface.rect_outline(
                 self.x,
                 self.y,
                 self.width,
@@ -95,14 +88,11 @@ impl Widget for Button {
                 colors::CONTROL_DISABLED,
             );
             let label_w = text_width(&self.label);
-            draw_text(
-                buffer,
-                buffer_width,
-                buffer_height,
+            surface.text(
                 self.x + (self.width as i32 - label_w as i32) / 2,
                 self.y + (self.height as i32 - text_height() as i32) / 2,
                 &self.label,
-                colors::TEXT_DISABLED,
+                Style::new(colors::TEXT_DISABLED),
             );
             return;
         }
@@ -116,28 +106,11 @@ impl Widget for Button {
         };
 
         // Draw button background
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.y,
-            self.width,
-            self.height,
-            bg_color,
-        );
+        surface.rect(self.x, self.y, self.width, self.height, bg_color);
 
         // Draw focus ring if focused
         if self.focus.focused {
-            draw_focus_ring(
-                buffer,
-                buffer_width,
-                buffer_height,
-                self.x,
-                self.y,
-                self.width,
-                self.height,
-            );
+            surface.focus_ring(self.x, self.y, self.width, self.height);
         }
 
         // Draw border (subtle, matches dark theme)
@@ -146,31 +119,14 @@ impl Widget for Button {
         } else {
             colors::INPUT_BORDER
         };
-        draw_rect_outline(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.y,
-            self.width,
-            self.height,
-            border_color,
-        );
+        surface.rect_outline(self.x, self.y, self.width, self.height, border_color);
 
         // Center the text
         let label_w = text_width(&self.label);
         let text_x = self.x + (self.width as i32 - label_w as i32) / 2;
         let text_y = self.y + (self.height as i32 - text_height() as i32) / 2;
 
-        draw_text(
-            buffer,
-            buffer_width,
-            buffer_height,
-            text_x,
-            text_y,
-            &self.label,
-            colors::TEXT,
-        );
+        surface.text(text_x, text_y, &self.label, Style::new(colors::TEXT));
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {

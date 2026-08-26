@@ -10,11 +10,10 @@ use edos_lib::keymap::keycode;
 use edos_lib::process::kill;
 use edos_lib::procinfo::{Details, Memory, Process, Table};
 use edos_render::metrics::{TEXT_CELL_HEIGHT, space};
+use edos_render::surface::Surface;
 use edos_render::text::{self, Style};
 use edos_render::theme::Theme;
-use edos_render::widgets::{
-    draw_rect, draw_rect_outline, draw_text, draw_text_styled, text_height, text_width,
-};
+use edos_render::widgets::{text_height, text_width};
 use edos_render::window::{Window, WindowEvent, WindowEventType, property, window_set};
 
 const WIN_W: u32 = 680;
@@ -269,9 +268,7 @@ impl Grid {
 
 /// Draw one row of cells, asking `ink` for each cell's colour.
 fn draw_cells(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
+    surface: &mut Surface<'_>,
     grid: &Grid,
     y: i32,
     cells: &[String; NCOLS],
@@ -281,15 +278,7 @@ fn draw_cells(
     for (index, cell) in cells.iter().enumerate() {
         let text = fit(cell, grid.widths[index], CELL);
         let x = grid.text_x(index, measure(&text, CELL));
-        draw_text_styled(
-            buffer,
-            width,
-            height,
-            x,
-            text_y,
-            &text,
-            Style::mono(ink(index)),
-        );
+        surface.text(x, text_y, &text, Style::mono(ink(index)));
     }
 }
 
@@ -484,29 +473,23 @@ impl App {
         }
     }
 
-    fn draw(&self, buffer: &mut [u32], width: u32, height: u32, bands: &Bands) {
+    fn draw(&self, surface: &mut Surface<'_>, bands: &Bands) {
         let theme = &Theme::DEFAULT;
         let visible = bands.visible_rows();
         let grid = Grid::new(MARGIN as i32, bands.table_w(), &self.rows);
 
-        draw_text(
-            buffer,
-            width,
-            height,
+        surface.text(
             MARGIN as i32,
             bands.summary_y,
             &fit(&self.summary(), bands.content_w, CHROME),
-            if self.notice.is_some() {
+            Style::new(if self.notice.is_some() {
                 theme.focus_ring.raw()
             } else {
                 theme.label_text.raw()
-            },
+            }),
         );
 
-        draw_rect(
-            buffer,
-            width,
-            height,
+        surface.rect(
             MARGIN as i32,
             bands.header_y,
             bands.content_w,
@@ -514,39 +497,21 @@ impl App {
             theme.button_normal.raw(),
         );
         let header: [String; NCOLS] = std::array::from_fn(|i| COLUMNS[i].title.to_string());
-        draw_cells(
-            buffer,
-            width,
-            height,
-            &grid,
-            bands.header_y,
-            &header,
-            |_| theme.label_text.raw(),
-        );
+        draw_cells(surface, &grid, bands.header_y, &header, |_| {
+            theme.label_text.raw()
+        });
 
         for (offset, row) in self.rows.iter().skip(self.scroll).take(visible).enumerate() {
             let y = bands.rows_y + (offset as u32 * ROW_H) as i32;
             if self.selected == Some(row.pid) {
-                draw_rect(
-                    buffer,
-                    width,
-                    height,
+                surface.rect(
                     MARGIN as i32,
                     y,
                     bands.content_w,
                     ROW_H,
                     theme.button_hover.raw(),
                 );
-                draw_rect(
-                    buffer,
-                    width,
-                    height,
-                    MARGIN as i32,
-                    y,
-                    MARKER_W,
-                    ROW_H,
-                    theme.focus_ring.raw(),
-                );
+                surface.rect(MARGIN as i32, y, MARKER_W, ROW_H, theme.focus_ring.raw());
             }
             // A kernel thread is not something the reader can act on, so it
             // recedes; a running one is what they are looking for.
@@ -560,36 +525,27 @@ impl App {
             } else {
                 base
             };
-            draw_cells(buffer, width, height, &grid, y, &row.cells, |index| {
+            draw_cells(surface, &grid, y, &row.cells, |index| {
                 if index == STATE_COL { state_ink } else { base }
             });
         }
 
-        self.draw_scrollbar(buffer, width, height, bands, visible);
+        self.draw_scrollbar(surface, bands, visible);
 
-        draw_text(
-            buffer,
-            width,
-            height,
+        surface.text(
             MARGIN as i32,
             bands.detail_y,
             &fit(&self.detail(), bands.content_w, CHROME),
-            theme.text_primary.raw(),
+            Style::new(theme.text_primary.raw()),
         );
-        draw_rect(
-            buffer,
-            width,
-            height,
+        surface.rect(
             MARGIN as i32,
             bands.hints_y - BAND_GAP as i32,
             bands.content_w,
             1,
             theme.input_border.raw(),
         );
-        draw_text(
-            buffer,
-            width,
-            height,
+        surface.text(
             MARGIN as i32,
             bands.hints_y,
             &fit(
@@ -597,31 +553,21 @@ impl App {
                 bands.content_w,
                 CHROME,
             ),
-            theme.text_placeholder.raw(),
+            Style::new(theme.text_placeholder.raw()),
         );
 
         if let Some(confirm) = &self.confirm {
-            draw_confirm(buffer, width, height, confirm);
+            draw_confirm(surface, confirm);
         }
     }
 
-    fn draw_scrollbar(
-        &self,
-        buffer: &mut [u32],
-        width: u32,
-        height: u32,
-        bands: &Bands,
-        visible: usize,
-    ) {
+    fn draw_scrollbar(&self, surface: &mut Surface<'_>, bands: &Bands, visible: usize) {
         if visible == 0 || self.rows.len() <= visible {
             return;
         }
         let theme = &Theme::DEFAULT;
         let x = (MARGIN + bands.content_w - MARKER_W) as i32;
-        draw_rect(
-            buffer,
-            width,
-            height,
+        surface.rect(
             x,
             bands.rows_y,
             MARKER_W,
@@ -633,10 +579,7 @@ impl App {
         let travel = span.saturating_sub(thumb_h);
         let max_scroll = self.rows.len() - visible;
         let thumb_y = bands.rows_y + (travel * self.scroll / max_scroll) as i32;
-        draw_rect(
-            buffer,
-            width,
-            height,
+        surface.rect(
             x,
             thumb_y,
             MARKER_W,
@@ -684,8 +627,9 @@ impl App {
 }
 
 /// Draw the kill confirmation over the middle of the window.
-fn draw_confirm(buffer: &mut [u32], width: u32, height: u32, confirm: &Confirm) {
+fn draw_confirm(surface: &mut Surface<'_>, confirm: &Confirm) {
     let theme = &Theme::DEFAULT;
+    let (width, height) = (surface.width, surface.height);
     let line = text_height();
     let question = format!("Send SIGTERM to {} (pid {})?", confirm.name, confirm.pid);
     let answer = "Y: kill      N: cancel";
@@ -695,46 +639,22 @@ fn draw_confirm(buffer: &mut [u32], width: u32, height: u32, confirm: &Confirm) 
     let box_x = (width as i32 - box_w as i32) / 2;
     let box_y = (height as i32 - box_h as i32) / 2;
 
-    draw_rect(
-        buffer,
-        width,
-        height,
-        box_x,
-        box_y,
-        box_w,
-        box_h,
-        theme.input_bg.raw(),
-    );
-    draw_rect_outline(
-        buffer,
-        width,
-        height,
-        box_x,
-        box_y,
-        box_w,
-        box_h,
-        theme.focus_ring.raw(),
-    );
+    surface.rect(box_x, box_y, box_w, box_h, theme.input_bg.raw());
+    surface.rect_outline(box_x, box_y, box_w, box_h, theme.focus_ring.raw());
 
     let inner_w = box_w.saturating_sub(DIALOG_PAD * 2);
     let text_x = box_x + DIALOG_PAD as i32;
-    draw_text(
-        buffer,
-        width,
-        height,
+    surface.text(
         text_x,
         box_y + DIALOG_PAD as i32,
         &fit(&question, inner_w, CHROME),
-        theme.text_primary.raw(),
+        Style::new(theme.text_primary.raw()),
     );
-    draw_text(
-        buffer,
-        width,
-        height,
+    surface.text(
         text_x,
         box_y + (DIALOG_PAD + line + BAND_GAP) as i32,
         answer,
-        theme.text_placeholder.raw(),
+        Style::new(theme.text_placeholder.raw()),
     );
 }
 
@@ -813,7 +733,7 @@ fn paint(window: &mut Window, app: &mut App) {
     window.fill(Theme::DEFAULT.background.raw());
     let (width, height) = (window.width, window.height);
     if let Some(buffer) = window.buffer_mut() {
-        app.draw(buffer, width, height, &bands);
+        app.draw(&mut Surface::new(buffer, width, height), &bands);
     }
     window.swap_buffers();
 }

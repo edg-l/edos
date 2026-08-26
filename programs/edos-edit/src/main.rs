@@ -11,7 +11,7 @@ mod syntax;
 mod tree;
 mod view;
 
-use edos_render::widgets::Canvas;
+use edos_render::surface::Surface;
 use std::time::Duration;
 
 use edos_lib::clipboard;
@@ -1025,7 +1025,7 @@ impl App {
         let Some(buf) = self.window.buffer_mut() else {
             return;
         };
-        let mut canvas = Canvas::new(buf, width, height);
+        let mut canvas = Surface::new(buf, width, height);
         canvas.fill(
             edos_render::widgets::Rect::new(0, 0, width, height),
             edos_render::theme::Theme::DEFAULT.background.raw(),
@@ -1077,7 +1077,7 @@ impl App {
             view::draw_prompt(&mut canvas, rect, label, &prompt_report);
         }
         if let Some(prompt) = &self.prompt {
-            prompt.widgets.draw_all(canvas.buf, width, height);
+            prompt.widgets.draw_all(&mut canvas);
         }
 
         self.window.swap_buffers();

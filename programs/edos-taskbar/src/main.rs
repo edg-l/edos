@@ -6,8 +6,10 @@ use edos_lib::io::klog_dump;
 use edos_lib::process::spawn;
 use edos_render::graphics::{Framebuffer, ScreenInfo};
 use edos_render::icons;
-use edos_render::theme::{draw_gradient_v, Theme};
-use edos_render::widgets::{draw_rect, draw_text, text_height, text_width};
+use edos_render::surface::Surface;
+use edos_render::text::Style;
+use edos_render::theme::Theme;
+use edos_render::widgets::{text_height, text_width};
 use edos_render::window::{
     flags::FLAG_DOCK, property, window_list, window_minimize, window_send_event, window_set,
     Window, WindowEvent, WindowEventType, WindowListEntry,
@@ -134,19 +136,10 @@ impl Control {
 }
 
 /// Draw a button's fill, its icon and its label, centred inside it.
-fn draw_button(buf: &mut [u32], w: u32, h: u32, control: &Control) {
+fn draw_button(surface: &mut Surface<'_>, control: &Control) {
     let y = panel::button_y();
     if let Some(fill) = control.fill {
-        draw_rect(
-            buf,
-            w,
-            h,
-            control.x,
-            y,
-            control.width,
-            panel::BUTTON_HEIGHT,
-            fill,
-        );
+        surface.rect(control.x, y, control.width, panel::BUTTON_HEIGHT, fill);
     }
 
     // Icon and label are one group, centred together, so a button with a short
@@ -159,19 +152,16 @@ fn draw_button(buf: &mut [u32], w: u32, h: u32, control: &Control) {
     let start = control.x + (control.width as i32 - content_w as i32) / 2;
 
     let icon_y = y + (panel::BUTTON_HEIGHT as i32 - icons::SIZE as i32) / 2;
-    icons::draw(buf, w, h, start, icon_y, &control.icon, control.ink);
+    surface.icon(start, icon_y, &control.icon, control.ink);
 
     if !control.label.is_empty() {
         let text_y = y + (panel::BUTTON_HEIGHT as i32 - text_height() as i32) / 2;
         let text_x = start + icons::SIZE as i32 + panel::ICON_GAP as i32;
-        draw_text(buf, w, h, text_x, text_y, &control.label, control.ink);
+        surface.text(text_x, text_y, &control.label, Style::new(control.ink));
     }
 
     if control.accent {
-        draw_rect(
-            buf,
-            w,
-            h,
+        surface.rect(
             control.x,
             y + panel::BUTTON_HEIGHT as i32 - panel::ACCENT_HEIGHT as i32,
             control.width,
@@ -217,11 +207,9 @@ fn changed_span(previous: Option<&PanelState>, current: &PanelState) -> Option<(
 }
 
 /// Lay the panel's ground: the gradient and the hairline along its top edge.
-fn draw_ground(buf: &mut [u32], w: u32, h: u32) {
-    draw_gradient_v(
-        buf,
-        w,
-        h,
+fn draw_ground(surface: &mut Surface<'_>) {
+    let (w, h) = (surface.width, surface.height);
+    surface.gradient_v(
         0,
         0,
         w,
@@ -229,9 +217,7 @@ fn draw_ground(buf: &mut [u32], w: u32, h: u32) {
         Theme::DEFAULT.taskbar_bg_top,
         Theme::DEFAULT.taskbar_bg_bottom,
     );
-    for x in 0..w {
-        buf[x as usize] = Theme::DEFAULT.taskbar_separator.raw();
-    }
+    surface.hline(0, 0, w, Theme::DEFAULT.taskbar_separator.raw());
 }
 
 fn main() {
@@ -494,9 +480,10 @@ fn main() {
 
         if redraw {
             if let Some(buf) = window.buffer_mut() {
-                draw_ground(buf, w, h);
+                let mut surface = Surface::new(buf, w, h);
+                draw_ground(&mut surface);
                 for control in &state.0 {
-                    draw_button(buf, w, h, control);
+                    draw_button(&mut surface, control);
                 }
             }
         }

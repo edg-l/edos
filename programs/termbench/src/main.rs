@@ -11,6 +11,7 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
+use edos_render::surface::Surface;
 use edos_render::widgets::{Terminal, Widget};
 
 /// The terminal's default window size, so the numbers describe the real thing.
@@ -70,7 +71,7 @@ fn main() {
         let t = Instant::now();
         term.write_str(SAMPLE[i % SAMPLE.len()]);
         term.write_str("\n");
-        term.draw(&mut buffer, WIDTH, HEIGHT);
+        term.draw(&mut Surface::new(&mut buffer, WIDTH, HEIGHT));
         samples.push(t.elapsed().as_micros() as u64);
     }
     report(
@@ -88,9 +89,9 @@ fn main() {
     let mut term = filled_terminal();
     let mut slot = 0usize;
     let warm = |term: &mut Terminal, buffer: &mut [u32], slot: &mut usize| {
-        term.draw_changed(*slot, buffer, WIDTH, HEIGHT);
+        term.draw_changed(*slot, &mut Surface::new(buffer, WIDTH, HEIGHT));
         *slot ^= 1;
-        term.draw_changed(*slot, buffer, WIDTH, HEIGHT);
+        term.draw_changed(*slot, &mut Surface::new(buffer, WIDTH, HEIGHT));
         *slot ^= 1;
     };
     warm(&mut term, &mut buffer, &mut slot);
@@ -180,7 +181,7 @@ fn bench_draw(out: &mut String, name: &str, buffer: &mut [u32], term: &Terminal)
     let start = Instant::now();
     for _ in 0..ITERS {
         let t = Instant::now();
-        term.draw(buffer, WIDTH, HEIGHT);
+        term.draw(&mut Surface::new(buffer, WIDTH, HEIGHT));
         samples.push(t.elapsed().as_micros() as u64);
     }
     report(out, name, &mut samples, start.elapsed().as_micros() as u64);
@@ -199,7 +200,7 @@ fn bench_changed(
     for i in 0..ITERS {
         let t = Instant::now();
         mutate(term, i);
-        term.draw_changed(*slot, buffer, WIDTH, HEIGHT);
+        term.draw_changed(*slot, &mut Surface::new(buffer, WIDTH, HEIGHT));
         samples.push(t.elapsed().as_micros() as u64);
         *slot ^= 1;
     }

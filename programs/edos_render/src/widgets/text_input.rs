@@ -1,11 +1,10 @@
 //! Single-line text input widget.
 
+use crate::surface::Surface;
+use crate::text::Style;
 use edos_lib::keymap::keycode;
 
-use super::{
-    FocusState, Rect, Widget, WidgetEvent, colors, draw_focus_ring, draw_rect, draw_rect_outline,
-    draw_text, text_height, text_width,
-};
+use super::{FocusState, Rect, Widget, WidgetEvent, colors, text_height, text_width};
 use crate::metrics::{CONTROL_HEIGHT, TEXT_PAD_X};
 
 /// A single-line text input field.
@@ -178,30 +177,13 @@ impl Widget for TextInput {
         self.y = y;
     }
 
-    fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+    fn draw(&self, surface: &mut Surface<'_>) {
         // Draw background
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.y,
-            self.width,
-            CONTROL_HEIGHT,
-            colors::INPUT_BG,
-        );
+        surface.rect(self.x, self.y, self.width, CONTROL_HEIGHT, colors::INPUT_BG);
 
         // Draw focus ring if focused
         if self.focus.focused {
-            draw_focus_ring(
-                buffer,
-                buffer_width,
-                buffer_height,
-                self.x,
-                self.y,
-                self.width,
-                CONTROL_HEIGHT,
-            );
+            surface.focus_ring(self.x, self.y, self.width, CONTROL_HEIGHT);
         }
 
         // Draw border
@@ -212,60 +194,36 @@ impl Widget for TextInput {
         } else {
             colors::INPUT_BORDER
         };
-        draw_rect_outline(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.y,
-            self.width,
-            CONTROL_HEIGHT,
-            border_color,
-        );
+        surface.rect_outline(self.x, self.y, self.width, CONTROL_HEIGHT, border_color);
 
         let text_x = self.x + TEXT_PAD_X as i32;
         let text_y = self.y + (CONTROL_HEIGHT as i32 - text_height() as i32) / 2;
 
         // Draw text or placeholder
         if self.text.is_empty() && !self.placeholder.is_empty() {
-            draw_text(
-                buffer,
-                buffer_width,
-                buffer_height,
+            surface.text(
                 text_x,
                 text_y,
                 &self.placeholder,
-                colors::TEXT_PLACEHOLDER,
+                Style::new(colors::TEXT_PLACEHOLDER),
             );
         } else {
-            draw_text(
-                buffer,
-                buffer_width,
-                buffer_height,
+            surface.text(
                 text_x,
                 text_y,
                 &self.text,
-                if self.focus.enabled {
+                Style::new(if self.focus.enabled {
                     colors::TEXT
                 } else {
                     colors::TEXT_DISABLED
-                },
+                }),
             );
         }
 
         // Draw cursor if focused and visible
         if self.focus.focused && self.cursor_visible {
             let cursor_x = text_x + text_width(&self.text[..self.cursor_byte()]) as i32;
-            draw_rect(
-                buffer,
-                buffer_width,
-                buffer_height,
-                cursor_x,
-                text_y,
-                2,
-                text_height(),
-                colors::TEXT,
-            );
+            surface.rect(cursor_x, text_y, 2, text_height(), colors::TEXT);
         }
     }
 

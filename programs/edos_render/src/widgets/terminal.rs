@@ -2,11 +2,10 @@
 
 use std::collections::VecDeque;
 
+use crate::surface::Surface;
 use edos_lib::clipboard::{self, Buffer};
 
-use super::{
-    FocusState, Rect, Widget, WidgetEvent, char_width, draw_rect, draw_text_styled, text_height,
-};
+use super::{FocusState, Rect, Widget, WidgetEvent, char_width, text_height};
 use crate::text::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1007,57 +1006,24 @@ impl Terminal {
 
     /// Rasterise one display row, over its own ground so a partial repaint
     /// erases whatever the row held before.
-    fn draw_row(
-        &self,
-        buffer: &mut [u32],
-        buffer_width: u32,
-        buffer_height: u32,
-        display_row: usize,
-        cells: &[RenderCell],
-    ) {
+    fn draw_row(&self, surface: &mut Surface<'_>, display_row: usize, cells: &[RenderCell]) {
         let char_w = char_width() as i32;
         let char_h = text_height() as i32;
         let (origin_x, origin_y) = self.content_origin();
         let row_y = origin_y + (display_row as i32) * char_h;
 
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            row_y,
-            self.width,
-            char_h as u32,
-            self.bg_color,
-        );
+        surface.rect(self.x, row_y, self.width, char_h as u32, self.bg_color);
 
         for (col, cell) in cells.iter().enumerate() {
             let cell_x = origin_x + (col as i32) * char_w;
             if cell.bg != self.bg_color {
-                draw_rect(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    cell_x,
-                    row_y,
-                    char_w as u32,
-                    char_h as u32,
-                    cell.bg,
-                );
+                surface.rect(cell_x, row_y, char_w as u32, char_h as u32, cell.bg);
             }
             if cell.ch != ' ' {
                 // Mono, always: this is a character grid, and a proportional
                 // face would put every cell's glyph at a different offset
                 // inside its cell.
-                draw_text_styled(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    cell_x,
-                    row_y,
-                    &cell.ch.to_string(),
-                    Style::mono(cell.fg),
-                );
+                surface.text(cell_x, row_y, &cell.ch.to_string(), Style::mono(cell.fg));
             }
         }
     }
@@ -1067,7 +1033,7 @@ impl Terminal {
     /// Every row lays down its own ground, so a full repaint covers the grid
     /// between them; filling the whole widget as well would write those pixels
     /// twice, and at a screen a frame that is the largest single cost here.
-    fn fill_padding(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+    fn fill_padding(&self, surface: &mut Surface<'_>) {
         let (_, origin_y) = self.content_origin();
         let grid_bottom = origin_y + (self.rows as i32) * (text_height() as i32);
         let widget_bottom = self.y + self.height as i32;
@@ -1077,16 +1043,7 @@ impl Terminal {
             (grid_bottom, widget_bottom - grid_bottom),
         ] {
             if height > 0 {
-                draw_rect(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    self.x,
-                    y,
-                    self.width,
-                    height as u32,
-                    self.bg_color,
-                );
+                surface.rect(self.x, y, self.width, height as u32, self.bg_color);
             }
         }
     }
@@ -1105,10 +1062,10 @@ impl Terminal {
     /// expensive way to say that row `r` now shows what row `r + shift` already
     /// showed. Those pixels are in the buffer; moving them costs one memmove
     /// and leaves only the newly exposed rows to draw.
-    fn scroll_pixels(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32, shift: i32) {
+    fn scroll_pixels(&self, surface: &mut Surface<'_>, shift: i32) {
         let char_h = text_height() as i32;
         let (_, origin_y) = self.content_origin();
-        let stride = buffer_width as usize;
+        let stride = surface.width as usize;
 
         // The band a row's ground covers, so what moves is exactly what
         // `draw_row` would have painted.
@@ -1121,7 +1078,7 @@ impl Terminal {
 
         let distance = shift.unsigned_abs() as i32 * char_h;
         let top = origin_y.max(0);
-        let bottom = (origin_y + self.rows as i32 * char_h).min(buffer_height as i32);
+        let bottom = (origin_y + self.rows as i32 * char_h).min(surface.height as i32);
         if bottom - top <= distance {
             return;
         }
@@ -1132,13 +1089,13 @@ impl Terminal {
             } else {
                 y - distance
             };
-            if src_y < 0 || src_y >= buffer_height as i32 {
+            if src_y < 0 || src_y >= surface.height as i32 {
                 return;
             }
             let src = src_y as usize * stride + left;
             let dst = y as usize * stride + left;
-            if src + span <= buffer.len() && dst + span <= buffer.len() {
-                buffer.copy_within(src..src + span, dst);
+            if src + span <= surface.pixels.len() && dst + span <= surface.pixels.len() {
+                surface.pixels.copy_within(src..src + span, dst);
             }
         };
 
@@ -1177,7 +1134,7 @@ impl Terminal {
     }
 
     /// Draw the cursor block and the character under it.
-    fn draw_cursor_block(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+    fn draw_cursor_block(&self, surface: &mut Surface<'_>) {
         if !self.cursor_mark().drawn {
             return;
         }
@@ -1187,10 +1144,7 @@ impl Terminal {
         let cursor_x = origin_x + (self.cursor_col as i32) * char_w;
         let cursor_y = origin_y + (self.cursor_row as i32) * char_h;
 
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
+        surface.rect(
             cursor_x,
             cursor_y,
             char_w as u32,
@@ -1201,10 +1155,7 @@ impl Terminal {
         if self.cursor_row < self.rows && self.cursor_col < self.cols {
             let ch = self.buffer[self.cursor_row][self.cursor_col].ch;
             if ch != ' ' {
-                draw_text_styled(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
+                surface.text(
                     cursor_x,
                     cursor_y,
                     &ch.to_string(),
@@ -1223,13 +1174,7 @@ impl Terminal {
     /// [`Widget::bounds`], or `None` when the buffer already shows the current
     /// picture. That rectangle is what the owner reports as damage, and it is
     /// what stops a one-character change costing a whole-window transfer.
-    pub fn draw_changed(
-        &mut self,
-        slot: usize,
-        buffer: &mut [u32],
-        buffer_width: u32,
-        buffer_height: u32,
-    ) -> Option<Rect> {
+    pub fn draw_changed(&mut self, slot: usize, surface: &mut Surface<'_>) -> Option<Rect> {
         let slot = slot & 1;
         let char_h = text_height() as i32;
         let (_, origin_y) = self.content_origin();
@@ -1264,7 +1209,7 @@ impl Terminal {
         if !redraw_all {
             let shift = self.top_line() - self.painted[slot].top_line;
             if shift != 0 && shift.unsigned_abs() < self.rows as u64 {
-                self.scroll_pixels(buffer, buffer_width, buffer_height, shift as i32);
+                self.scroll_pixels(surface, shift as i32);
                 self.painted[slot].shift_rows(shift as i32);
             }
         }
@@ -1273,9 +1218,9 @@ impl Terminal {
         let mut last = 0usize;
 
         if redraw_all {
-            self.fill_padding(buffer, buffer_width, buffer_height);
+            self.fill_padding(surface);
             for (display_row, row) in current.iter().enumerate() {
-                self.draw_row(buffer, buffer_width, buffer_height, display_row, row);
+                self.draw_row(surface, display_row, row);
             }
         }
 
@@ -1287,7 +1232,7 @@ impl Terminal {
 
         for (display_row, row) in current.iter().enumerate() {
             if !redraw_all && differs(&self.painted[slot], display_row) {
-                self.draw_row(buffer, buffer_width, buffer_height, display_row, row);
+                self.draw_row(surface, display_row, row);
             }
             if report_all || differs(&self.painted[slot ^ 1], display_row) {
                 first = first.min(display_row);
@@ -1296,7 +1241,7 @@ impl Terminal {
         }
 
         if redraw_all {
-            self.draw_cursor_block(buffer, buffer_width, buffer_height);
+            self.draw_cursor_block(surface);
         }
 
         if first == usize::MAX {
@@ -1309,7 +1254,7 @@ impl Terminal {
         }
 
         if !redraw_all {
-            self.draw_cursor_block(buffer, buffer_width, buffer_height);
+            self.draw_cursor_block(surface);
         }
 
         self.record(slot, &mut current, cursor);
@@ -1339,16 +1284,16 @@ impl Widget for Terminal {
         self.y = y;
     }
 
-    fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
-        self.fill_padding(buffer, buffer_width, buffer_height);
+    fn draw(&self, surface: &mut Surface<'_>) {
+        self.fill_padding(surface);
 
         let mut row = Vec::new();
         for display_row in 0..self.rows {
             self.render_row_into(display_row, &mut row);
-            self.draw_row(buffer, buffer_width, buffer_height, display_row, &row);
+            self.draw_row(surface, display_row, &row);
         }
 
-        self.draw_cursor_block(buffer, buffer_width, buffer_height);
+        self.draw_cursor_block(surface);
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {

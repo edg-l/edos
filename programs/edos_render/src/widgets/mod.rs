@@ -1,7 +1,6 @@
 //! Widget toolkit for building GUI applications.
 
 pub mod button;
-pub mod canvas;
 pub mod checkbox;
 pub mod container;
 pub mod label;
@@ -11,13 +10,14 @@ pub mod terminal;
 pub mod text_input;
 
 pub use button::Button;
-pub use canvas::Canvas;
 pub use checkbox::Checkbox;
 pub use container::WidgetContainer;
 pub use label::Label;
 pub use slider::Slider;
 pub use terminal::Terminal;
 pub use text_input::TextInput;
+
+use crate::surface::Surface;
 
 /// Unique identifier for a widget.
 pub type WidgetId = u32;
@@ -110,7 +110,7 @@ pub trait Widget {
     fn set_position(&mut self, x: i32, y: i32);
 
     /// Draw the widget to the given buffer.
-    fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32);
+    fn draw(&self, surface: &mut Surface<'_>);
 
     /// Handle mouse movement.
     fn on_mouse_move(&mut self, x: i32, y: i32);
@@ -226,139 +226,6 @@ pub mod colors {
     pub const SLIDER_THUMB: u32 = Theme::DEFAULT.slider_thumb.raw();
     /// Checkbox check mark color.
     pub const CHECKBOX_CHECK: u32 = Theme::DEFAULT.checkbox_check.raw();
-}
-
-/// Helper function to draw a filled rectangle in a buffer.
-pub fn draw_rect(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    color: u32,
-) {
-    if buffer_width == 0 {
-        return;
-    }
-    // The far edges are computed in i64. A rect entirely left of or above the
-    // surface has a negative one, and casting that to u32 before the clamp
-    // turns it into a value far larger than the surface -- which is how a
-    // fully off-screen rect came to fill whole rows.
-    let start_x = x.max(0) as u32;
-    let start_y = y.max(0) as u32;
-    let end_x = (x as i64 + width as i64).clamp(0, buffer_width as i64) as u32;
-    // Rows the buffer actually holds, which is what bounds the writes; a
-    // caller passing fewer than `buffer_height` claims is clamped here rather
-    // than caught per pixel further down.
-    let rows = (buffer.len() / buffer_width as usize) as u32;
-    let end_y = (y as i64 + height as i64).clamp(0, buffer_height.min(rows) as i64) as u32;
-
-    for py in start_y..end_y {
-        let row = (py * buffer_width) as usize;
-        if start_x < end_x {
-            buffer[row + start_x as usize..row + end_x as usize].fill(color);
-        }
-    }
-}
-
-/// Helper function to draw a rectangle outline.
-pub fn draw_rect_outline(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    color: u32,
-) {
-    // Top edge
-    draw_rect(buffer, buffer_width, buffer_height, x, y, width, 1, color);
-    // Bottom edge
-    draw_rect(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x,
-        y + height as i32 - 1,
-        width,
-        1,
-        color,
-    );
-    // Left edge
-    draw_rect(buffer, buffer_width, buffer_height, x, y, 1, height, color);
-    // Right edge
-    draw_rect(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x + width as i32 - 1,
-        y,
-        1,
-        height,
-        color,
-    );
-}
-
-/// Draw the keyboard focus ring around a control, offset from its edge by
-/// [`crate::metrics::FOCUS_RING_GAP`] so the ring never touches the border.
-pub fn draw_focus_ring(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-) {
-    let gap = crate::metrics::FOCUS_RING_GAP;
-    draw_rect_outline(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x - gap as i32,
-        y - gap as i32,
-        width + gap * 2,
-        height + gap * 2,
-        colors::FOCUS_RING,
-    );
-}
-
-/// Draw a line of interface text with its top edge at `y`.
-pub fn draw_text(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    text: &str,
-    color: u32,
-) {
-    draw_text_styled(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x,
-        y,
-        text,
-        crate::text::Style::new(color),
-    );
-}
-
-/// Draw a line of text in an explicit style.
-pub fn draw_text_styled(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    text: &str,
-    style: crate::text::Style,
-) {
-    let mut surface = crate::text::Surface::new(buffer, buffer_width, buffer_height);
-    crate::text::draw(&mut surface, x, y, text, style);
 }
 
 /// Width of a string set as interface text, in pixels.
