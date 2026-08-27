@@ -44,6 +44,10 @@ pub fn power_off() -> ! {
     quiesce("power off");
     acpi_soft_off();
     for (port, value) in EMULATOR_SOFT_OFF {
+        // SAFETY: reached only after `acpi_soft_off` returned, meaning the
+        // tables described no usable S5. On real hardware these ports belong to
+        // no device that answers this value, so the write is inert; on the
+        // emulators listed it is the documented soft-off register.
         unsafe { PortWriteOnly::new(port).write(value) };
     }
     println!("power off: no soft-off mechanism answered, halting");
@@ -66,6 +70,9 @@ pub fn reboot() -> ! {
     // RST_CNT: SYS_RST selects a reset, RST_CPU triggers it. A hard reset
     // (bit 3) also cycles the CPU, which is what a warm boot wants.
     let mut reset = Port::<u8>::new(RESET_CONTROL);
+    // SAFETY: 0xCF9 is the chipset's reset control register and belongs to no
+    // driver here. The filesystems are already synced, so a reset that does
+    // land loses nothing.
     unsafe {
         reset.write(0x02);
         reset.write(0x0E);
@@ -73,6 +80,9 @@ pub fn reboot() -> ! {
 
     // 8042 pulse: command 0xFE drives the reset line low on chipsets that
     // do not implement RST_CNT.
+    // SAFETY: 0x64 is the 8042 command port. The PS/2 controller is driven
+    // through the same port elsewhere, but every other CPU has been told to
+    // stop and this write is the last thing before the machine resets.
     unsafe { PortWriteOnly::<u8>::new(PS2_COMMAND).write(0xFE) };
 
     println!("reboot: no reset mechanism answered, halting");
@@ -114,12 +124,17 @@ fn acpi_soft_off() {
         && pm1a.address_space == AddressSpace::SystemIo
         && pm1a.address != 0
     {
+        // SAFETY: the FADT named this port as PM1a_CNT and said it lives in
+        // I/O space, which is the only thing that makes the address a port at
+        // all; writing SLP_TYP + SLP_EN to it is the transition ACPI 6.5 §4.8.3
+        // defines.
         unsafe { PortWriteOnly::new(pm1a.address as u16).write(value) };
     }
     if let Ok(Some(pm1b)) = fadt.pm1b_control_block()
         && pm1b.address_space == AddressSpace::SystemIo
         && pm1b.address != 0
     {
+        // SAFETY: as for PM1a, with the optional PM1b_CNT block.
         unsafe { PortWriteOnly::new(pm1b.address as u16).write(value) };
     }
 }
@@ -137,7 +152,13 @@ fn s5_sleep_type() -> Option<u8> {
     if length <= body_offset {
         return None;
     }
+    // SAFETY: the address and length come from the DSDT's own entry in the
+    // ACPI tables, so they describe a table the firmware placed in memory, and
+    // `length` is checked above to be larger than the header it starts with.
     let mapping = unsafe { AcpiHandler.map_physical_region::<u8>(dsdt.phys_address, length) };
+    // SAFETY: `map_physical_region` mapped exactly `length` bytes at
+    // `virtual_start`, and `mapping` outlives `aml`. The bytes are AML, which
+    // is read here as bytes and never as a typed value.
     let aml = unsafe { core::slice::from_raw_parts(mapping.virtual_start.as_ptr(), length) };
 
     let mut result = None;

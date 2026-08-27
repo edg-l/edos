@@ -174,6 +174,9 @@ fn prefault_elf_tail_page_from_cache(
 
     let phys_offset = crate::boot::boot_info().physical_memory_offset;
     let frame_ptr = (phys_offset + private_frame.start_address().as_u64()).as_mut_ptr::<u8>();
+    // SAFETY: `frame_ptr` is the HHDM alias of a 4 KiB frame the allocator has
+    // just handed out and nothing else holds, so all 4096 bytes are writable
+    // and unaliased.
     unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
 
     // Get the cached page (pins it; we must unpin after the memcpy).
@@ -183,6 +186,11 @@ fn prefault_elf_tail_page_from_cache(
     // Copy the 4 KiB page from the cache frame into our private frame via HHDM.
     let cache_phys = cached_page.frame().start_address().as_u64();
     let cache_ptr = (phys_offset + cache_phys).as_ptr::<u8>();
+    // SAFETY: both are HHDM aliases of whole 4 KiB frames, so 4096 bytes are
+    // readable at one and writable at the other. They are distinct frames — one
+    // came from the page cache, the other from the frame allocator — so they do
+    // not overlap. `cached_page` is still pinned, so the cache cannot evict the
+    // source out from under the copy.
     unsafe {
         core::ptr::copy_nonoverlapping(cache_ptr, frame_ptr, 4096);
     }
@@ -196,6 +204,8 @@ fn prefault_elf_tail_page_from_cache(
     if let Some(off) = zero_from
         && off < 4096
     {
+        // SAFETY: `off < 4096` is checked by the condition above, so the
+        // offset and the length together stay inside the same private frame.
         unsafe {
             core::ptr::write_bytes(frame_ptr.add(off), 0, 4096 - off);
         }
@@ -798,6 +808,11 @@ fn map_image(
                 );
             };
             let frame_virt = phys_offset + (frame.start_address() + offset).as_u64();
+            // SAFETY: `apply_relocs_to_page` wants 4096 writable kernel-visible
+            // bytes with no concurrent access. `frame_virt` is the HHDM alias of
+            // the frame the translation above found for a page this loader has
+            // just faulted in for a process that has not started running, so
+            // nothing else can reach it.
             unsafe {
                 table.apply_relocs_to_page(frame_virt, page_offset, image.load_base);
             }

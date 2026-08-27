@@ -62,6 +62,10 @@ pub fn add_serial_log(text: &str) {
 /// Writes directly to the 0x3F8 UART data port.
 pub fn emergency_write(msg: &[u8]) {
     for &byte in msg {
+        // SAFETY: 0x3FD and 0x3F8 are COM1's line-status and data registers.
+        // Bypassing `SERIAL_DBG`'s lock is the point: this runs from crash
+        // paths where the lock may be held by the CPU that faulted. The worst
+        // a concurrent writer can do is interleave bytes.
         unsafe {
             // Spin-wait for transmit buffer empty (LSR bit 5)
             while x86_64::instructions::port::Port::<u8>::new(0x3FD).read() & 0x20 == 0 {

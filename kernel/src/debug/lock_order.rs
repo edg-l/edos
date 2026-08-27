@@ -347,6 +347,9 @@ pub fn enter_same(rank: u16, site: &'static str) {
         "lock_order::enter_same: current_thread_id mismatch"
     );
 
+    // SAFETY: `lock_ranks` is only ever reached from the owning thread's CPU
+    // context, which the `current_thread_id()` check above enforces. No other
+    // thread touches this cell.
     let stack = unsafe { &mut *thread.lock_ranks.get() };
 
     let top = stack.last().copied();
@@ -395,6 +398,8 @@ pub fn exit(rank: u16, site: &'static str) {
         return;
     }
 
+    // SAFETY: as in `enter`; the exiting thread is the only accessor of its
+    // own rank stack.
     let stack = unsafe { &mut *thread.lock_ranks.get() };
 
     match stack.pop() {
@@ -447,6 +452,8 @@ pub fn assert_no_guards_held(context: &str) {
         return;
     }
 
+    // SAFETY: as in `enter`; the dying thread is the only accessor of its own
+    // rank stack.
     let stack = unsafe { &mut *thread.lock_ranks.get() };
     if stack.is_empty() {
         return;

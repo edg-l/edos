@@ -11507,3 +11507,40 @@ twentieth suite in `scripts/guest-check`.
 Full write-up, including why the buffer became a `Vec<u64>` and how to check
 another device for the same shape:
 `doc/bugs/2026-08-28-the-framebuffer-ioctls-read-past-the-buffer.md`.
+
+## The thirteen small modules are clean under `undocumented_unsafe_blocks`
+
+`boot`, `cmdline`, `debug`, `gdt`, `loader`, `logs`, `net`, `power`, `profile`,
+`serial`, `smp`, `timer` and `window` now carry their own
+`#[deny(clippy::undocumented_unsafe_blocks)]` in `main.rs`, 48 blocks between
+them. Three of the thirteen (`cmdline`, `logs`, `window`) contain no `unsafe`
+at all and cost only the attribute. That leaves `drivers/` (307), `thread/`
+(61) and `fs/` (60) as the whole of §I5a's remainder: 397 blocks, down from
+445.
+
+Worth doing as one pass because the arguments repeat across the group rather
+than within any one file, and several are the same fact:
+
+- **Bring-up code argues "nothing else exists yet", not "nothing else
+  aliases".** `gdt::init_current_cpu`, `smp::ap_start` and `boot::kmain` run
+  before their CPU has a scheduler to be preempted by, which is what makes a
+  `&mut` into a per-CPU TSS or a GS-base write sound. Written down at each
+  site, because the moment any of them is called twice the claim is gone.
+- **A port write is bounded by who else drives the port, not by memory.** The
+  PIT (`timer.rs`), `RST_CNT` and the 8042 pulse (`power.rs`), and the
+  emergency UART (`serial.rs`) each say which driver owns the port and why a
+  concurrent write cannot arise — or, for `emergency_write`, why interleaved
+  bytes are the accepted worst case of bypassing the lock on purpose.
+- **`_rdtsc` is the same argument nine times**, so it is written out once in
+  `TscClock::now` (architectural on x86_64, unprivileged unless CR4.TSD which
+  this kernel never sets, no side effect) and referred to from the other eight.
+  Whether the counter is *usable as a clock* is a different question, answered
+  by `invariant_tsc` and `verify_tsc_sync` before `TSC_ACTIVE` lets it run.
+- **`profile::walk_kernel` reads memory whose contents are untrusted.** The
+  range check before the two loads is what makes them sound; the frame chain
+  they return is checked afterwards and ends the walk rather than faulting.
+  The comment has to separate those two, or it reads as a claim the frame
+  pointer is valid, which is exactly what a sampling profiler cannot assume.
+
+`TimerCalibration::setup_pit_oneshot` was the only `unsafe fn` in the group
+without a `# Safety` section.

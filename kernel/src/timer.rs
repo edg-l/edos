@@ -32,13 +32,22 @@ impl TimerCalibration {
         println!("Calibrating APIC timer frequency...");
 
         // 1. Setup PIT for one-shot mode
+        // SAFETY: calibration runs once on the BSP during bring-up, before the
+        // APIC timer is armed for anything and before any other CPU is up, so
+        // nothing else is programming channel 0 concurrently.
         unsafe {
             Self::setup_pit_oneshot(PIT_TICKS_FOR_CALIBRATION);
         }
 
         // 2. Start APIC timer with maximum count
         let apic_start_count = 0xFFFFFFFF;
+        // SAFETY: `rdtsc` reads a counter and has no other effect; see
+        // `TscClock::now` for why it is always available here.
         let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
+        // SAFETY: `get_lapic` hands back the calling CPU's own local APIC, and
+        // interrupts are off for the whole of bring-up, so the CPU whose base
+        // was read is still the CPU these writes land on. Nothing is waiting on
+        // the timer yet, so overwriting its mode and count cuts nothing short.
         unsafe {
             let lapic = get_lapic();
             lapic.set_timer_mode(x2apic::lapic::TimerMode::OneShot);
@@ -50,7 +59,10 @@ impl TimerCalibration {
         Self::wait_for_pit_completion();
 
         // 4. Read APIC timer current count
+        // SAFETY: the same local APIC this function armed a few lines above,
+        // still on the same CPU with interrupts off.
         let apic_end_count = unsafe { get_lapic().timer_current() };
+        // SAFETY: as for `tsc_start`.
         let tsc_end = unsafe { core::arch::x86_64::_rdtsc() };
 
         // 5. Calculate APIC frequency
@@ -83,8 +95,17 @@ impl TimerCalibration {
         }
     }
 
+    /// Arm PIT channel 0 to count `ticks` down once.
+    ///
+    /// # Safety
+    ///
+    /// Channel 0 is the interrupt timer, so the caller must know nothing else
+    /// is using it: the kernel drives no PIT interrupt, and calibration is the
+    /// only thing that ever programs it.
     #[inline(always)]
     unsafe fn setup_pit_oneshot(ticks: u16) {
+        // SAFETY: 0x43 and 0x40 are the PIT's command and channel-0 data
+        // ports, and the caller has promised channel 0 is unused.
         unsafe {
             // PIT Command: Channel 0, Lo/Hi byte, Mode 0 (interrupt on terminal count), Binary
             Port::new(0x43).write(0b00110000u8); // Command register
@@ -99,6 +120,10 @@ impl TimerCalibration {
     fn wait_for_pit_completion() {
         // Poll PIT status until count reaches zero
         loop {
+            // SAFETY: the read-back command latches channel 0's status without
+            // disturbing the count `setup_pit_oneshot` loaded, and reading the
+            // data port after it returns that status byte rather than the
+            // counter. Both ports are the PIT's, which nothing else drives.
             unsafe {
                 // Read-back command: Channel 0, latch count
                 Port::new(0x43).write(0b11100010u8);
@@ -162,6 +187,11 @@ static TSC_ACTIVE: AtomicBool = AtomicBool::new(false);
 impl TscClock {
     #[inline]
     fn now(&self) -> u64 {
+        // SAFETY: `rdtsc` is architectural on x86_64 and reads a counter with
+        // no side effect. It is unprivileged unless CR4.TSD is set, which this
+        // kernel never sets. Whether the counter is *usable* as a clock is a
+        // separate question, answered by `invariant_tsc` and `verify_tsc_sync`
+        // before `TSC_ACTIVE` lets this run at all.
         let delta = unsafe { _rdtsc() }.wrapping_sub(self.base_tsc);
         self.base_nanos
             .wrapping_add(((delta as u128 * self.mult as u128) >> TSC_SHIFT) as u64)
@@ -204,6 +234,7 @@ fn calibrate_tsc(hpet: &HpetTimer) -> Option<u64> {
     const WINDOW_NS: u64 = 10_000_000;
 
     let start_hpet = hpet.get_counter();
+    // SAFETY: as in `TscClock::now`; `rdtsc` only reads.
     let start_tsc = unsafe { _rdtsc() };
     loop {
         let elapsed = hpet.ticks_to_nanos(hpet.get_counter().wrapping_sub(start_hpet));
@@ -212,6 +243,7 @@ fn calibrate_tsc(hpet: &HpetTimer) -> Option<u64> {
         }
         core::hint::spin_loop();
     }
+    // SAFETY: as in `TscClock::now`; `rdtsc` only reads.
     let end_tsc = unsafe { _rdtsc() };
     let elapsed_ns = hpet.ticks_to_nanos(hpet.get_counter().wrapping_sub(start_hpet));
 
@@ -261,6 +293,7 @@ pub fn init_monotonic_clock() {
     let mult = ((1_000_000_000u128 << TSC_SHIFT) / freq as u128) as u64;
     TSC_CLOCK.call_once(|| TscClock {
         base_nanos: hpet_nanos(),
+        // SAFETY: as in `TscClock::now`; `rdtsc` only reads.
         base_tsc: unsafe { _rdtsc() },
         mult,
     });

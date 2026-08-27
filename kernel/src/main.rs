@@ -44,31 +44,44 @@ mod acpi;
 mod allocator;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod apic;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod boot;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod cmdline;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod debug;
 mod drivers;
 mod fs;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod gdt;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod graphics;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod interrupts;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod loader;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod logs;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod memory;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod net;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod power;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod profile;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod serial;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod smp;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod syscalls;
 mod thread;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod timer;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod util;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod window;
 
 extern crate alloc;

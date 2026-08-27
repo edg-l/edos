@@ -697,17 +697,27 @@ buffer userspace had chosen the size of. `arg_len` is now threaded from
 device, the buffer is a `Vec<u64>` so the structs read out of it are aligned,
 and every framebuffer arm goes through a bounds-checking `IoctlBuf`.
 `doc/WORKING-NOTES.md` carries the mechanism.
-445 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+Then the thirteen small modules in one pass -- `boot`, `cmdline`, `debug`,
+`gdt`, `loader`, `logs`, `net`, `power`, `profile`, `serial`, `smp`, `timer`,
+`window` -- 48 blocks between them and nine of the thirteen under ten each, so
+the remainder is now three modules rather than sixteen. That pass is where the
+platform's own bring-up lives: the GDT and TSS a CPU loads, the AP entrypoint,
+the PIT/APIC calibration, the reset and soft-off port writes, the frame-pointer
+walk the profiler does on untrusted `rbp`, and the emergency serial path that
+bypasses its own lock on purpose. `TimerCalibration::setup_pit_oneshot` gained
+the `# Safety` section it had none of.
+397 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`: `usb/xhci/mod.rs` (77), `ahci/port.rs` (38),
-`virtio/gpu.rs` (33), `thread/scheduler.rs` (26), `fs/efs/mod.rs` (18) and
-`virtio/queue.rs` (14) first. The lint sits
+grep -cE '^\s+--> '`, and they are in exactly three modules: `drivers/`
+(`usb/xhci/mod.rs` 77, `ahci/port.rs` 38, `virtio/gpu.rs` 33, `virtio/queue.rs`
+14, `nvme/admin.rs` 13, `ahci/controller.rs` 12), `thread/`
+(`scheduler.rs` 26) and `fs/` (`efs/mod.rs` 18). The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
 
 **I5b, the contracts.** 64 `unsafe fn` declarations against 50 `# Safety`
-sections, remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the eight
+sections, remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
 modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented
 `unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
 the smaller of the two.
@@ -715,10 +725,9 @@ the smaller of the two.
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
-the modules it covers carries a `# Safety` section. The impls are done and eight
-modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`, `interrupts/`,
-`acpi/`, `apic/`, `graphics/`) hold their own deny; what is left is the rest of
-the tree, module by module.
+the modules it covers carries a `# Safety` section. The impls are done and
+twenty-one of the twenty-four modules in `main.rs` hold their own deny; the
+three left are `drivers/`, `fs/` and `thread/`.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

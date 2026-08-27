@@ -266,6 +266,9 @@ pub fn wait_for_samples(timeout_ms: u64) {
 /// out of it belongs to the interrupted code, including `rbp`, which is the
 /// head of its frame list.
 pub fn take_sample(context: *const CpuContext) {
+    // SAFETY: the timer interrupt handler passes the frame it pushed on the
+    // current stack, so it is a live, aligned `CpuContext` for the whole of
+    // this call, and interrupts are off so nothing overwrites it.
     let ctx = unsafe { &*context };
     let frame = &ctx.interrupt_stack_frame;
 
@@ -333,7 +336,13 @@ fn walk_kernel(rbp: u64, frames: &mut [u64; MAX_FRAMES]) -> (usize, u32) {
             return (depth, ended_at(depth));
         }
         let frame_ptr = rbp as *const u64;
+        // SAFETY: the check above put `rbp` and `rbp + 16` inside the current
+        // kernel stack and confirmed 8-byte alignment, so both reads are of
+        // initialised, aligned, mapped memory. Their *contents* are untrusted —
+        // a frame chain the walk cannot follow ends the walk rather than
+        // faulting, which is what the next two checks are for.
         let next_rbp = unsafe { *frame_ptr };
+        // SAFETY: as above; the range check covered both words of the frame.
         let ret = unsafe { *frame_ptr.add(1) };
         if ret < KERNEL_BASE {
             return (depth, ended_at(depth));

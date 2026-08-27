@@ -61,13 +61,13 @@ Coverage in `kernel/src`, measured 2026-08-28:
 | quantity | count | command |
 | --- | --- | --- |
 | `unsafe { ... }` blocks | 758 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
-| `// SAFETY:` comments | 341 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
+| `// SAFETY:` comments | 389 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe fn` declarations | 64 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
-| `# Safety` sections | 50 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
+| `# Safety` sections | 51 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe impl` | 38 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
-So the block half is at roughly 45% and the contract half at roughly
-three-quarters. The block figure moves a module at a time, since the eight that
+So the block half is at roughly half and the contract half at roughly four
+fifths. The block figure moves a module at a time, since the twenty-one that
 hold their own `#[deny(clippy::undocumented_unsafe_blocks)]` cannot regress. The
 two are `ROADMAP-CLEANUP.md` I5, and they are different work: the lint
 `clippy::undocumented_unsafe_blocks` finds blocks and `unsafe impl`, and finds

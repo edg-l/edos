@@ -170,6 +170,10 @@ impl RelocTable {
             // Within-page byte offset of this relocation target.
             let page_byte_off = (entry.offset & 0xfff) as usize;
             let ptr = (frame_virt.as_u64() + page_byte_off as u64) as *mut u64;
+            // SAFETY: `page_byte_off` is masked to the low 12 bits, so the
+            // eight bytes written stay inside the 4096 the caller promised are
+            // writable. Relocation targets are 8-byte aligned in the ELF the
+            // table was built from, and `frame_virt` is page-aligned.
             unsafe {
                 *ptr = base.wrapping_add(entry.addend as u64);
             }

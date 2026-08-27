@@ -172,11 +172,18 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
     switch_to_kernel_page();
     tlb_flush_all_including_global();
     crate::util::per_cpu::enable_fsgsbase_on_ap();
+    // SAFETY: this is the AP's first instruction sequence, so it has no
+    // per-CPU block yet and cannot already be holding a reference into one,
+    // and `enable_fsgsbase_on_ap` above has made `wrgsbase` legal here.
+    // Limine gives each AP its own `MpInfo`, so `lapic_id` is this CPU's.
     unsafe { init_gs_for_this_cpu(cpu.lapic_id) };
     gdt::init_current_cpu();
     interrupts::init_current_cpu();
 
     // Enable LAPIC
+    // SAFETY: called once on this CPU, after its GS base and IDT are in place
+    // so the interrupts the APIC is about to be allowed to deliver have
+    // somewhere to land.
     unsafe { enable_lapic() };
 
     // Register this AP in the CPU topology tables.
@@ -194,8 +201,12 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
     // else will compare against.
     crate::timer::verify_tsc_sync(cpu.lapic_id);
 
+    // SAFETY: once per CPU, and the GDT loaded above holds the kernel and user
+    // selectors at the offsets STAR is programmed with here.
     unsafe { setup_syscall() };
 
+    // SAFETY: once per CPU, before this CPU runs any thread and so before
+    // anything has FPU state for `init_fpu`'s control-register writes to lose.
     unsafe { fpu::init_fpu() };
 
     // The G bits on the kernel half were set by the BSP before this CPU
@@ -206,6 +217,9 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
 
     crate::allocator::enable_percpu_cache();
 
+    // SAFETY: `get_lapic` reads this CPU's own local APIC, and this CPU is not
+    // yet in `ONLINE_CPU_MASK` as far as the scheduler is concerned — nothing
+    // can migrate it away between the GS-base read and the register read.
     println!("[smp] AP online: LAPIC id {}", unsafe { get_lapic().id() });
 
     // Last, so the BSP's wait ends only once this CPU can carry a thread.
@@ -218,6 +232,12 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
 
 #[inline(always)]
 pub fn tlb_flush_all_including_global() {
+    // SAFETY: CR4 is read, cleared of PGE and restored to exactly the value it
+    // held, and CR3 is written back with the table it already pointed at, so
+    // the address space in force is unchanged either side of the sequence. The
+    // only effect is that global entries are dropped from the TLB, which every
+    // caller wants. Interrupts are off in the callers that need the CR4 hole
+    // to be invisible.
     unsafe {
         use core::arch::asm;
         const CR4_PGE: u64 = 1 << 7;

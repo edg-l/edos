@@ -145,6 +145,8 @@ unsafe impl Sync for BootFramebuffer {}
 pub static BOOT_INFO: Once<BootInfo> = Once::new();
 
 pub fn boot_info() -> &'static BootInfo {
+    // SAFETY: `kmain` fills `BOOT_INFO` before it calls anything that could
+    // reach this, and nothing else in the kernel runs before `kmain`.
     unsafe { BOOT_INFO.get().unwrap_unchecked() }
 }
 
@@ -155,6 +157,9 @@ unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
 
     crate::util::per_cpu::probe_and_enable_fsgsbase();
+    // SAFETY: the first thing the BSP does, so it holds no reference into a
+    // per-CPU block and there is no allocator yet for the dynamic form to use;
+    // `probe_and_enable_fsgsbase` on the line above has made `wrgsbase` legal.
     unsafe { init_gs_for_bsp_static() };
 
     // Early init serial in case we panic on expects.
@@ -213,7 +218,12 @@ unsafe extern "C" fn kmain() -> ! {
     let physical_memory_offset = VirtAddr::new(physical_memory_offset);
 
     let cr3 = Cr3::read();
+    // SAFETY: `physical_memory_offset` is the HHDM base Limine reported, so
+    // all of physical memory is mapped at it, and this is the only place that
+    // takes the level-4 table — nothing else holds a reference to it.
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
+    // SAFETY: the same HHDM offset the table was read through, which is what
+    // `OffsetPageTable` needs to walk the frames the entries name.
     let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
 
     let boot_info = BootInfo {

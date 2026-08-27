@@ -206,6 +206,10 @@ fn poll_for_dhcp(
         }
 
         if let Some((buf, len)) = nic.receive() {
+            // SAFETY: `receive` hands back a DMA buffer it owns together with
+            // the number of bytes the NIC wrote into it, so `len` bytes at
+            // `buf` are initialised and readable. The slice dies before the
+            // buffer is handed back to the DMA pool below.
             let data = unsafe { core::slice::from_raw_parts(buf.as_ptr(), len) };
             let result = try_parse_dhcp_response(data, xid, expected_type);
             let _ = dma().dealloc(buf);
