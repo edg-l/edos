@@ -11494,3 +11494,53 @@ the machine and it needs a LAPIC to read the destination id from.
 called, which looks like aliasing and is not: the type is a handle over MMIO,
 not an owner of it. What callers must not do is write the same redirection
 entry from two of them, and that is what its comment says.
+
+## OPEN BUG: the framebuffer ioctls read past the ioctl buffer, and userspace picks how far
+
+Found while trying to write `// SAFETY:` comments for `kernel/src/graphics/`.
+`graphics/` is therefore **not** documented and does not carry a deny: three of
+its blocks cannot be given an honest comment, because they are not sound.
+
+`sys_ioctl` (`kernel/src/syscalls/ioctl/mod.rs`) allocates `vec![0u8; arg_len]`
+and copies `arg_len` bytes in from the user pointer. **`arg_len` is a syscall
+argument**, so userspace chooses it. The buffer pointer, and nothing else,
+reaches the device: `DevFsDevice::ioctl(&self, request: u64, arg: u64)` has no
+length parameter, and neither does `FileSystem::ioctl` or `fs::api::ioctl`
+behind it.
+
+`FB_IOCTL_DRAW` in `graphics/framebuffer.rs` then reads a `FramebufferDraw`
+header out of that buffer and builds a slice of `header.pixel_count` u32s
+*after* it:
+
+```rust
+let data_ptr = unsafe { (arg as *const u8).add(size_of::<FramebufferDraw>()) };
+let pixels = unsafe { from_raw_parts(data_ptr as *const u32, header.pixel_count as usize) };
+```
+
+`pixel_count` is checked against `width * height` and against nothing else. A
+caller that passes `arg_len = size_of::<FramebufferDraw>()` with
+`width = height = 4096` makes the kernel build a 64 MB slice over a 32-byte
+heap allocation and blit it to the screen: kernel heap contents on the display,
+and a page fault in kernel mode once the read walks off the mapped heap.
+`FB_IOCTL_SET_CURSOR` has the identical shape. The well-behaved caller
+(`programs/edos_render/src/graphics.rs:461`) does pass
+`header_bytes + pixel_bytes`, which is why nothing has tripped over it; the
+kernel is trusting userspace to have got it right.
+
+The comments already in that file say "arg points to kernel-copied ioctl buffer
+(safe to read)". That is true of the header and false of everything past it,
+and it is the sentence that hid this.
+
+**The fix is at the trait, not at the call site.** `arg_len` is known in
+`sys_ioctl` and thrown away one frame later, so the length has to be threaded
+down beside the pointer: `DevFsDevice::ioctl(&self, request, arg, arg_len)`,
+`FileSystem::ioctl(&self, path, request, arg, arg_len)`, and the `fs::api` and
+`fs::vfs` hops between them. Four `DevFsDevice` impls (`logs.rs`,
+`graphics/framebuffer.rs`, `drivers/hda/mod.rs`, `fs/devfs/block.rs`) plus the
+default. Then every variable-length handler checks
+`size_of::<Header>() + pixel_count * 4 <= arg_len` before forming the slice and
+returns `DevFsError::IoError` otherwise. Do not special-case the framebuffer:
+the missing length is the defect, and `hda` will grow the same shape.
+
+Once that lands, `graphics/` can be documented and take its deny like the other
+seven modules.
