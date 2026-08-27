@@ -11271,3 +11271,33 @@ Do not point this at a desktop boot: a running session is never idle for 4 s
 (the taskbar clock alone is work), and that is correct behaviour, not a
 missing dump. `scripts/wedge-probe` remains the first instrument for a
 suspected wedge — it reads the same counters over QMP with no kernel build.
+
+## The `[lints]` table outside the kernel, and what an unfulfilled `expect` means
+
+`programs/` is a workspace, `libs/` and `tools/` are not. So the same three
+lints reach them two different ways: `[workspace.lints.clippy]` in
+`programs/Cargo.toml` plus `lints.workspace = true` in every member manifest
+(133 of them; a workspace lint table reaches no member that does not opt in,
+silently), and a plain `[lints.clippy]` in each of the nine `libs/` and four
+`tools/` packages.
+
+Converting `#[allow]` to `#[expect]` outside the kernel found eleven
+suppressions with nothing behind them, all `dead_code` or `unused` on a `pub`
+item in a library target -- where `dead_code` does not fire at all, because the
+item is reachable from the crate root. Seven were in `tools/efs-fsck`, three in
+`programs/{edos_render,edos-web,edos-wm}`. That is the whole value of
+`allow_attributes_without_reason` plus `expect`: the conversion is mechanical,
+but the compiler answers back, and a suppression the code has outgrown is a
+one-line deletion rather than a reworded comment. Delete those; do not invent a
+reason for a lint that never fires.
+
+`tools/` is not covered by `make clippy`'s `-D warnings` for the default lint
+set: `cargo clippy --all-targets` in `tools/efs-fsck` prints eight findings
+(`collapsible_if`, `manual is_multiple_of`, `&mut Vec` parameters, a
+`too_many_arguments`) that predate this table and that no gate reads. They are
+not from the three lints above.
+
+The edition bump of the last three 2021 programs (`edos-taskbar`,
+`edos-terminal`, `wintest`) is not free either: edition 2024 stabilises let
+chains, so `collapsible_if` starts reaching `if cond { if let ... }` pairs it
+could not rewrite before, and both of the affected programs had one.
