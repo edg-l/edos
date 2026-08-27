@@ -11102,3 +11102,55 @@ suites run as `name > /dev/klog 2>&1`, so stderr and stdout land in the same
 place -- but stderr is flushed per fragment, and the same message arrived split
 across four klog lines (`FAIL `, `wc -l`, `: `, then the strings) while the
 `println!` copy arrived whole. `texttest` prints its verdict on stdout only.
+
+## The NVMe hostile-boot wedge is all four CPUs halted, not a live-lock
+
+`scripts/wedge-probe` called a boot wedged after 12 s of serial silence and gave
+up on it after 120 s. Both numbers were too small for the hostile cmdline. Under
+`nvme_timeout_ms=0` the watchdog fires on every command, so a healthy hostile
+boot spends minutes resetting the controller, and the log it produces is bounded
+— a run that finished normally in this batch wrote 317 KB with 1314 watchdog
+firings, and its serial output arrives in bursts with quiet stretches between
+them. Twelve seconds of quiet is inside the normal range. The thresholds are now
+`SILENCE = 60` and `RUN_CAP = 600`.
+
+Ten hostile boots on a quiet host at 60 s: **9 pass, 1 WEDGE**, which is the
+recorded 1-in-10 and not the probe's thresholds. So the wedge is real. What it
+is, however, is the opposite of what was written down:
+
+```
+IDLE_CPU_MASK          0x000000000000000f   (all four CPUs)   stable across 2 s
+NVME_INFLIGHT          0x0000000000000001                     stable
+WATCHDOG_RESETS        0x0000000000000a24                     stable
+query-status           running
+CPU#0..3               RIP=ffffffff80049062  HLT=1
+```
+
+`addr2line` puts that RIP in `Scheduler::take_idle`
+(`kernel/src/thread/scheduler.rs:1189`). **All four vCPUs are halted in the
+scheduler's idle path, every idle bit is published, and nothing is running.**
+The earlier note that this shape is a live-lock with `SWITCHES` advancing
+~2100/s is wrong for this boot: `SWITCHES` did not even resolve here, because
+`debug::stall` is not compiled into the default kernel that the hostile ISO
+carries, so the probe never read that counter and the live-lock reading came
+from a different build.
+
+The shape is therefore a **lost wakeup**: one NVMe command is in flight, the
+watchdog that would time it out is asleep, and no interrupt or enqueue ever
+pokes a halted CPU to run it. `WATCHDOG_RESETS` frozen at 0xa24 says the
+watchdog thread stopped being scheduled, not that it decided there was nothing
+to do. The next reading is which thread is blocked on what: dump the runqueues
+and the watchdog kthread's state rather than the registers, since the registers
+now only ever say "halted".
+
+Reproducer, ~10 minutes on a quiet host:
+
+```
+make edos-nvme-hostile.iso
+WEDGE_OUT=logs/<date>-wedge scripts/wedge-probe 10
+```
+
+Do not run a build, another VM or a gate beside it: a 20-run batch previously
+read 2 wedges in its first 10 and 5 in the next 6 purely from host load. The
+per-run `.qmp` file in the output directory carries the counters and registers
+above; the `.log` beside it is that boot's serial.

@@ -28,8 +28,14 @@ OUT = os.path.join(REPO, os.environ.get("WEDGE_OUT", "logs/2026-08-26-wedge"))
 SERIAL = os.path.join(REPO, "run_log.txt")
 VM = os.path.join(REPO, "scripts/edos-vm")
 
-SILENCE = 12      # seconds of no serial growth before calling it wedged
-RUN_CAP = 120     # hard cap per run
+# A boot that is live-locked and a boot that is merely slow look identical for
+# as long as the log stays quiet, so the silence threshold decides which of the
+# two the probe reports. Twelve seconds was short enough to call a working boot
+# wedged; the hostile cmdline (`nvme_timeout_ms=0`) makes the watchdog fire on
+# every command, and journal replay under that runs minutes with nothing
+# reaching the bounded log ring.
+SILENCE = 60      # seconds of no serial growth before calling it wedged
+RUN_CAP = 600     # hard cap per run
 RUNS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 
 # `exit` is the gate's own configuration: `-no-reboot`, so a guest that resets
