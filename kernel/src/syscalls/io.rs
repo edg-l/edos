@@ -51,6 +51,8 @@ fn copy_in(user_ptr: *const u8, count: usize) -> Option<Vec<u8>> {
         return Some(Vec::new());
     }
     let mut buf = vec![0u8; count];
+    // SAFETY: `buf` was allocated with `count` bytes immediately above,
+    // which is the length named.
     if !unsafe { try_copy_from_user(buf.as_mut_ptr(), user_ptr, count) } {
         return None;
     }
@@ -127,6 +129,8 @@ fn copy_out(user_ptr: *mut u8, data: &[u8]) -> bool {
     if data.is_empty() {
         return true;
     }
+    // SAFETY: the length is the source slice's own, so the read side is in
+    // bounds; the destination is the caller's pointer, range-checked inside.
     unsafe { try_copy_to_user(user_ptr, data.as_ptr(), data.len()) }
 }
 
@@ -275,6 +279,8 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> Result<u64, Er
             let mut inline = [0u8; STREAM_STACK_BUF];
             let mut heap = Vec::new();
             let data = stage_buffer(&mut inline, &mut heap, count);
+            // SAFETY: `data` is the staging buffer `stage_buffer` just sized, and
+            // `data.len()` is what is copied into it.
             if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, data.len()) } {
                 return Err(Errno::EFAULT);
             }
@@ -487,6 +493,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> Result<u64, Er
                 }
 
                 let mut data = vec![0u8; count];
+                // SAFETY: `data` was allocated with `count` bytes immediately above.
                 if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
                     return Err(Errno::EFAULT);
                 }
@@ -509,6 +516,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> Result<u64, Er
                 match remote {
                     Some(dst) => {
                         let mut data = vec![0u8; count];
+                        // SAFETY: `data` was allocated with `count` bytes immediately above.
                         if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
                             return Err(Errno::EFAULT);
                         }
@@ -649,6 +657,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> Result<u64, Errno
                 if bytes_to_copy == 0 {
                     return Ok(0);
                 }
+                // SAFETY: `bytes_to_copy` is clamped to `kernel_data.len()`, so the
+                // source is valid for it, and to `count`, the caller's own claim.
                 if !unsafe { try_copy_to_user(buffer_ptr, kernel_data.as_ptr(), bytes_to_copy) } {
                     return Err(Errno::EFAULT);
                 }
@@ -890,6 +900,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> Result<u64, Errno
                 let data: Vec<u8> = c.rx_buffer.drain(..bytes_to_read).collect();
                 drop(c);
 
+                // SAFETY: `bytes_to_read` is `count.min(c.rx_buffer.len())` and `data`
+                // holds exactly that many bytes, drained above.
                 if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_read) } {
                     return Err(Errno::EFAULT);
                 }
@@ -923,6 +935,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> Result<u64, Errno
                 match data_opt {
                     Some(data) => {
                         let bytes_to_copy = data.len().min(count);
+                        // SAFETY: `bytes_to_copy` is clamped to `data.len()`, so the source is
+                        // valid for it, and to `count`, the caller's own claim.
                         if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
                             return Err(Errno::EFAULT);
                         }
@@ -955,6 +969,7 @@ pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> Result<u6
     let mut kernel_buffer = vec![0u8; count];
     random::fill_bytes(&mut kernel_buffer);
 
+    // SAFETY: the length is the kernel buffer's own.
     if !unsafe { try_copy_to_user(buffer_ptr, kernel_buffer.as_ptr(), kernel_buffer.len()) } {
         return Err(Errno::EFAULT);
     }
@@ -1304,16 +1319,24 @@ fn write_dir_entries(
             reserved: [0, 0],
         };
 
+        // SAFETY: `entry` is a live `DirEntry` and `entry_size` is its own
+        // `size_of`, so the slice covers its storage and nothing else.
         let entry_bytes = unsafe {
             core::slice::from_raw_parts(&entry as *const DirEntry as *const u8, entry_size)
         };
+        // SAFETY: `written + entry_size + name_bytes.len()` was checked against
+        // `buffer_size` above, so the offset is inside the caller's buffer.
         let user_entry_ptr = unsafe { buffer_ptr.add(written) };
+        // SAFETY: `entry_bytes` is `entry_size` long by construction, and the
+        // same check covered the record at this offset.
         if !unsafe { try_copy_to_user(user_entry_ptr, entry_bytes.as_ptr(), entry_size) } {
             return Err(Errno::EFAULT);
         }
         written += entry_size;
 
+        // SAFETY: the same check covered the name that follows the record.
         let user_name_ptr = unsafe { buffer_ptr.add(written) };
+        // SAFETY: the length is the name slice's own.
         if !unsafe { try_copy_to_user(user_name_ptr, name_bytes.as_ptr(), name_bytes.len()) } {
             return Err(Errno::EFAULT);
         }
@@ -1411,11 +1434,15 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> Result
 
     let fds_bytes = count * core::mem::size_of::<SelectFd>();
 
+    // SAFETY: `fds` holds `count` entries -- inline or heap, the slice is
+    // `count` long -- and `fds_bytes` is `count * size_of::<SelectFd>()`.
     if !unsafe { try_copy_from_user(fds.as_mut_ptr() as *mut u8, fds_ptr as *const u8, fds_bytes) }
     {
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `entries` is that same `count`-long slice, so `fds_bytes` is
+    // its length in bytes here too.
     let copy_back = |entries: &[SelectFd]| unsafe {
         try_copy_to_user(fds_ptr as *mut u8, entries.as_ptr() as *const u8, fds_bytes)
     };
@@ -1689,10 +1716,15 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> Result<u64, Errno> {
         return Err(Errno::EINVAL);
     }
 
+    // SAFETY: the length is the path string's own, and `access_ok` already
+    // accepted `size` bytes at the destination, which `size` exceeds.
     if !unsafe { try_copy_to_user(buffer_ptr, cwd_bytes.as_ptr(), cwd_bytes.len()) } {
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: the terminator goes one past the path, and
+    // `cwd_bytes.len() + 1 > size` was refused above, so it is still inside
+    // the buffer `access_ok` accepted.
     if !unsafe { try_write_user(buffer_ptr.add(cwd_bytes.len()), 0u8) } {
         return Err(Errno::EFAULT);
     }
@@ -1890,6 +1922,8 @@ fn copy_in_iovecs(iov_ptr: *const IoVec, iovcnt: usize) -> Result<Vec<IoVec>, Er
     }
     let mut iovs = vec![IoVec { base: 0, len: 0 }; iovcnt];
     let bytes = iovcnt * core::mem::size_of::<IoVec>();
+    // SAFETY: `iovs` was allocated with `iovcnt` entries immediately above
+    // and `bytes` is `iovcnt * size_of::<IoVec>()`.
     if !unsafe { try_copy_from_user(iovs.as_mut_ptr() as *mut u8, iov_ptr as *const u8, bytes) } {
         return Err(Errno::EFAULT);
     }
@@ -2294,6 +2328,8 @@ pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> Result<u64, Errno> {
 
     let fds = [master_fd, slave_fd];
     let fds_bytes = core::mem::size_of_val(&fds);
+    // SAFETY: `fds_bytes` is `size_of_val` of the two-element array, so the
+    // source is valid for the length named.
     if !unsafe { try_copy_to_user(pipefd_ptr as *mut u8, fds.as_ptr() as *const u8, fds_bytes) } {
         {
             let mut table = fd_table.lock();

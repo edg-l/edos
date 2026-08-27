@@ -98,6 +98,9 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> Result<u64,
         } else {
             let mut title_bytes = [0u8; 256];
             for (i, byte) in title_bytes.iter_mut().enumerate() {
+                // SAFETY: `i` is bounded by the 256-byte title buffer being filled, and
+                // each byte goes through `try_read_user`, which range-checks the address
+                // and traps the fault rather than taking it.
                 if let Some(b) = unsafe { try_read_user(ptr.add(i)) } {
                     if b == 0 {
                         break;
@@ -268,6 +271,8 @@ pub fn sys_window_poll(
         let event_size = core::mem::size_of::<WindowEvent>();
         let bytes_to_copy = count * event_size;
 
+        // SAFETY: `events` holds `count` entries, so `bytes_to_copy` is exactly
+        // its length in bytes.
         if !unsafe {
             try_copy_to_user(
                 events_ptr as *mut u8,
@@ -377,10 +382,15 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64, flags: u64) -> Result<u64,
 
     let entry_size = core::mem::size_of::<WindowListEntry>();
     for (i, entry) in entries.iter().enumerate() {
+        // SAFETY: `entry` is a live `WindowListEntry` out of `entries` and
+        // `entry_size` is its own `size_of`, so the slice covers its storage and
+        // nothing else.
         let entry_bytes = unsafe {
             core::slice::from_raw_parts(entry as *const WindowListEntry as *const u8, entry_size)
         };
 
+        // SAFETY: `entry_bytes` is `entry_size` long by construction; the
+        // destination is the caller's buffer, range-checked inside.
         if !unsafe {
             try_copy_to_user(
                 buffer_ptr.add(i * entry_size),
@@ -448,6 +458,9 @@ pub fn sys_window_send_event(
     }
 
     // Read the event from user space
+    // SAFETY: `WindowEvent` is the plain integer record from
+    // `libs/window-abi`, so any byte pattern userspace supplies is a valid
+    // value of it.
     let event: WindowEvent = match unsafe { try_read_user(event_ptr) } {
         Some(e) => e,
         None => {
@@ -680,6 +693,8 @@ pub fn sys_clipboard_set(which: u64, buffer_ptr: *const u8, len: usize) -> Resul
         // Copied before the lock is taken: a copy from a user pointer can
         // demand-fault, and parking on a page fill under a spin lock leaves
         // every other CPU spinning on it for the duration of the I/O.
+        // SAFETY: `bytes` was sized to `len` immediately above, so the
+        // destination holds the whole copy.
         if !unsafe { try_copy_from_user(bytes.as_mut_ptr(), buffer_ptr, len) } {
             return Err(Errno::EFAULT);
         }
@@ -710,6 +725,8 @@ pub fn sys_clipboard_get(which: u64, buffer_ptr: *mut u8, len: usize) -> Result<
         // Outside the clipboard lock, which `clipboard::get` has already
         // released, for the reason `sys_window_list` copies outside the
         // registry lock.
+        // SAFETY: `copy_len` is clamped to `bytes.len()`, so the source is
+        // valid for it, and to `len`, which `access_ok` already accepted.
         if !unsafe { try_copy_to_user(buffer_ptr, bytes.as_ptr(), copy_len) } {
             return Err(Errno::EFAULT);
         }

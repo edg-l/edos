@@ -210,6 +210,9 @@ fn capture_strings(rec: &mut TraceRecord, info: &table::SyscallInfo, args: &[u64
             continue;
         }
 
+        // SAFETY: `offset` is the running total of what earlier arguments wrote
+        // and `cap` is `TRACE_STR_CAP - offset`, checked non-zero just above, so
+        // the offset lands inside `rec.strs`.
         let dst = unsafe { rec.strs.as_mut_ptr().add(offset) };
         let Some(ptr) = user_ptr(args[i]) else {
             rec.str_lens[slot] = TRACE_STR_FAULT;
@@ -223,12 +226,16 @@ fn capture_strings(rec: &mut TraceRecord, info: &table::SyscallInfo, args: &[u64
             let want = declared.min(cap);
             if want == 0 {
                 Ok(0)
+            // SAFETY: `want` is clamped to `cap`, the space left in `rec.strs`
+            // behind `dst`; `ptr` came from `user_ptr` and is checked again inside.
             } else if unsafe { try_copy_from_user(dst, ptr, want) } {
                 Ok(want)
             } else {
                 Err(UAccessError::Fault)
             }
         } else {
+            // SAFETY: `cap` is exactly the space left behind `dst`, and that is the
+            // most `try_copy_string_from_user` will write.
             match unsafe { try_copy_string_from_user(dst, ptr, cap) } {
                 // No terminator within the space left: keep the prefix, which
                 // `try_copy_string_from_user` has already written.
@@ -316,6 +323,8 @@ pub fn record_exit(call: &TracedCall, ret: u64) {
     {
         let want = (ret as usize).min(TRACE_STR_CAP);
         if let Some(ptr) = user_ptr(call.args[index]) {
+            // SAFETY: `want` is clamped to `TRACE_STR_CAP`, the whole of
+            // `rec.strs`, and nothing has written into it on this path.
             rec.str_lens[0] = if unsafe { try_copy_from_user(rec.strs.as_mut_ptr(), ptr, want) } {
                 want as u16
             } else {
@@ -523,6 +532,8 @@ pub fn sys_trace_read(dst: *mut TraceRecord, max: u64, timeout_ms: u64) -> Resul
     }
 
     let bytes = core::mem::size_of_val(batch.as_slice());
+    // SAFETY: `bytes` is `size_of_val` of the batch's own slice, so the
+    // source is valid for the length named.
     if !unsafe { try_copy_to_user(dst as *mut u8, batch.as_ptr() as *const u8, bytes) } {
         // The records are already out of the ring; a tracer that hands the
         // kernel an unwritable buffer loses them, which is its own doing.

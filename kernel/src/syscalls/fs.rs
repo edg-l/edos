@@ -117,6 +117,8 @@ fn read_user_str(value_ptr: *const u8) -> Result<CString, Errno> {
     }
 
     let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    // SAFETY: `buf` is a `MAX_PATH_LEN` array and that is the cap passed,
+    // so the copy cannot run past its end.
     let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), value_ptr, MAX_PATH_LEN) }
     {
         Ok(len) => len,
@@ -358,10 +360,15 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> Result<u64, Errno> {
             break;
         }
 
+        // SAFETY: `bytes` is `bytemuck::bytes_of` a live `SysPartition`, so the
+        // length is its own; the loop breaks before `written` can exceed the
+        // caller's `size`.
         if !unsafe { try_copy_to_user(current_ptr, bytes.as_ptr(), bytes.len()) } {
             return Err(Errno::EFAULT);
         }
         written += bytes.len();
+        // SAFETY: the same bound -- `written + bytes.len()` was checked against
+        // `size` above, so the walked pointer stays inside the caller's buffer.
         current_ptr = unsafe { current_ptr.add(bytes.len()) };
     }
 
@@ -399,14 +406,20 @@ pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> Result<u64, E
             partition_index: mount.partition_index as u64,
         };
 
+        // SAFETY: `entry` is a live `RawMountEntry` and `entry_size` is its own
+        // `size_of`, so the slice covers its storage and nothing else.
         let entry_bytes = unsafe {
             core::slice::from_raw_parts((&entry as *const RawMountEntry).cast::<u8>(), entry_size)
         };
 
+        // SAFETY: `written + total_size` was checked against `buffer_size`
+        // above, so the offset and the `entry_size` behind it are both inside the
+        // caller's buffer.
         if !unsafe { try_copy_to_user(buffer_ptr.add(written), entry_bytes.as_ptr(), entry_size) } {
             return Err(Errno::EFAULT);
         }
         written += entry_size;
+        // SAFETY: the same check covered the name that follows the record.
         if !unsafe {
             try_copy_to_user(
                 buffer_ptr.add(written),
@@ -538,6 +551,8 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut Stat) -> Result<u64, Errno> {
         }
     };
 
+    // SAFETY: the value is a live local and `try_write_user` writes exactly
+    // its `size_of` to the caller's pointer, which it range-checks.
     if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
         return Err(Errno::EFAULT);
     }
@@ -590,6 +605,7 @@ pub fn sys_fstatat(
         }
     };
 
+    // SAFETY: as above -- a live local written by its own size.
     if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
         return Err(Errno::EFAULT);
     }
@@ -705,6 +721,8 @@ pub fn sys_symlinkat(
     }
 
     let mut target_buf: PathBuf = [0u8; MAX_PATH_LEN];
+    // SAFETY: `target_len` was checked against `MAX_PATH_LEN`, which is
+    // `target_buf`'s length, above.
     if !unsafe { try_copy_from_user(target_buf.as_mut_ptr(), target_ptr, target_len) } {
         return Err(Errno::EFAULT);
     }
@@ -761,6 +779,8 @@ pub fn sys_readlinkat(
     };
 
     let count = target.len().min(buf_len);
+    // SAFETY: `count` is clamped to `target.len()`, so the source is valid
+    // for it, and to `buf_len`, the caller's own claim about its buffer.
     if count > 0 && !unsafe { try_copy_to_user(buf, target.as_ptr(), count) } {
         return Err(Errno::EFAULT);
     }
@@ -845,6 +865,8 @@ pub fn sys_utimensat(
             tv_sec: 0,
             tv_nsec: 0,
         }; 2];
+        // SAFETY: `pair` is two `UserTimespec`, which is exactly the length
+        // named.
         let copied = unsafe {
             try_copy_from_user(
                 pair.as_mut_ptr() as *mut u8,
@@ -931,6 +953,8 @@ pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> Result<u
     let copy_len = type_bytes.len().min(15);
     raw.fs_type[..copy_len].copy_from_slice(&type_bytes[..copy_len]);
 
+    // SAFETY: the source is a live `RawStatFs` and `needed` is its
+    // `size_of`, already compared against the caller's `buf_len` above.
     if !unsafe { try_copy_to_user(buf, &raw as *const RawStatFs as *const u8, needed) } {
         return Err(Errno::EFAULT);
     }

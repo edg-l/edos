@@ -31,6 +31,9 @@ pub fn sys_profile_ctl(op: u64, arg: u64) -> Result<u64, Errno> {
         }
         ctl::STATS => {
             let stats = sampler::stats();
+            // SAFETY: `stats` is a live local, so the source is valid for exactly
+            // the `size_of::<Stats>()` bytes named. The destination is the caller's
+            // pointer, which `try_copy_to_user` range-checks and faults through.
             let ok = unsafe {
                 try_copy_to_user(
                     arg as *mut u8,
@@ -78,6 +81,8 @@ pub fn sys_profile_read(dst: *mut Sample, max: u64, timeout_ms: u64) -> Result<u
     }
 
     let bytes = core::mem::size_of_val(batch.as_slice());
+    // SAFETY: `bytes` is `size_of_val` of the batch's own slice, so the
+    // source is valid for the length named.
     if !unsafe { try_copy_to_user(dst as *mut u8, batch.as_ptr() as *const u8, bytes) } {
         // The samples are already out of the ring; a profiler that hands the
         // kernel an unwritable buffer loses them, which is its own doing.

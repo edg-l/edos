@@ -11333,3 +11333,41 @@ Two traps in this:
   failure is `x86_64-0.15.4` not implementing `Step::forward_overflowing` — a
   dependency error that looks nothing like a toolchain mismatch. Run it with
   the cwd inside `kernel/`, or go through `make -C kernel clippy`.
+
+## `kernel/src/syscalls/` is the second module clean under `undocumented_unsafe_blocks`
+
+All 107 `unsafe {` across its thirteen files (`mod.rs` 27, `net.rs` 23,
+`io.rs` 20, `fs.rs` 12, `window.rs` 7, `trace.rs` 5, `memory.rs`/`sigframe.rs`/
+`sync.rs` 3 each, `profile.rs` 2, `ioctl/mod.rs` 2) carry a `// SAFETY:`, and
+`mod syscalls;` in `main.rs` denies the lint on its own declaration the way
+`mod memory;` does. 608 blocks remain outside the two, `usb/xhci/mod.rs` (77),
+`ahci/port.rs` (38), `virtio/gpu.rs` (33), `thread/scheduler.rs` (28) and
+`allocator.rs` (21) first.
+
+**What the comments say, and why it is not boilerplate.** Roughly eighty of the
+107 are calls into `util/uaccess`: `try_copy_to_user`, `try_copy_from_user`,
+`try_read_user`, `try_write_user`, `try_copy_string_from_user`. Those helpers
+already null-check and `access_ok` the *user* address and trap a fault instead
+of taking it, so a comment that argues about the user pointer is arguing about
+the half the helper handles. What the caller actually has to uphold is the
+*kernel* side, and it is exactly where syscall length bugs live:
+
+- a length that is the source slice's own (`bytes.len()`, `size_of_val`),
+- a length clamped against both the kernel buffer and the caller's claim
+  (`data.len().min(count)`),
+- an offset into a user buffer whose `written + needed <= size` check is
+  several lines up (`sys_list_mounts`, `write_dir_entries`, `sys_get_partitions`),
+- a `T: Copy` read out of userspace, where the claim is that `T` is plain
+  integer data with no invalid bit pattern (`SockAddrIn`, `WindowEvent`,
+  `SchedAttr`, `Timespec`, `SpawnArgs`).
+
+Each comment names which of those bounds *its* length. A reviewer changing a
+buffer's size now has the claim it would break written next to it.
+
+**Trap: the lint wants the comment adjacent to the block, not to the
+statement.** `kernel/src/syscalls/ioctl/mod.rs` has two sites shaped
+`if copy_in && !unsafe { ... }`. A `// SAFETY:` above the `if` does not satisfy
+`undocumented_unsafe_blocks` — it is not the preceding line of the *block*. It
+has to go between the `if` condition's first operand and the `&&`, which
+`cargo fmt` then keeps in place. The error is identical to having written no
+comment at all, so the fix is not obvious from the diagnostic.

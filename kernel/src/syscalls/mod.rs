@@ -185,11 +185,21 @@ pub unsafe fn setup_syscall() {
 
     let mut efer = Efer::read();
     efer |= EferFlags::SYSTEM_CALL_EXTENSIONS;
+    // SAFETY: writing EFER's SCE bit is what arms SYSCALL, and STAR, LSTAR
+    // and SFMASK were all programmed above, so the entry point the first
+    // SYSCALL lands on is set. Called once per core.
     unsafe { Efer::write(efer) };
 
     println!("SYSCALL/SYSRET enabled");
 }
 
+/// The LSTAR target: where the CPU lands on a `SYSCALL` from ring 3.
+///
+/// # Safety
+///
+/// Never called from Rust. The only caller is the CPU, which arrives with
+/// RCX holding the user return address, R11 the user RFLAGS and the stack
+/// still on the user side, and this body is written to that entry state.
 #[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
     /*
@@ -636,6 +646,9 @@ macro_rules! syscall_arms {
 table::syscall_table!(syscall_arms);
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
+    // SAFETY: `syscall_entry` passes the register frame it just pushed on
+    // this thread's kernel stack, so the pointer is non-null and lives for
+    // the whole call.
     let ctx = unsafe { ctx.as_mut().unwrap() };
 
     // Beware with some sched() calls, they call hlt which might hang if we don't have interrupts enabled.
@@ -704,6 +717,7 @@ fn sys_clock_gettime(buf_ptr: *mut u8) -> Result<u64, Errno> {
     };
 
     let data = nanos.to_le_bytes();
+    // SAFETY: `data` is an 8-byte array and 8 is the length named.
     if !unsafe { try_copy_to_user(buf_ptr, data.as_ptr(), 8) } {
         return Err(Errno::EFAULT);
     }
@@ -723,6 +737,8 @@ fn sys_clock_settime(buf_ptr: *const u8) -> Result<u64, Errno> {
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `u64` has no invalid bit patterns, so whatever the caller's
+    // pointer holds is a valid value; the address is range-checked inside.
     let Some(nanos) = (unsafe { try_read_user(buf_ptr as *const u64) }) else {
         return Err(Errno::EFAULT);
     };
@@ -1067,6 +1083,9 @@ fn sched_attr_target(tid: u64) -> Option<Arc<Thread>> {
 /// sides, so a program written against a different scheduler's range gets the
 /// nearest thing this one will serve instead of an error it has no answer for.
 fn sys_sched_setattr(tid: u64, attr_ptr: *const SchedAttr) -> Result<u64, Errno> {
+    // SAFETY: `SchedAttr` is plain integer data from `libs/syscall-abi`, so
+    // any byte pattern userspace supplies is a valid value of it. The fields
+    // are range-clamped below rather than trusted.
     let Some(attr) = (unsafe { try_read_user(attr_ptr) }) else {
         return Err(Errno::EFAULT);
     };
@@ -1088,6 +1107,8 @@ fn sys_sched_getattr(tid: u64, attr_ptr: *mut SchedAttr) -> Result<u64, Errno> {
         _pad: 0,
         slice_ns: thread.request_ns(),
     };
+    // SAFETY: `attr` is a live local and `try_write_user` writes exactly
+    // its `size_of` to the caller's pointer, which it range-checks.
     if !unsafe { try_write_user(attr_ptr, attr) } {
         return Err(Errno::EFAULT);
     }
@@ -1121,6 +1142,8 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> Result<u64, Errno>
 
     // Fast path: already exited
     if let Some(code) = take_thread_exit_code(target) {
+        // SAFETY: a `u64` exit code written by its own size to a pointer
+        // checked non-null just before.
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
             return Err(Errno::EFAULT);
         }
@@ -1131,6 +1154,7 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> Result<u64, Errno>
     // going to exit while it is suspended and a caller that blocked here would
     // never come back.
     if has_stopped() {
+        // SAFETY: as above.
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
             return Err(Errno::EFAULT);
         }
@@ -1170,6 +1194,7 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> Result<u64, Errno>
     }
 
     if !EXITED_THREADS.has_exited(target) {
+        // SAFETY: as above.
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
             return Err(Errno::EFAULT);
         }
@@ -1178,6 +1203,7 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> Result<u64, Errno>
 
     // Now consume the exit code
     if let Some(code) = take_thread_exit_code(target) {
+        // SAFETY: as above.
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
             return Err(Errno::EFAULT);
         }
@@ -1230,6 +1256,8 @@ pub struct Timespec {
 /// delivers to a sleeping thread either is ignored or kills it, so the EINTR
 /// case a caller would read the remainder for cannot happen.
 fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> Result<u64, Errno> {
+    // SAFETY: `Timespec` is two integers, so any byte pattern is a valid
+    // value; the fields are range-checked below rather than trusted.
     let Some(req) = (unsafe { try_read_user(req_ptr) }) else {
         return Err(Errno::EFAULT);
     };
@@ -1291,6 +1319,8 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> Result<u64, Errno> {
     // Copy file descriptor numbers to user space
     let pipefd = [read_fd, write_fd];
     let pipefd_bytes = core::mem::size_of_val(&pipefd);
+    // SAFETY: `pipefd_bytes` is `size_of_val` of the two-element array, so
+    // the source is valid for the length named.
     if !unsafe {
         try_copy_to_user(
             pipefd_ptr as *mut u8,
@@ -1455,6 +1485,9 @@ fn parse_user_string_array(
     let mut terminated = false;
 
     for index in 0..max_count {
+        // SAFETY: `index` is bounded by `max_count`, the caller's declared
+        // array length, and a pointer-sized read has no invalid bit patterns.
+        // An array shorter than it claimed faults and is trapped, not taken.
         let current_ptr = match unsafe { try_read_user(ptr.add(index)) } {
             Some(p) => p,
             None => return Err(Errno::EFAULT),
@@ -1807,6 +1840,9 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> Result<u64, Errno> {
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `SpawnArgs` is plain integer and raw-pointer data, so any
+    // byte pattern is a valid value; every pointer in it is validated by the
+    // `try_*` helpers before it is followed.
     let args: SpawnArgs = match unsafe { try_read_user(args_ptr) } {
         Some(a) => a,
         None => {
@@ -2002,6 +2038,10 @@ fn sys_execve(
     // preemption a dangling CR3.
     let (parts, old) = install_image(&thread, &user_arc, &info, image);
 
+    // SAFETY: `install_image` published `parts.new_cr3` on the thread
+    // before this point, so the table CR3 now names is the one a preemption
+    // would reload, and the old one is still alive in `old` to be torn down
+    // below.
     unsafe { Cr3::write(parts.new_cr3.0, parts.new_cr3.1) };
 
     let DetachedAddressSpace {
@@ -2013,6 +2053,9 @@ fn sys_execve(
     crate::thread::thread::flush_shared_mappings(&vmas);
     crate::thread::thread::release_mappings(&mut memory_manager, &vmas, pid, stack_top);
     drop(memory_manager);
+    // SAFETY: the old PML4 was detached by `install_image` and CR3 no
+    // longer names it, its mappings were released just above, and nothing
+    // else in the kernel refers to it.
     unsafe { frame_allocator().deallocate_frame(pml4) };
 
     let LoadedImageParts {
@@ -2164,6 +2207,9 @@ fn release_user_mappings_of_image(mut image: crate::thread::thread::LoadedImage)
     use crate::memory::frame_allocator::frame_allocator;
 
     image.memory_manager.clean_lower_half();
+    // SAFETY: `clean_lower_half` has just released everything the image
+    // mapped, and the frame belongs to an image that was never installed on a
+    // thread, so no CR3 can name it.
     unsafe { frame_allocator().deallocate_frame(image.pml4_frame) };
 }
 
@@ -2446,6 +2492,9 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> Result<u64, Errno> {
     // runs out of frames has nothing but its own partial tree to give back.
     let child_pml4_frame = {
         let parent_vmas = ranked_lock!(RANK_VMAS, "user.vmas", parent_user_read.vmas);
+        // SAFETY: `parent_cr3` is this thread's live PML4 and `parent_vmas` is
+        // the VMA set describing it, held for the walk, so the tree being copied
+        // cannot change underneath it.
         match unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_vmas) } {
             Some(frame) => frame,
             None => {
@@ -2540,7 +2589,14 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> Result<u64, Errno> {
     // Explicitly clone reloc_table (Arc clone, cheap) and reloc_vma_range from
     // the parent so the child can apply lazy relocs after COW faults.
     let child_mm = {
+        // SAFETY: `child_pml4_frame` came from `clone_user_page_tables_cow`
+        // just above and is a live level-4 table; the HHDM it is reached through
+        // maps it.
         let child_page_table = unsafe { get_level_4_table((child_pml4_frame, parent_cr3.1)) };
+        // SAFETY: `phys_offset` is the HHDM base the whole kernel maps physical
+        // memory at, which is what `child_page_table`'s entries are relative to.
+        // The child's table is not installed on any CPU yet, so this mapper is
+        // the only thing that can reach it.
         let table = unsafe { OffsetPageTable::new(child_page_table, phys_offset) };
         let mut mm = MemoryManager::new(table);
         mm.pml4_frame = Some(child_pml4_frame);
@@ -2647,6 +2703,9 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> Result<u64, Errno> {
         fpu: {
             // Save parent's current FPU/SSE state and copy to child.
             let mut fpu_state = crate::drivers::fpu::FpuState::default();
+            // SAFETY: `fpu_state` is a live, correctly aligned `FpuState` and this
+            // runs on the parent's own CPU, so what is saved is the parent's current
+            // register state.
             unsafe { crate::drivers::fpu::save_fpu_state(&mut fpu_state) };
             core::cell::UnsafeCell::new(fpu_state)
         },
@@ -2701,6 +2760,9 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> Result<u64, Errno> {
     crate::thread::util::queue_spawn_thread(child_thread);
 
     // Restore parent's address space before returning to userspace.
+    // SAFETY: `parent_cr3` is the parent's own PML4, still live -- the
+    // child got a copy, not the original -- and this restores it before the
+    // return to userspace.
     unsafe { Cr3::write(parent_cr3.0, parent_cr3.1) };
 
     Ok(child_id.0)
@@ -2722,6 +2784,8 @@ pub fn copy_user_path(buf: &mut PathBuf, ptr: *const u8) -> Result<&str, Errno> 
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `buf` is a `MAX_PATH_LEN` array and that is the cap passed,
+    // so the copy cannot run past its end.
     let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), ptr, MAX_PATH_LEN) } {
         Ok(len) => len,
         Err(UAccessError::TooLong) => return Err(Errno::EINVAL),
@@ -2749,6 +2813,8 @@ pub fn copy_user_path_len(buf: &mut PathBuf, ptr: *const u8, len: usize) -> Resu
         return Err(Errno::EINVAL);
     }
 
+    // SAFETY: `len` was checked against `MAX_PATH_LEN`, which is `buf`'s
+    // length, just above.
     if !unsafe { try_copy_from_user(buf.as_mut_ptr(), ptr, len) } {
         return Err(Errno::EFAULT);
     }
@@ -2762,6 +2828,8 @@ fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccess
     }
 
     let mut buf = vec![0u8; max_len];
+    // SAFETY: `buf` was allocated with `max_len` bytes immediately above,
+    // which is the cap passed.
     let len = unsafe { try_copy_string_from_user(buf.as_mut_ptr(), ptr, max_len) }?;
 
     buf.truncate(len);
@@ -2782,6 +2850,8 @@ fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> R
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `[u8; 4]` has no invalid bit patterns, so whatever the
+    // caller's pointer holds is a valid value.
     let dst_ip = match unsafe { try_read_user(dst_ip_ptr) } {
         Some(ip) => ip,
         None => {
@@ -2861,6 +2931,8 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> Result<u64, Errno> {
 
     let bytes = text.as_bytes();
     let copy_len = bytes.len().min(buf_len);
+    // SAFETY: `copy_len` is clamped to `bytes.len()`, so the source is
+    // valid for it, and to `buf_len`, the caller's claim about its buffer.
     if !unsafe { try_copy_to_user(buf_ptr, bytes.as_ptr(), copy_len) } {
         return Err(Errno::EFAULT);
     }

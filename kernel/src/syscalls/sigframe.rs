@@ -109,6 +109,9 @@ fn build_frame(thread: &Thread, ctx: &mut SyscallContext, signum: u32, handler: 
         return false;
     }
 
+    // SAFETY: the source is a live local `SigFrame` and the length is its
+    // own `size_of`; `frame_base` was checked against `USER_VA_END` above and
+    // is range-checked again inside.
     let wrote_frame = unsafe {
         try_copy_to_user(
             frame_base as *mut u8,
@@ -116,6 +119,7 @@ fn build_frame(thread: &Thread, ctx: &mut SyscallContext, signum: u32, handler: 
             size_of::<SigFrame>(),
         )
     };
+    // SAFETY: the source is a live local `u64` and the length matches it.
     let wrote_return = unsafe {
         try_copy_to_user(
             entry_rsp as *mut u8,
@@ -150,6 +154,9 @@ pub fn sys_sigreturn(ctx: &mut SyscallContext) -> Result<u64, Errno> {
         saved: *ctx,
     };
     let read = ctx.rsp < USER_VA_END
+        // SAFETY: the destination is a live local `SigFrame` and the length is
+        // its own `size_of`. `SigFrame` is plain integer data, so whatever byte
+        // pattern userspace left at `rsp` is a valid value of it.
         && unsafe {
             try_copy_from_user(
                 &mut frame as *mut SigFrame as *mut u8,

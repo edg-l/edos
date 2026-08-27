@@ -64,6 +64,8 @@ pub fn sys_ioctl(
                 let mut buffer: Vec<u8> = vec![0u8; arg_len];
 
                 if copy_in
+                    // SAFETY: `buffer` was allocated with `arg_len` bytes
+                    // immediately above, which is the length named.
                     && !unsafe {
                         try_copy_from_user(buffer.as_mut_ptr(), user_ptr as *const u8, arg_len)
                     }
@@ -85,6 +87,9 @@ pub fn sys_ioctl(
                 match result {
                     Ok(value) => {
                         if copy_out
+                            // SAFETY: `buffer` is still the `arg_len`
+                            // allocation made above; the driver wrote into it
+                            // in place and cannot have changed its length.
                             && !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) }
                         {
                             return Err(Errno::EFAULT);

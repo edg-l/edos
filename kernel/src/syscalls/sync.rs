@@ -126,6 +126,9 @@ fn futex_wait_inner(
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `addr` is the caller's pointer to a `u32`, which has no
+    // invalid bit patterns; the address is range-checked and a fault on it is
+    // trapped rather than taken.
     let current = unsafe { try_read_user(addr) }.ok_or(Errno::EFAULT)?;
 
     if current != expected {
@@ -146,6 +149,8 @@ fn futex_wait_inner(
     let fault = Cell::new(None);
     let loan = FutexLoan::lend(owner_tid);
     let outcome = queue.wait_until_timeout(
+        // SAFETY: as above. The word is re-read on every wake, which is what
+        // makes the compare-and-park free of the lost-update race.
         || match unsafe { try_read_user(addr) } {
             Some(value) => value != expected,
             None => {
@@ -164,6 +169,8 @@ fn futex_wait_inner(
 
     let result = match outcome {
         WaitOutcome::Ready => 1,
+        // SAFETY: as above -- the word is read once more after the park to tell
+        // a real wake from a timeout.
         WaitOutcome::Parked => match unsafe { try_read_user(addr) } {
             Some(value) => {
                 if value != expected {

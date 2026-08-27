@@ -445,7 +445,7 @@ pub fn flush_shared_vma_pages(
         }
     };
     for (idx, page) in &work {
-        // Safety: no mutable aliasing; the page frame is exclusively
+        // SAFETY: no mutable aliasing; the page frame is exclusively
         // referenced by the cache and mapped read-only in userspace PTEs.
         let buf = unsafe { page.as_slice() };
         match pc_ops.flush_page(inode.ino, *idx, buf, 4096) {
@@ -683,6 +683,10 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> Result<u64, Errno> {
                     continue;
                 }
 
+                // SAFETY: `page` is mapped in this address space -- `translate` just
+                // said so -- and `mm.mapper` is that space's own mapper. Only permission
+                // bits move, so no frame changes hands; the flush is ignored because the
+                // whole span is shot down after the mapper lock is dropped.
                 if let Ok(flush) = unsafe { mm.mapper.update_flags(page, new_flags) } {
                     flush.ignore();
                 }
@@ -758,6 +762,9 @@ pub fn sys_munmap(addr: u64, length: u64) -> Result<u64, Errno> {
                 }
                 let mut fa = frame_allocator();
                 for frame in frames {
+                    // SAFETY: the frame was unmapped from the only address space that
+                    // referenced it and every CPU's cached entry dropped by the shootdown
+                    // above, so nothing can reach it once it is back in the allocator.
                     unsafe { fa.deallocate_frame(frame) };
                 }
             }

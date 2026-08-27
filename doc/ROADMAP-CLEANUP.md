@@ -638,12 +638,18 @@ previously-bare `unsafe fn` (`active_level_4_table`, `get_level_4_table`,
 `main.rs` denies `undocumented_unsafe_blocks` on its own declaration so the
 module cannot regress while the rest catches up. Three identical
 `from_raw_parts_mut` blocks in `find_bitmap_storage` became one `claim_storage`
-helper on the way. 662 blocks remain, `usb/xhci/mod.rs` (77), `ahci/port.rs`
-(38), `virtio/gpu.rs` (33), `syscalls/mod.rs` (27) and `thread/scheduler.rs`
-(26) first; `syscalls/` is the next module. The lint sits commented out in
-`kernel/Cargo.toml`'s `[lints.clippy]` beside the three that are on: moving it
-up from the last module's `mod` declaration is the commit that closes this
-entry.
+helper on the way. `syscalls/` is the second module done: all 107 blocks across
+its thirteen files carry a `// SAFETY:`, `syscall_entry` -- the LSTAR target --
+carries the `# Safety` section saying the CPU is its only caller and what entry
+state it is written to, and `mod syscalls;` denies the lint too. Most of those
+107 are calls into `util/uaccess`, whose helpers range-check the user address
+and trap the fault, so what a caller actually has to uphold is the *kernel*
+side: each comment names what bounds its own length. 608 blocks remain,
+`usb/xhci/mod.rs` (77), `ahci/port.rs` (38), `virtio/gpu.rs` (33),
+`thread/scheduler.rs` (28) and `allocator.rs` (21) first. The lint sits
+commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
+are on: moving it up from the last module's `mod` declaration is the commit
+that closes this entry.
 
 **I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
 sections. No lint finds these and none can: a caller of an undocumented
@@ -652,8 +658,8 @@ the smaller of the two.
 
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, the lint is denied in `memory/` and `syscalls/` with no suppressions,
-and every `unsafe fn` in those two modules carries a `# Safety` section.
-`memory/` is done; `syscalls/` is not.
+and every `unsafe fn` in those two modules carries a `# Safety` section. Both
+are done; what is left is the rest of the tree, module by module.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

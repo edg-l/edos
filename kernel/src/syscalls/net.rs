@@ -56,6 +56,9 @@ fn write_sockaddr_out(
     let capacity = if addr_len_ptr.is_null() {
         full
     } else {
+        // SAFETY: `u32` has no invalid bit patterns, so whatever the caller's
+        // capacity word holds is a valid value; a bad address faults and is
+        // trapped.
         unsafe { try_read_user(addr_len_ptr) }.ok_or(Errno::EFAULT)? as usize
     };
 
@@ -66,11 +69,17 @@ fn write_sockaddr_out(
         zero: [0u8; 8],
     };
     let bytes =
+        // SAFETY: `sockaddr` is a live local and `full` is its own `size_of`,
+        // so the slice covers its storage and nothing else.
         unsafe { core::slice::from_raw_parts(&sockaddr as *const SockAddrIn as *const u8, full) };
     let copied = capacity.min(full);
+    // SAFETY: `copied` is clamped to `full`, the length of `bytes`, and to
+    // the capacity the caller declared.
     if copied > 0 && !unsafe { try_copy_to_user(addr_ptr as *mut u8, bytes.as_ptr(), copied) } {
         return Err(Errno::EFAULT);
     }
+    // SAFETY: a `u32` written by its own size to the caller's pointer,
+    // checked non-null here and range-checked inside.
     if !addr_len_ptr.is_null() && !unsafe { try_write_user(addr_len_ptr, full as u32) } {
         return Err(Errno::EFAULT);
     }
@@ -131,6 +140,8 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> Result<u
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `SockAddrIn` is plain integer data, so any byte pattern is a
+    // valid value; `addr_len` was checked to cover it above.
     let addr: SockAddrIn = match unsafe { try_read_user(addr_ptr) } {
         Some(a) => a,
         None => {
@@ -188,6 +199,8 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> Resul
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: as above -- plain integer data, and `addr_len` was checked to
+    // cover it.
     let addr: SockAddrIn = match unsafe { try_read_user(addr_ptr) } {
         Some(a) => a,
         None => {
@@ -392,6 +405,8 @@ pub fn sys_sendto(
 
     // Determine destination address
     let dst = if !addr_ptr.is_null() && addr_len >= core::mem::size_of::<SockAddrIn>() as u64 {
+        // SAFETY: as above -- plain integer data, behind the same `addr_len`
+        // check.
         let addr: SockAddrIn = match unsafe { try_read_user(addr_ptr) } {
             Some(a) => a,
             None => {
@@ -416,6 +431,8 @@ pub fn sys_sendto(
     const MAX_SENDTO_SIZE: usize = 65536; // 64 KiB
     let count = count.min(MAX_SENDTO_SIZE);
     let mut data = alloc::vec![0u8; count];
+    // SAFETY: `data` was allocated with `count` bytes immediately above,
+    // after `count` was capped at `MAX_SENDTO_SIZE`.
     if !unsafe { crate::util::uaccess::try_copy_from_user(data.as_mut_ptr(), buf_ptr, count) } {
         return Err(Errno::EFAULT);
     }
@@ -555,6 +572,8 @@ pub fn sys_recvfrom(
     };
 
     let bytes_to_copy = data.len().min(count);
+    // SAFETY: `bytes_to_copy` is clamped to `data.len()`, so the source is
+    // valid for it, and to `count`, the caller's own claim.
     if !unsafe { try_copy_to_user(buf_ptr, data.as_ptr(), bytes_to_copy) } {
         return Err(Errno::EFAULT);
     }
@@ -774,6 +793,8 @@ pub fn sys_setsockopt(
             if val_len < core::mem::size_of::<Timeval>() as u32 {
                 return Err(Errno::EINVAL);
             }
+            // SAFETY: `Timeval` is two integers, so any byte pattern is a valid
+            // value; `val_len` was checked to cover it above.
             let tv: Timeval = match unsafe { try_read_user(val_ptr as *const Timeval) } {
                 Some(v) => v,
                 None => {
@@ -804,6 +825,8 @@ pub fn sys_setsockopt(
             if val_len < 4 {
                 return Err(Errno::EINVAL);
             }
+            // SAFETY: `i32` has no invalid bit patterns, and `val_len` was checked
+            // to be at least four bytes above.
             let val: i32 = match unsafe { try_read_user(val_ptr as *const i32) } {
                 Some(v) => v,
                 None => {
@@ -853,10 +876,14 @@ pub fn sys_getsockopt(
                 },
             };
             drop(s);
+            // SAFETY: a live local `Timeval` written by its own size to the
+            // caller's pointer, which is range-checked inside.
             if !unsafe { try_write_user(val_ptr as *mut Timeval, tv) } {
                 return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null()
+                // SAFETY: a `usize`-derived `u32` written by its own size to a pointer
+                // checked non-null here.
                 && !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<Timeval>() as u32) }
             {
                 return Err(Errno::EFAULT);
@@ -868,10 +895,13 @@ pub fn sys_getsockopt(
                 l_onoff: 0,
                 l_linger: 0,
             };
+            // SAFETY: a live local `LingerVal` written by its own size.
             if !unsafe { try_write_user(val_ptr as *mut LingerVal, linger) } {
                 return Err(Errno::EFAULT);
             }
             if !val_len_ptr.is_null()
+                // SAFETY: a `u32` written by its own size to a pointer checked non-null
+                // here.
                 && !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<LingerVal>() as u32) }
             {
                 return Err(Errno::EFAULT);
@@ -884,9 +914,12 @@ pub fn sys_getsockopt(
             } else {
                 0
             };
+            // SAFETY: an `i32` written by its own size.
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
                 return Err(Errno::EFAULT);
             }
+            // SAFETY: a `u32` written by its own size to a pointer checked non-null
+            // here.
             if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
                 return Err(Errno::EFAULT);
             }
@@ -897,9 +930,12 @@ pub fn sys_getsockopt(
             // error this stack records. Zero means the socket has none.
             let val: i32 =
                 ranked_lock!(RANK_SOCKET, "sys_getsockopt", sock_arc).take_connect_error() as i32;
+            // SAFETY: an `i32` written by its own size.
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
                 return Err(Errno::EFAULT);
             }
+            // SAFETY: a `u32` written by its own size to a pointer checked non-null
+            // here.
             if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
                 return Err(Errno::EFAULT);
             }
@@ -908,9 +944,12 @@ pub fn sys_getsockopt(
         _ => {
             // Unknown: return 0 as value
             let val: i32 = 0;
+            // SAFETY: an `i32` written by its own size.
             if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
                 return Err(Errno::EFAULT);
             }
+            // SAFETY: a `u32` written by its own size to a pointer checked non-null
+            // here.
             if !val_len_ptr.is_null() && !unsafe { try_write_user(val_len_ptr, 4u32) } {
                 return Err(Errno::EFAULT);
             }
@@ -982,6 +1021,8 @@ pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> Result<u64, Errno> {
         return Err(Errno::ENOTCONN);
     };
 
+    // SAFETY: a live `[u8; 4]` written by its own size to the caller's
+    // pointer, which is range-checked inside.
     if !unsafe { try_write_user(addr_ptr, dns) } {
         return Err(Errno::EFAULT);
     }
@@ -1003,6 +1044,8 @@ pub fn sys_setdns(addr_ptr: *const [u8; 4]) -> Result<u64, Errno> {
         return Err(Errno::EFAULT);
     }
 
+    // SAFETY: `[u8; 4]` has no invalid bit patterns, so whatever the
+    // caller's pointer holds is a valid value.
     let Some(addr) = (unsafe { try_read_user(addr_ptr) }) else {
         return Err(Errno::EFAULT);
     };
