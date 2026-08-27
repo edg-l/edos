@@ -56,17 +56,19 @@ makes `unsafe_op_in_unsafe_fn` warn by default, and CI denies warnings, so the
 compiler already forces the inner blocks to exist; nothing yet forces either
 comment.
 
-Coverage in `kernel/src`, measured 2026-08-26:
+Coverage in `kernel/src`, measured 2026-08-28:
 
 | quantity | count | command |
 | --- | --- | --- |
-| `unsafe { ... }` blocks | 767 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
-| `// SAFETY:` comments | 46 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
-| `unsafe fn` declarations | 61 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
-| `# Safety` sections | 32 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
+| `unsafe { ... }` blocks | 758 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
+| `// SAFETY:` comments | 341 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
+| `unsafe fn` declarations | 64 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
+| `# Safety` sections | 50 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe impl` | 38 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
-So the block half is at roughly 6% and the contract half at roughly half. The
+So the block half is at roughly 45% and the contract half at roughly
+three-quarters. The block figure moves a module at a time, since the eight that
+hold their own `#[deny(clippy::undocumented_unsafe_blocks)]` cannot regress. The
 two are `ROADMAP-CLEANUP.md` I5, and they are different work: the lint
 `clippy::undocumented_unsafe_blocks` finds blocks and `unsafe impl`, and finds
 nothing about an undocumented `unsafe fn`, whose contract has no lintable form.
@@ -198,7 +200,7 @@ Rejected, with the reason, so it is not re-proposed:
   list is made of; two entries there sounded obviously right and made the system
   slower. Reach for `profile` and `fsbench` first, then change one thing.
 - **`[workspace.dependencies]` for the programs workspace.** Only `flate2`,
-  `sha2` and `ed25519-dalek` have more than one consumer, and the 74
+  `sha2` and `ed25519-dalek` have more than one consumer, and the 85
   `edos_lib = { path = "../edos_lib" }` lines carry no version to drift. The
-  132 duplicated `version` and `edition` keys could inherit from the workspace
+  134 duplicated `version` and `edition` keys could inherit from the workspace
   and that is the whole of what it would buy.

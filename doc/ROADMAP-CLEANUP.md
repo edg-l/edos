@@ -260,12 +260,16 @@ each answers `--help` on stdout with `usage: <name>` and exit 0, that
 `grep -- -pattern` treats the pattern as a pattern, and that `wc -l -` reads
 stdin. That is the part of this entry that is done.
 
-Counts, measured as `grep -rl '"--help"\|edos_lib::args' programs/*/src/*.rs`
-against 134 program directories:
+Counts against 134 program directories, remeasured 2026-08-28. Adopting the
+parser moves a program out of the literal-string greps, since `--` and `-` are
+handled inside `args.rs` and never appear in the caller, so each count is the
+union of the literal and the adopters:
 
-- 39 accept `--help` (was 29)
-- 14 honour `--` as end of options (was 5)
-- 9 accept `-` as stdin
+- 39 accept `--help` (was 29) --
+  `grep -rl '"--help"\|edos_lib::args' programs/*/src/*.rs`
+- 15 honour `--` as end of options (was 5) --
+  `grep -rl '"--"' ...` union `grep -rl 'edos_lib::args' ...`
+- 9 accept `-` as stdin -- `grep -rlE '== "-"' programs/*/src/*.rs`
 
 **Remaining.** Adopt `Spec` in the rest, starting with the four hand-rolled
 short-flag loops still outside it (`gzip`, `ln`, `tee`, `tar`); the others
@@ -481,11 +485,12 @@ house style is `kernel/src/syscalls/io.rs:71`, where the comment on
 `STREAM_STACK_BUF` carries a measurement table and says why the constant is
 small on purpose.
 
-### G3. `doc/WORKING-NOTES.md` is 11,433 lines and `CLAUDE.md` says read it first (S2, E2)
+### G3. `doc/WORKING-NOTES.md` is 11,574 lines and `CLAUDE.md` says read it first (S2, E2)
 
-261 sections, covering 21 days. `doc/bugs/` holds 27 post-mortems and has a
-`README.md` stating the format. The line count only ever
-grows while this is open, so remeasure it rather than quoting this one.
+263 sections (`grep -c '^## '`). `doc/bugs/` holds 26 post-mortems
+(`ls doc/bugs/*.md | grep -vc README`, which is one less than the file count)
+and a `README.md` stating the format. The line count only ever grows while this
+is open, so remeasure it rather than quoting this one.
 
 A handoff document nobody can read is not a handoff. Split it: the current state
 and the open traps stay in `WORKING-NOTES.md` and it stays short; each closed
@@ -701,18 +706,19 @@ commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
 
-**I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
-sections. No lint finds these and none can: a caller of an undocumented
+**I5b, the contracts.** 64 `unsafe fn` declarations against 50 `# Safety`
+sections, remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the eight
+modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented
 `unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
 the smaller of the two.
 
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
-the modules it covers carries a `# Safety` section. The impls are done and seven
+the modules it covers carries a `# Safety` section. The impls are done and eight
 modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`, `interrupts/`,
-`acpi/`, `apic/`) hold their own deny; what is left is the rest of the tree,
-module by module.
+`acpi/`, `apic/`, `graphics/`) hold their own deny; what is left is the rest of
+the tree, module by module.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 
@@ -727,7 +733,7 @@ and the default build does not. Thirteen `unsafe impl` that shared one
 `// SAFETY:` with the impl above them now carry their own, and `ahci/port.rs`
 lost a `/// Safety:` heading on a safe fn and a `// SAFETY:` on an expression
 with no unsafe in it. The same table is now `[workspace.lints.clippy]` in
-`programs/Cargo.toml` with `lints.workspace = true` in all 133 member
+`programs/Cargo.toml` with `lints.workspace = true` in all 134 member
 manifests, and a plain `[lints.clippy]` in each of the nine `libs/` and four
 `tools/` packages, which are standalone rather than workspace members. The 31
 reasonless `#[allow]` outside the kernel became `#[expect(..., reason = "...")]`
@@ -748,7 +754,7 @@ suppression the code has outgrown, since `expect` warns when the lint it names
 stops firing — two of the kernel's did.
 
 ~~Same manifests, same sitting: `programs/edos-taskbar`, `programs/edos-terminal`
-and `programs/wintest` are still `edition = "2021"`.~~ Done: all 133 programs,
+and `programs/wintest` are still `edition = "2021"`.~~ Done: all 134 programs,
 the kernel and all nine libs are on `edition = "2024"`. None of the three
 contained `unsafe`, so it was drift rather than a hole.
 

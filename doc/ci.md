@@ -43,7 +43,7 @@ they are cheap, and they are the two gates most likely to red CI on a change
 that otherwise works.
 
 `clippy::too_many_arguments` is allowed globally -- `kernel/src/main.rs` for the
-kernel, `programs/.cargo/config.toml` for the 131-member workspace. Splitting a
+kernel, `programs/.cargo/config.toml` for the 134-member workspace. Splitting a
 driver's submit path or a widget's draw call into argument structs to satisfy a
 count is churn that makes the call sites harder to read; where a bundle
 genuinely clarifies, it is worth doing on its own merits. Everything else is
