@@ -30,6 +30,14 @@ pub const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
 /// Entries in one page table at any level.
 const ENTRIES_PER_TABLE: u64 = 512;
 
+/// The live PML4, as named by CR3.
+///
+/// # Safety
+///
+/// `physical_memory_offset` must be the base of a complete mapping of physical
+/// memory. The returned reference is `'static` and exclusive, so the caller
+/// must not let a second one to the same table exist, and must hold the address
+/// space against concurrent modification for as long as it is used.
 pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
     use x86_64::registers::control::Cr3;
 
@@ -39,9 +47,18 @@ pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static
     let virt = physical_memory_offset + phys.as_u64();
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
+    // SAFETY: CR3 holds the physical address of the live PML4, and the physical
+    // offset mapping covers all of RAM at page alignment. Exclusivity is the
+    // caller's, per this function's # Safety section.
     unsafe { &mut *page_table_ptr }
 }
 
+/// The PML4 named by an arbitrary `cr3` value, live or not.
+///
+/// # Safety
+///
+/// `cr3.0` must name a page table frame that is still allocated. The same
+/// exclusivity contract as [`active_level_4_table`] applies to the result.
 pub unsafe fn get_level_4_table(cr3: (PhysFrame, Cr3Flags)) -> &'static mut PageTable {
     let physical_memory_offset = boot_info().physical_memory_offset;
 
@@ -49,6 +66,8 @@ pub unsafe fn get_level_4_table(cr3: (PhysFrame, Cr3Flags)) -> &'static mut Page
     let virt = physical_memory_offset + phys.as_u64();
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
+    // SAFETY: cr3.0 names a PML4 frame, mapped through the physical offset like
+    // any other RAM. Exclusivity is the caller's, per the # Safety section.
     unsafe { &mut *page_table_ptr }
 }
 
@@ -158,6 +177,9 @@ impl MemoryManager {
                 let frame = frame_allocator
                     .allocate_frame()
                     .ok_or(MapToError::FrameAllocationFailed)?;
+                // SAFETY: page is unmapped in this address space (the range was checked
+                // above), and frame was just allocated so nothing else refers to it. The
+                // flush covers the entry map_to created.
                 unsafe {
                     self.mapper
                         .map_to(page, frame, flags, &mut **frame_allocator)?
@@ -189,6 +211,8 @@ impl MemoryManager {
                 let current_frame = PhysFrame::containing_address(
                     frame.start_address() + (i as u64 * Size4KiB::SIZE),
                 );
+                // SAFETY: each page in the range is unmapped in this address space, and the
+                // frames come from one contiguous allocation owned by this mapping alone.
                 unsafe {
                     self.mapper
                         .map_to(page, current_frame, flags, &mut **frame_allocator)?
@@ -214,6 +238,9 @@ impl MemoryManager {
         let page_range = get_page_range(addr, size);
 
         for page in page_range {
+            // SAFETY: changing flags on an already-present entry cannot invalidate a
+            // frame's ownership, and the flush that follows retires any TLB entry
+            // cached under the old flags.
             unsafe {
                 self.mapper
                     .update_flags(page, PageTableFlags::PRESENT | flags)?
@@ -239,6 +266,9 @@ impl MemoryManager {
                 flush.flush();
 
                 // Reclaim the frame to the allocator
+                // SAFETY: the page was mapped to frame and has just been unmapped and
+                // flushed, so no translation to it survives. Only privately owned
+                // anonymous mappings reach this path, so the frame has one owner.
                 unsafe {
                     frame_allocator.deallocate_frame(frame);
                 }
@@ -340,8 +370,13 @@ impl MemoryManager {
         });
         let phys_off = boot_info().physical_memory_offset;
         let pml4_ptr = (phys_off + pml4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+        // SAFETY: pml4_ptr addresses a live PML4 through the physical offset
+        // mapping, and the mapper lock this method holds keeps any other CPU out
+        // of the same tables.
         unsafe { upgrade_parent_entries(&mut *pml4_ptr, virt_addr, parent_flags) };
 
+        // SAFETY: page is either unmapped or being remapped to frame by an explicit
+        // request; the parent entries were just upgraded to cover the new leaf.
         unsafe {
             self.mapper
                 .map_to_with_table_flags(
@@ -453,6 +488,9 @@ impl MemoryManager {
                 {
                     return 0;
                 }
+                // SAFETY: entry is PRESENT and not a leaf, so its address names a page table
+                // frame reachable through the physical offset mapping. Read-only for the
+                // length of the count.
                 let pdpt = unsafe { &*(phys_off + entry.addr().as_u64()).as_ptr::<PageTable>() };
                 count_present_bytes(
                     pdpt,
@@ -534,6 +572,9 @@ impl MemoryManager {
             let dest_ptr = self
                 .translate_to_hhdm_ptr(current_vaddr)
                 .expect("copy_to_user: page not mapped");
+            // SAFETY: dest_ptr is the HHDM alias of a mapped user page, so writable, and
+            // chunk is clamped to the remainder of that page. src is a live slice and
+            // the HHDM alias of a user frame cannot overlap it.
             unsafe {
                 core::ptr::copy_nonoverlapping(src[offset..].as_ptr(), dest_ptr, chunk);
             }
@@ -551,6 +592,8 @@ impl MemoryManager {
             let dest_ptr = self
                 .translate_to_hhdm_ptr(current_vaddr)
                 .expect("zero_user: page not mapped");
+            // SAFETY: dest_ptr is the HHDM alias of a mapped user page and chunk is
+            // clamped to the remainder of that page.
             unsafe {
                 core::ptr::write_bytes(dest_ptr, 0, chunk);
             }
@@ -561,6 +604,9 @@ impl MemoryManager {
     /// Write a value to user virtual address space via HHDM.
     /// Uses copy_to_user internally so it handles page boundaries safely.
     pub fn write_val_to_user<T: Copy>(&self, dest_vaddr: VirtAddr, value: T) {
+        // SAFETY: T: Copy has no padding invariant to violate when read as bytes,
+        // and the slice borrows `value`, which outlives the copy_to_user call
+        // below.
         let bytes = unsafe {
             core::slice::from_raw_parts(&value as *const T as *const u8, core::mem::size_of::<T>())
         };
@@ -573,6 +619,9 @@ impl MemoryManager {
             Page::containing_address(VirtAddr::new(0x0000_7fff_ffff_ffff)),
         );
 
+        // SAFETY: the lower half belongs to this address space alone and every
+        // mapping in it has already been unmapped, so the tables clean_up frees
+        // are unreachable from any CR3 but this one.
         unsafe {
             self.mapper
                 .clean_up_addr_range(lower_half, &mut **frame_allocator())
@@ -624,6 +673,8 @@ fn count_present_bytes(
                 // only the part asked for.
                 return entry_end.min(end) - entry_base.max(start);
             }
+            // SAFETY: entry is PRESENT and not a leaf, so it addresses a page table
+            // frame, reachable through the physical offset mapping.
             let child = unsafe { &*(phys_off + entry.addr().as_u64()).as_ptr::<PageTable>() };
             count_present_bytes(
                 child,
@@ -645,6 +696,12 @@ fn count_present_bytes(
 /// mapping (e.g. read-only SHM) leaves PML2/3/4 entries without WRITABLE, and
 /// x86-64's AND-across-levels semantics then block any later writable leaf
 /// in the same 2 MiB / 1 GiB / 512 GiB range.
+///
+/// # Safety
+///
+/// `pml4` must be the live top-level table for the address space `virt_addr`
+/// belongs to, and the caller must hold that address space against concurrent
+/// modification -- the mapper lock, for the paths that reach this.
 unsafe fn upgrade_parent_entries(pml4: &mut PageTable, virt_addr: VirtAddr, flags: PageTableFlags) {
     let a = virt_addr.as_u64();
     let i4 = ((a >> 39) & 0x1FF) as usize;
@@ -653,6 +710,9 @@ unsafe fn upgrade_parent_entries(pml4: &mut PageTable, virt_addr: VirtAddr, flag
     let phys_off = boot_info().physical_memory_offset;
     let pt_from_frame = |f: PhysFrame| -> &'static mut PageTable {
         let virt = phys_off + f.start_address().as_u64();
+        // SAFETY: f names a page table frame reached by walking the live hierarchy,
+        // mapped through the physical offset. upgrade_parent_entries' caller holds
+        // the mapper lock, so this is the only walker.
         unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
     };
 
@@ -703,6 +763,8 @@ pub fn debug_assert_permissive_parents(pml4_frame: PhysFrame, virt_addr: VirtAdd
     let want = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     let pt_from_frame = |f: PhysFrame| -> &'static PageTable {
         let virt = phys_off + f.start_address().as_u64();
+        // SAFETY: f names a page table frame reached by walking the live hierarchy,
+        // mapped through the physical offset. Shared read-only.
         unsafe { &*virt.as_ptr::<PageTable>() }
     };
     let p4 = pt_from_frame(pml4_frame);

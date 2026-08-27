@@ -19,6 +19,10 @@ use crate::{
 /// A `&mut PageTable` over the frame's physical-memory-offset mapping.
 fn pt_from_frame(frame: PhysFrame) -> &'static mut PageTable {
     let virt = boot_info().physical_memory_offset + frame.start_address().as_u64();
+    // SAFETY: frame names a page table the caller reached by walking a live
+    // hierarchy, so it is RAM and covered by the physical offset mapping at
+    // PageTable alignment. Exclusivity is the callers' contract: every path
+    // here holds the address space against concurrent modification.
     unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
 }
 
@@ -60,6 +64,9 @@ pub unsafe fn clone_user_page_tables_cow(
         child_pml4[i] = kernel_pml4[i].clone();
     }
 
+    // SAFETY: the caller of clone_user_page_tables_cow guarantees the parent's
+    // tables are stable, and child_pml4 is the table just built here, which no
+    // other CPU can reach yet.
     let built = unsafe { clone_user_half(parent_cr3, parent_vmas, child_pml4) };
 
     // Flush TLB on all CPUs: parent PTEs were changed from writable to
@@ -69,7 +76,11 @@ pub unsafe fn clone_user_page_tables_cow(
     crate::memory::tlb::tlb_shootdown_all();
 
     if built.is_none() {
+        // SAFETY: child_pml4 is the half-built table clone_user_half just failed on
+        // and no CR3 ever pointed at it, which is free_child_user_half's contract.
         unsafe { free_child_user_half(child_pml4) };
+        // SAFETY: the frame backing child_pml4, allocated above and now unreferenced
+        // by any table or CR3.
         unsafe { frame_allocator().deallocate_frame(child_pml4_frame) };
         return None;
     }
@@ -228,10 +239,15 @@ unsafe fn free_child_user_half(child_pml4: &mut PageTable) {
                     // still holds this frame, so it must not be freed here.
                     alloc.dec_refcount(PhysFrame::containing_address(pml1[pml1_idx].addr()));
                 }
+                // SAFETY: pml1_frame was reached through the child table the caller
+                // guarantees is unreachable from any CR3, so this level is dropped exactly
+                // once. Its leaves had their refcounts decremented just above.
                 unsafe { alloc.deallocate_frame(pml1_frame) };
             }
+            // SAFETY: as above, one level up; every PML1 under it has been freed.
             unsafe { alloc.deallocate_frame(pml2_frame) };
         }
+        // SAFETY: as above; every PML2 under it has been freed.
         unsafe { alloc.deallocate_frame(pml3_frame) };
     }
 }
@@ -353,6 +369,9 @@ pub unsafe fn handle_cow_fault(fault_addr: VirtAddr) -> bool {
 
         let src_ptr = (phys_offset + old_frame.start_address().as_u64()).as_ptr::<u8>();
         let dst_ptr = (phys_offset + new_frame.start_address().as_u64()).as_mut_ptr::<u8>();
+        // SAFETY: both frames are 4 KiB and mapped through the physical offset, and
+        // new_frame was just allocated so it cannot alias old_frame. The copy
+        // covers exactly one frame.
         unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 4096) };
 
         alloc.dec_refcount(old_frame);

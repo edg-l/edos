@@ -42,6 +42,11 @@ pub fn init_frame_allocator(memory_regions: &'static MemmapResponse) {
     let (bitmap_storage, refcount_raw) = combined_storage.split_at_mut(bitmap_bytes);
 
     // Reinterpret refcount_raw as &'static mut [u16]
+    // SAFETY: refcount_raw is the tail of the same claimed region, so it is
+    // mapped, exclusively owned and at least frame_count * 2 bytes long. u16
+    // has no invalid bit patterns and the region base is page-aligned with a
+    // bitmap_bytes prefix that is a multiple of 2, so the pointer is aligned.
+    // The loop below initialises every element before any is read.
     let refcount_storage: &'static mut [u16] = unsafe {
         core::slice::from_raw_parts_mut(refcount_raw.as_mut_ptr() as *mut u16, frame_count)
     };
@@ -81,6 +86,28 @@ pub fn is_frame_reserved(frame: PhysFrame) -> bool {
         .is_none_or(|index| alloc.is_frame_allocated(index))
 }
 
+/// Hand out `size` bytes of the usable region starting at physical `start` as
+/// the bitmap's backing store.
+///
+/// The caller must have established that the region is `MEMMAP_USABLE` and at
+/// least `size` bytes long, and this is only ever called once per boot, before
+/// the frame allocator exists to hand any of that memory out again.
+fn claim_storage(start: u64, size: usize) -> (&'static mut [u8], u64, usize) {
+    let virt_addr = get_virt_addr_from_phys_offset(PhysAddr::new(start));
+    // SAFETY: `start` begins a usable region of at least `size` bytes, which
+    // the physical offset mapping covers in full, so the range is mapped,
+    // writable and `u8`-aligned. Nothing else owns it: the region is claimed
+    // here before the allocator that would otherwise hand it out is built, so
+    // the `'static` exclusive borrow is unaliased for the life of the system.
+    unsafe {
+        (
+            core::slice::from_raw_parts_mut(virt_addr.as_mut_ptr::<u8>(), size),
+            start,
+            size,
+        )
+    }
+}
+
 /// Find suitable memory for bitmap storage
 fn find_bitmap_storage(
     memory_regions: &MemmapResponse,
@@ -96,14 +123,7 @@ fn find_bitmap_storage(
 
     // Check if first range is sufficient
     if current.end - current.start >= required_size as u64 {
-        let phys_addr = PhysAddr::new(current.start);
-        let virt_addr = get_virt_addr_from_phys_offset(phys_addr);
-
-        unsafe {
-            let ptr = virt_addr.as_mut_ptr::<u8>();
-            let storage = core::slice::from_raw_parts_mut(ptr, required_size);
-            return Some((storage, current.start, required_size));
-        }
+        return Some(claim_storage(current.start, required_size));
     }
 
     for range in addr_ranges {
@@ -113,14 +133,7 @@ fn find_bitmap_storage(
 
             // Check if it fits now
             if current.end - current.start >= required_size as u64 {
-                let phys_addr = PhysAddr::new(current.start);
-                let virt_addr = get_virt_addr_from_phys_offset(phys_addr);
-
-                unsafe {
-                    let ptr = virt_addr.as_mut_ptr::<u8>();
-                    let storage = core::slice::from_raw_parts_mut(ptr, required_size);
-                    return Some((storage, current.start, required_size));
-                }
+                return Some(claim_storage(current.start, required_size));
             }
         } else {
             // Gap found, start new range
@@ -128,14 +141,7 @@ fn find_bitmap_storage(
 
             // Check if this new range is sufficient
             if current.end - current.start >= required_size as u64 {
-                let phys_addr = PhysAddr::new(current.start);
-                let virt_addr = get_virt_addr_from_phys_offset(phys_addr);
-
-                unsafe {
-                    let ptr = virt_addr.as_mut_ptr::<u8>();
-                    let storage = core::slice::from_raw_parts_mut(ptr, required_size);
-                    return Some((storage, current.start, required_size));
-                }
+                return Some(claim_storage(current.start, required_size));
             }
         }
     }
@@ -580,6 +586,9 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
 
 impl FrameDeallocator<Size4KiB> for BitmapFrameAllocator {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        // SAFETY: forwards to the inherent deallocate_frame, whose contract is the
+        // trait method's: the caller guarantees the frame is unused and came from
+        // this allocator.
         unsafe {
             self.deallocate_frame(frame);
         }

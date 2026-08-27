@@ -77,10 +77,11 @@ window-abi = { path = "../libs/window-abi" }
 unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 allow_attributes_without_reason = "warn"
-# The fourth of the set. It reports 720 blocks across 84 files today, which is
+# The fourth of the set. It reports 662 blocks today, which is
 # `doc/ROADMAP-CLEANUP.md` §I5a's remaining work; turning it on is the commit
 # that finishes that entry, and a blanket allow to turn it on sooner is exactly
-# what the other three lints exist to prevent.
+# what the other three lints exist to prevent. A module that is finished denies
+# it on its own `mod` declaration in `main.rs` instead, so the work ratchets.
 # undocumented_unsafe_blocks = "warn"
 
 [profile.dev]

@@ -11301,3 +11301,35 @@ The edition bump of the last three 2021 programs (`edos-taskbar`,
 `edos-terminal`, `wintest`) is not free either: edition 2024 stabilises let
 chains, so `collapsible_if` starts reaching `if cond { if let ... }` pairs it
 could not rewrite before, and both of the affected programs had one.
+
+## `undocumented_unsafe_blocks` ratchets per module, not per crate
+
+`kernel/Cargo.toml`'s `[lints.clippy]` carries three of the four `unsafe`-hygiene
+lints. The fourth, `undocumented_unsafe_blocks`, stays commented out because
+turning it on crate-wide reports hundreds of findings at once, and the only way
+to make the build green that day is a blanket `allow` — exactly what the other
+three lints exist to prevent.
+
+A module that is finished denies it on its own `mod` declaration in `main.rs`:
+
+```rust
+#[deny(clippy::undocumented_unsafe_blocks)]
+mod memory;
+```
+
+That is enough to make the lint fire for everything under the module while the
+rest of the kernel is still exempt, so each module's work is locked in as it
+lands. When the last module has its own `deny`, they all collapse back into the
+one line in `Cargo.toml`.
+
+Two traps in this:
+
+- **Do not write the literal `SAFETY:` in a comment above a `mod` item.**
+  `unnecessary_safety_comment` reads any comment containing that token as a
+  safety comment on the item below it, and a module cannot have one, so a note
+  explaining the `deny` fails the build. Say "documented" instead.
+- **`cargo clippy --manifest-path kernel/Cargo.toml` from the repo root is the
+  wrong toolchain.** It does not pick up `kernel/rust-toolchain.toml`, and the
+  failure is `x86_64-0.15.4` not implementing `Step::forward_overflowing` — a
+  dependency error that looks nothing like a toolchain mismatch. Run it with
+  the cwd inside `kernel/`, or go through `make -C kernel clippy`.

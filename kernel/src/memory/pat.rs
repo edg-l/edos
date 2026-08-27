@@ -41,6 +41,10 @@ pub fn init_pat() {
         return;
     }
 
+    // SAFETY: WRMSR to IA32_PAT (SDM Vol 3A 12.12.4) with the CPUID PAT bit
+    // confirmed above. The CR3 reload that follows flushes every TLB entry
+    // that could have cached a memory type from the old PAT, and the MSR
+    // number and value are compile-time constants naming a valid encoding.
     unsafe {
         // The full SDM Section 11.12 sequence (CR0.CD=1, WBINVD, etc.) causes
         // triple faults under KVM because setting CR0.CD disables caching on
@@ -63,6 +67,8 @@ pub fn init_pat() {
 
     // Verify readback
     let readback: u64;
+    // SAFETY: RDMSR of the same IA32_PAT the CPUID check above proved exists.
+    // A read has no architectural side effect.
     unsafe {
         let lo: u32;
         let hi: u32;

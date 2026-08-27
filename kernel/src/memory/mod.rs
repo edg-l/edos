@@ -75,6 +75,10 @@ pub fn verify_kernel_no_phys_aliasing() {
 
     let phys_off = boot_info().physical_memory_offset;
     let cr3_phys = Cr3::read().0.start_address();
+    // SAFETY: CR3 holds the physical address of a live PML4, and the physical
+    // offset mapping covers all of RAM, so phys_off + cr3 is a mapped
+    // PageTable-aligned page. The reference is read-only and lives no longer
+    // than this walk, which runs with the address space unchanged.
     let pml4 = unsafe { &*(phys_off + cr3_phys.as_u64()).as_ptr::<PageTable>() };
 
     let mut mappings: Vec<(u64, u64)> = Vec::with_capacity(8192);
@@ -120,6 +124,9 @@ fn walk_page_table(
     out: &mut alloc::vec::Vec<(u64, u64)>,
 ) {
     let table_virt = phys_off + parent_entry.addr().as_u64();
+    // SAFETY: parent_entry is PRESENT and not a leaf, so its address names a
+    // page table frame, reachable through the physical offset mapping like any
+    // other RAM. Shared read-only for the length of the walk.
     let table = unsafe { &*table_virt.as_ptr::<PageTable>() };
     let shift: u64 = match level {
         3 => 30,
@@ -173,6 +180,9 @@ pub fn mark_kernel_mappings_global() {
 
     let phys_off = boot_info().physical_memory_offset;
     let cr3_phys = Cr3::read().0.start_address();
+    // SAFETY: CR3 names the live PML4, mapped through the physical offset. The
+    // exclusive reference is sound because this runs at boot on the BSP before
+    // any other CPU is started, so nothing else is walking the tables.
     let pml4 = unsafe { &mut *(phys_off + cr3_phys.as_u64()).as_mut_ptr::<PageTable>() };
 
     let mut marked = 0u64;
@@ -200,6 +210,10 @@ fn mark_global(
     marked: &mut u64,
 ) {
     let table_virt = phys_off + parent_entry.addr().as_u64();
+    // SAFETY: parent_entry is PRESENT and not a leaf, so it addresses a page
+    // table frame in RAM, reachable through the physical offset mapping. The
+    // boot-time single-CPU argument from mark_kernel_mappings_global carries
+    // down the whole recursion.
     let table = unsafe { &mut *table_virt.as_mut_ptr::<PageTable>() };
 
     for entry in table.iter_mut() {
@@ -225,6 +239,10 @@ pub fn enable_pge() {
 
     let mut cr4 = Cr4::read();
     cr4.insert(Cr4Flags::PAGE_GLOBAL);
+    // SAFETY: setting CR4.PGE only enables the G bit already present in the
+    // entries mark_kernel_mappings_global marked, and only for this CPU. Every
+    // global mapping is kernel-half and identical on every CPU, so a TLB entry
+    // that now survives a CR3 reload stays correct.
     unsafe { Cr4::write(cr4) };
 }
 

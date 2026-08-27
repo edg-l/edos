@@ -232,6 +232,9 @@ fn send_shootdown_ipis(mask: u64) {
         let idx = mask.trailing_zeros() as usize;
         mask &= mask - 1;
         let lapic_id = lapic_id_for_cpu(idx);
+        // SAFETY: lapic_id names a CPU that SMP brought up, and TlbShootdown is an
+        // installed IDT vector. On x2APIC send_ipi is an MSR write, so it needs no
+        // interrupt state of its own.
         unsafe { get_lapic().send_ipi(InterruptIndex::TlbShootdown as u8, lapic_id) };
     }
 }
@@ -253,6 +256,8 @@ fn do_local_flush(start: VirtAddr, page_count: u64) {
     let base = start.as_u64();
     for i in 0..page_count {
         let addr = base + i * 4096;
+        // SAFETY: invlpg on a canonical address is architecturally defined for any
+        // address, mapped or not (SDM Vol 3A 4.10.4.1), and touches no memory.
         unsafe {
             core::arch::asm!("invlpg [{0}]", in(reg) addr, options(nostack, preserves_flags));
         }
@@ -284,5 +289,7 @@ pub extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStack
             .fetch_and(!(1u64 << my_idx), Ordering::Release);
     }
 
+    // SAFETY: called from an interrupt handler for the vector being acknowledged,
+    // which is the one context in which EOI is defined.
     unsafe { get_lapic().end_of_interrupt() };
 }

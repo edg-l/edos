@@ -47,6 +47,11 @@ mod graphics;
 mod interrupts;
 mod loader;
 mod logs;
+// Every `unsafe` block under `memory` is documented, and the deny is what keeps
+// it that way while the rest of the kernel catches up
+// (`doc/ROADMAP-CLEANUP.md` §I5a). Move it up to `[lints.clippy]` in
+// `Cargo.toml` once no module needs the exemption.
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod memory;
 mod net;
 mod power;

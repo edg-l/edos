@@ -228,6 +228,10 @@ pub fn fault_in_page(
         frame_allocator().inc_refcount(frame);
 
         // Install the PTE (pt_flags already has COW_BIT set for private, stripped of WRITABLE).
+        // SAFETY: cr3 is the faulting thread's live PML4 and page_addr is the page
+        // that faulted, so nothing is mapped there yet; map_page_direct reports a
+        // race rather than overwriting. The refcount was bumped just above, so the
+        // cache page cannot be freed while this PTE refers to it.
         let success = unsafe { map_page_direct(cr3, page_addr, frame, info.pt_flags, phys_offset) };
 
         if success {
@@ -280,11 +284,16 @@ pub fn fault_in_page(
 
         // Zero the frame via HHDM
         let frame_virt = phys_offset + frame.start_address().as_u64();
+        // SAFETY: frame was just allocated and is not mapped anywhere, so this is
+        // the only reference to it. The physical offset mapping covers it in full
+        // and it is exactly one 4 KiB page.
         unsafe {
             core::ptr::write_bytes(frame_virt.as_mut_ptr::<u8>(), 0, 4096);
         }
 
         // Map the page
+        // SAFETY: cr3 is the faulting thread's live PML4, page_addr faulted so no
+        // leaf is present, and frame is freshly allocated and zeroed.
         let success = unsafe { map_page_direct(cr3, page_addr, frame, info.pt_flags, phys_offset) };
 
         if success {
@@ -297,6 +306,8 @@ pub fn fault_in_page(
         } else {
             // Race: check if another CPU/path already mapped it
             if is_page_present(cr3, page_addr, phys_offset) {
+                // SAFETY: map_page_direct refused because another CPU won the race, so this
+                // frame was never installed in any table and is returned unmapped.
                 unsafe { frame_allocator().deallocate_frame(frame) };
                 FaultOutcome {
                     mapped: true,
@@ -304,6 +315,8 @@ pub fn fault_in_page(
                     cached_page: None,
                 }
             } else {
+                // SAFETY: as above; the mapping failed for want of an intermediate table,
+                // so the frame is unreferenced.
                 unsafe { frame_allocator().deallocate_frame(frame) };
                 FaultOutcome {
                     mapped: false,
@@ -326,7 +339,10 @@ pub fn fault_in_page(
 /// (caller falls through to the normal demand path).
 ///
 /// # Safety
-/// Must be called from the page fault handler with the faulting thread's CR3 active.
+///
+/// Must be called from the page fault handler with the faulting thread's CR3
+/// active: `cr3` must be that thread's own live PML4, and `fault_addr` must lie
+/// inside the VMA `fault_info` describes.
 unsafe fn fault_in_reloc_page(
     fault_addr: VirtAddr,
     fault_info: &FaultInfo,
@@ -397,6 +413,9 @@ unsafe fn fault_in_reloc_page(
     // Copy the cache page into the private frame via HHDM.
     let cache_ptr = (phys_offset + cache_frame.start_address().as_u64()).as_ptr::<u8>();
     let private_ptr = (phys_offset + private_frame.start_address().as_u64()).as_mut_ptr::<u8>();
+    // SAFETY: both frames are 4 KiB and mapped through the physical offset.
+    // private_frame was just allocated, so it cannot alias the pinned cache
+    // frame, and the pin keeps the source alive across the copy.
     unsafe {
         core::ptr::copy_nonoverlapping(cache_ptr, private_ptr, 4096);
     }
@@ -406,6 +425,9 @@ unsafe fn fault_in_reloc_page(
     drop(cached_page);
 
     // Apply all RELATIVE relocations that land in this page.
+    // SAFETY: the destination is this thread's private copy of the page, so
+    // patching it is invisible to every other mapping, and the relocations
+    // applied are those the table records as landing inside this one page.
     unsafe {
         reloc_table.apply_relocs_to_page(
             phys_offset + private_frame.start_address().as_u64(),
@@ -421,6 +443,8 @@ unsafe fn fault_in_reloc_page(
     pt_flags |= PageTableFlags::WRITABLE;
 
     // Map the private frame at the faulting page address.
+    // SAFETY: cr3 is the faulting thread's live PML4, page_addr faulted, and
+    // private_frame is the patched copy owned by this mapping alone.
     let success = unsafe { map_page_direct(cr3, page_addr, private_frame, pt_flags, phys_offset) };
 
     if success {
@@ -428,9 +452,12 @@ unsafe fn fault_in_reloc_page(
         Some(true)
     } else if is_page_present(cr3, page_addr, phys_offset) {
         // Race: another CPU already mapped it; free our private frame.
+        // SAFETY: another CPU mapped the page first, so private_frame was never
+        // installed and nothing refers to it.
         unsafe { frame_allocator().deallocate_frame(private_frame) };
         Some(true)
     } else {
+        // SAFETY: the mapping failed outright, so private_frame is unreferenced.
         unsafe { frame_allocator().deallocate_frame(private_frame) };
         Some(false)
     }
@@ -518,6 +545,8 @@ pub unsafe fn handle_demand_fault(
 
     // If this is a reloc-bearing page, handle it with the lazy reloc path.
     if let Some((reloc_table, page_vaddr_offset, load_base)) = reloc_info
+        // SAFETY: cr3_frame is the faulting thread's own CR3, read above, and
+        // fault_addr is inside the VMA lookup_fault_vma matched.
         && let Some(mapped) = unsafe {
             fault_in_reloc_page(
                 fault_addr,
@@ -619,6 +648,11 @@ pub fn store_cached_page_on_vma(
 /// Allocates intermediate page table frames as needed.
 /// Returns false if the leaf PTE is already present (race condition) or on
 /// allocation failure.
+///
+/// # Safety
+///
+/// `cr3` must name a live PML4 whose tables no other CPU is modifying, and
+/// `frame` must be owned by the caller and not already mapped at `vaddr`.
 unsafe fn map_page_direct(
     cr3: PhysFrame,
     vaddr: VirtAddr,
@@ -628,6 +662,10 @@ unsafe fn map_page_direct(
 ) -> bool {
     let pt_from_frame = |f: PhysFrame| -> &'static mut PageTable {
         let virt = phys_offset + f.start_address().as_u64();
+        // SAFETY: f names a page table frame reached by walking from the live cr3,
+        // so it is RAM covered by the physical offset mapping at PageTable
+        // alignment. Exclusive because a fault is serviced on its own address
+        // space with the mapper lock held.
         unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
     };
 
@@ -644,6 +682,8 @@ unsafe fn map_page_direct(
 
     // PML4 -> PML3
     let pml3_frame =
+        // SAFETY: pml4 is the live top-level table for cr3 and the entry is the one
+        // this fault address selects.
         match unsafe { ensure_table_entry(&mut pml4[pml4_idx], intermediate_flags, phys_offset) } {
             Some(f) => f,
             None => return false,
@@ -652,6 +692,8 @@ unsafe fn map_page_direct(
 
     // PML3 -> PML2
     let pml2_frame =
+        // SAFETY: pml3 is the table ensure_table_entry just returned for this
+        // address, so the entry indexed is inside it.
         match unsafe { ensure_table_entry(&mut pml3[pml3_idx], intermediate_flags, phys_offset) } {
             Some(f) => f,
             None => return false,
@@ -660,6 +702,8 @@ unsafe fn map_page_direct(
 
     // PML2 -> PML1
     let pml1_frame =
+        // SAFETY: pml2 is the table ensure_table_entry just returned for this
+        // address, so the entry indexed is inside it.
         match unsafe { ensure_table_entry(&mut pml2[pml2_idx], intermediate_flags, phys_offset) } {
             Some(f) => f,
             None => return false,
@@ -684,6 +728,11 @@ unsafe fn map_page_direct(
 /// Ensure a page table entry points to a valid next-level table.
 /// If not present, allocate a new frame and initialize it.
 /// Returns the frame of the next-level table, or None on allocation failure.
+///
+/// # Safety
+///
+/// `entry` must belong to a page table reachable from a live CR3, and
+/// `phys_offset` must be the base of the physical memory mapping.
 unsafe fn ensure_table_entry(
     entry: &mut PageTableEntry,
     flags: PageTableFlags,
@@ -702,6 +751,9 @@ unsafe fn ensure_table_entry(
     } else {
         let new_frame = frame_allocator().allocate_frame()?;
         let virt = phys_offset + new_frame.start_address().as_u64();
+        // SAFETY: new_frame was just allocated and is not yet referenced by any
+        // entry, and the physical offset mapping covers the whole 4 KiB. Zeroing
+        // before it is installed is what makes the new table's entries non-present.
         unsafe {
             core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096);
         }
@@ -714,6 +766,8 @@ unsafe fn ensure_table_entry(
 fn is_page_present(cr3: PhysFrame, vaddr: VirtAddr, phys_offset: VirtAddr) -> bool {
     let pt_from_frame = |f: PhysFrame| -> &'static PageTable {
         let virt = phys_offset + f.start_address().as_u64();
+        // SAFETY: f names a page table frame reached by walking from a live cr3,
+        // mapped through the physical offset. Shared read-only.
         unsafe { &*virt.as_ptr::<PageTable>() }
     };
 

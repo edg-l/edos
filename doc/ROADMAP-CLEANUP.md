@@ -630,11 +630,20 @@ field, so the 38 impls came first.~~ **Done:** all 38 `unsafe impl` in
 `kernel/src` (18 `Send`, 14 `Sync`, `GlobalAlloc`, `FrameAllocator`) now carry a
 `// SAFETY:` naming what makes the claim true, up from 2 with an argument and 6
 more with a `// Safety:` the lint does not recognise. What remains here is the
-blocks, per module, `memory/` and `syscalls/` first, since turning the lint on
-tree-wide at once produces hundreds of findings and would be abandoned. The lint
-sits commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three
-that are on: uncommenting it is the commit that closes this entry, and the count
-above is what `make -C kernel clippy` prints if you uncomment it today.
+blocks, per module, since turning the lint on tree-wide at once produces
+hundreds of findings and would be abandoned. `memory/` is the first module
+done: all 58 blocks across its eleven files are documented, its three
+previously-bare `unsafe fn` (`active_level_4_table`, `get_level_4_table`,
+`upgrade_parent_entries`) carry a `# Safety` section, and `mod memory;` in
+`main.rs` denies `undocumented_unsafe_blocks` on its own declaration so the
+module cannot regress while the rest catches up. Three identical
+`from_raw_parts_mut` blocks in `find_bitmap_storage` became one `claim_storage`
+helper on the way. 662 blocks remain, `usb/xhci/mod.rs` (77), `ahci/port.rs`
+(38), `virtio/gpu.rs` (33), `syscalls/mod.rs` (27) and `thread/scheduler.rs`
+(26) first; `syscalls/` is the next module. The lint sits commented out in
+`kernel/Cargo.toml`'s `[lints.clippy]` beside the three that are on: moving it
+up from the last module's `mod` declaration is the commit that closes this
+entry.
 
 **I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
 sections. No lint finds these and none can: a caller of an undocumented
@@ -644,12 +653,13 @@ the smaller of the two.
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, the lint is denied in `memory/` and `syscalls/` with no suppressions,
 and every `unsafe fn` in those two modules carries a `# Safety` section.
+`memory/` is done; `syscalls/` is not.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 
 ~~There is no `[lints]` table in any manifest in the tree.~~ **Done:**
 `kernel/Cargo.toml` carries a `[lints.clippy]` table with three of the four
-lints denied, `undocumented_unsafe_blocks` commented out behind I5a's 720
+lints denied, `undocumented_unsafe_blocks` commented out behind I5a's remaining
 blocks. Every `#[allow]` and `#[expect]` in `kernel/src` now carries a
 `reason = "..."`: 34 `allow` became `expect`, two were dropped as unfulfilled,
 and the four that stay `allow` are the three `cfg_attr` feature-conditional

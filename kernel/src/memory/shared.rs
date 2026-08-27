@@ -91,6 +91,10 @@ impl SharedMemory {
         // Zero the frames
         for frame in &frames {
             let virt = crate::memory::get_virt_addr_from_phys_offset(frame.start_address());
+            // SAFETY: frame was just handed out by the frame allocator and is owned by
+            // this region alone, so nothing else can observe the write. The physical
+            // offset mapping covers all of RAM and the frame is one 4 KiB page, so the
+            // whole range written is inside it.
             unsafe {
                 core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096);
             }
@@ -192,6 +196,9 @@ impl Drop for SharedMemory {
         for chunk in self.frames.chunks(BATCH_SIZE) {
             let mut allocator = frame_allocator();
             for frame in chunk {
+                // SAFETY: the frames were allocated for this region and never shared with
+                // another owner; SharedMemory is being dropped, so no mapping of them
+                // survives and each is returned exactly once.
                 unsafe {
                     allocator.deallocate_frame(*frame);
                 }
