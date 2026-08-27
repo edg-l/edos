@@ -56,7 +56,13 @@ pub enum XhciError {
     CommandTimeout,
     SlotsFull,
     /// xHCI completion code, carried for the `Debug` rendering in the driver's logs.
-    TransferError(#[allow(dead_code)] u8),
+    TransferError(
+        #[expect(
+            dead_code,
+            reason = "the controller's completion code, carried for the log line"
+        )]
+        u8,
+    ),
     InvalidDevice,
     UnsupportedSpeed,
 }
@@ -93,10 +99,16 @@ pub struct XhciController {
     /// The scratchpad array the controller reads through DCBAA[0]. The hardware reaches
     /// it by physical address, so nothing reads the field again; holding it is what keeps
     /// the allocation alive for the controller's life.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "scratchpad pages are owned so the controller keeps them; the driver never reads them"
+    )]
     scratch_array: Option<DmaBuffer>,
     /// The pages that array points at, held for the same reason.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "scratchpad pages are owned so the controller keeps them; the driver never reads them"
+    )]
     scratch_pages: Vec<DmaBuffer>,
     command_ring: CommandRing,
     event_ring: EventRing,

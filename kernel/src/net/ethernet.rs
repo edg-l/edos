@@ -10,7 +10,10 @@ pub enum EtherType {
     Arp = 0x0806,
 }
 
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the Ethernet II header in full; the stack reads a subset"
+)]
 pub struct EthernetHeader {
     pub dst: [u8; 6],
     pub src: [u8; 6],

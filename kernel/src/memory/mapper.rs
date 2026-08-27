@@ -110,7 +110,10 @@ fn with_global_if_kernel(addr: VirtAddr, flags: PageTableFlags) -> PageTableFlag
     }
 }
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the mapper's diagnostic half: walks and dumps no path calls today"
+)]
 impl MemoryManager {
     pub fn new(page_table: OffsetPageTable<'static>) -> Self {
         Self {

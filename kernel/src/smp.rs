@@ -27,7 +27,10 @@ static CPU_LAPIC_IDS: [AtomicU32; 64] = {
     // AtomicU32 is not Copy so we must use a const initializer trick.
     // Used only as the repeated element of an array initializer, where each copy
     // is a fresh value rather than a shared one.
-    #[allow(clippy::declare_interior_mutable_const)]
+    #[expect(
+        clippy::declare_interior_mutable_const,
+        reason = "an array-initialiser const, the only way to build a fixed-size array of atomics"
+    )]
     const ZERO: AtomicU32 = AtomicU32::new(0);
     [ZERO; 64]
 };
@@ -63,7 +66,10 @@ const AP_BRINGUP_TIMEOUT: Duration = Duration::from_millis(1000);
 /// is running and not taking the interrupt it was sent — and only the second is
 /// a fault in this kernel. Nothing else here distinguishes them.
 static CPU_HEARTBEAT: [AtomicU64; 64] = {
-    #[allow(clippy::declare_interior_mutable_const)]
+    #[expect(
+        clippy::declare_interior_mutable_const,
+        reason = "an array-initialiser const, the only way to build a fixed-size array of atomics"
+    )]
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 64]
 };

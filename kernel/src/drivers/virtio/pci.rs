@@ -120,7 +120,10 @@ pub struct VirtioTransport {
     common_cfg: *mut u8,
     notify_base: *mut u8,
     notify_off_multiplier: u32,
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the ISR status byte, unread while the device runs on MSI-X"
+    )]
     isr: *mut u8,
     device_cfg: *mut u8,
 }
@@ -342,7 +345,10 @@ impl VirtioTransport {
     }
 
     /// Bind device configuration-change notifications to an MSI-X vector.
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the config-vector and layout accessors the transport offers in full"
+    )]
     pub fn set_config_msix_vector(&self, vector: u16) -> bool {
         self.cfg_write_u16(COMMON_MSIX_CONFIG, vector);
         self.cfg_read_u16(COMMON_MSIX_CONFIG) == vector
@@ -352,7 +358,10 @@ impl VirtioTransport {
         self.cfg_read_u16(COMMON_QUEUE_NOTIFY_OFF)
     }
 
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the config-vector and layout accessors the transport offers in full"
+    )]
     pub fn num_queues(&self) -> u16 {
         self.cfg_read_u16(COMMON_NUM_QUEUES)
     }
@@ -366,7 +375,10 @@ impl VirtioTransport {
         };
     }
 
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the config-vector and layout accessors the transport offers in full"
+    )]
     pub fn device_cfg_ptr(&self) -> *mut u8 {
         self.device_cfg
     }
@@ -397,7 +409,10 @@ impl VirtioTransport {
         self.set_status_bit(VIRTIO_STATUS_DRIVER_OK);
     }
 
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the config-vector and layout accessors the transport offers in full"
+    )]
     pub fn pci_addr(&self) -> PciAddress {
         self.pci_addr
     }

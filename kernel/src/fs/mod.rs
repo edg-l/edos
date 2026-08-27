@@ -61,7 +61,10 @@ pub fn init() {
     queue_spawn_kthread_named("fs", fs_main_thread as *const () as u64);
 }
 
-#[expect(clippy::enum_variant_names)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "every variant of an FS error names the layer it came from"
+)]
 #[derive(Debug, Error, Clone)]
 pub enum Error {
     #[error("file not found")]
@@ -118,7 +121,10 @@ pub struct MmapRegion {
 }
 
 impl MmapRegion {
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "constructing a region by hand, which the boot path does not do"
+    )]
     pub const fn new(phys_addr: u64, length: usize) -> Self {
         Self {
             phys_addr,

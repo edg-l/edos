@@ -98,13 +98,25 @@ pub struct DetectedDevice {
     pub id: u64,
     pub controller_pci_address: PciAddress,
     pub port_idx: usize,
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "IDENTIFY's answer in full; the port reads the geometry it needs"
+    )]
     pub device_info: DeviceIdentifyInfo,
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the AHCI port geometry in full; the driver reads what it issues commands with"
+    )]
     pub device_type: DeviceType,
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the AHCI port geometry in full; the driver reads what it issues commands with"
+    )]
     pub supports_ncq: bool,
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the AHCI port geometry in full; the driver reads what it issues commands with"
+    )]
     pub ncq_depth: u8,
 }
 

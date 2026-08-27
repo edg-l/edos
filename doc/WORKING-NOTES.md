@@ -11200,3 +11200,33 @@ so `head -n banana` printed ten lines and looked like it worked.
 `--help` on stdout with a first line of `usage: <name>` and exit 0, that
 `grep -- -pattern` treats the pattern as a pattern, and that `wc -l -` reads
 stdin. A tool that drifts back to parsing its own flags fails those.
+
+## `[lints.clippy]` in the kernel, and why the fourth lint is commented out
+
+`kernel/Cargo.toml` carries `unnecessary_safety_comment`,
+`unnecessary_safety_doc` and `allow_attributes_without_reason` at `warn`, which
+`make -C kernel clippy`'s `-D warnings` turns into errors.
+`undocumented_unsafe_blocks` is the fourth of the set and is commented out: it
+reports 720 blocks across 84 files, which is `doc/ROADMAP-CLEANUP.md` §I5a's
+remaining work. Uncommenting it is the commit that closes I5a; a crate-level
+allow to turn it on sooner is exactly what the other three lints exist to stop.
+
+Two things the conversion taught, both worth knowing before the next pass:
+
+- `allow_attributes_without_reason` fires on `#[expect]` as well, and the kernel
+  had more reasonless `expect` (63) than `allow` (40). Grepping for
+  `#\[allow(` alone undercounts the work by half, and a multi-line
+  `#[expect(\n    dead_code,\n    reason = "..."\n)]` does not match a
+  line-oriented `grep -v reason` either, so it overcounts in the other
+  direction. `cargo clippy` is the only honest count.
+- `#[expect]` is the wrong attribute where the lint fires under some feature
+  sets and not others: `main.rs`'s `unreachable_code` is unfulfilled in the
+  default build and needed under `sched-test`, so it stays an `allow` with a
+  reason. The kernel clippy target loops over every feature, which is what
+  catches this; a single default-feature run reports it as dead and invites
+  deleting it.
+
+`clippy::undocumented_unsafe_blocks` wants a `// SAFETY:` on *each* `unsafe
+impl`, so the tree's common shape of one comment covering a `Send`/`Sync` pair
+leaves the second impl flagged; thirteen of those got their own one-line
+comment pointing at the argument above.

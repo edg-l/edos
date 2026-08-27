@@ -557,7 +557,10 @@ impl Fatfs {
         self.partition.starting_lba + reserved + (numfats * fatsz)
     }
 
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "FAT32 traversal helpers kept complete beside the ones in use"
+    )]
     #[inline(always)]
     pub fn first_data_lba(&self) -> u64 {
         let reserved = self.boot_info.reserved_sector_count as u64;

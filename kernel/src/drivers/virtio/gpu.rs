@@ -449,7 +449,10 @@ impl VirtioGpu {
     ///
     /// Returns `(width, height)` of the first enabled scanout, or a 1280x800
     /// fallback if none is reported.
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "re-reading display info after the mode is set has no caller"
+    )]
     pub fn get_display_info(&mut self) -> (u32, u32) {
         self.begin_command();
         let mut hdr: VirtioGpuCtrlHdr = unsafe { core::mem::zeroed() };
@@ -1247,7 +1250,10 @@ impl VirtioGpu {
     }
 
     /// Access the underlying transport (e.g. to read the PCI address).
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the transport accessor, kept for the same reason the other drivers keep one"
+    )]
     pub fn transport(&self) -> &VirtioTransport {
         &self.transport
     }

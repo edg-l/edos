@@ -22,7 +22,10 @@ pub const DEFAULT_WINDOW: u16 = 16384;
 pub const MAX_RX_BUFFER: usize = 65535;
 
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the TCP header in full (RFC 9293 §3.1); the stack reads a subset"
+)]
 pub struct TcpHeader {
     pub src_port: u16,
     pub dst_port: u16,
@@ -114,7 +117,10 @@ pub fn parse_mss(data: &[u8], data_offset: u8) -> Option<u16> {
 /// `options` is optional raw TCP options bytes (for MSS in SYN).
 // Every argument is a distinct field of the operation; grouping them into a
 // struct would only move the same list one level out.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the TCP header fields a segment builder must be told (RFC 9293 §3.1)"
+)]
 pub fn build(
     src_port: u16,
     dst_port: u16,
@@ -174,7 +180,10 @@ fn tcp_checksum(tcp_pkt: &[u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> u16 {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the eleven RFC 9293 states; the stack does not enter every one"
+)]
 pub enum TcpState {
     Closed,
     Listen,

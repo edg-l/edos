@@ -946,7 +946,10 @@ impl Thread {
     /// is already running takes effect at its next placement rather than
     /// immediately. Set it before publishing the thread when the first
     /// placement has to honour it.
-    #[cfg_attr(not(feature = "sched-test"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "sched-test"),
+        allow(dead_code, reason = "live only under the sched-test feature")
+    )]
     pub fn set_affinity_mask(&self, mask: u32) {
         self.cpu_affinity.store(mask, Ordering::Release);
         self.mark_need_resched();
@@ -1117,7 +1120,10 @@ impl Thread {
     /// Must provide entry point and cr3 page table.
     // Every argument is a distinct field of the operation; grouping them into a
     // struct would only move the same list one level out.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "everything a user thread needs at creation; bundling it would only move the list"
+    )]
     pub fn new_user(
         inode: Arc<VfsInode>,
         path: &Path,
@@ -1270,7 +1276,10 @@ impl Thread {
 
     /// Load a user thread from an ELF file on the filesystem.
     ///
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "spawning from a path, which every current caller does through exec"
+    )]
     pub fn new_user_from_path(
         path: &Path,
         name: Option<String>,

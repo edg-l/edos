@@ -619,10 +619,10 @@ survivors E1 annotated and nothing else.
 name only the first. `doc/rust-style.md` states the rule and the sources; the
 counts below are the gap, measured 2026-08-26 with the commands recorded there.
 
-**I5a, the blocks and the impls.** 767 `unsafe { ... }` blocks against 46
-`// SAFETY:` comments, so about 6%, concentrated in `usb/xhci/mod.rs` (77
-`unsafe`), `ahci/port.rs` (39), `thread/scheduler.rs` (33), `virtio/gpu.rs` (33)
-and `syscalls/mod.rs` (31). `clippy::undocumented_unsafe_blocks` is the gate and
+**I5a, the blocks and the impls.** `clippy::undocumented_unsafe_blocks` reports
+720 blocks across 84 files, concentrated in `usb/xhci/mod.rs` (77),
+`ahci/port.rs` (38), `virtio/gpu.rs` (33), `syscalls/mod.rs` (27) and
+`thread/scheduler.rs` (26). `clippy::undocumented_unsafe_blocks` is the gate and
 it covers `unsafe impl` too. ~~A bare `unsafe impl Send for T {}` is a hand-made
 claim that no data race can arise, in a preemptive SMP kernel with work-stealing,
 and it is the claim most likely to stop being true when the type later grows a
@@ -631,7 +631,10 @@ field, so the 38 impls came first.~~ **Done:** all 38 `unsafe impl` in
 `// SAFETY:` naming what makes the claim true, up from 2 with an argument and 6
 more with a `// Safety:` the lint does not recognise. What remains here is the
 blocks, per module, `memory/` and `syscalls/` first, since turning the lint on
-tree-wide at once produces hundreds of findings and would be abandoned.
+tree-wide at once produces hundreds of findings and would be abandoned. The lint
+sits commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three
+that are on: uncommenting it is the commit that closes this entry, and the count
+above is what `make -C kernel clippy` prints if you uncomment it today.
 
 **I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
 sections. No lint finds these and none can: a caller of an undocumented
@@ -644,9 +647,20 @@ and every `unsafe fn` in those two modules carries a `# Safety` section.
 
 ### I6. A `[lints]` table, and what goes in it (S3, E1)
 
-There is no `[lints]` table in any manifest in the tree. Clippy runs at its
-default level under `-D warnings`, which is why I5's lint has to be enabled
-somewhere before it can be enabled per module.
+~~There is no `[lints]` table in any manifest in the tree.~~ **Partly done:**
+`kernel/Cargo.toml` carries a `[lints.clippy]` table with three of the four
+lints denied, `undocumented_unsafe_blocks` commented out behind I5a's 720
+blocks. Every `#[allow]` and `#[expect]` in `kernel/src` now carries a
+`reason = "..."`: 34 `allow` became `expect`, two were dropped as unfulfilled,
+and the four that stay `allow` are the three `cfg_attr` feature-conditional
+sites plus `main.rs`'s `unreachable_code`, which the `sched-test` build needs
+and the default build does not. Thirteen `unsafe impl` that shared one
+`// SAFETY:` with the impl above them now carry their own, and `ahci/port.rs`
+lost a `/// Safety:` heading on a safe fn and a `// SAFETY:` on an expression
+with no unsafe in it. **What remains:** the same table in `programs/`'s
+workspace manifest (which needs `lints.workspace = true` in 134 member
+manifests) and the 31 reasonless `#[allow]` under `programs/`, `libs/` and
+`tools/`, and the edition bump below.
 
 **Fix.** A `[lints.clippy]` table carrying `undocumented_unsafe_blocks`,
 `unnecessary_safety_comment`, `unnecessary_safety_doc` and
@@ -654,19 +668,19 @@ somewhere before it can be enabled per module.
 what was rejected and why. The two `unnecessary_*` lints are why this is a set:
 without them the cheapest way to satisfy I5a is a comment that says nothing.
 
-`allow_attributes_without_reason` is a mechanical conversion, not an audit. The
-35 `#[allow(` in `kernel/src` and the 17 in `programs/` already carry their
-reason as a comment above the attribute (`allocator.rs:161`, `per_cpu.rs:96`,
-`block_page_cache.rs:143`); the lint requires it in the `reason = "..."` field,
-where a lint can check it.
+`allow_attributes_without_reason` is a mechanical conversion, not an audit, but
+it is not free either: it fires on `#[expect]` too, and the kernel had 63 of
+those without a reason against 40 `allow`. It is also the lint that finds a
+suppression the code has outgrown, since `expect` warns when the lint it names
+stops firing — two of the kernel's did.
 
 Same manifests, same sitting: `programs/edos-taskbar`, `programs/edos-terminal`
 and `programs/wintest` are still `edition = "2021"` while the other 129 programs,
 the kernel and all eight libs are on 2024. None of the three contains `unsafe`,
 so this is drift rather than a hole.
 
-**Done when** the table exists, the tree is clean under it, and
-`grep -c 'edition = "2021"' programs/*/Cargo.toml` is zero.
+**Done when** the table exists in `programs/` too, the tree is clean under it,
+and `grep -c 'edition = "2021"' programs/*/Cargo.toml` is zero.
 
 ---
 

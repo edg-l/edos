@@ -113,7 +113,10 @@ impl CachedPage {
     // The frame is shared interior-mutable storage reached through an `Arc`, so
     // `&self` is the only handle callers have; exclusion is the caller's
     // contract, not the borrow checker's.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the page is pinned by the caller; the contract is on the unsafe fn"
+    )]
     pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.virt_addr(), PAGE_SIZE) }
     }

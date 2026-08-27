@@ -63,6 +63,7 @@ pub struct PerCpuData {
 // No cross-CPU access occurs. The Cell/UnsafeCell fields are !Sync but
 // the per-CPU isolation makes sharing safe.
 unsafe impl Sync for PerCpuData {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Send for PerCpuData {}
 
 impl PerCpuData {
@@ -93,7 +94,10 @@ impl PerCpuData {
     // Per-CPU interior-mutable state: the owning CPU is the only accessor, and
     // `&self` is the only handle it has, so the aliasing the lint warns about
     // cannot arise.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the TSS belongs to the calling CPU; the contract is on the unsafe fn"
+    )]
     pub unsafe fn tss_mut(&self) -> &mut TaskStateSegment {
         unsafe { &mut *self.tss.get() }
     }

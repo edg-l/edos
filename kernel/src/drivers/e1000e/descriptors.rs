@@ -25,7 +25,10 @@ pub struct TxDescriptor {
 
 // RX descriptor status bits
 pub const RX_STATUS_DD: u8 = 1 << 0;
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the 82574 descriptor status bits in full; the driver tests a subset"
+)]
 pub const RX_STATUS_EOP: u8 = 1 << 1;
 
 // TX descriptor command bits

@@ -1,5 +1,8 @@
 //! HDA codec discovery and configuration.
-#![allow(clippy::unusual_byte_groupings)]
+#![allow(
+    clippy::unusual_byte_groupings,
+    reason = "verb encodings are grouped as the HD Audio spec writes them"
+)]
 
 use super::HdaController;
 use crate::log;

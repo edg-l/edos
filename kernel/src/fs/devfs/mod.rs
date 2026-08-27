@@ -497,7 +497,10 @@ pub fn unregister_device(path: &Path) -> Result<(), DevFsError> {
 }
 
 /// Convenience helper for unregistering devices via string paths.
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "unregistering by path string; every caller holds the node instead"
+)]
 pub fn unregister_device_str(path: &str) -> Result<(), DevFsError> {
     let path = Path::parse(path).map_err(|_| DevFsError::InvalidPath)?;
     unregister_device(&path)

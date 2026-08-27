@@ -1280,7 +1280,10 @@ fn parse_tid(component: &str) -> Option<u64> {
 
 // The tuple is destructured immediately by its single caller; naming a struct
 // for it would only add a type to read one line further away.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "one tuple per procfs column; naming it would only move the type"
+)]
 fn read_thread_info(
     tid: ThreadId,
 ) -> (

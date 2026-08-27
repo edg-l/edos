@@ -39,7 +39,10 @@ impl<T> DmaRegion<T> {
         }
     }
 
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "unwrapping a mapping back to its buffer has no caller today"
+    )]
     pub fn into_buffer(self) -> DmaBuffer {
         self.buffer
     }

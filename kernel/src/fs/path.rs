@@ -15,7 +15,10 @@ pub struct Path {
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("invalid")]
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the component kinds in full; a parsed path never yields this one"
+    )]
     Invalid,
 }
 

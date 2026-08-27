@@ -1,12 +1,18 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // Signal numbers
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the POSIX signal numbers in full; not every one has a sender yet"
+)]
 pub const SIGHUP: u32 = 1;
 pub const SIGINT: u32 = 2;
 pub const SIGKILL: u32 = 9;
 pub const SIGPIPE: u32 = 13;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the POSIX signal numbers in full; not every one has a sender yet"
+)]
 pub const SIGTERM: u32 = 15;
 pub const SIGCHLD: u32 = 17;
 pub const SIGCONT: u32 = 18;
@@ -75,7 +81,10 @@ impl SignalState {
         // Must use const initialization for all 32 elements
         // Used only as the repeated element of an array initializer, where each
         // copy is a fresh value rather than a shared one.
-        #[allow(clippy::declare_interior_mutable_const)]
+        #[expect(
+            clippy::declare_interior_mutable_const,
+            reason = "an array-initialiser const, the only way to build a fixed-size array of atomics"
+        )]
         const INIT: AtomicU64 = AtomicU64::new(0);
         Self {
             pending: AtomicU32::new(0),
@@ -115,7 +124,10 @@ impl SignalState {
     }
 
     /// Check if any signal is pending.
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the pending-set accessors are the readable half of this API"
+    )]
     pub fn has_pending(&self) -> bool {
         self.pending.load(Ordering::Acquire) != 0
     }
@@ -180,7 +192,10 @@ impl SignalState {
     }
 
     /// Check if a specific signal is pending.
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the pending-set accessors are the readable half of this API"
+    )]
     pub fn is_pending(&self, signum: u32) -> bool {
         if signum == 0 || signum >= 32 {
             return false;

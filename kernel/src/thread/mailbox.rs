@@ -168,7 +168,10 @@ impl<T, R> Mailbox<T, R> {
         ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::try_recv", self.queue).pop_front()
     }
 
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "forwarding a request to a second mailbox has no caller yet"
+    )]
     pub fn forward<U>(&self, req: Request<U, R>, payload: T) {
         let new_req = Request {
             payload: Some(payload),

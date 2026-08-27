@@ -14,7 +14,10 @@ pub enum IpProtocol {
 }
 
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the IPv4 header in full (RFC 791 §3.1); the stack reads a subset"
+)]
 pub struct Ipv4Header {
     pub version_ihl: u8,
     pub dscp_ecn: u8,

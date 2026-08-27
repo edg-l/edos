@@ -102,6 +102,7 @@ pub struct NvmeController {
 // SAFETY: `regs` is a stable MMIO mapping read and written only through
 // volatile accesses; every other field is already `Send + Sync`.
 unsafe impl Send for NvmeController {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for NvmeController {}
 
 impl NvmeController {

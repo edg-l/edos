@@ -24,7 +24,10 @@ impl Fatfs {
     /// Overwrite file contents starting at offset 0.
     /// Extends the cluster chain if `buf` is larger than the current file.
     /// Does not shrink or update the on-disk directory entry size yet.
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "FAT32 write support, which no mount path enables today"
+    )]
     pub fn write_file(
         &self,
         entry: &mut DirectoryEntry,
@@ -753,7 +756,10 @@ impl Fatfs {
     }
 
     /// Copy the entire primary FAT to the backup FAT.
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "FAT32 write support, which no mount path enables today"
+    )]
     pub fn mirror_primary_fat_to_backup(&self) -> Result<(), Error> {
         let total: u64 = self.boot_info.fat_size_32 as u64; // sectors in one FAT
         let mut src_lba = self.first_fat_lba();

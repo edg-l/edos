@@ -369,7 +369,10 @@ fn detect_fat_by_heuristics(boot_sector: &Fat32BootSector) -> Option<FilesystemT
 }
 
 /// Check if boot sector has FAT12/FAT16 characteristics
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "distinguishing FAT16/FAT12, which the MBR scan does not need to do"
+)]
 fn is_fat16_or_fat12(boot_sector: &Fat32BootSector) -> bool {
     // Basic FAT validation
     boot_sector.bytes_per_sector == 512 &&

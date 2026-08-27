@@ -482,6 +482,7 @@ struct SpawnArgs {
 // SAFETY: SpawnArgs only holds raw pointers read from userspace; we never
 // dereference them outside of the syscall handler on the calling CPU.
 unsafe impl Send for SpawnArgs {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for SpawnArgs {}
 
 /// How a syscall argument register becomes a typed argument.
@@ -753,7 +754,7 @@ fn sys_clock_settime(buf_ptr: *const u8) -> Result<u64, Errno> {
 macro_rules! errnos {
     ($($(#[$attr:meta])* $name:ident = $value:expr,)*) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[allow(clippy::upper_case_acronyms)]
+        #[expect(clippy::upper_case_acronyms, reason = "the name is the ABI's, not this crate's")]
         #[repr(u64)]
         pub enum Errno {
             $($(#[$attr])* $name = $value,)*
@@ -1492,7 +1493,10 @@ fn parse_user_string_array(
 /// is only performed at depth 0 to prevent infinite recursion.
 // Every argument is a distinct field of the operation; grouping them into a
 // struct would only move the same list one level out.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the spawn ABI's arguments, passed through rather than bundled"
+)]
 fn do_spawn(
     path: &crate::fs::path::Path,
     path_str: &str,

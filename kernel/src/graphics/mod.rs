@@ -179,7 +179,6 @@ fn try_init_virtio_gpu() -> Option<Display> {
 
 // Exactly one `Display` exists for the life of the system, so the size of the
 // unused variant costs nothing.
-#[allow(clippy::large_enum_variant)]
 /// The most regions one frame may be split into, matching the compositor's own
 /// dirty-region cap.
 pub const MAX_FLIP_RECTS: usize = 16;
@@ -188,7 +187,10 @@ pub const MAX_FLIP_RECTS: usize = 16;
 // The variants differ by about 3 KB, so boxing the larger would trade one
 // one-time allocation for an indirection on the flip path, which every frame
 // pays.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the framebuffer variant is large because it carries the dirty-region array"
+)]
 pub enum Display {
     Vbe(DirectFramebuffer),
     VirtioGpu(VirtioGpuDisplay),

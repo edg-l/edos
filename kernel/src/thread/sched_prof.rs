@@ -24,7 +24,10 @@ use crate::timer::Instant;
 
 /// A step of the switch path, and its index into the accumulator table.
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "sched-prof"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "sched-prof"),
+    allow(dead_code, reason = "live only under the sched-prof feature")
+)]
 pub enum Stage {
     /// Copy the outgoing thread's registers into its `ctx`.
     SaveCtx,

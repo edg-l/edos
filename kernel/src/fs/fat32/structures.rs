@@ -179,17 +179,35 @@ pub struct LongFilenameEntry {
 }
 
 // File attributes
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const ATTR_READ_ONLY: u8 = 0x01;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const ATTR_HIDDEN: u8 = 0x02;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const ATTR_SYSTEM: u8 = 0x04;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const ATTR_VOLUME_ID: u8 = 0x08;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const ATTR_DIRECTORY: u8 = 0x10;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const ATTR_ARCHIVE: u8 = 0x20;
 pub const ATTR_LONG_NAME: u8 = 0x0F; // LFN entry
 
@@ -199,7 +217,10 @@ pub const CLUSTER_BAD: u32 = 0x0FFFFFF7;
 pub const CLUSTER_EOF: u32 = 0x0FFFFFF8; // End of chain (0x0FFFFFF8 - 0x0FFFFFFF)
 pub const FAT32_MASK: u32 = 0x0FFFFFFF;
 pub const FAT16_MASK: u32 = 0x0000FFFF;
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+)]
 pub const FAT12_MASK: u32 = 0x00000FFF;
 
 // FAT12/16 specific constants
@@ -224,19 +245,28 @@ impl Fat32BootSector {
     }
 
     /// Convert cluster number to LBA
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn cluster_to_lba(&self, cluster: u32) -> u32 {
         self.data_start_sector() + ((cluster - 2) * self.sectors_per_cluster as u32)
     }
 
     /// Get bytes per cluster
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn bytes_per_cluster(&self) -> u32 {
         self.bytes_per_sector as u32 * self.sectors_per_cluster as u32
     }
 
     /// Get FSInfo sector LBA
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn fsinfo_lba(&self) -> u32 {
         self.fs_info as u32
     }
@@ -317,25 +347,37 @@ impl FsInfo {
     }
 
     /// Check if next free hint is known
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn has_next_free_hint(&self) -> bool {
         self.next_free != FSINFO_UNKNOWN
     }
 
     /// Update free cluster count (decreases when allocating)
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn update_free_count(&mut self, new_count: u32) {
         self.free_count = new_count;
     }
 
     /// Update next free cluster hint
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn update_next_free(&mut self, next_cluster: u32) {
         self.next_free = next_cluster;
     }
 
     /// Create a new FSInfo sector
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn new() -> Self {
         Self {
             lead_signature: FSINFO_LEAD_SIG,
@@ -524,7 +566,10 @@ impl DirectoryEntry {
     }
 
     /// Check if filename matches this entry's name
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "the FAT32 on-disk structures and their accessors in full (Microsoft FAT spec); the driver reads a subset"
+    )]
     pub fn name_matches(&self, filename: &str) -> bool {
         let fat_name = Self::string_to_fat_name(filename);
         self.name == fat_name

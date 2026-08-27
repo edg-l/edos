@@ -63,8 +63,9 @@ struct SlotPool {
 /// Translate a virtual buffer into a scatter-gather list of (phys_addr, byte_count) entries.
 /// Returns None if any page translation fails. Merges physically contiguous entries.
 /// IMPORTANT: The IrqLock on memory_mapper() is acquired and dropped per-page translation.
-/// Safety: x86-64 PCIe DMA is cache-coherent; dirty WB cache lines are visible to the
-/// HBA via bus snooping. Do not use on non-coherent architectures without cache flushes.
+/// x86-64 PCIe DMA is cache-coherent, so dirty WB cache lines are visible to the
+/// HBA via bus snooping; a non-coherent architecture would need explicit cache
+/// flushes here.
 fn virt_buffer_to_sg_list(
     buf: *const u8,
     len: usize,
@@ -220,6 +221,7 @@ pub struct AhciPort {
 // allocation guarantees; the `command_list` DMA region is written per-slot at
 // disjoint offsets and is NO_CACHE mapped.
 unsafe impl Send for AhciPort {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for AhciPort {}
 
 // ---------------------------------------------------------------------------
@@ -1352,7 +1354,7 @@ impl AhciPort {
         } else {
             // Pool-path write: copy caller buffer into pool pages now, before
             // we issue the command.
-            // SAFETY: caller's contract — buffer outlives the handle.
+            // The caller's contract has the buffer outliving the handle.
             SlotCompletion::PoolWrite
         };
 

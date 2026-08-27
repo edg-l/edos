@@ -64,7 +64,10 @@ unsafe fn enable_io_apic(
     let lapic_id = unsafe { get_lapic().id() };
     println!("I/O apics {:#?}", info.io_apics);
 
-    #[allow(clippy::never_loop)]
+    #[expect(
+        clippy::never_loop,
+        reason = "the loop takes the first usable IO APIC and stops; ACPI may list more"
+    )]
     for io_apic_info in info.io_apics.iter() {
         println!("Initializing i/o apic with id: {}", io_apic_info.id);
         unsafe {

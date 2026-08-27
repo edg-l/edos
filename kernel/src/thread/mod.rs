@@ -31,7 +31,10 @@ pub mod scheduler;
 pub mod signal;
 // `thread::thread` holds the Thread type itself; the parent module is the
 // subsystem, not a re-export facade.
-#[allow(clippy::module_inception)]
+#[expect(
+    clippy::module_inception,
+    reason = "thread::thread is the Thread type itself, beside the scheduler that runs it"
+)]
 pub mod thread;
 pub mod util;
 pub mod waitqueue;

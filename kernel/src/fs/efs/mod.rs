@@ -142,7 +142,10 @@ enum NewBlock {
 /// Where a path walk stopped.
 // The large variant is the common one and the value is consumed immediately by
 // the caller, so boxing it would add an allocation to every successful walk.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the walk state carries a block-sized buffer in one arm by design"
+)]
 enum Walk {
     Node((u64, EfsInode)),
     /// A symbolic link named a path outside this filesystem.
@@ -2957,7 +2960,10 @@ impl EfsDriver {
 
     // Every argument is a distinct field of the operation; grouping them into a
     // struct would only move the same list one level out.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "both ends of a rename: two parents, two names and the flags"
+    )]
     fn rename_inner(
         &self,
         old_parent_ino: u64,

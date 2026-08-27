@@ -140,7 +140,10 @@ impl CachedBlockPage {
     // The page frame is shared interior-mutable storage reached through an `Arc`,
     // so `&self` is the only handle callers have; `write_lock` is what provides
     // exclusion, not the borrow checker.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the shard lock is held by the caller; the contract is on the unsafe fn"
+    )]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
         unsafe { &mut *(self.virt_addr() as *mut [u8; PAGE_SIZE]) }
     }
@@ -224,7 +227,10 @@ impl BlockPageGuard {
     /// # Safety
     /// Caller must hold the page's write_lock.
     // See `CachedBlockPage::as_mut_slice`: exclusion comes from `write_lock`.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the shard lock is held by the caller; the contract is on the unsafe fn"
+    )]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
         unsafe { self.page.as_mut_slice() }
     }
@@ -387,7 +393,10 @@ fn shard_index(key: Key) -> usize {
 /// caller has to keep that property; where the fill is a copy from another
 /// slice, `Vec::with_capacity` plus `extend_from_slice` gets the same result
 /// with nothing uninitialized, and is what `read_bytes` does.
-#[allow(clippy::uninit_vec)]
+#[expect(
+    clippy::uninit_vec,
+    reason = "a staging buffer filled by DMA before any read of it"
+)]
 fn staging_buffer(len: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(len);
     // SAFETY: `u8` has no invalid bit patterns and no drop glue, and

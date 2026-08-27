@@ -87,7 +87,10 @@ pub fn mount_partition(
     }))
 }
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the VFS API in full; unmount has no syscall behind it yet"
+)]
 pub fn unmount(mount_point: Path) -> Result<(), Error> {
     expect_ok(send_request(FsRequest::Unmount { mount_point }))
 }
@@ -200,14 +203,20 @@ pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, E
     })
 }
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the VFS API in full; these paths go through the file handle instead"
+)]
 pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
     on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
         vfs::write(op, offset, data, false)
     })
 }
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the VFS API in full; these paths go through the file handle instead"
+)]
 pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
     on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
         vfs::write(op, offset, &data, false)
@@ -296,7 +305,10 @@ pub fn file_info_resolved(path: &Path) -> Result<(File, Path), Error> {
     })
 }
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the VFS API in full; these paths go through the file handle instead"
+)]
 pub fn flush(path: &Path) -> Result<(), Error> {
     on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
         vfs::flush(op)
@@ -320,7 +332,10 @@ pub fn poll(path: &Path) -> Result<Box<dyn Pollable>, Error> {
     })
 }
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the VFS API in full; these paths go through the file handle instead"
+)]
 pub fn mmap(
     path: &Path,
     offset: usize,

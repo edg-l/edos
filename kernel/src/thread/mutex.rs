@@ -68,6 +68,7 @@ pub struct BlockingMutex<T> {
 // `T: Send` covers both impls: the mutex never lends `&T` to two threads, so
 // sharing it only ever moves the `T` between them.
 unsafe impl<T: Send> Send for BlockingMutex<T> {}
+// SAFETY: the same argument as the impl above.
 unsafe impl<T: Send> Sync for BlockingMutex<T> {}
 
 impl<T> BlockingMutex<T> {
@@ -199,14 +200,14 @@ impl<T> BlockingMutex<T> {
     }
 
     /// Get mutable access when the mutex itself is uniquely borrowed.
-    #[expect(unused)]
+    #[expect(unused, reason = "the uncontended accessor every lock type offers")]
     pub fn get_mut(&mut self) -> &mut T {
         // Safe because &mut self guarantees unique access to the inner value.
         unsafe { &mut *self.value.get() }
     }
 
     /// Check whether the lock is currently held.
-    #[expect(unused)]
+    #[expect(unused, reason = "the uncontended accessor every lock type offers")]
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire)
     }

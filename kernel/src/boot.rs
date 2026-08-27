@@ -80,7 +80,10 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the Limine handoff in full; the kernel reads the parts it needs"
+)]
 pub struct BootInfo {
     pub framebuffer: Option<BootFramebuffer>,
     pub memory_map: &'static MemmapResponse,
@@ -113,6 +116,7 @@ pub struct BootModule {
 // are never written after Limine hands them over, so sharing the value hands
 // out reads only.
 unsafe impl Send for BootModule {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for BootModule {}
 
 /// Extracted framebuffer data from Limine, safe to share across threads.
@@ -135,6 +139,7 @@ pub struct BootFramebuffer {
 // the whole boot, and the one owner that draws through it is
 // `graphics::DirectFramebuffer`.
 unsafe impl Send for BootFramebuffer {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for BootFramebuffer {}
 
 pub static BOOT_INFO: Once<BootInfo> = Once::new();

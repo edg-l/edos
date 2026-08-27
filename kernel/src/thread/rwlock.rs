@@ -137,6 +137,7 @@ pub struct RwLock<T> {
 // asks only `T: Send`; sharing it lends `&T` to several readers at once, so
 // `Sync` additionally asks `T: Sync`.
 unsafe impl<T: Send> Send for RwLock<T> {}
+// SAFETY: the same argument as the impl above.
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
@@ -316,7 +317,7 @@ impl<T> RwLock<T> {
     }
 
     /// Get mutable access when the lock itself is uniquely borrowed.
-    #[expect(unused)]
+    #[expect(unused, reason = "the uncontended accessor every lock type offers")]
     pub fn get_mut(&mut self) -> &mut T {
         unsafe { &mut *self.value.get() }
     }

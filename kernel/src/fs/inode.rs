@@ -47,7 +47,10 @@ pub struct VfsInode {
     pub ino: u64,
     /// Cached file kind (file, directory, special). Part of the identity the
     /// inode is created with; readers go through the filesystem's own lookup.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the kind is set at construction and read through the VFS trait instead"
+    )]
     pub kind: FileKind,
     /// Per-inode read-write lock.
     pub lock: BlockingRwLock<()>,

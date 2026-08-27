@@ -91,6 +91,7 @@ pub struct NvmeQueue {
 // of the mapping and are only ever written through, never aliased mutably
 // by Rust references; the DMA buffers behind `sq`/`cq` are exclusively owned.
 unsafe impl Send for NvmeQueue {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for NvmeQueue {}
 
 impl NvmeQueue {

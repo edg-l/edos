@@ -68,5 +68,20 @@ edos-profile-abi = { path = "../libs/edos-profile-abi" }
 syscall-abi = { path = "../libs/syscall-abi" }
 window-abi = { path = "../libs/window-abi" }
 
+# `unsafe` is documented twice, for two readers: `// SAFETY:` above a block says
+# why this operation upholds a contract, `# Safety` on an item says what the
+# contract is. `doc/rust-style.md` states the rule. The two `unnecessary_*`
+# lints are what stop the cheapest way to satisfy the first from being a
+# comment that says nothing.
+[lints.clippy]
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+allow_attributes_without_reason = "warn"
+# The fourth of the set. It reports 720 blocks across 84 files today, which is
+# `doc/ROADMAP-CLEANUP.md` §I5a's remaining work; turning it on is the commit
+# that finishes that entry, and a blanket allow to turn it on sooner is exactly
+# what the other three lints exist to prevent.
+# undocumented_unsafe_blocks = "warn"
+
 [profile.dev]
 opt-level = 2

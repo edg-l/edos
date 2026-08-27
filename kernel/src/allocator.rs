@@ -129,6 +129,7 @@ pub struct PerCpuCache {
 
 // SAFETY: PerCpuCache is only accessed by its owning CPU with IRQs off.
 unsafe impl Send for PerCpuCache {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for PerCpuCache {}
 
 impl PerCpuCache {
@@ -150,6 +151,7 @@ pub struct PerCpuCacheCell(pub UnsafeCell<PerCpuCache>);
 // the owning CPU's GS base with interrupts disabled, so the `UnsafeCell` is
 // never entered from two CPUs at once.
 unsafe impl Sync for PerCpuCacheCell {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Send for PerCpuCacheCell {}
 
 impl PerCpuCacheCell {
@@ -161,7 +163,10 @@ impl PerCpuCacheCell {
     // The cache is per-CPU interior-mutable state: `&self` is the only handle a
     // CPU ever has to its own cell, and the safety contract restricts callers to
     // the owning CPU with interrupts off, so no second reference can exist.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the caller holds the per-CPU heap cache exclusively for the section that calls this"
+    )]
     #[inline(always)]
     pub unsafe fn get_mut(&self) -> &mut PerCpuCache {
         unsafe { &mut *self.0.get() }

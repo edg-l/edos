@@ -125,7 +125,6 @@ enum BufferOwner {
     /// later than the handle leaving `Pending` whenever the submitter was
     /// cancelled. Never read back: it exists to be dropped at the right
     /// time, not to be inspected.
-    #[allow(dead_code)]
     Owned(Arc<dyn Send + Sync>),
     /// The submitter promises to reap this handle before it can reach a
     /// kill point. Counted on the submitting thread and asserted at
@@ -138,7 +137,10 @@ enum BufferOwner {
     /// caller either co-owns its backing or reaps inline -- but it is part
     /// of the type's design space and kept so the variant exists when a
     /// driver-owned buffer needs it.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the buffer ownership kinds in full; the field keeps the allocation alive"
+    )]
     Static,
 }
 
@@ -148,6 +150,7 @@ enum BufferOwner {
 // the buffer is a description handed to a driver, so moving or sharing it
 // carries no access the contract does not already cover.
 unsafe impl Send for BlockBuffer {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for BlockBuffer {}
 
 impl BlockBuffer {

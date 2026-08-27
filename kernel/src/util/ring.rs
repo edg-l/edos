@@ -33,7 +33,10 @@ impl ByteRing {
     }
 
     /// Live under `sched-test`, where the ring's own check reads it.
-    #[cfg_attr(not(feature = "sched-test"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "sched-test"),
+        allow(dead_code, reason = "live only under the sched-test feature")
+    )]
     pub fn len(&self) -> usize {
         self.len
     }

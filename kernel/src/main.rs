@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![allow(clippy::fn_to_numeric_cast)]
+#![allow(
+    clippy::fn_to_numeric_cast,
+    reason = "entry points are handed to the CPU and to Limine as addresses"
+)]
 
 use core::time::Duration;
 
@@ -201,7 +204,10 @@ fn main() -> ! {
     }
 
     // `sched-test` ends in the loop above and never reaches normal boot.
-    #[allow(unreachable_code)]
+    #[allow(
+        unreachable_code,
+        reason = "the sched-test feature runs its suite and never returns from the call above"
+    )]
     logs::init();
     crate::fs::block_page_cache::BlockPageCache::init();
     drivers::init_drivers();

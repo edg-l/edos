@@ -6,7 +6,10 @@ pub const ECHO_REQUEST: u8 = 8;
 pub const ECHO_REPLY: u8 = 0;
 
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the ICMP header in full (RFC 792); the stack reads a subset"
+)]
 pub struct IcmpHeader {
     pub type_: u8,
     pub code: u8,

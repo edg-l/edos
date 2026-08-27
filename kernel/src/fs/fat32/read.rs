@@ -53,7 +53,10 @@ impl Fatfs {
             Ok(buffer)
         }
     }
-    #[expect(unused)]
+    #[expect(
+        unused,
+        reason = "reading a whole file at once, which the VFS does page by page"
+    )]
     pub fn read_file(&self, entry: &DirectoryEntry) -> Result<Vec<u8>, Error> {
         if entry.is_directory() {
             return Err(Error::NotAFile);

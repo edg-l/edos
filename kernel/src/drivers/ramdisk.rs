@@ -36,6 +36,7 @@ pub struct RamBlockDevice {
 // of the boot; concurrent access is serialized by the block layer's callers
 // the same way it is for a real disk.
 unsafe impl Send for RamBlockDevice {}
+// SAFETY: the same argument as the impl above.
 unsafe impl Sync for RamBlockDevice {}
 
 impl RamBlockDevice {

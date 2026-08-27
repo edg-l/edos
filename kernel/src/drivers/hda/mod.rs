@@ -484,7 +484,10 @@ impl HdaController {
 
 // === Shared playback state ===
 
-#[expect(unused)]
+#[expect(
+    unused,
+    reason = "the playback state the stream descriptor programming will read"
+)]
 struct HdaPlaybackState {
     controller: HdaController,
     pci_device: crate::drivers::pci::structures::PciDevice,

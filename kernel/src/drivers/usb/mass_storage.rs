@@ -360,7 +360,10 @@ impl UsbMassStorage {
     /// held it last.
     // Every argument is a distinct field of the operation; grouping them into a
     // struct would only move the same list one level out.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one bulk-only transfer: CBW fields plus both buffer halves (USB BOT §3)"
+    )]
     fn bot_transfer(
         &mut self,
         controller: &mut XhciController,

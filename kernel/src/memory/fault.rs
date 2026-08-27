@@ -62,7 +62,10 @@ pub struct FaultInfo {
 /// which the dead-code lint does not count as a read; they are the first thing
 /// to look at when a fault kills a process.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the fault-rejection reasons in full; not every one has a producer"
+)]
 pub enum FaultReject {
     /// A protection violation, which belongs to the COW handler.
     Protection,

@@ -57,7 +57,10 @@ impl FrameDrop {
     // The slice aliases the HHDM mapping of a physical frame, not anything the
     // wrapper owns by value, so the returned lifetime is bounded by the caller's
     // stated exclusivity rather than by `&self`.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the frame is owned by this handle; the contract is on the unsafe fn"
+    )]
     pub unsafe fn frame_slice_mut(&self) -> &mut [u8] {
         let frame = self.frame();
         let ptr = get_virt_addr_from_phys_offset(frame.start_address()).as_mut_ptr();

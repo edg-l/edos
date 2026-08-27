@@ -174,7 +174,10 @@ impl UsbSpeed {
     // Taking `self` by value here would force every call site through a copy of
     // the enum for no gain; the receiver stays borrowed for consistency with the
     // other accessors on this type.
-    #[allow(clippy::wrong_self_convention)]
+    #[expect(
+        clippy::wrong_self_convention,
+        reason = "the name is the xHCI field's: the Slot Context speed encoding"
+    )]
     pub fn to_slot_speed(&self) -> u32 {
         match self {
             UsbSpeed::Full => 1,
@@ -203,7 +206,10 @@ pub struct UsbDevice {
     /// Output Device Context buffer whose physical address is registered in the
     /// DCBAA. Nothing reads it back; holding it is what keeps the controller's
     /// entry pointing at live memory for as long as the device exists.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the output context is kept mapped for the controller's lifetime, not read by the driver"
+    )]
     pub output_ctx: DmaBuffer,
     pub device_descriptor: Option<DeviceDescriptor>,
     /// Raw configuration descriptor blob (Configuration + Interface + Endpoint descriptors).
