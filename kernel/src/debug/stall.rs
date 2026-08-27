@@ -22,21 +22,33 @@
 //! at a workload that should never be idle, the way `heap-poison` is a
 //! debugging build to point at a heap that should never be corrupt.
 //!
-//! **It has never been seen to fire, and that is worth knowing before it is
-//! trusted.** It was built to explain a wedge that turned out not to be one:
-//! the machine was running about a thousand threads a second inside a
-//! watchdog's own millisecond sleep, so there was no stall to detect. What
-//! answered that question was reading the kernel's counters out of the guest
-//! over QMP (`scripts/wedge-probe`), which needs no kernel build at all.
-//! Reach for that first, and treat a silent run under this feature as
-//! unproven rather than as evidence of anything.
+//! Not every switch is progress. The AHCI and NVMe watchdogs wake once a
+//! second for as long as the machine is up, so a counter that took their
+//! switches as work stood still for at most one second and could never reach
+//! [`STALL_MS`] on any boot with a storage controller -- which is every boot
+//! this tree runs. A thread that only polls therefore calls
+//! [`mark_heartbeat`] and is not counted; see it for what qualifies.
+//!
+//! `make stall-check` is the proof that this fires: it boots a kernel whose
+//! `stalltest` cmdline deadlocks two kthreads on a [`BlockingMutex`] instead
+//! of loading init, and fails unless the dump names them both. Reach for
+//! `scripts/wedge-probe` first all the same -- it reads the kernel's counters
+//! out of a running guest over QMP and needs no kernel build at all.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::Duration,
+};
 
 use crate::{
-    emergency_println,
-    thread::thread::{State, Thread, list_threads},
+    emergency_println, log,
+    thread::{
+        mutex::BlockingMutex,
+        scheduler::{current_thread, thread_park, thread_sleep},
+        thread::{State, Thread, list_threads},
+        util::queue_spawn_kthread_named,
+    },
     timer::Instant,
 };
 
@@ -55,9 +67,51 @@ pub static SWITCHES: AtomicU64 = AtomicU64::new(0);
 /// dump between them rather than four interleaved ones.
 static DUMPED: AtomicBool = AtomicBool::new(false);
 
+/// Threads whose switches are not progress, by [`ThreadId`]. Zero is free.
+///
+/// [`ThreadId`]: crate::thread::thread::ThreadId
+static HEARTBEATS: [AtomicU64; MAX_HEARTBEATS] = [const { AtomicU64::new(0) }; MAX_HEARTBEATS];
+
+/// Room for the two storage watchdogs and any later poller of the same shape.
+/// A registry that fills silently would make the detector unfirable again, so
+/// an overflow says so on the serial line.
+const MAX_HEARTBEATS: usize = 8;
+
+/// Declare the calling thread a heartbeat: its switches do not count as work.
+///
+/// For a thread whose whole body is `sleep(tick); look; repeat` and which
+/// therefore keeps running at its tick on a machine that has stopped. The
+/// test is not "wakes periodically" but "wakes periodically *and* finding
+/// nothing is its normal answer": a thread that sleeps between units of real
+/// work would hide exactly the stall this exists to catch.
+pub fn mark_heartbeat() {
+    let Some(thread) = current_thread() else {
+        return;
+    };
+    let tid = thread.id.0;
+    for slot in &HEARTBEATS {
+        if slot
+            .compare_exchange(0, tid, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    emergency_println!("stall: heartbeat registry full, tid {tid} counts as work");
+}
+
+fn is_heartbeat(tid: u64) -> bool {
+    HEARTBEATS
+        .iter()
+        .any(|slot| slot.load(Ordering::Relaxed) == tid)
+}
+
 /// Count a switch into a real thread. Called from the scheduler.
 #[inline(always)]
-pub fn note_switch() {
+pub fn note_switch(tid: u64) {
+    if is_heartbeat(tid) {
+        return;
+    }
     SWITCHES.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -173,5 +227,40 @@ fn backtrace(thread: &Arc<Thread>) {
             break;
         }
         rbp = next;
+    }
+}
+
+/// The lock the `stalltest` cmdline deadlocks two kthreads on.
+static DEADLOCK: BlockingMutex<()> = BlockingMutex::new(());
+
+/// Deadlock two kthreads on [`DEADLOCK`], so the machine has a real stall to
+/// find. Started from `mount_system_fs` in place of loading init, because a
+/// desktop is never idle for [`STALL_MS`]: the taskbar clock alone is work,
+/// and work is what this refuses to call a stall.
+///
+/// `stall-holder` takes the lock and parks forever; `stall-waiter` blocks
+/// behind it. Neither is a heartbeat, so both stop the counter, and both are
+/// `Parked` and therefore backtraced by the dump.
+pub fn spawn_deadlock() {
+    log!("stall: stalltest — deadlocking two kthreads instead of loading init");
+    queue_spawn_kthread_named("stall-holder", holder as *const () as u64);
+    queue_spawn_kthread_named("stall-waiter", waiter as *const () as u64);
+}
+
+extern "C" fn holder() -> ! {
+    let _guard = DEADLOCK.lock();
+    loop {
+        thread_park();
+    }
+}
+
+extern "C" fn waiter() -> ! {
+    // Let the holder win the lock, so the two names in the dump describe what
+    // each thread actually did. Either order deadlocks; only this one is
+    // legible.
+    thread_sleep(Duration::from_millis(500));
+    let _guard = DEADLOCK.lock();
+    loop {
+        thread_park();
     }
 }

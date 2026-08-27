@@ -1033,7 +1033,7 @@ impl Scheduler {
             next.id.0
         );
         #[cfg(feature = "stall-dump")]
-        crate::debug::stall::note_switch();
+        crate::debug::stall::note_switch(next.id.0);
 
         // Set as current. Update cpu FIRST so the old CPU's
         // save_current_thread sees the migration and bails out.

@@ -11230,3 +11230,44 @@ Two things the conversion taught, both worth knowing before the next pass:
 impl`, so the tree's common shape of one comment covering a `Send`/`Sync` pair
 leaves the second impl flagged; thirteen of those got their own one-line
 comment pointing at the argument above.
+
+## `stall-dump` fires, and why it never did before (`make stall-check`)
+
+The detector in `kernel/src/debug/stall.rs` had never printed. That was not
+because stalls are rare: **it could not fire on any boot this tree runs.** It
+declares a stall when its switch counter stands still for 4 s, and five kernel
+threads wake on a timer forever, whatever else the machine is doing:
+
+| thread | tick |
+| --- | --- |
+| `tcp-retransmit` (`net/stack.rs`) | 200 ms |
+| `nvme_watchdog`, `ahci_watchdog` | 1 s |
+| `block_writeback`, `journal_committer` | ~5 s |
+
+Measured on a deliberately deadlocked guest, that is ~5 switches per second
+forever, so the counter's longest still window was 200 ms against a 4000 ms
+threshold. No threshold fixes it; the count advances indefinitely.
+
+The fix is `stall::mark_heartbeat()`, called by those five on entry: a thread
+whose body is `sleep(tick); look; repeat` and whose normal answer is "nothing
+to do" is not the machine making progress, so `note_switch` skips it. The
+exclusion is narrow on purpose — if housekeeping ever *does* wake a real
+waiter, that waiter is not a heartbeat and the counter moves, which is the
+whole distinction between a stalled machine and a quiet one.
+
+**The reproducer, so the next session can re-run it:** `make stall-check`.
+It builds `edos-stall.iso` (`--features stall-dump`, `stalltest` on the
+cmdline); `mount_system_fs` then spawns `stall-holder`, which takes a
+`BlockingMutex` and parks forever, and `stall-waiter`, which blocks behind it,
+and never loads init. QEMU is killed after 90 s and the verdict comes from
+`run_log.txt`. Confirmed output: `=== STALL: nothing ran for 4000 ms (400
+switches this boot) ===`, twenty threads with their state, and
+`stall-waiter`'s backtrace resolving through `addr2line` to
+`edos_kernel::debug::stall::waiter`. After the one dump it prints
+`stall: still nothing, switches=408` per window, which is how a machine that
+stayed stopped is told from one that started again.
+
+Do not point this at a desktop boot: a running session is never idle for 4 s
+(the taskbar clock alone is work), and that is correct behaviour, not a
+missing dump. `scripts/wedge-probe` remains the first instrument for a
+suspected wedge — it reads the same counters over QMP with no kernel build.

@@ -474,6 +474,41 @@ edos-nvme.iso: limine/limine kernel live-root.img
 edos-nvme-hostile.iso: limine/limine kernel live-root.img
 	$(call build_iso,edos-nvme-hostile.iso,iso_root_nvme_hostile,$(NVME_UUID),nvme_timeout_ms=0)
 
+# The same system with `stalltest` on the cmdline: `mount_system_fs` deadlocks
+# two kthreads on a BlockingMutex instead of loading init, so the machine ends
+# the boot with nothing runnable. Only `stall-check` boots this one, and only a
+# kernel built `--features stall-dump` acts on the flag.
+edos-stall.iso: limine/limine kernel live-root.img
+	$(call build_iso,edos-stall.iso,iso_root_stall,$(NVME_UUID),stalltest)
+
+# Proof that the stall detector fires. It had never been seen to print, which
+# was evidence of nothing while there was no stall to point it at: this builds
+# one. The dump has to name both deadlocked threads, so a detector that fires
+# on any old quiet moment does not pass either.
+#
+# The guest never exits -- that is the whole point -- so qemu is killed on a
+# timer and the verdict comes from the log.
+.PHONY: stall-check
+stall-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img nvme-disk.img
+	$(MAKE) edos-stall.iso CARGO_FLAGS="--features stall-dump"
+	rm -f run_log.txt
+	-timeout 90 $(MAKE) stall-boot
+	@if grep -aq '=== STALL' run_log.txt \
+	   && grep -aq 'stall-holder' run_log.txt \
+	   && grep -aq 'stall-waiter' run_log.txt; then \
+		echo "stall-check: OK, the dump named both deadlocked threads"; \
+	else \
+		echo "stall-check: no stall dump naming both threads in run_log.txt"; \
+		exit 1; \
+	fi
+
+.PHONY: stall-boot
+stall-boot: BOOT_ISO := edos-stall.iso
+# Nothing is listening, and an unattended gate has no session bus to bind.
+stall-boot: AUDIODEV := none
+stall-boot:
+	$(call run_qemu_uefi,iso,4,-accel kvm,$(DISPLAY_HEADLESS))
+
 $(IMAGE_NAME).hdd: limine/limine kernel
 	rm -f $(IMAGE_NAME).hdd
 	dd if=/dev/zero bs=1M count=0 seek=128 of=$(IMAGE_NAME).hdd

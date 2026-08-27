@@ -97,6 +97,9 @@ pub fn inflight_dec() {
 }
 
 pub extern "C" fn watchdog_entry() -> ! {
+    // A poller that finds nothing is not the machine making progress.
+    #[cfg(feature = "stall-dump")]
+    crate::debug::stall::mark_heartbeat();
     loop {
         // Sweep at the tick, or faster when the timeout has been shortened
         // for a test, so a short timeout is actually reachable.

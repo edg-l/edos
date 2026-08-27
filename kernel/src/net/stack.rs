@@ -608,6 +608,9 @@ impl NetStack {
 /// Kernel thread that periodically checks TCP connections for retransmit timeouts
 /// and cleans up TIME_WAIT / Closed connections.
 pub extern "C" fn tcp_retransmit_main() -> ! {
+    // A poller that finds nothing is not the machine making progress.
+    #[cfg(feature = "stall-dump")]
+    crate::debug::stall::mark_heartbeat();
     let thread = current_thread().unwrap();
     thread.set_priority(crate::thread::runqueue::IO_PRIORITY);
 

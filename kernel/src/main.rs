@@ -517,6 +517,20 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
+    // `stalltest` deadlocks two kthreads here and never loads init, so the
+    // machine has nothing left to run and `debug::stall` has a real stall to
+    // find. `make stall-check` is the gate; the desktop is not idle enough to
+    // serve as one.
+    if cmdline.other_params.iter().any(|(k, _)| k == "stalltest") {
+        #[cfg(feature = "stall-dump")]
+        {
+            crate::debug::stall::spawn_deadlock();
+            kthread_exit(0)
+        }
+        #[cfg(not(feature = "stall-dump"))]
+        log!("stalltest: ignored, this kernel was not built --features stall-dump");
+    }
+
     // One userspace process is started: init. What else runs, and what happens
     // when it dies, is init's policy rather than the kernel's.
     let name = "bin/edos-init";

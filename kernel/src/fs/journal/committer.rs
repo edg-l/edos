@@ -26,6 +26,9 @@ use crate::{
 const COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn committer_thread() -> ! {
+    // A poller that finds nothing is not the machine making progress.
+    #[cfg(feature = "stall-dump")]
+    crate::debug::stall::mark_heartbeat();
     loop {
         let cache = BlockPageCache::global();
 

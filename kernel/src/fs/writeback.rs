@@ -63,6 +63,9 @@ fn flush_blocks(cache: &BlockPageCache, force: bool) -> (u64, bool) {
 }
 
 pub fn writeback_thread() -> ! {
+    // A poller that finds nothing is not the machine making progress.
+    #[cfg(feature = "stall-dump")]
+    crate::debug::stall::mark_heartbeat();
     loop {
         let cache = BlockPageCache::global();
 
