@@ -11596,3 +11596,63 @@ than within any one file, and several are the same fact:
 
 `TimerCalibration::setup_pit_oneshot` was the only `unsafe fn` in the group
 without a `# Safety` section.
+
+## `kernel/src/thread/`, documented: the last module outside `drivers/`
+
+56 `unsafe` blocks across nine files (`scheduler.rs` 26, `sched_test.rs` 7,
+`thread.rs` 6, `runqueue.rs` 6, `rwlock.rs` 5, `mutex.rs` 3, and one each in
+`paging.rs`, `util.rs`, `interrupt.rs`), now under `mod thread;`'s own
+`#[deny(clippy::undocumented_unsafe_blocks)]`. §I5a's remainder is 295 blocks
+and they are all in `drivers/`.
+
+- **The runqueue's six are one argument.** Every pointer in the list came from
+  an `Arc::into_raw` in `enqueue`, the list holds that reference for as long as
+  the node is linked, and `unlink` is the only way out and takes the `Arc`
+  back — so a linked pointer is never dangling. Written out once in
+  `avg_vruntime` and referred to from `pick_next` and `steal_victim`.
+- **A guard's `Deref` names the state value that excludes everyone else**, not
+  "the guard means we have the lock". `BlockingMutexGuard` cites `locked` and
+  its own `Drop`; `RwLockReadGuard` cites a non-negative `state`;
+  `RwLockWriteGuard` cites `state == -1`. Two of these replaced informal
+  `// Safe:` comments the lint does not recognise.
+- **The scheduler's `context` is one of exactly two things**, and every comment
+  says which: the interrupt frame the entry stub pushed, which `check_context`
+  validated on the way in, or the synthetic frame `save_transition_switch`
+  built on the calling thread's own stack. Nothing else ever reaches these
+  functions, and saying so is more useful than restating that the pointer is
+  non-null.
+- **The per-CPU calls argue migration, not validity**, the same way `util/`
+  does. `sched()` is the sharp case and says it outright: a thread moved
+  between the GS-base read and the load answers with *another* CPU's scheduler,
+  which is still the live `'static` one that CPU's `init` leaked, so the risk
+  here is reading the wrong CPU's scheduler and never an invalid pointer.
+  `set_current_thread`, `cache_thread_info` and `tss_mut` all carry contracts
+  that name interrupts-off, and each call site says where its interrupts-off
+  comes from.
+- `context_switch_to`, `switch_away` and `save_transition_switch` were
+  `unsafe fn` with no `# Safety` section. `save_transition_switch`'s is the
+  interesting one: `arg` must stay valid *for as long as the thread is away*,
+  which in practice means the caller's own frame, since the caller is suspended
+  for exactly that long.
+
+### A soundness fix on the way: `RwLock`'s `Debug`
+
+It loaded `state` and then, in the `0` arm, read `value` straight through the
+`UnsafeCell`. A writer arriving between the load and the read is a data race
+for the sake of a debug line, and no honest `// SAFETY:` could be written above
+it. `RwLock` now has a `try_read` — the read-side counterpart of the `try_lock`
+`BlockingMutex`'s own `Debug` already used — and the formatter goes through a
+guard like every other reader. The three-way `<write-locked>` /
+`<read-locked, N readers>` split went with it: what a formatter can actually
+report is "I got the lock" or "I did not".
+
+### Trap: a `#[deny]` is only proven by the feature sweep
+
+Two of `scheduler.rs`'s blocks live inside `trace_event!`, which expands to
+nothing unless `--features trace` is on. A plain `cargo clippy` and a
+`cargo clippy --features sched-test` both reported the module clean while those
+two were still bare; only `make -C kernel clippy`, which loops over every
+feature set, caught them. So when adding a module's deny, the check that it is
+actually satisfied is the sweep, not a single run — and the same holds for
+counting what is left, since the tree-wide `-W` measurement is a default-feature
+run and undercounts any module with feature-gated `unsafe`.

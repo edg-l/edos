@@ -179,6 +179,26 @@ impl<T> RwLock<T> {
         }
     }
 
+    /// Take a read lock if no writer holds it, without ever blocking.
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+        loop {
+            let s = self.state.load(Ordering::Acquire);
+            if s < 0 {
+                return None;
+            }
+            if self
+                .state
+                .compare_exchange_weak(s, s + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(RwLockReadGuard {
+                    lock: self,
+                    slot: self.claim_reader_slot(),
+                });
+            }
+        }
+    }
+
     /// Acquire an exclusive write lock. Blocks if any readers or a writer are active.
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         loop {
@@ -319,6 +339,8 @@ impl<T> RwLock<T> {
     /// Get mutable access when the lock itself is uniquely borrowed.
     #[expect(unused, reason = "the uncontended accessor every lock type offers")]
     pub fn get_mut(&mut self) -> &mut T {
+        // SAFETY: `&mut self` is a unique borrow of the whole lock, so no guard
+        // can be outstanding and no other CPU can hold it for read or write.
         unsafe { &mut *self.value.get() }
     }
 }
@@ -326,17 +348,16 @@ impl<T> RwLock<T> {
 impl<T: fmt::Debug> fmt::Debug for RwLock<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut dbg = f.debug_struct("RwLock");
-        let s = self.state.load(Ordering::Relaxed);
-        match s {
-            -1 => {
+        // Through a guard, not through `value` directly: a state load says only
+        // what was true a moment ago, and a writer arriving between the load and
+        // the read would be a data race for the sake of a debug line.
+        match self.try_read() {
+            Some(guard) => {
+                dbg.field("value", &*guard);
+                drop(guard);
+            }
+            None => {
                 dbg.field("value", &"<write-locked>");
-            }
-            0 => {
-                let val = unsafe { &*self.value.get() };
-                dbg.field("value", val);
-            }
-            n => {
-                dbg.field("value", &alloc::format!("<read-locked, {} readers>", n));
             }
         }
         dbg.finish()
@@ -354,6 +375,10 @@ pub struct RwLockReadGuard<'a, T> {
 impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: the guard is only built after `state` was raised for this
+        // reader, and it is not lowered again until `Drop`. A non-negative
+        // `state` excludes the write holder, so every live reference derived
+        // from the cell for this guard's lifetime is shared, as this one is.
         unsafe { &*self.lock.value.get() }
     }
 }
@@ -390,12 +415,17 @@ pub struct RwLockWriteGuard<'a, T> {
 impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: the write guard is only built after `state` went 0 -> -1,
+        // which excludes every reader and every other writer until `Drop`
+        // restores it, so this guard is the value's only reachable borrow.
         unsafe { &*self.lock.value.get() }
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref` -- `state` is -1 for the guard's lifetime, and
+        // `&mut self` makes this the only reference derived from it.
         unsafe { &mut *self.lock.value.get() }
     }
 }

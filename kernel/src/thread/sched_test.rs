@@ -36,6 +36,9 @@ fn wake_tid(tid: ThreadId, priority: WakePriority) {
 /// The exit code seen by the host is `(code << 1) | 1`, so
 /// writing 0x00 produces exit code 1 (success), 0x01 produces 3 (failure).
 fn qemu_exit(code: u32) -> ! {
+    // SAFETY: a single byte to port 0xf4, QEMU's isa-debug-exit device. Nothing
+    // else in the kernel drives that port, and the machine stops executing
+    // immediately afterwards.
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0xf4u16, in("al") code as u8);
     }
@@ -359,6 +362,9 @@ fn spawn_test(harness: &Arc<TestHarness>, name: &str, entry: extern "C" fn(*mut 
 }
 
 fn get_harness(arg: *mut u8) -> Arc<TestHarness> {
+    // SAFETY: `arg` is the `Box::into_raw` `spawn_test` handed to
+    // `queue_spawn_kthread_named_arg`, which delivers it once, to this thread's
+    // entry point and no other. So this reclaims the box exactly once.
     unsafe { *Box::from_raw(arg as *mut Arc<TestHarness>) }
 }
 
@@ -1179,6 +1185,8 @@ fn hash_step(state: u64, input: u64) -> u64 {
 }
 
 extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
+    // SAFETY: the boxed argument this test's spawner leaked, delivered
+    // once to this entry point, and of the type it was boxed as.
     let (h, seed) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
 
     // Use many locals to force register pressure + stack spills.
@@ -1460,6 +1468,8 @@ const TRI_SPIN_MS: u64 = 300;
 const TRI_SPINNERS: u32 = 2;
 
 extern "C" fn test_tri_spinner(arg: *mut u8) -> ! {
+    // SAFETY: the boxed argument this test's spawner leaked, delivered
+    // once to this entry point, and of the type it was boxed as.
     let (h, priority) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
     current_thread().unwrap().set_priority(priority as u8);
 
@@ -1533,6 +1543,8 @@ const SHARE_WINDOW_MS: u64 = 300;
 const SHARE_THREADS: u32 = 2;
 
 extern "C" fn test_weighted_share(arg: *mut u8) -> ! {
+    // SAFETY: the boxed argument this test's spawner leaked, delivered
+    // once to this entry point, and of the type it was boxed as.
     let (h, priority) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
     let priority = priority as u8;
     let heavy = priority == SHARE_HEAVY_PRIORITY;
@@ -1677,6 +1689,8 @@ fn cpu_time_now(thread: &Thread) -> u64 {
 }
 
 extern "C" fn test_burst_share(arg: *mut u8) -> ! {
+    // SAFETY: the boxed argument this test's spawner leaked, delivered
+    // once to this entry point, and of the type it was boxed as.
     let (h, sleeps) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
     let sleeps = sleeps != 0;
     let me = current_thread().unwrap();
@@ -2067,6 +2081,8 @@ fn pi_hold_section(h: &TestHarness, flavour: u64, me: &Arc<Thread>) -> (u64, u64
 }
 
 extern "C" fn test_priority_inversion(arg: *mut u8) -> ! {
+    // SAFETY: the boxed argument this test's spawner leaked, delivered
+    // once to this entry point, and of the type it was boxed as.
     let (h, encoded, quiet) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64, u64)) };
     let (flavour, role) = (encoded / 3, encoded % 3);
     let quiet = quiet != 0;

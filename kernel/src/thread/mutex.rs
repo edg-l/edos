@@ -202,7 +202,8 @@ impl<T> BlockingMutex<T> {
     /// Get mutable access when the mutex itself is uniquely borrowed.
     #[expect(unused, reason = "the uncontended accessor every lock type offers")]
     pub fn get_mut(&mut self) -> &mut T {
-        // Safe because &mut self guarantees unique access to the inner value.
+        // SAFETY: `&mut self` is a unique borrow of the whole mutex, so no
+        // guard can be outstanding and no other CPU can hold the lock.
         unsafe { &mut *self.value.get() }
     }
 
@@ -234,13 +235,17 @@ impl<'a, T> Deref for BlockingMutexGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // Safe: the guard represents exclusive access to the inner value.
+        // SAFETY: the guard exists only while this thread holds the lock and
+        // `release` runs in its `Drop`, so no other reference to the value is
+        // live for the guard's lifetime.
         unsafe { &*self.lock.value.get() }
     }
 }
 
 impl<'a, T> DerefMut for BlockingMutexGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: as in `deref` -- the guard is the lock's sole holder, and
+        // `&mut self` makes this the only reference derived from it.
         unsafe { &mut *self.lock.value.get() }
     }
 }

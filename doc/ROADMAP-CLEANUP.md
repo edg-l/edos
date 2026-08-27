@@ -724,17 +724,38 @@ frame-pointer walk, whose comment says outright that it does not bound `rbp` to
 the current stack the way `profile::walk_kernel` does. They take no `#[deny]`:
 a crate-level one would reach `drivers/` and `thread/` too, so they ratchet
 when the last module does.
-344 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
---target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`, and they are in exactly two modules: `drivers/` (295;
-`usb/xhci/mod.rs` 77, `ahci/port.rs` 38, `virtio/gpu.rs` 33, `virtio/queue.rs`
-14, `nvme/admin.rs` 13, `ahci/controller.rs` 12) and `thread/` (49;
-`scheduler.rs` 26). The lint sits
-commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
-are on: moving it up from the last module's `mod` declaration is the commit
-that closes this entry.
+`thread/` is the last module outside `drivers/`: 56 blocks across
+`scheduler.rs` (26), `sched_test.rs`, `thread.rs`, `runqueue.rs`, `rwlock.rs`,
+`mutex.rs`, `paging.rs`, `util.rs` and `interrupt.rs`. Two shapes carry most of
+it. The runqueue's six are one argument written once -- a pointer in the list
+came from `Arc::into_raw` in `enqueue`, the list holds that reference for as
+long as the node is linked, and `unlink` is the only way out and takes the
+`Arc` back -- and the guard `Deref`s in `mutex.rs` and `rwlock.rs` are the
+other, each naming the state value that excludes every other reference for the
+guard's lifetime. The scheduler's own comments split cleanly in two: `context`
+is always "the interrupt frame `check_context` validated on entry" or "the
+synthetic frame `save_transition_switch` built on the caller's stack", and the
+per-CPU calls (`set_current_thread`, `cache_thread_info`, `tss_mut`,
+`get_lapic`) all argue migration rather than validity, as `util/` does. `sched()`
+says so outright: a thread moved between the GS-base read and the load answers
+with another CPU's scheduler, which is still a live `'static` one, so the risk
+is reading the wrong CPU's and never an invalid pointer. `context_switch_to`,
+`switch_away` and `save_transition_switch` gained `# Safety` sections.
+`RwLock`'s `Debug` impl needed a fix before it could take a comment: it
+discriminated on a `state` load and then read `value` through the cell, which is
+a data race against a writer arriving in between, so it now goes through a new
+`try_read` the way `BlockingMutex`'s `Debug` already went through `try_lock`.
 
-**I5b, the contracts.** 65 `unsafe fn` declarations against 51 `# Safety`
+295 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+--target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
+grep -cE '^\s+--> '`, and they are all in `drivers/`: `usb/xhci/mod.rs` 77,
+`ahci/port.rs` 38, `virtio/gpu.rs` 33, `virtio/queue.rs` 14, `nvme/admin.rs` 13,
+`ahci/controller.rs` 12, `mod.rs` 10, `hda/mod.rs` 10, then a tail of eight or
+fewer. The lint sits commented out in `kernel/Cargo.toml`'s `[lints.clippy]`
+beside the three that are on: moving it up from the last module's `mod`
+declaration is the commit that closes this entry.
+
+**I5b, the contracts.** 65 `unsafe fn` declarations against 55 `# Safety`
 sections, remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
 modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented
 `unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
@@ -744,8 +765,8 @@ the smaller of the two.
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
 the modules it covers carries a `# Safety` section. The impls are done and
-twenty-two of the twenty-four modules in `main.rs` hold their own deny; the
-two left are `drivers/` and `thread/`.
+twenty-three of the twenty-four modules in `main.rs` hold their own deny; the
+one left is `drivers/`.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

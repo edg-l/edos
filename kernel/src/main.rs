@@ -77,6 +77,7 @@ mod serial;
 mod smp;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod syscalls;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod thread;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod timer;

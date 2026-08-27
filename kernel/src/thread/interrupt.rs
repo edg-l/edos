@@ -91,6 +91,9 @@ pub unsafe extern "C" fn timer_interrupt_handler() {
 /// put. See `Scheduler::tick_prepare` for why leaving matters.
 #[unsafe(no_mangle)]
 pub extern "C" fn timer_tick_prepare(context: *mut CpuContext) -> u64 {
+    // SAFETY: an EOI write to this CPU's own LAPIC, from the handler of the
+    // vector it acknowledges. The LAPIC is mapped and enabled before any
+    // interrupt can be delivered, so the register exists by the time this runs.
     unsafe { get_lapic().end_of_interrupt() };
     tick_prepare(context)
 }

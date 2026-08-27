@@ -136,6 +136,8 @@ fn claim_idle_cpu() -> Option<usize> {
 
 pub fn init() {
     println!("Initializing scheduler");
+    // SAFETY: a read of this CPU's own LAPIC ID register. `apic::init` maps
+    // and enables the LAPIC before any CPU brings its scheduler up.
     let lapic_id = unsafe { get_lapic().id() };
     let sched = Box::new(Scheduler::new(lapic_id));
 
@@ -166,6 +168,12 @@ pub fn init() {
 
 #[inline(always)]
 pub fn sched() -> &'static Scheduler {
+    // SAFETY: `init` leaks a `Box<Scheduler>` into this CPU's slot and nothing
+    // ever clears it, so once set the pointer is `'static` and non-null. A
+    // migration between the GS-base read and the load answers with the other
+    // CPU's scheduler, which is still a live `'static` one -- the risk here is
+    // reading the wrong CPU's, never an invalid pointer. Callers that can run
+    // before their CPU's `init` use `try_sched`.
     unsafe {
         get_percpu_data()
             .scheduler
@@ -180,6 +188,8 @@ pub fn sched() -> &'static Scheduler {
 /// inside the frame allocator / heap init).
 #[inline(always)]
 pub fn try_sched() -> Option<&'static Scheduler> {
+    // SAFETY: the slot holds either null or the leaked `'static` scheduler that
+    // `init` put there, and `as_ref` turns the first of those into `None`.
     unsafe { get_percpu_data().scheduler.get().as_ref() }
 }
 pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
@@ -663,6 +673,9 @@ impl Scheduler {
     fn run_idle(&self, context: *mut CpuContext) -> bool {
         // Mark CPU idle
         self.current.store(0, Ordering::Release);
+        // SAFETY: `run_idle` is reached from the scheduler with interrupts off,
+        // so the store lands on the CPU whose GS base named the slot, and no
+        // `with_current_thread` borrow is outstanding across it.
         unsafe { get_percpu_data().set_current_thread(None) };
 
         // Switch to the kernel page table so we don't idle with a stale
@@ -871,6 +884,11 @@ impl Scheduler {
                         t.id.0
                     );
                     if t.cas_state(State::Ready, State::Running) {
+                        // SAFETY: `context` is this CPU's live interrupt frame,
+                        // checked on entry; `t` has just been popped off this
+                        // CPU's runqueue and won the Ready -> Running CAS, so no
+                        // other CPU can also be switching to it. Interrupts are
+                        // off for the whole of `pick_and_run`.
                         unsafe { self.context_switch_to(t, context) };
                         return;
                     } else {
@@ -989,6 +1007,12 @@ impl Scheduler {
             }
             let end_ns = Instant::now().as_nanos();
             current.end_run(end_ns);
+            // SAFETY: `context` is the interrupt frame the entry stub pushed on
+            // this CPU's stack, validated by `check_context` on the way in, so
+            // it is a live aligned `CpuContext`. `current.fpu` is an
+            // `UnsafeCell` touched only from the CPU its thread is on, with
+            // interrupts off; the `current.cpu` check just above proved that is
+            // still this CPU, so no stealer is writing it concurrently.
             unsafe {
                 #[cfg(debug_assertions)]
                 Self::validate_ctx(&current, &*context, "save_current_thread");
@@ -1010,6 +1034,7 @@ impl Scheduler {
             trace_event!(Save {
                 cpu: self.cpu,
                 tid: current.id.0,
+                // SAFETY: the frame `check_context` validated on entry.
                 rip: unsafe {
                     (*context)
                         .interrupt_stack_frame
@@ -1020,6 +1045,16 @@ impl Scheduler {
         }
     }
 
+    /// Install `next` as this CPU's running thread by overwriting the
+    /// interrupt frame at `context` with its saved one.
+    ///
+    /// # Safety
+    /// `context` must point at the interrupt frame this CPU is about to
+    /// `iretq` from, and the caller must run with interrupts disabled on the
+    /// CPU this `Scheduler` belongs to. `next` must have been claimed by this
+    /// CPU -- won out of a runqueue or a state transition -- so that no other
+    /// CPU is switching to it at the same time, and the current thread's
+    /// context must already have been saved.
     unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
         debug_assert!(
             !next.rq_link.is_linked(),
@@ -1055,6 +1090,9 @@ impl Scheduler {
         let entry = sched_prof::now_ns();
         self.switches.fetch_add(1, Ordering::Relaxed);
         self.current.store(next.id.0, Ordering::Release);
+        // SAFETY: `context_switch_to` runs with interrupts off, so the store
+        // lands on the CPU whose GS base named the slot, and the previous
+        // thread's entry was dropped before this replaces it.
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);
         next.context_saved.store(false, Ordering::Release);
@@ -1108,6 +1146,9 @@ impl Scheduler {
         #[cfg(debug_assertions)]
         Self::validate_ctx(&next, &ctx_snapshot, "context_switch_to");
         let user_rsp = ctx_snapshot.interrupt_stack_frame.stack_pointer.as_u64();
+        // SAFETY: `context` points at the interrupt frame this CPU is about to
+        // `iretq` from, validated by `check_context` at every entry. Writing the
+        // next thread's saved frame over it is what performs the switch.
         unsafe { *context = ctx_snapshot };
         let probe = sched_prof::record(Stage::RestoreCtx, probe);
 
@@ -1136,6 +1177,12 @@ impl Scheduler {
             let owned_here = percpu.fpu_owner.get() == next.id.0
                 && next.fpu_cpu.load(Ordering::Acquire) == self.cpu;
             if !owned_here {
+                // SAFETY: `next.fpu` is an `UnsafeCell` reached only from the
+                // CPU its thread is being placed on, with interrupts off, and
+                // `owned_here` just proved no other CPU still holds that
+                // thread's register state. The buffer is the one this thread's
+                // state was last saved into, which is what the two helpers
+                // expect.
                 unsafe {
                     let fpu = &mut *next.fpu.get();
                     if !next.fpu_init.load(Ordering::Relaxed) {
@@ -1160,6 +1207,10 @@ impl Scheduler {
                 next.id.0, kstack, next.name
             );
         }
+        // SAFETY: `tss_mut` wants the caller on the CPU the TSS belongs to with
+        // no other borrow of it live; `context_switch_to` runs with interrupts
+        // off and takes the reference only for this store. RSP0 is next read on
+        // a ring 3 -> ring 0 entry, which cannot happen before this returns.
         unsafe { cpu.tss_mut().privilege_stack_table[0] = VirtAddr::new(kstack) };
 
         // set kernel gs stack
@@ -1226,6 +1277,10 @@ impl Scheduler {
 
     pub fn send_reschedule_ipi(&self, target_cpu: u32) {
         without_interrupts(|| {
+            // SAFETY: this CPU's own LAPIC drives the ICR, and
+            // `without_interrupts` keeps the write on the CPU whose GS base
+            // named it. `target_cpu` is a LAPIC id taken from `SCHEDULERS`, so
+            // the IPI has a real destination.
             unsafe { get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu) };
         });
     }
@@ -1435,6 +1490,9 @@ impl Scheduler {
         self.with_rq(|rq| rq.place(&thread, request));
 
         // context_switch_to overwrites the interrupt frame in-place.
+        // SAFETY: `context` is this CPU's live interrupt frame, and the thread
+        // was won by the state transition above, so this CPU is the only one
+        // switching to it. Interrupts are off for the whole of the steal.
         unsafe { self.context_switch_to(thread, context) };
         true
     }
@@ -1611,6 +1669,8 @@ pub fn current_thread_info() -> Arc<IrqSpinlock<UserThreadInfo>> {
         let info = THREADS
             .get_info(tid)
             .unwrap_or_else(|| panic!("current_thread_info: no UserThreadInfo for tid {}", tid.0));
+        // SAFETY: inside `without_interrupts`, so the slot written belongs to
+        // the CPU whose GS base was read -- `cache_thread_info`'s requirement.
         unsafe { cpu.cache_thread_info(tid, info.clone()) };
         info
     })
@@ -1619,6 +1679,10 @@ pub fn current_thread_info() -> Arc<IrqSpinlock<UserThreadInfo>> {
 #[inline]
 pub fn thread_yield() {
     debug_assert_preemptible("thread_yield");
+    // SAFETY: `save_transition_switch` wants interrupts disabled, which
+    // `without_interrupts` supplies, and a transition it can call on the
+    // caller's stack before the switch. `transition_yield` reads no argument,
+    // so the null `arg` is never dereferenced.
     without_interrupts(|| unsafe {
         save_transition_switch(transition_yield, core::ptr::null_mut());
     });
@@ -1629,6 +1693,8 @@ pub fn thread_park() {
     let Some(_cur) = current_thread() else {
         return;
     };
+    // SAFETY: as in `thread_yield` -- interrupts off, and `transition_park`
+    // reads no argument.
     without_interrupts(|| unsafe {
         save_transition_switch(transition_park, core::ptr::null_mut());
     });
@@ -1656,6 +1722,11 @@ pub fn thread_park_while<F: FnMut() -> bool>(mut should_park: F) {
 
     // Wrapper to call the Rust closure through a C function pointer.
     extern "C" fn check_wrapper<F: FnMut() -> bool>(ctx: *mut u8) -> bool {
+        // SAFETY: `ctx` is the `&mut should_park` installed in `check_ctx`
+        // beside this very instantiation of `check_wrapper::<F>`, so the type
+        // matches. It points into `thread_park_while`'s frame, which stays live
+        // until the park returns, and the transition runs on that thread with
+        // nothing else able to reach the closure.
         let f = unsafe { &mut *(ctx as *mut F) };
         f()
     }
@@ -1664,6 +1735,9 @@ pub fn thread_park_while<F: FnMut() -> bool>(mut should_park: F) {
         check_fn: check_wrapper::<F>,
         check_ctx: &mut should_park as *mut F as *mut u8,
     };
+    // SAFETY: as in `thread_yield`, and `ctx` lives in this frame -- which the
+    // parking thread keeps for the whole park -- and is of the type
+    // `transition_park_while` reads it back as.
     without_interrupts(|| unsafe {
         save_transition_switch(
             transition_park_while,
@@ -1681,6 +1755,8 @@ pub fn thread_sleep(dt: Duration) {
     let now = Instant::now();
     let deadline_ns = (now + dt).as_nanos();
     let mut ctx = SleepCtx { deadline_ns };
+    // SAFETY: as in `thread_park_while` -- interrupts off, and `ctx` lives in
+    // this frame and is of the type `transition_sleep` reads it back as.
     without_interrupts(|| unsafe {
         save_transition_switch(transition_sleep, &mut ctx as *mut SleepCtx as *mut u8);
     });
@@ -1738,6 +1814,9 @@ pub fn thread_exit(code: i32) -> ! {
     // it. `switch_away` pivots to the per-CPU scheduler stack first and
     // `reap_and_schedule` posts it from there. Heavy cleanup (free, unmap)
     // happens in the reaper with interrupts enabled.
+    // SAFETY: `switch_away` wants interrupts off and the caller never to be
+    // resumed. The thread is marked Dying here and `thread_exit` returns `!`,
+    // so nothing after the call can run on this stack.
     without_interrupts(|| unsafe {
         if let Some(t) = get_thread_by_id(tid) {
             t.exit_code.store(code, Ordering::Release);
@@ -1836,6 +1915,8 @@ pub fn tick_prepare(context: *mut CpuContext) -> u64 {
     // proves it holds no kernel lock guard, which is what makes exiting here
     // safe; a tick that caught it inside the kernel leaves it to the syscall
     // boundary.
+    // SAFETY: `check_context` above proved `context` is a live, aligned,
+    // kernel-address `CpuContext` -- the frame this tick interrupted.
     if unsafe { (*context).is_from_userspace() } {
         stop_if_signalled();
         exit_if_killed();
@@ -1866,10 +1947,15 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
     let end_ns = Instant::now().as_nanos();
     current.end_run(end_ns);
     let probe = sched_prof::now_ns();
+    // SAFETY: `context` is the synthetic frame `save_transition_switch` built on
+    // the calling thread's own stack and passed straight down, so it is live and
+    // aligned for the length of this call.
     unsafe {
         *current.ctx.lock() = (*context).clone();
     }
     let probe = sched_prof::record(Stage::SaveCtx, probe);
+    // SAFETY: `current.fpu` is an `UnsafeCell` touched only from the CPU its
+    // thread is running on, and this runs on that CPU with interrupts off.
     unsafe {
         if current.user.is_some() {
             let fpu = &mut *current.fpu.get();
@@ -1891,6 +1977,7 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
     trace_event!(Save {
         cpu: sched().cpu,
         tid: current.id.0,
+        // SAFETY: the frame `save_transition_switch` built and passed down.
         rip: unsafe {
             (*context)
                 .interrupt_stack_frame
@@ -1928,6 +2015,12 @@ extern "C" fn schedule_voluntary(context: *mut CpuContext) -> *mut CpuContext {
 /// thread_exit where the thread is about to be destroyed).
 /// Builds a throwaway CpuContext frame on the stack, calls schedule_voluntary,
 /// then iretq-restores the next thread.
+///
+/// # Safety
+/// Must be called with interrupts disabled, on a thread that is never to be
+/// resumed: the context is deliberately not saved, so returning to the caller
+/// would resume from a frame nobody wrote. The caller must hold no lock guard
+/// and no borrow of per-CPU state, since this never unwinds back to it.
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_away() {
     core::arch::naked_asm!(
@@ -1970,6 +2063,9 @@ extern "C" fn reap_and_schedule(context: *mut CpuContext) -> *mut CpuContext {
     without_interrupts(|| {
         if let Some(t) = current_thread() {
             sc.current.store(0, Ordering::Release);
+            // SAFETY: inside `without_interrupts`, so the store lands on the CPU
+            // whose GS base named the slot, and `t` is a clone rather than a
+            // borrow, so no `with_current_thread` reference is outstanding.
             unsafe { get_percpu_data().set_current_thread(None) };
             reaper_enqueue(t);
         }
@@ -2045,6 +2141,10 @@ struct ParkWhileCtx {
 
 extern "C" fn transition_park_while(arg: *mut u8) -> bool {
     let probe = sched_prof::now_ns();
+    // SAFETY: `arg` is the `ParkWhileCtx` `thread_park_while` placed in its own
+    // frame and handed to `save_transition_switch`, which passes it through
+    // unchanged. That frame belongs to the parking thread and stays live until
+    // the park returns.
     let ctx = unsafe { &*(arg as *const ParkWhileCtx) };
     let Some(cur) = current_thread() else {
         return true;
@@ -2096,6 +2196,9 @@ struct SleepCtx {
 }
 
 extern "C" fn transition_sleep(arg: *mut u8) -> bool {
+    // SAFETY: `arg` is the `SleepCtx` `thread_sleep` placed in its own frame and
+    // handed to `save_transition_switch`, which passes it through unchanged; the
+    // deadline is read out of it below before the thread publishes Sleeping.
     let ctx = unsafe { &*(arg as *const SleepCtx) };
     let sched = sched();
     let Some(cur) = current_thread() else {
@@ -2150,7 +2253,12 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
 /// resumed, at which point it returns `true`.  If transition returns false
 /// the function returns `false` immediately without switching.
 ///
-/// Must be called with interrupts disabled.
+/// # Safety
+/// Must be called with interrupts disabled. `transition` must be callable on
+/// the caller's own kernel stack, and `arg` must either be null or point at
+/// live storage of the type `transition` reads it back as -- storage that stays
+/// valid for as long as the thread is away, which in practice means the
+/// caller's frame, since the caller is suspended for exactly that long.
 #[unsafe(naked)]
 pub unsafe extern "C" fn save_transition_switch(
     transition: extern "C" fn(arg: *mut u8) -> bool,
@@ -2401,10 +2509,13 @@ impl Eq for SleepEntry {}
 pub fn switch_to_kernel_page() {
     let kernel_cr3 = boot_info().cr3;
     if Cr3::read().0.start_address() != kernel_cr3.0.start_address() {
-        // Drops every non-global translation. Kernel-half mappings are marked
-        // GLOBAL (`memory::mark_kernel_mappings_global`) and survive, which is
-        // the point: they are identical in the space being left and the one
-        // being entered.
+        // SAFETY: `boot_info().cr3` is the kernel's own PML4, live for as long
+        // as the system is, so the code executing here and the stack under it
+        // stay mapped across the write. It drops every non-global translation;
+        // kernel-half mappings are marked GLOBAL
+        // (`memory::mark_kernel_mappings_global`) and survive, which is the
+        // point: they are identical in the space being left and the one being
+        // entered.
         unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
     }
 }

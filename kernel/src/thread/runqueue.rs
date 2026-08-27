@@ -183,6 +183,11 @@ impl RunQueue {
         let mut weighted: u128 = 0;
         let mut total: u128 = 0;
         for ptr in self.queue.iter() {
+            // SAFETY: every pointer in `queue` came from an `Arc::into_raw` in
+            // `enqueue`, and the list holds that reference for as long as the
+            // node is linked, so a linked pointer names a live pinned `Thread`.
+            // `unlink` is the only way out and it takes the `Arc` back, so the
+            // pointer is never dangling while the iteration can reach it.
             let thread = unsafe { &*ptr };
             let weight = weight_of(thread.effective_priority()) as u128;
             // Relative to the watermark so the products stay small; absolute
@@ -280,6 +285,10 @@ impl RunQueue {
         );
 
         let ptr = Arc::into_raw(thread) as *mut Thread;
+        // SAFETY: `ptr` is a fresh `Arc::into_raw`, so the reference it carries
+        // keeps the thread alive for as long as the list holds it, and the
+        // assertion above proved the node is not already linked -- which is
+        // `IntrusiveList::push_back`'s requirement.
         unsafe { self.queue.push_back(ptr) };
     }
 
@@ -303,6 +312,7 @@ impl RunQueue {
         let mut best: Option<(*mut Thread, u64, u64)> = None;
         let mut earliest: Option<(*mut Thread, u64)> = None;
         for ptr in self.queue.iter() {
+            // SAFETY: a linked node's pointer is live, as in `avg_vruntime`.
             let thread = unsafe { &*ptr };
             let vruntime = thread.vruntime.load(Ordering::Acquire);
             let vdeadline = thread.vdeadline.load(Ordering::Acquire);
@@ -341,6 +351,7 @@ impl RunQueue {
     ) -> Option<Arc<Thread>> {
         let mut best: Option<(*mut Thread, u64)> = None;
         for ptr in self.queue.iter() {
+            // SAFETY: a linked node's pointer is live, as in `avg_vruntime`.
             let thread = unsafe { &*ptr };
             if !allowed(thread) {
                 continue;
@@ -355,7 +366,12 @@ impl RunQueue {
     }
 
     fn unlink(&mut self, ptr: *mut Thread) -> Arc<Thread> {
+        // SAFETY: `ptr` was read out of this queue's own iteration, so it is
+        // linked into this list and not another, which is what `remove` wants.
         unsafe { self.queue.remove(ptr) };
+        // SAFETY: pairs with the `Arc::into_raw` in `enqueue`. The node has just
+        // been unlinked, so the list no longer holds that reference and this
+        // reclaims it exactly once.
         let thread = unsafe { Arc::from_raw(ptr as *const Thread) };
         debug_assert!(
             !thread.rq_link.is_linked(),

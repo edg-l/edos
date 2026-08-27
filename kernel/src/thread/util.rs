@@ -162,6 +162,10 @@ pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
             if let Ok((_, flush)) = manager.mapper.unmap(page) {
                 flush.ignore();
             }
+            // SAFETY: `phys` was translated out of this thread's own stack
+            // range and the page has just been unmapped, so no page table
+            // still points at the frame. The thread being torn down is the
+            // only user of its stack, so nothing can fault it back in.
             unsafe { crate::memory::frame_allocator::frame_allocator().deallocate_frame(phys) };
         }
     }

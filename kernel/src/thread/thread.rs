@@ -406,11 +406,20 @@ pub(crate) fn load_process_image(
 ) -> Result<LoadedImage, ElfLoadError> {
     let kernel_pml4 = boot_info().cr3;
     let physical_memory_offset = boot_info().physical_memory_offset;
+    // SAFETY: `boot_info().cr3` is the kernel's live PML4 and the HHDM it is
+    // read through is mapped before any process image can be loaded.
     let kernel_table = unsafe { get_level_4_table(kernel_pml4) };
+    // SAFETY: the same HHDM. The frame handed back is owned by this image and
+    // is attached to `memory_manager.pml4_frame` below, which is what frees it.
     let page = unsafe { allocate_process_pml4(kernel_table) };
 
     // Build the new page table via HHDM (no CR3 switch needed).
+    // SAFETY: `page` is the PML4 just allocated, so it is a live level-4 table
+    // reachable at the same offset.
     let child_page_table = unsafe { get_level_4_table((page, kernel_pml4.1)) };
+    // SAFETY: `child_page_table` is that PML4 and `physical_memory_offset` is
+    // the offset every physical frame is mapped at, which is what
+    // `OffsetPageTable` needs to walk the table it is handed.
     let table = unsafe { OffsetPageTable::new(child_page_table, physical_memory_offset) };
 
     let mut memory_manager = MemoryManager::new(table);
@@ -872,6 +881,11 @@ impl Thread {
         }
         let (frame, flags) = Self::decode_cr3(target);
         if Cr3::read().0.start_address() != frame.start_address() {
+            // SAFETY: `target` decodes this thread's own PML4, whose higher
+            // half is a copy of the kernel's, so the code executing here and
+            // the kernel stack under it stay mapped across the write. The
+            // thread is being placed on this CPU, so its address space cannot
+            // be torn down underneath the load.
             unsafe { Cr3::write(frame, flags) };
         }
     }
@@ -1374,6 +1388,10 @@ impl Thread {
             ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager).release_page_tables();
 
             let pml4 = user.cr3.0;
+            // SAFETY: the dying process's own PML4. Its user mappings and lower
+            // tables have just been released and this CPU has been switched
+            // back to the kernel table, so no CR3 anywhere names the frame and
+            // nothing can walk it again.
             unsafe { frame_allocator().deallocate_frame(pml4) };
         }
     }
