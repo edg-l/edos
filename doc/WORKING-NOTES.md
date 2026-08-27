@@ -11560,3 +11560,15 @@ caller said, so a device cannot be tricked into reading a raw user pointer.
 scalar only. The parameter is there so the next variable-length request has the
 length in hand rather than rediscovering this.
 
+**The gate.** `programs/fbtest` is the twentieth suite in `scripts/guest-check`.
+It opens `/dev/fb0` in a real guest and asks each request for more bytes than
+it was given: the two that write their answer through the pointer with room for
+part of it, the four fixed-size headers with a buffer too small to hold one,
+and `FB_IOCTL_DRAW` / `FB_IOCTL_SET_CURSOR` with a header that is internally
+consistent about an 8x8 rectangle in a buffer carrying the header and not one
+pixel, then the same one pixel short. Every case must come back an error.
+
+The first case is the one that makes the rest mean anything: a correctly sized
+`FB_IOCTL_SCREEN_INFO` that must *succeed* and answer a non-zero screen. Without
+it a suite of refusals passes just as well against a machine with no
+framebuffer, or against a device that has started refusing everything.
