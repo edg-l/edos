@@ -57,6 +57,7 @@ SUITES = [
     ("lookuptest", "", 120),
     ("pitest", "", 120),
     ("evicttest", "", 120),
+    ("texttest", "", 120),
 ]
 
 MARKER = "GUESTCHECK"

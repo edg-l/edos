@@ -11058,3 +11058,47 @@ runs. EINVAL out of `read_link` is `fs::api::read_link` saying the path is not
 a symbolic link, moments after `soft_link` created it on EFS — an FS-layer
 visibility question with nothing in the converted files on the path. Recorded
 rather than chased.
+
+## The text coreutils are executed by a gate now, and their expectations were built on the host
+
+`programs/texttest` runs 24 cases over the nine text tools -- uniq, sort, cut,
+tr, wc, head, tail, sed, grep -- and `scripts/guest-check` runs it as its
+nineteenth suite. Before this, 131 binaries shipped in `/bin` and not one text
+tool was executed by anything. That is the blind spot `uniq` spinning forever
+on a persistent read error lived in: a tool that compiles is indistinguishable
+from a tool that works until something runs it.
+
+**Redirection is by descriptor, not by pipe.** Each case opens its fixture
+`O_RDONLY`, opens `/tmp/texttest/out.txt` `O_WRONLY|O_CREAT|O_TRUNC`, and hands
+both to `process::spawn` as the child's stdin and stdout. A pipe would deadlock
+the moment a tool wrote more than the pipe buffer before the parent read, and
+the parent cannot read while it is blocked in `waitpid`. The suite is a
+statement about a tool's output, not about the plumbing carrying it.
+
+**The expected strings were validated on the host first, and that is the
+transferable part.** None of the nine tools depends on `edos_lib`; they are
+plain `std` programs. So
+
+```
+rustc +nightly -O --edition 2024 -o /tmp/wc programs/wc/src/main.rs
+```
+
+builds the *same* implementation for the host, and a shell loop over the
+fixtures printed every tool's real output in one second. GNU coreutils are no
+help here -- the padding and the `-c` line format are this tree's own -- but
+the tree's own source compiled natively is exact. One expectation was wrong
+(`tr -d an` deletes the `a` in `apple` too, so the answer is `pple`, not
+`apple`), and catching it on the host rather than in the guest saved a full
+image rebuild and boot. Do this before every guest round trip when the program
+under test is `std`-only.
+
+**The gate was watched going red.** `wc`'s line count was given a deliberate
+`+ 1`, `make programs && make guest-check` reported `texttest FAILED (exit 1)`,
+and `run_log.txt` carried `FAIL wc -l: want "       6\n", got "       7\n"`.
+Reverted, green again at 19 suites. A gate never seen red is not a gate.
+
+**`eprintln!` is the wrong call for a failure line under `guest-check`.** The
+suites run as `name > /dev/klog 2>&1`, so stderr and stdout land in the same
+place -- but stderr is flushed per fragment, and the same message arrived split
+across four klog lines (`FAIL `, `wc -l`, `: `, then the strings) while the
+`println!` copy arrived whole. `texttest` prints its verdict on stdout only.
