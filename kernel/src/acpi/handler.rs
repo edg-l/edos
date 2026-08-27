@@ -83,66 +83,99 @@ impl Handler for AcpiHandler {
     }
 
     fn read_u8(&self, address: usize) -> u8 {
+        // SAFETY: the interpreter only reaches a SystemMemory region it first
+        // asked `map_physical_region` for, so `address` is inside a PRESENT
+        // mapping this handler made and is still holding. x86 allows an
+        // unaligned load of any of these widths, so a DSDT that misdescribes a
+        // field's offset reads neighbouring firmware bytes rather than
+        // faulting. Nothing else in the kernel writes firmware memory, so the
+        // read races with no one.
         unsafe { *(address as *const u8) }
     }
 
     fn read_u16(&self, address: usize) -> u16 {
+        // SAFETY: a mapped firmware address, as in `read_u8`.
         unsafe { *(address as *const u16) }
     }
 
     fn read_u32(&self, address: usize) -> u32 {
+        // SAFETY: a mapped firmware address, as in `read_u8`.
         unsafe { *(address as *const u32) }
     }
 
     fn read_u64(&self, address: usize) -> u64 {
+        // SAFETY: a mapped firmware address, as in `read_u8`.
         unsafe { *(address as *const u64) }
     }
 
     fn write_u8(&self, address: usize, value: u8) {
+        // SAFETY: `address` is inside a mapping this handler made, as in
+        // `read_u8`, and `map_physical_region` asks for WRITABLE. The store
+        // goes where AML says: this kernel cannot tell a control register in a
+        // SystemMemory OperationRegion from a scratch byte, so the DSDT is
+        // trusted with what it names, the same way firmware is trusted with
+        // the machine before the kernel runs.
         unsafe {
             *(address as *mut u8) = value;
         }
     }
 
     fn write_u16(&self, address: usize, value: u16) {
+        // SAFETY: a mapped writable firmware address, as in `write_u8`.
         unsafe {
             *(address as *mut u16) = value;
         }
     }
 
     fn write_u32(&self, address: usize, value: u32) {
+        // SAFETY: a mapped writable firmware address, as in `write_u8`.
         unsafe {
             *(address as *mut u32) = value;
         }
     }
 
     fn write_u64(&self, address: usize, value: u64) {
+        // SAFETY: a mapped writable firmware address, as in `write_u8`.
         unsafe {
             *(address as *mut u64) = value;
         }
     }
 
     fn read_io_u8(&self, port: u16) -> u8 {
+        // SAFETY: an `in` from a port a SystemIO OperationRegion names. The
+        // port number is 16 bits wide, so every value is a port the
+        // instruction can address, and a read of a port no device decodes
+        // returns all-ones instead of faulting. Which ports are safe to touch
+        // is the DSDT's statement about this machine, not something the kernel
+        // can check.
         unsafe { Port::new(port).read() }
     }
 
     fn read_io_u16(&self, port: u16) -> u16 {
+        // SAFETY: an `in` from a port AML names, as in `read_io_u8`.
         unsafe { Port::new(port).read() }
     }
 
     fn read_io_u32(&self, port: u16) -> u32 {
+        // SAFETY: an `in` from a port AML names, as in `read_io_u8`.
         unsafe { Port::new(port).read() }
     }
 
     fn write_io_u8(&self, port: u16, value: u8) {
+        // SAFETY: an `out` to a port a SystemIO OperationRegion names. As with
+        // the memory writes, the DSDT is trusted with which ports of this
+        // machine it drives; the kernel's own port users (the PICs, the PIT,
+        // the PS/2 controller) are all set up before the AML interpreter runs.
         unsafe { Port::new(port).write(value) }
     }
 
     fn write_io_u16(&self, port: u16, value: u16) {
+        // SAFETY: an `out` to a port AML names, as in `write_io_u8`.
         unsafe { Port::new(port).write(value) }
     }
 
     fn write_io_u32(&self, port: u16, value: u32) {
+        // SAFETY: an `out` to a port AML names, as in `write_io_u8`.
         unsafe { Port::new(port).write(value) }
     }
 

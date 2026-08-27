@@ -34,13 +34,15 @@ use crate::{
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
-mod acpi;
 // Every `unsafe` block in the modules carrying this deny is documented, and
 // the deny is what keeps it that way while the rest of the kernel catches up
 // (`doc/ROADMAP-CLEANUP.md` §I5a). Move it up to `[lints.clippy]` in
 // `Cargo.toml` once no module needs the exemption.
 #[deny(clippy::undocumented_unsafe_blocks)]
+mod acpi;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod allocator;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod apic;
 mod boot;
 mod cmdline;

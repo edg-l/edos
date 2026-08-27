@@ -11449,3 +11449,48 @@ That last part closed `doc/ROADMAP-CLEANUP.md` §G2's named remainder in the sam
 pass: `uaccess.rs` was the tree's last pocket of restate-the-signature doc
 comments, and a file being rewritten for `// SAFETY:` is the cheapest time to
 fix them, since every one of them is being read anyway.
+
+## `acpi/` and `apic/`: sixteen trait methods that all make the same claim
+
+`kernel/src/acpi/` and `kernel/src/apic/` are the sixth and seventh modules
+clean under `undocumented_unsafe_blocks`, done in one pass because the second
+reads the first's tables. Twenty-six blocks; fifteen of them are in one file.
+
+`acpi/handler.rs` implements the `acpi` crate's `Handler`, which is sixteen
+methods wide: four widths of memory read, four of memory write, three of `in`,
+three of `out`. Every one is a one-line `unsafe` block, and every one rests on
+the *same* fact -- the address or port came out of an AML OperationRegion, so
+the DSDT is the thing being trusted, not the kernel. Sixteen copies of that
+paragraph is not documentation, and there is no helper to hoist it into either:
+a private `unsafe fn read_at<T>` moves the block without removing it, and the
+call sites need a comment each anyway. What is written instead is the argument
+in full four times -- once for a memory read, once for a memory write, once for
+`in`, once for `out`, since those four differ in what could go wrong -- and
+a one-line "a mapped firmware address, as in `read_u8`" for the rest. The
+substance of it: reads and writes only reach a region the interpreter first
+asked `map_physical_region` for, x86 permits an unaligned load of any of these
+widths so a misdescribed field reads neighbouring bytes rather than faulting,
+every 16-bit value is a port the instruction can address, and a read of a port
+nothing decodes returns all-ones.
+
+`apic/init.rs` had `enable_io_apic` wrapped in a single 75-line `unsafe` block
+that contained the page-table `translate`/`map_address` match, the
+interrupt-source-override scan and two byte-identical redirection-entry setups
+-- all safe code. Four calls in it are actually unsafe (`IoApic::new`,
+`ioapic.init`, `set_table_entry`, `enable_irq`), so the block became four, the
+two entry setups became a two-element loop, and the comments have something to
+say. A wide `unsafe` block is worse than an undocumented one: it is
+undocumented *and* it hides which operation the reader should be looking at.
+
+`enable_lapic` and `enable_io_apic` were `unsafe fn` with "Should only be
+called once" and nothing. What they actually require: for the first, that the
+calling CPU has no LAPIC recorded yet, because it `Box::leak`s a fresh one into
+the per-CPU slot and a second call would strand the old one while two
+`&'static mut` named the same register block; for the second, that it runs once
+from the BSP after `enable_lapic`, because the redirection table is global to
+the machine and it needs a LAPIC to read the destination id from.
+
+`get_ioapic` hands out a second `IoApic` over the same window every time it is
+called, which looks like aliasing and is not: the type is a handle over MMIO,
+not an owner of it. What callers must not do is write the same redirection
+entry from two of them, and that is what its comment says.

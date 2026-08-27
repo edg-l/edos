@@ -15,6 +15,12 @@ use crate::{timer::get_timer_calibration, util::per_cpu::get_percpu_data};
 /// GS base was read on, so it stops being the caller's own the moment the
 /// thread can migrate. Use it inside the section that read it.
 pub fn get_lapic() -> &'static mut LocalApic {
+    // SAFETY: `lapic` holds a `Box::leak`ed `LocalApic` that `enable_lapic`
+    // stored on this CPU's own block before any other code on it runs, so the
+    // pointer is non-null, aligned and lives for the rest of the boot. It is
+    // reachable only through this CPU's GS base, so the `&'static mut` is
+    // unique for as long as the caller stays on the CPU whose base was read —
+    // which is the migration rule stated above, not an aliasing one.
     unsafe { get_percpu_data().lapic.get().as_mut().unwrap() }
 }
 
@@ -39,8 +45,12 @@ fn timer_count(duration: Duration) -> u32 {
 }
 
 pub fn set_apic_timer_and_enable(duration: Duration) {
+    let lapic = get_lapic();
+    // SAFETY: these four write the calling CPU's own LVT timer entry, divide
+    // register and initial count, which no other CPU can reach. The vector was
+    // fixed by `LocalApicBuilder` at `enable_lapic` time and is not touched
+    // here, so arming the timer can only deliver `InterruptIndex::Timer`.
     unsafe {
-        let lapic = get_lapic();
         lapic.set_timer_mode(x2apic::lapic::TimerMode::OneShot);
         lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);
         lapic.set_timer_initial(timer_count(duration));
@@ -57,6 +67,9 @@ pub fn set_apic_timer_and_enable(duration: Duration) {
 pub fn set_apic_timer(duration: Duration) -> Duration {
     let armed = duration.max(MIN_TIMER_INTERVAL);
     let lapic = get_lapic();
+    // SAFETY: a write to the calling CPU's own initial-count register, as in
+    // `set_apic_timer_and_enable`. The mode, divide and vector were programmed
+    // by that function and re-arming does not disturb them.
     unsafe {
         lapic.set_timer_initial(timer_count(armed));
     }

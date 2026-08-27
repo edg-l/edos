@@ -28,6 +28,12 @@ pub fn acpi_tables() -> &'static AcpiTables<AcpiHandler> {
         // A machine whose firmware describes no usable ACPI tables cannot be
         // brought up at all: the APIC, the HPET and the PCI enumeration all
         // read them.
+        //
+        // SAFETY: `info.rdsp` is the RSDP address Limine reported, so it names
+        // a firmware structure the bootloader found and left mapped, and the
+        // crate validates the signature and checksum before following it. The
+        // tables it walks from there are reached through `AcpiHandler`, which
+        // maps each one before reading it.
         unsafe { AcpiTables::from_rsdp(AcpiHandler, info.rdsp).expect("failed to get acpi tables") }
     })
 }

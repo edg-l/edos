@@ -627,11 +627,10 @@ survivors E1 annotated and nothing else.
 name only the first. `doc/rust-style.md` states the rule and the sources; the
 counts below are the gap, measured 2026-08-26 with the commands recorded there.
 
-**I5a, the blocks and the impls.** `clippy::undocumented_unsafe_blocks` reports
-720 blocks across 84 files, concentrated in `usb/xhci/mod.rs` (77),
-`ahci/port.rs` (38), `virtio/gpu.rs` (33), `syscalls/mod.rs` (27) and
-`thread/scheduler.rs` (26). `clippy::undocumented_unsafe_blocks` is the gate and
-it covers `unsafe impl` too. ~~A bare `unsafe impl Send for T {}` is a hand-made
+**I5a, the blocks and the impls.** `clippy::undocumented_unsafe_blocks` is the
+gate, and it covers `unsafe impl` too. It reported 720 blocks across 84 files
+when this entry opened; the current figure and where it is concentrated are at
+the end of this entry, with the command that measures them. ~~A bare `unsafe impl Send for T {}` is a hand-made
 claim that no data race can arise, in a preemptive SMP kernel with work-stealing,
 and it is the claim most likely to stop being true when the type later grows a
 field, so the 38 impls came first.~~ **Done:** all 38 `unsafe impl` in
@@ -675,11 +674,21 @@ mid-handler, so it cannot name another CPU's LAPIC -- and `idt.rs`'s four
 copies call it too. `read_pte` gained a `# Safety` section, and the four fault
 paths that read `if unsafe { ... }` became named bindings, since the lint will
 not accept a comment above an `if` whose condition opens with the block.
-489 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+`acpi/` and `apic/` are the sixth and seventh, and they are one pass because the
+second reads the first's tables: fifteen of the twenty-six blocks are the
+`acpi::Handler` methods, whose comment is the same argument sixteen times over
+(the address or port came from an AML OperationRegion, the DSDT is trusted with
+what it names), so it is written out once for reads, once for writes, once for
+each I/O direction and referred to from the rest. `enable_lapic` and
+`enable_io_apic` gained real `# Safety` sections in place of "Should only be
+called once", `enable_io_apic`'s single 75-line `unsafe` block around mostly
+safe mapping code became four blocks around the four calls that are actually
+unsafe, and its two byte-identical redirection-entry setups became one loop.
+463 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
 grep -cE '"'"'^\s+--> '"'"'`: `usb/xhci/mod.rs` (77), `ahci/port.rs` (38),
-`virtio/gpu.rs` (33), `thread/scheduler.rs` (26) and `fs/efs/mod.rs` (18)
-first. The lint sits
+`virtio/gpu.rs` (33), `thread/scheduler.rs` (26), `fs/efs/mod.rs` (18) and
+`graphics/` (18) first. The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
@@ -692,9 +701,10 @@ the smaller of the two.
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
-the modules it covers carries a `# Safety` section. The impls are done and five
-modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`, `interrupts/`) hold
-their own deny; what is left is the rest of the tree, module by module.
+the modules it covers carries a `# Safety` section. The impls are done and seven
+modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`, `interrupts/`,
+`acpi/`, `apic/`) hold their own deny; what is left is the rest of the tree,
+module by module.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 
