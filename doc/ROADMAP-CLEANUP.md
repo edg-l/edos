@@ -8,13 +8,14 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-28.** 27 of the 32 entries are struck: I6 landed with the
+**State as of 2026-08-28.** 26 of the 32 entries are struck: I6 landed with the
 `[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`, and
-G2's named `uaccess.rs` remainder is closed. What is open, in the order the
+G2's named `uaccess.rs` remainder is closed. Six are open, in the order the
 evidence suggests: C2 (the parser exists, 125 programs have not adopted it),
-B2/B3 (the 477 `errno =` assignments and the dispatch match), H1 and H3 (two
-long functions), G3 (split `WORKING-NOTES.md`), and the gates I2 and I5. The
-numbers each entry quotes were remeasured on the date it names.
+H1 and H3 (two long functions), G3 (split `WORKING-NOTES.md`), and the gates I2
+and I5. The numbers each entry quotes were remeasured on the date it names, and
+the count above is `grep -c '^### ' minus the struck ones`, not a tally kept by
+hand.
 
 The conventions these entries are written against, and the sources behind them,
 are `doc/rust-style.md`. I5 and I6 are its measurements; the rest of this file
@@ -480,10 +481,10 @@ house style is `kernel/src/syscalls/io.rs:71`, where the comment on
 `STREAM_STACK_BUF` carries a measurement table and says why the constant is
 small on purpose.
 
-### G3. `doc/WORKING-NOTES.md` is 10,959 lines and `CLAUDE.md` says read it first (S2, E2)
+### G3. `doc/WORKING-NOTES.md` is 11,433 lines and `CLAUDE.md` says read it first (S2, E2)
 
-250 sections, 9 marked FIXED or DONE, covering 19 days. `doc/bugs/` holds 24
-post-mortems and has a `README.md` stating the format. The line count only ever
+261 sections, covering 21 days. `doc/bugs/` holds 27 post-mortems and has a
+`README.md` stating the format. The line count only ever
 grows while this is open, so remeasure it rather than quoting this one.
 
 A handoff document nobody can read is not a handoff. Split it: the current state
