@@ -35,6 +35,11 @@ use crate::{
 };
 
 mod acpi;
+// Every `unsafe` block in the modules carrying this deny is documented, and
+// the deny is what keeps it that way while the rest of the kernel catches up
+// (`doc/ROADMAP-CLEANUP.md` §I5a). Move it up to `[lints.clippy]` in
+// `Cargo.toml` once no module needs the exemption.
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod allocator;
 mod apic;
 mod boot;
@@ -47,10 +52,6 @@ mod graphics;
 mod interrupts;
 mod loader;
 mod logs;
-// Every `unsafe` block under `memory` and `syscalls` is documented, and the
-// deny on each is what keeps it that way while the rest of the kernel catches
-// up (`doc/ROADMAP-CLEANUP.md` §I5a). Move it up to `[lints.clippy]` in
-// `Cargo.toml` once no module needs the exemption.
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod memory;
 mod net;

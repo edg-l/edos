@@ -660,11 +660,19 @@ is about, so its comments name migration rather than validity. Four `unsafe fn`
 there (`tss_mut`, `set_current_thread`, `init_gs_for_this_cpu`,
 `init_gs_for_bsp_static`) gained the `# Safety` section they had no form of, and
 `setup_fault_resume`/`clear_fault_resume` -- reached only from `do_user_copy`'s
-asm -- now say so. 529 blocks remain, measured with `cargo clippy --target
-x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks`:
-`usb/xhci/mod.rs` (77), `ahci/port.rs` (38), `virtio/gpu.rs` (33),
-`thread/scheduler.rs` (26), `interrupts/idt.rs` (18), `fs/efs/mod.rs` (18) and
-`allocator.rs` (15) first. The lint sits
+asm -- now say so. `allocator.rs` is the fourth module done, and it is the only
+one whose blocks are reached from *every* other: 21 blocks, six of them behind
+`heap-poison`, so the module is clean under all ten feature sets rather than the
+default one. Two of them argue migration for the same reason `per_cpu.rs` does
+-- both per-CPU cache paths read the GS base inside `without_interrupts` -- and
+four argue that `SIZE_CLASSES` entries are non-zero powers of two, which is what
+`Layout::from_size_align_unchecked` needs. `PerCpuCacheCell::get_mut` gained the
+`# Safety` section its one-line doc comment stood in for.
+514 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+--target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
+grep -cE '"'"'^\s+--> '"'"'`: `usb/xhci/mod.rs` (77), `ahci/port.rs` (38),
+`virtio/gpu.rs` (33), `thread/scheduler.rs` (26), `interrupts/idt.rs` (18) and
+`fs/efs/mod.rs` (18) first. The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
@@ -675,10 +683,11 @@ sections. No lint finds these and none can: a caller of an undocumented
 the smaller of the two.
 
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
-comment, the lint is denied in `memory/`, `syscalls/` and `util/` with no
-suppressions,
-and every `unsafe fn` in those two modules carries a `# Safety` section. Both
-are done; what is left is the rest of the tree, module by module.
+comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
+`kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
+the modules it covers carries a `# Safety` section. The impls are done and four
+modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`) hold their own deny;
+what is left is the rest of the tree, module by module.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

@@ -159,16 +159,23 @@ impl PerCpuCacheCell {
         Self(UnsafeCell::new(PerCpuCache::new()))
     }
 
-    /// Get mutable access. Only call from owning CPU with interrupts disabled.
-    // The cache is per-CPU interior-mutable state: `&self` is the only handle a
-    // CPU ever has to its own cell, and the safety contract restricts callers to
-    // the owning CPU with interrupts off, so no second reference can exist.
+    /// Get mutable access to this CPU's cache.
+    ///
+    /// The cache is per-CPU interior-mutable state: `&self` is the only handle a
+    /// CPU ever has to its own cell, and the contract below restricts callers to
+    /// the owning CPU with interrupts off, so no second reference can exist.
+    ///
+    /// # Safety
+    /// The caller must be the CPU that owns this cell, and interrupts must stay
+    /// disabled for as long as the returned reference lives.
     #[expect(
         clippy::mut_from_ref,
         reason = "the caller holds the per-CPU heap cache exclusively for the section that calls this"
     )]
     #[inline(always)]
     pub unsafe fn get_mut(&self) -> &mut PerCpuCache {
+        // SAFETY: the caller is the owning CPU with interrupts off, so this is
+        // the only reference to the cell's contents that exists.
         unsafe { &mut *self.0.get() }
     }
 }
@@ -223,6 +230,8 @@ unsafe impl GlobalAlloc for Allocator {
             self.global_alloc(layout)
         };
         #[cfg(feature = "heap-poison")]
+        // SAFETY: `ptr` is either null, which `on_alloc` ignores, or the block
+        // this call just handed out under `layout`.
         unsafe {
             poison::on_alloc(ptr, layout)
         };
@@ -231,6 +240,8 @@ unsafe impl GlobalAlloc for Allocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         #[cfg(feature = "heap-poison")]
+        // SAFETY: `GlobalAlloc::dealloc` is handed the live allocation `layout`
+        // describes, which is what `on_free` requires.
         unsafe {
             poison::on_free(ptr, layout)
         };
@@ -241,6 +252,8 @@ unsafe impl GlobalAlloc for Allocator {
         }
 
         // Fall through to global allocator.
+        // SAFETY: `ptr` is a live allocation this impl returned under `layout`,
+        // so it is non-null and the heap holds the matching block.
         unsafe {
             self.inner
                 .lock()
@@ -279,14 +292,20 @@ mod poison {
         if size < 8 || ptr.is_null() {
             return None;
         }
-        Some(unsafe { ptr.add(size - 8) } as *mut u64)
+        // SAFETY: `ptr` is non-null and `size` is the length of the allocation
+        // it points at, so `size - 8` is an offset inside that same allocation.
+        let tail = unsafe { ptr.add(size - 8) };
+        Some(tail as *mut u64)
     }
 
     /// # Safety
     /// `ptr` must be the live allocation `layout` describes, about to be freed.
     pub unsafe fn on_free(ptr: *mut u8, layout: Layout) {
         let Some(t) = tail(ptr, layout) else { return };
-        if unsafe { t.read_unaligned() } == FREED {
+        // SAFETY: `t` is the last eight bytes of the live allocation, and any
+        // bit pattern is a valid `u64`, so an unaligned read of one is defined.
+        let stamp = unsafe { t.read_unaligned() };
+        if stamp == FREED {
             panic!(
                 "heap double free: {:p}, size {}, align {}",
                 ptr,
@@ -299,6 +318,8 @@ mod poison {
         // extra work to change the timing of the race this exists to catch --
         // measured, it took a failure seen in roughly one boot in five to none
         // in twenty, which is a perturbed instrument rather than a result.
+        // SAFETY: the same eight bytes, still owned by the caller until this
+        // free returns, so nothing else reads or writes them.
         unsafe { t.write_unaligned(FREED) };
     }
 
@@ -306,6 +327,8 @@ mod poison {
     /// `ptr` must be the allocation `layout` describes, just handed out.
     pub unsafe fn on_alloc(ptr: *mut u8, layout: Layout) {
         if let Some(t) = tail(ptr, layout) {
+            // SAFETY: `t` is the last eight bytes of the allocation just handed
+            // out, which no other reference reaches yet.
             unsafe { t.write_unaligned(0) };
         }
     }
@@ -318,6 +341,9 @@ impl Allocator {
         let sc = SIZE_CLASSES[idx];
 
         x86_64::instructions::interrupts::without_interrupts(|| {
+            // SAFETY: inside `without_interrupts`, so the CPU whose GS base
+            // named this cell is still the CPU running, and it is the only one
+            // that reaches its own cache.
             let cache = unsafe { crate::util::per_cpu::get_percpu_data().heap_cache.get_mut() };
             if !cache.ready {
                 return None;
@@ -329,6 +355,8 @@ impl Allocator {
             }
 
             // Slow path: batch refill from global heap (lock taken here).
+            // SAFETY: `sc` is an entry of `SIZE_CLASSES`, a non-zero power of
+            // two, so it is a valid alignment and a size already rounded to it.
             let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
             let limit = cache_limit(idx);
             let mut heap = self.inner.lock();
@@ -357,6 +385,9 @@ impl Allocator {
         let sc = SIZE_CLASSES[idx];
 
         x86_64::instructions::interrupts::without_interrupts(|| {
+            // SAFETY: inside `without_interrupts`, so the CPU whose GS base
+            // named this cell is still the CPU running, and it is the only one
+            // that reaches its own cache.
             let cache = unsafe { crate::util::per_cpu::get_percpu_data().heap_cache.get_mut() };
             if !cache.ready {
                 return false;
@@ -373,9 +404,14 @@ impl Allocator {
             let _ = cache.caches[idx].try_push(ptr, limit); // guaranteed to succeed
 
             // Return drained objects to global heap.
+            // SAFETY: `sc` is an entry of `SIZE_CLASSES`, a non-zero power of
+            // two, so it is a valid alignment and a size already rounded to it.
             let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
             let mut heap = self.inner.lock();
             for ptr in drained.iter().take(n) {
+                // SAFETY: every cached pointer was allocated from this heap
+                // under `sc_layout` and is non-null, so it is returned under
+                // the layout it was taken with.
                 unsafe {
                     heap.dealloc(NonNull::new_unchecked(*ptr), sc_layout);
                 }
@@ -394,6 +430,8 @@ impl Allocator {
         let layout = match size_class_index(layout.size(), layout.align()) {
             Some(idx) => {
                 let sc = SIZE_CLASSES[idx];
+                // SAFETY: `sc` is an entry of `SIZE_CLASSES`, a non-zero power
+                // of two, so it is a valid alignment and a size rounded to it.
                 unsafe { Layout::from_size_align_unchecked(sc, sc) }
             }
             None => layout,
@@ -451,6 +489,8 @@ impl Allocator {
 
         let result = {
             let mut heap = self.inner.lock();
+            // SAFETY: `base..end` was just mapped writable by the block above
+            // and is given to the heap alone, so no live allocation overlaps it.
             unsafe { heap.add_to_heap(base as usize, end as usize) };
             heap.alloc(layout)
                 .map(|b| b.as_ptr())
@@ -482,6 +522,8 @@ pub fn init_heap() {
 
     println!("Mapped kernel heap at {:p}-{:p}", heap_start, heap_end);
 
+    // SAFETY: the heap range was mapped writable immediately above, and this
+    // runs once during boot before any allocation, so nothing else owns it.
     unsafe {
         ALLOCATOR
             .inner
@@ -493,11 +535,16 @@ pub fn init_heap() {
 /// Enable the per-CPU allocation cache for the calling CPU.
 /// Call after the heap and per-CPU data are initialized.
 pub fn enable_percpu_cache() {
-    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
-        crate::util::per_cpu::get_percpu_data()
-            .heap_cache
-            .get_mut()
-            .enable();
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        // SAFETY: inside `without_interrupts`, so the calling CPU cannot move
+        // between the GS-base read and the access, and it is the only CPU that
+        // reaches its own cache.
+        unsafe {
+            crate::util::per_cpu::get_percpu_data()
+                .heap_cache
+                .get_mut()
+                .enable();
+        }
     });
 }
 
@@ -541,19 +588,26 @@ pub mod bench {
     fn layout(size: usize) -> Layout {
         // Every request in this benchmark is a plain byte buffer, so the
         // alignment is the one a `Vec<u8>` would ask for.
+        // SAFETY: 1 is a valid alignment, and every size in `SIZES` and `MIX`
+        // rounded up to it is far below `isize::MAX`.
         unsafe { Layout::from_size_align_unchecked(size, 1) }
     }
 
     /// Allocates and touches one block, so a mapping that is never written
     /// cannot make the number look better than the allocation was.
     fn take(size: usize) -> Option<NonNull<u8>> {
+        // SAFETY: every size this benchmark uses is non-zero, which is what
+        // `alloc` requires of a layout.
         let ptr = unsafe { alloc::alloc::alloc(layout(size)) };
         let ptr = NonNull::new(ptr)?;
+        // SAFETY: the allocation is live and at least one byte long.
         unsafe { ptr.write(1) };
         Some(ptr)
     }
 
     fn give(ptr: NonNull<u8>, size: usize) {
+        // SAFETY: `ptr` came from `take(size)`, so it was allocated under this
+        // same layout, and each block in this module is freed exactly once.
         unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout(size)) };
     }
 
