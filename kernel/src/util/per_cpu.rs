@@ -90,7 +90,12 @@ impl PerCpuData {
         self.tss.get() as *const _
     }
 
-    /// Mutable ref to TSS. Only call from owning CPU.
+    /// The TSS this CPU loads its ring-0 and IST stack pointers from.
+    ///
+    /// # Safety
+    /// The caller must be running on the CPU this `PerCpuData` belongs to, must
+    /// not already hold a reference into the same TSS, and must not let the
+    /// returned reference outlive a context switch.
     // Per-CPU interior-mutable state: the owning CPU is the only accessor, and
     // `&self` is the only handle it has, so the aliasing the lint warns about
     // cannot arise.
@@ -99,11 +104,16 @@ impl PerCpuData {
         reason = "the TSS belongs to the calling CPU; the contract is on the unsafe fn"
     )]
     pub unsafe fn tss_mut(&self) -> &mut TaskStateSegment {
+        // SAFETY: the caller upholds that it runs on the owning CPU and holds
+        // no other reference into this TSS, so this is the only live borrow.
         unsafe { &mut *self.tss.get() }
     }
 
     /// Clone the current thread Arc.
     pub fn current_thread(&self) -> Option<Arc<Thread>> {
+        // SAFETY: this slot is only ever written by `set_current_thread` on the
+        // owning CPU, and a `&self` here was reached through that CPU's GS
+        // base, so no other CPU can be writing it while this clone reads it.
         unsafe { (*self.current_thread.get()).clone() }
     }
 
@@ -114,6 +124,9 @@ impl PerCpuData {
     /// switch; the safest pattern is a closure scope.
     #[inline]
     pub fn with_current_thread<R>(&self, f: impl FnOnce(&Thread) -> R) -> Option<R> {
+        // SAFETY: as in `current_thread`, the owning CPU is the only writer.
+        // The borrow does not escape `f`, and a switch on this CPU can only
+        // happen after `f` returns.
         unsafe { (*self.current_thread.get()).as_deref().map(f) }
     }
 
@@ -122,7 +135,16 @@ impl PerCpuData {
     /// The drop is what keeps a thread's fd table, working directory and
     /// address space from outliving it by however long this CPU takes to run
     /// another user thread.
+    ///
+    /// # Safety
+    /// The caller must be on the CPU this `PerCpuData` belongs to with
+    /// preemption or interrupts held off, so the store cannot land on the CPU
+    /// the reader has since migrated away from, and must hold no outstanding
+    /// borrow handed out by `with_current_thread`.
     pub unsafe fn set_current_thread(&self, thread: Option<Arc<Thread>>) {
+        // SAFETY: the caller guarantees it cannot migrate, so this CPU is the
+        // only accessor. The info cache is cleared first: it keys off the
+        // outgoing thread and must never be seen against the incoming one.
         unsafe {
             *self.current_info.get() = None;
             *self.current_thread.get() = thread;
@@ -132,6 +154,9 @@ impl PerCpuData {
     /// This CPU's cached `UserThreadInfo` for `tid`, or `None` when it holds
     /// another thread's or nothing.
     pub fn cached_thread_info(&self, tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThreadInfo>>> {
+        // SAFETY: written only by `cache_thread_info` and `set_current_thread`,
+        // both of which run on the owning CPU with migration held off, so no
+        // concurrent writer exists while this reads.
         unsafe {
             match &*self.current_info.get() {
                 Some((cached, info)) if *cached == tid => Some(info.clone()),
@@ -147,6 +172,8 @@ impl PerCpuData {
     /// migration between the read of the current thread and this store would
     /// cache the entry against the wrong CPU.
     pub unsafe fn cache_thread_info(&self, tid: ThreadId, info: Arc<IrqSpinlock<UserThreadInfo>>) {
+        // SAFETY: the caller guarantees interrupts are off, so this CPU is the
+        // only accessor of the slot for the duration of the store.
         unsafe { *self.current_info.get() = Some((tid, info)) }
     }
 }
@@ -161,6 +188,10 @@ pub fn probe_and_enable_fsgsbase() {
     // CPUID leaf 7, sub-leaf 0: EBX bit 0 = FSGSBASE
     // rbx is reserved by LLVM, so save/restore it manually.
     let ebx: u32;
+    // SAFETY: `cpuid` is architecturally available on every CPU this kernel
+    // runs on and has no side effects beyond the four output registers, all of
+    // which are declared. rbx is LLVM-reserved, so the block saves and restores
+    // it around the instruction rather than naming it as an operand.
     unsafe {
         core::arch::asm!(
             "push rbx",
@@ -177,6 +208,8 @@ pub fn probe_and_enable_fsgsbase() {
     }
     if ebx & 1 != 0 {
         HAS_FSGSBASE.store(true, Ordering::Relaxed);
+        // SAFETY: CPUID.(EAX=7,ECX=0):EBX[0] was just read as set, which is
+        // exactly the condition setting CR4.FSGSBASE requires.
         unsafe { crate::drivers::fpu::enable_fsgsbase() };
     }
 }
@@ -184,6 +217,9 @@ pub fn probe_and_enable_fsgsbase() {
 /// Enable FSGSBASE on this AP (CR4 is per-CPU). Only call if BSP detected support.
 pub fn enable_fsgsbase_on_ap() {
     if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        // SAFETY: the flag is only set by `probe_and_enable_fsgsbase` after
+        // CPUID reported the feature, and the CPUs are a homogeneous set, so
+        // this AP has it too. CR4 is per-CPU, hence the second write here.
         unsafe { crate::drivers::fpu::enable_fsgsbase() };
     }
 }
@@ -191,6 +227,9 @@ pub fn enable_fsgsbase_on_ap() {
 #[inline(always)]
 fn write_gs_base(addr: VirtAddr) {
     if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        // SAFETY: the flag means CR4.FSGSBASE is set on this CPU, so the
+        // instruction is legal. `addr` is a canonical kernel address, which is
+        // what `wrgsbase` requires; a non-canonical value would #GP.
         unsafe {
             core::arch::asm!("wrgsbase {}", in(reg) addr.as_u64(), options(nomem, nostack, preserves_flags));
         }
@@ -209,6 +248,8 @@ fn write_gs_base(addr: VirtAddr) {
 pub fn read_fs_base() -> VirtAddr {
     if HAS_FSGSBASE.load(Ordering::Relaxed) {
         let base: u64;
+        // SAFETY: the flag means CR4.FSGSBASE is set on this CPU. `rdfsbase`
+        // only writes the named output register.
         unsafe {
             core::arch::asm!("rdfsbase {}", out(reg) base, options(nomem, nostack, preserves_flags));
         }
@@ -222,6 +263,9 @@ pub fn read_fs_base() -> VirtAddr {
 #[inline(always)]
 pub fn write_fs_base(addr: VirtAddr) {
     if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        // SAFETY: the flag means CR4.FSGSBASE is set on this CPU. `addr` comes
+        // from `arch_prctl(ARCH_SET_FS)` or a saved thread context, both of
+        // which are canonical-checked before reaching here.
         unsafe {
             core::arch::asm!("wrfsbase {}", in(reg) addr.as_u64(), options(nomem, nostack, preserves_flags));
         }
@@ -236,38 +280,58 @@ pub fn write_fs_base(addr: VirtAddr) {
 pub fn get_percpu_data() -> &'static PerCpuData {
     let base: u64;
     if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        // SAFETY: the flag means CR4.FSGSBASE is set on this CPU. `rdgsbase`
+        // only writes the named output register.
         unsafe {
             core::arch::asm!("rdgsbase {}", out(reg) base, options(nomem, nostack, preserves_flags));
         }
     } else {
         base = GsBase::read().as_u64();
     }
+    // SAFETY: `init_gs_for_this_cpu` or `init_gs_for_bsp_static` ran on this
+    // CPU before anything calls this, and both point GS at a leaked `Box` or a
+    // `static`, so the pointee lives for the rest of the boot. The reference is
+    // shared, which is why every mutable field is a `Cell` or `UnsafeCell`.
     unsafe { &*(base as *const PerCpuData) }
 }
 
 /// Allocate and install per-CPU data for the current CPU and set GS bases.
-/// Must be called once per CPU very early during bring-up (before GDT/IDT use it).
+///
+/// # Safety
+/// Call once per CPU, on the CPU itself, before anything reads GS: the GDT and
+/// IDT setup that follows dereferences what this installs. Calling it twice on
+/// one CPU leaks the first block and orphans every reference into it.
 pub unsafe fn init_gs_for_this_cpu(lapic_id: u32) -> &'static PerCpuData {
     let percpu_ptr: *mut PerCpuData = Box::leak(Box::new(PerCpuData::new()));
+    // SAFETY: the pointer comes from `Box::leak`, so it is valid, aligned and
+    // has no other reference to it yet.
     unsafe { (*percpu_ptr).lapic_id.set(lapic_id) };
     let addr = VirtAddr::new(percpu_ptr as u64);
     // Set both to the same value so `swapgs` does not change effective base
     // and `get_percpu_data()` works uniformly.
     write_gs_base(addr);
     KernelGsBase::write(addr);
+    // SAFETY: the allocation is leaked, so `'static` is the truth about it.
     unsafe { &*percpu_ptr }
 }
 
 /// BSP-only: install a statically allocated PerCpuData and set GS bases.
-/// Call this in early BSP boot before the heap is initialized.
+///
+/// # Safety
+/// Call once, on the BSP, before the heap exists -- which is the whole reason
+/// this exists beside [`init_gs_for_this_cpu`]. An AP calling it would point
+/// its GS at the BSP's block and silently share every per-CPU field.
 pub unsafe fn init_gs_for_bsp_static() -> &'static PerCpuData {
     static BSP_PCPU: PerCpuData = PerCpuData::new();
     let ptr: *const PerCpuData = &BSP_PCPU;
+    // SAFETY: `ptr` names a `static`, so it is valid and aligned for the whole
+    // boot. `lapic_id` is a `Cell`, so this shared-reference store is sound.
     unsafe {
         (*ptr).lapic_id.set(raw_current_apic_id());
     }
     let addr = VirtAddr::new(ptr as u64);
     write_gs_base(addr);
     KernelGsBase::write(addr);
+    // SAFETY: `ptr` names a `static`, which outlives every caller.
     unsafe { &*ptr }
 }

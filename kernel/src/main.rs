@@ -62,6 +62,7 @@ mod smp;
 mod syscalls;
 mod thread;
 mod timer;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod util;
 mod window;
 

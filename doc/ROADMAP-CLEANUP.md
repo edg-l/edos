@@ -8,12 +8,13 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-26.** 25 of the 32 entries are struck; G2 is struck with
-a named remainder. What is open, in the order the evidence suggests: C2 (the
-parser exists, 125 programs have not adopted it), B2/B3 (the 477 `errno =`
-assignments and the dispatch match), H1 and H3 (two long functions), G3 (split
-`WORKING-NOTES.md`), and the three gates I2, I5, I6. The numbers each entry
-quotes were remeasured on this date.
+**State as of 2026-08-28.** 27 of the 32 entries are struck: I6 landed with the
+`[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`, and
+G2's named `uaccess.rs` remainder is closed. What is open, in the order the
+evidence suggests: C2 (the parser exists, 125 programs have not adopted it),
+B2/B3 (the 477 `errno =` assignments and the dispatch match), H1 and H3 (two
+long functions), G3 (split `WORKING-NOTES.md`), and the gates I2 and I5. The
+numbers each entry quotes were remeasured on the date it names.
 
 The conventions these entries are written against, and the sources behind them,
 are `doc/rust-style.md`. I5 and I6 are its measurements; the rest of this file
@@ -462,16 +463,22 @@ other restarts. `Terminal` moved onto it too.
 process that produced the code. The kernel mostly honours this and reads well.
 Two pockets do not.
 
-### G2. ~~Restate-the-signature doc comments in `edos_render`~~ (mostly done)
+### G2. ~~Restate-the-signature doc comments~~
 
 45 doc comments that said only what the signature said were deleted across ten
-widget and layout files, `linear.rs` and `grid.rs` included. The ones that state
-a constraint stayed (`set_uniform`, `cursor_byte`, `viewport_top`).
+`edos_render` widget and layout files, `linear.rs` and `grid.rs` included. The
+ones that state a constraint stayed (`set_uniform`, `cursor_byte`,
+`viewport_top`).
 
-Still open: `kernel/src/util/uaccess.rs` has the same voice ("This function
-attempts to copy `size` bytes from user space address `src`"). The house style
-is `kernel/src/syscalls/io.rs:71`, where the comment on `STREAM_STACK_BUF`
-carries a measurement table and says why the constant is small on purpose.
+`kernel/src/util/uaccess.rs` carried the same voice ("This function attempts to
+copy `size` bytes from user space address `src`") and was the named remainder.
+Its eleven comments now say what the signature cannot: why the string copy is a
+byte at a time, why `TooLong` is distinct from a fault, why the user pointer is
+checked here and the kernel pointer is the caller's, and that
+`current_cpu_uaccess` stops describing the caller the moment it can migrate. The
+house style is `kernel/src/syscalls/io.rs:71`, where the comment on
+`STREAM_STACK_BUF` carries a measurement table and says why the constant is
+small on purpose.
 
 ### G3. `doc/WORKING-NOTES.md` is 10,959 lines and `CLAUDE.md` says read it first (S2, E2)
 
@@ -644,9 +651,19 @@ carries the `# Safety` section saying the CPU is its only caller and what entry
 state it is written to, and `mod syscalls;` denies the lint too. Most of those
 107 are calls into `util/uaccess`, whose helpers range-check the user address
 and trap the fault, so what a caller actually has to uphold is the *kernel*
-side: each comment names what bounds its own length. 608 blocks remain,
+side: each comment names what bounds its own length. `util/` is the third
+module done, and it is the one the other two lean on: `uaccess.rs` is the
+callee those 107 syscall comments defer to, and `per_cpu.rs` is where the
+GS-base reads live that `doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md`
+is about, so its comments name migration rather than validity. Four `unsafe fn`
+there (`tss_mut`, `set_current_thread`, `init_gs_for_this_cpu`,
+`init_gs_for_bsp_static`) gained the `# Safety` section they had no form of, and
+`setup_fault_resume`/`clear_fault_resume` -- reached only from `do_user_copy`'s
+asm -- now say so. 529 blocks remain, measured with `cargo clippy --target
+x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks`:
 `usb/xhci/mod.rs` (77), `ahci/port.rs` (38), `virtio/gpu.rs` (33),
-`thread/scheduler.rs` (28) and `allocator.rs` (21) first. The lint sits
+`thread/scheduler.rs` (26), `interrupts/idt.rs` (18), `fs/efs/mod.rs` (18) and
+`allocator.rs` (15) first. The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
@@ -657,7 +674,8 @@ sections. No lint finds these and none can: a caller of an undocumented
 the smaller of the two.
 
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
-comment, the lint is denied in `memory/` and `syscalls/` with no suppressions,
+comment, the lint is denied in `memory/`, `syscalls/` and `util/` with no
+suppressions,
 and every `unsafe fn` in those two modules carries a `# Safety` section. Both
 are done; what is left is the rest of the tree, module by module.
 

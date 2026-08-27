@@ -11371,3 +11371,63 @@ statement.** `kernel/src/syscalls/ioctl/mod.rs` has two sites shaped
 has to go between the `if` condition's first operand and the `&&`, which
 `cargo fmt` then keeps in place. The error is identical to having written no
 comment at all, so the fix is not obvious from the diagnostic.
+
+## Counting what `undocumented_unsafe_blocks` has left, and the flag that reads zero
+
+`grep -c 'unsafe {'` is not the number. It counts blocks the lint already
+accepts, misses `unsafe impl`, and misses a block written without the brace on
+the same line. The number the ratchet is against comes from clippy itself:
+
+```
+cd kernel && touch src/main.rs
+cargo clippy --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks \
+  2>&1 | grep -cE '^\s+--> '
+```
+
+Two things bite. `touch src/main.rs` is required: a `-W` passed after `--` does
+not change the fingerprint clippy caches against, so a warm tree answers 0 and
+reads exactly like a finished module. And **`--message-format short` also
+answers 0** for a grep on the lint name -- the short format prints
+`file:line: warning: <message>` with the lint name dropped, so the count has to
+be of the `-->` lines, not of `undocumented_unsafe_blocks`.
+
+Measured this way after `util/`: 529 blocks over the whole kernel, largest
+`usb/xhci/mod.rs` 77, `ahci/port.rs` 38, `virtio/gpu.rs` 33,
+`thread/scheduler.rs` 26, `interrupts/idt.rs` 18, `fs/efs/mod.rs` 18,
+`allocator.rs` 15.
+
+## `kernel/src/util/` is the third module clean, and what its comments had to say
+
+`memory/` and `syscalls/` are about validity -- is this pointer live, is this
+length inside the buffer. `util/` is not, and writing its comments in that voice
+would have produced nothing true:
+
+- **`per_cpu.rs`** is a set of GS-base reads, so what every block turns on is
+  *migration*, not validity. `get_percpu_data` returns a `&'static PerCpuData`
+  derived from a register, and the pointee is a leaked `Box` or a `static`, so
+  validity is never in question; what a caller can get wrong is being moved
+  between the read and the access, which is
+  `doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md`. So
+  `set_current_thread` and `cache_thread_info` say "the caller cannot migrate",
+  and the `wrgsbase`/`rdfsbase` blocks say "CR4.FSGSBASE is set on this CPU",
+  which is a fact about `HAS_FSGSBASE` having been stored by
+  `probe_and_enable_fsgsbase` and about the CPUs being homogeneous.
+- **`uaccess.rs`** is the callee that ~80 of `syscalls/`'s comments defer to, so
+  its own comments are the other half of that argument: `try_copy_from_user`
+  checks the *user* pointer (null, and inside the user half, for the reason
+  `access_ok` gives) and the *kernel* side is the caller's, which is why its
+  `# Safety` now lists only `dst`. `do_user_copy`'s asm block is the one place
+  the fixup has to be argued: a fault lands on `5:`, which falls through into
+  the same `clear_resume` call the success path takes, so the resume point is
+  disarmed on both exits.
+
+Four `unsafe fn` there had no `# Safety` section at all (`tss_mut`,
+`set_current_thread`, `init_gs_for_this_cpu`, `init_gs_for_bsp_static`), and
+`setup_fault_resume`/`clear_fault_resume` are `unsafe extern "C"` reachable only
+from `do_user_copy`'s asm -- which is now what their contract says, rather than
+"called from assembly" above a signature that already said so.
+
+That last part closed `doc/ROADMAP-CLEANUP.md` §G2's named remainder in the same
+pass: `uaccess.rs` was the tree's last pocket of restate-the-signature doc
+comments, and a file being rewritten for `// SAFETY:` is the cheapest time to
+fix them, since every one of them is being read anyway.
