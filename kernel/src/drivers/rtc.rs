@@ -40,6 +40,10 @@ pub fn read_rtc() -> RtcDateTime {
 }
 
 fn read_rtc_once() -> RtcDateTime {
+    // SAFETY: every call below goes to the CMOS index/data pair, which only
+    // this module drives, and the loop waits out the update-in-progress flag
+    // first so the register file is not being rewritten mid-read. `read_rtc`
+    // above serialises callers by reading twice and comparing.
     unsafe {
         // Wait for update to complete
         while is_updating() {
@@ -87,7 +91,14 @@ fn read_rtc_once() -> RtcDateTime {
     }
 }
 
+/// # Safety
+/// Leaves NMI masked for the duration of the access (bit 7 of the index port),
+/// so the caller must pair every index write with the data access that
+/// follows and must not be interrupted between them by another CMOS user.
 unsafe fn read_rtc_register(reg: u16) -> u8 {
+    // SAFETY: 0x70/0x71 are the CMOS index and data ports, driven only from
+    // this module. Selecting an index and reading the byte has no effect
+    // beyond leaving that index selected.
     unsafe {
         // Bit 7 keeps NMI disabled during RTC access.
         Port::new(0x70).write(reg as u8 | 0x80);
@@ -95,7 +106,11 @@ unsafe fn read_rtc_register(reg: u16) -> u8 {
     }
 }
 
+/// # Safety
+/// As [`read_rtc_register`], whose contract this inherits.
 unsafe fn is_updating() -> bool {
+    // SAFETY: `RTC_STATUS_A` is a CMOS register and the caller carries
+    // `read_rtc_register`'s contract.
     (unsafe { read_rtc_register(RTC_STATUS_A) } & 0x80) != 0
 }
 

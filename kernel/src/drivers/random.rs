@@ -116,6 +116,9 @@ impl RandomSource {
 fn rdrand64() -> Option<u64> {
     let mut value = 0u64;
     for _ in 0..16 {
+        // SAFETY: `rdrand64` is only reached from the `Rdrand` variant, which is
+        // built only when CPUID reported the feature. `RDRAND` writes the
+        // destination and a carry flag and has no other effect.
         let status = unsafe { core::arch::x86_64::_rdrand64_step(&mut value) };
         if status == 1 {
             return Some(value);
@@ -129,6 +132,8 @@ fn seed_entropy() -> u64 {
     let mut seed = FALLBACK_SEED.load(Ordering::Relaxed);
 
     if seed == 0 {
+        // SAFETY: the TSC is architectural on every CPU this kernel boots and
+        // `RDTSC` only reads it.
         let mut mix = unsafe { core::arch::x86_64::_rdtsc() };
         mix ^= timer::uptime_us();
 

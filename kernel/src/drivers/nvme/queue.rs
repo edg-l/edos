@@ -126,6 +126,8 @@ impl NvmeQueue {
         // reading phase 0 at start of day; stale bytes here invent
         // completions on the first drain pass rather than waiting for real
         // ones.
+        // SAFETY: the buffer owns `cq_buffer.size` bytes of mapped, writable DMA
+        // memory and no completion queue entry has been published yet.
         unsafe {
             ptr::write_bytes(cq_buffer.as_ptr(), 0, cq_buffer.size);
         }
@@ -139,12 +141,16 @@ impl NvmeQueue {
             .cast::<CompletionQueueEntry>()
             .cast_const();
 
+        // SAFETY: `bar_virt` is BAR0's mapped register window, which the caller
+        // sized to cover the doorbell stride the controller reported; the offset
+        // is `qid`'s submission doorbell within it and is dword aligned.
         let sq_tail_doorbell = unsafe {
             bar_virt
                 .as_mut_ptr::<u8>()
                 .add(regs::sq_tail_doorbell_offset(qid, dstrd))
                 .cast::<u32>()
         };
+        // SAFETY: as above, for `qid`'s completion queue head doorbell.
         let cq_head_doorbell = unsafe {
             bar_virt
                 .as_mut_ptr::<u8>()
@@ -367,6 +373,10 @@ impl NvmeQueue {
             let mut cq = ranked_lock!(RANK_NVME_CQ, "NvmeQueue.cq", self.cq);
             cq.head = 0;
             cq.phase = true;
+            // SAFETY: the buffer owns `cq.buffer.size` bytes of mapped, writable DMA
+            // memory, and the controller is reset here, so nothing is writing entries
+            // into it concurrently. Zeroing is what restores the phase-0 start state
+            // `cq.phase = true` above assumes.
             unsafe {
                 ptr::write_bytes(cq.buffer.as_ptr(), 0, cq.buffer.size);
             }
@@ -426,6 +436,9 @@ impl NvmeQueue {
     pub fn write_sqe_and_ring(&self, sqe: &SubmissionQueueEntry) {
         let mut sq = ranked_lock!(RANK_NVME_SQ, "NvmeQueue.sq", self.sq);
         let idx = sq.tail as usize;
+        // SAFETY: `sq.buffer` holds `sq.entries` submission queue entries and
+        // `sq.tail` is kept below that by the wrap on the next line, so `idx`
+        // indexes inside the ring. The lock makes this the only writer.
         unsafe {
             sq.buffer
                 .as_ptr()
@@ -434,6 +447,8 @@ impl NvmeQueue {
                 .write_volatile(*sqe);
         }
         sq.tail = (sq.tail + 1) % sq.entries;
+        // SAFETY: `self.sq_tail_doorbell` is the dword-aligned doorbell computed
+        // from BAR0's mapping in `new`; the entry it publishes was written above.
         unsafe {
             ptr::write_volatile(self.sq_tail_doorbell, sq.tail as u32);
         }
@@ -468,6 +483,9 @@ impl NvmeQueue {
             let mut cq = ranked_lock!(RANK_NVME_CQ, "NvmeQueue.cq", self.cq);
             loop {
                 let idx = cq.head as usize;
+                // SAFETY: `cq.buffer` holds `cq.entries` completion queue entries and
+                // `cq.head` is wrapped against that below, so `idx` indexes inside the
+                // ring. Volatile because the controller writes these entries by DMA.
                 let entry = unsafe {
                     ptr::read_volatile(cq.buffer.as_ptr().cast::<CompletionQueueEntry>().add(idx))
                 };
@@ -486,6 +504,8 @@ impl NvmeQueue {
                 }
             }
             if !completions.is_empty() {
+                // SAFETY: `self.cq_head_doorbell` is the dword-aligned doorbell computed
+                // from BAR0's mapping in `new`.
                 unsafe {
                     ptr::write_volatile(self.cq_head_doorbell, cq.head as u32);
                 }
@@ -603,6 +623,8 @@ pub fn build_prp(
             0,
             "PRP list entry must be page-aligned"
         );
+        // SAFETY: `entries` points at the PRP list buffer, which was allocated to
+        // hold the page count this loop is bounded by, so `i` stays inside it.
         unsafe {
             ptr::write_volatile(entries.add(i), page_phys.as_u64());
         }

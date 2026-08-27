@@ -746,17 +746,35 @@ discriminated on a `state` load and then read `value` through the cell, which is
 a data race against a writer arriving in between, so it now goes through a new
 `try_read` the way `BlockingMutex`'s `Debug` already went through `try_lock`.
 
-295 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
---target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`, and they are all in `drivers/`: `usb/xhci/mod.rs` 77,
-`ahci/port.rs` 38, `virtio/gpu.rs` 33, `virtio/queue.rs` 14, `nvme/admin.rs` 13,
-`ahci/controller.rs` 12, `mod.rs` 10, `hda/mod.rs` 10, then a tail of eight or
-fewer. The lint sits commented out in `kernel/Cargo.toml`'s `[lints.clippy]`
-beside the three that are on: moving it up from the last module's `mod`
-declaration is the commit that closes this entry.
+`drivers/` is the last module, and it is taken a submodule at a time rather
+than whole: the `#[deny]` goes on each `pub mod` line in `drivers/mod.rs`, so
+fourteen of its twenty-one submodules are already ratcheted while the rest
+catch up. The first batch is the tail -- `nvme/` (23 blocks), `pci/`, `fpu.rs`,
+`hpet/`, `msi/`, `rtc.rs`, `ramdisk.rs`, `random.rs`, `vga/`, `dma.rs`,
+`tty.rs`, `keyboard/`, `mouse/`, `null.rs` -- 58 blocks. Two shapes carry it: a
+`read_volatile`/`write_volatile` of a field in a mapped BAR window, where the
+comment names the mapping that makes the pointer live and says volatile is
+there because the *controller* changes the value; and a port-I/O pair, where
+the comment names who else drives the port and the lock that keeps an address
+write and its data access together. `fpu.rs`, `hpet/driver.rs` and `rtc.rs`
+between them held nine `unsafe fn` with no `# Safety` section at all, which is
+the whole of the FPU/SSE bring-up path: `init_fpu`, `enable_fpu`, `enable_sse`
+and `enable_fsgsbase` all write a control register on the calling CPU and so
+require a non-migratable caller, and `restore_fpu_state` requires an image
+`FXSAVE` wrote, since `FXRSTOR` raises `#GP` on a reserved `MXCSR` bit that
+arbitrary bytes can carry.
 
-**I5b, the contracts.** 65 `unsafe fn` declarations against 55 `# Safety`
-sections, remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
+237 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+--target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
+grep -cE '^\s+--> '`, and they are all in the seven `drivers/` submodules left:
+`usb/` 97 (`xhci/mod.rs` 77), `virtio/` 55, `ahci/` 56, `hda/` 10, `e1000e/` 9,
+`drivers/mod.rs` itself 10. The lint sits commented out in `kernel/Cargo.toml`'s
+`[lints.clippy]` beside the three that are on: moving it up once the last
+submodule holds its own deny is the commit that closes this entry.
+
+**I5b, the contracts.** 65 `unsafe fn` declarations against 67 `# Safety`
+sections -- a section also belongs on an `unsafe trait` and on a safe fn whose
+contract is in a raw pointer, so the surplus is not slack -- remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
 modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented
 `unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
 the smaller of the two.
@@ -764,9 +782,10 @@ the smaller of the two.
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
-the modules it covers carries a `# Safety` section. The impls are done and
-twenty-three of the twenty-four modules in `main.rs` hold their own deny; the
-one left is `drivers/`.
+the modules it covers carries a `# Safety` section. The impls are done,
+twenty-three of the twenty-four modules in `main.rs` hold their own deny, and
+inside the one left -- `drivers/` -- fourteen of its twenty-one submodules do
+too.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

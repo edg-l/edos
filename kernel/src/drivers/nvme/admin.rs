@@ -147,6 +147,9 @@ impl NvmeController {
         }
 
         let regs = bar0_virt.as_mut_ptr::<NvmeRegs>();
+        // SAFETY: `regs` is BAR0's register window, mapped just above, and the field
+        // is a naturally aligned location inside it. Volatile because the
+        // controller, not this code, decides when the value changes.
         let cap = unsafe { ptr::read_volatile(&raw const (*regs).cap) };
 
         if regs::cap_mpsmin(cap) != 0 {
@@ -203,6 +206,9 @@ impl NvmeController {
         // Clear CC.EN and wait for CSTS.RDY to drop before reprogramming the
         // admin queue registers (NVMe 2.0 3.5.1 requires the controller be
         // disabled while ASQ/ACQ/AQA change).
+        // SAFETY: `regs` is BAR0's mapped register window; `CC` is a naturally
+        // aligned dword inside it, and clearing it is the documented way to take
+        // the controller out of the enabled state.
         unsafe { ptr::write_volatile(&raw mut (*regs).cc, 0) };
         wait_csts(regs, regs::CSTS_RDY, false, timeout)?;
 
@@ -215,12 +221,19 @@ impl NvmeController {
             bar0_virt,
         )?;
 
+        // SAFETY: `regs` is BAR0's mapped register window and AQA/ASQ/ACQ are
+        // naturally aligned locations inside it. `CC.EN` is clear here, which is
+        // what NVMe 2.0 3.5.1 requires before these three are reprogrammed; the
+        // two addresses come from a DMA allocation that outlives the controller.
         unsafe {
             ptr::write_volatile(&raw mut (*regs).aqa, ADMIN_AQA);
             ptr::write_volatile(&raw mut (*regs).asq, admin_queue.sq_phys_addr().as_u64());
             ptr::write_volatile(&raw mut (*regs).acq, admin_queue.cq_phys_addr().as_u64());
         }
 
+        // SAFETY: `regs` is BAR0's mapped register window and `CC` a naturally
+        // aligned dword inside it; the admin queue registers it refers to were
+        // written on the lines above.
         unsafe { ptr::write_volatile(&raw mut (*regs).cc, CC_ENABLED) };
         if let Err(e) = wait_csts(regs, regs::CSTS_RDY, true, timeout) {
             admin_queue.dealloc_all();
@@ -293,6 +306,9 @@ impl NvmeController {
 
     /// `CSTS`, read fresh. The watchdog reads `CSTS.CFS` through this.
     pub fn csts(&self) -> u32 {
+        // SAFETY: `self.regs` is BAR0's register window, mapped for the life of the
+        // controller, and the field is a naturally aligned location inside it.
+        // Volatile because the controller changes it behind the driver's back.
         unsafe { ptr::read_volatile(&raw const (*self.regs).csts) }
     }
 
@@ -346,6 +362,9 @@ impl NvmeController {
             // reentrant.
             let _guard = ranked_lock!(RANK_NVME_ADMIN, "NvmeController.reset", self.admin);
             let timeout = self.controller_timeout();
+            // SAFETY: `self.regs` is BAR0's mapped register window and `CC` a
+            // naturally aligned dword inside it. Clearing it resets the controller,
+            // which is this function's whole purpose.
             unsafe { ptr::write_volatile(&raw mut (*self.regs).cc, 0) };
             wait_csts(self.regs, regs::CSTS_RDY, false, timeout)?;
 
@@ -356,6 +375,9 @@ impl NvmeController {
                 queue.reset_state();
             }
 
+            // SAFETY: `self.regs` is BAR0's mapped register window; the controller is
+            // disabled at this point, so AQA/ASQ/ACQ may be reprogrammed (NVMe 2.0
+            // 3.5.1), and the addresses are the queue's own DMA allocation.
             unsafe {
                 ptr::write_volatile(&raw mut (*self.regs).aqa, ADMIN_AQA);
                 ptr::write_volatile(
@@ -386,8 +408,13 @@ impl NvmeController {
     pub fn shutdown(&self) -> Result<(), NvmeError> {
         let _guard = ranked_lock!(RANK_NVME_ADMIN, "NvmeController.shutdown", self.admin);
         let timeout = self.controller_timeout();
+        // SAFETY: `self.regs` is BAR0's register window, mapped for the life of the
+        // controller, and the field is a naturally aligned location inside it.
+        // Volatile because the controller changes it behind the driver's back.
         let cc = unsafe { ptr::read_volatile(&raw const (*self.regs).cc) };
         let cc = (cc & !regs::CC_SHN_MASK) | regs::CC_SHN_NORMAL;
+        // SAFETY: `self.regs` is BAR0's mapped register window; this writes back
+        // the dword read on the line above with only `CC.SHN` changed.
         unsafe { ptr::write_volatile(&raw mut (*self.regs).cc, cc) };
 
         let start = Instant::now();
@@ -641,6 +668,10 @@ impl NvmeController {
 
     pub fn identify_controller(&self) -> Result<IdentifyController, NvmeError> {
         let buffer = self.identify(regs::IDENTIFY_CNS_CONTROLLER, 0)?;
+        // SAFETY: `identify` returned a DMA buffer the controller filled with a
+        // 4096-byte Identify Controller structure, which is exactly what
+        // `IdentifyController` describes; it is `Pod`, so every byte pattern is
+        // valid, and the read copies out before the buffer is released.
         let ident = unsafe { *buffer.as_ptr().cast::<IdentifyController>() };
         dma().dealloc(buffer).map_err(NvmeError::DmaError)?;
         Ok(ident)
@@ -648,6 +679,7 @@ impl NvmeController {
 
     pub fn identify_namespace(&self, nsid: u32) -> Result<IdentifyNamespace, NvmeError> {
         let buffer = self.identify(regs::IDENTIFY_CNS_NAMESPACE, nsid)?;
+        // SAFETY: as above, for the 4096-byte Identify Namespace structure.
         let ident = unsafe { *buffer.as_ptr().cast::<IdentifyNamespace>() };
         dma().dealloc(buffer).map_err(NvmeError::DmaError)?;
         Ok(ident)
@@ -660,6 +692,9 @@ impl NvmeController {
         let mut ids = Vec::new();
         let list = buffer.as_ptr().cast::<u32>();
         for i in 0..1024 {
+            // SAFETY: the Identify buffer is 4096 bytes and holds the active
+            // namespace id list, which NVM Command Set 5.17.2.1 defines as 1024
+            // little-endian dwords, so `i < 1024` stays inside it.
             let id = unsafe { ptr::read_volatile(list.add(i)) };
             if id == 0 {
                 break;
@@ -681,6 +716,9 @@ fn wait_csts(
 ) -> Result<(), NvmeError> {
     let start = Instant::now();
     loop {
+        // SAFETY: `regs` is BAR0's mapped register window -- every caller passes
+        // the pointer it mapped -- and `CSTS` is a naturally aligned dword inside
+        // it. Volatile because this loop is waiting for the controller to change it.
         let csts = unsafe { ptr::read_volatile(&raw const (*regs).csts) };
         if (csts & bit != 0) == want {
             return Ok(());

@@ -627,6 +627,8 @@ struct ProbeReadArgs {
 /// signature (`0x55 0xAA` at byte 510), the observable this phase's read
 /// path is verified against before anything in the kernel depends on it.
 extern "C" fn nvme_probe_read_thread(arg: *mut ProbeReadArgs) -> ! {
+    // SAFETY: `arg` is the `Box::into_raw` this thread was spawned with, and a
+    // kthread's entry point runs once, so the box is reclaimed exactly here.
     let args = *unsafe { Box::from_raw(arg) };
     let ns = args.namespace;
 

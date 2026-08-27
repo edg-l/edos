@@ -65,6 +65,10 @@ impl AsyncBlockDevice for RamBlockDevice {
         buffer: BlockBuffer,
     ) -> Result<Arc<BlockIoHandle>, BlockError> {
         let (start, count) = self.range(lba, sectors, buffer.len())?;
+        // SAFETY: `range` rejected anything whose `start + count` runs past
+        // `self.len` and anything whose buffer is not exactly `count` bytes, so
+        // both sides own `count` bytes. The image and a block buffer are distinct
+        // allocations, so they cannot overlap.
         unsafe {
             core::ptr::copy_nonoverlapping(self.data.add(start), buffer.as_mut_ptr(), count);
         }
@@ -81,6 +85,8 @@ impl AsyncBlockDevice for RamBlockDevice {
         _flags: WriteFlags,
     ) -> Result<Arc<BlockIoHandle>, BlockError> {
         let (start, count) = self.range(lba, sectors, buffer.len())?;
+        // SAFETY: as in `submit_read` -- `range` bounds both sides to `count`
+        // bytes and the two allocations are distinct.
         unsafe {
             core::ptr::copy_nonoverlapping(buffer.as_ptr(), self.data.add(start), count);
         }

@@ -11,6 +11,9 @@ pub const DISPI_INDEX_Y_OFFSET: u16 = 0x09;
 pub const DISPI_INDEX_VIDEO_MEMORY_64K: u16 = 0x0A;
 
 pub fn dispi_write(index: u16, value: u16) {
+    // SAFETY: 0x01CE/0x01CF are the Bochs DISPI index and data ports, which
+    // only this module drives; the pair is written from a single thread at
+    // framebuffer setup and page-flip time.
     unsafe {
         Port::new(DISPI_INDEX_PORT).write(index);
         Port::new(DISPI_DATA_PORT).write(value);
@@ -18,6 +21,9 @@ pub fn dispi_write(index: u16, value: u16) {
 }
 
 pub fn dispi_read(index: u16) -> u16 {
+    // SAFETY: 0x01CE/0x01CF are the Bochs DISPI index and data ports, which
+    // only this module drives; the pair is written from a single thread at
+    // framebuffer setup and page-flip time.
     unsafe {
         Port::new(DISPI_INDEX_PORT).write(index);
         Port::new(DISPI_DATA_PORT).read()

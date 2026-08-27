@@ -11656,3 +11656,46 @@ feature set, caught them. So when adding a module's deny, the check that it is
 actually satisfied is the sweep, not a single run — and the same holds for
 counting what is left, since the tree-wide `-W` measurement is a default-feature
 run and undercounts any module with feature-gated `unsafe`.
+
+## `drivers/` is ratcheted per submodule, not whole
+
+`drivers/` is the last module I5a has to cross and it is far too big to take in
+one sitting (295 blocks when it opened, `usb/xhci/mod.rs` alone 77). The
+`#[deny(clippy::undocumented_unsafe_blocks)]` therefore goes on each `pub mod`
+line inside `kernel/src/drivers/mod.rs` rather than on `mod drivers;` in
+`main.rs`, which lets a finished submodule be locked in while its neighbours are
+still bare. Fourteen of the twenty-one now hold one: `dma`, `fpu`, `hpet`,
+`keyboard`, `mouse`, `msi`, `null`, `nvme`, `pci`, `ramdisk`, `random`, `rtc`,
+`tty`, `vga`. Left: `ahci`, `block_io`, `e1000e`, `hda`, `usb`, `virtio`, and
+`drivers/mod.rs`'s own ten blocks, which cannot be denied until every sibling
+is, because a deny on the parent reaches the children.
+
+**The two arguments that cover almost all of it.** A driver's blocks are not
+varied. The first shape is `read_volatile`/`write_volatile` of a field in a
+mapped BAR window: what makes it sound is the mapping that produced the pointer
+(and it should be named -- "BAR0's register window, mapped in
+`NvmeController::new`"), that the field is naturally aligned inside it, and
+that `volatile` is there because the *device* changes the value, not this code.
+The second is a port-I/O pair: what bounds it is who else drives the port. For
+`pci/config.rs` that is "this module is the only thing in the kernel that
+touches 0xCF8/0xCFC, and `PCI_CONFIG_LOCK` keeps the address write and the data
+access together against every other CPU" -- the lock is load-bearing to the
+*safety* argument, not just to correctness, and saying so is the point.
+
+**Where the real gap was: the FPU/SSE bring-up path had no contracts at all.**
+`fpu.rs`, `hpet/driver.rs` and `rtc.rs` between them held nine `unsafe fn` with
+no `# Safety` section. `init_fpu`, `enable_fpu`, `enable_sse` and
+`enable_fsgsbase` each write a control register on the calling CPU, so the
+contract is a *non-migratable caller*, the same shape `util/per_cpu.rs`'s
+comments argue -- the danger is not an invalid write, it is writing the CPU you
+were on rather than the one you are on. `restore_fpu_state`'s is different and
+worth knowing: `FXRSTOR` raises `#GP` if the saved `MXCSR` has a reserved bit
+set, so the contract is that the image came from `save_fpu_state` or
+`init_fpu_state` and not from arbitrary or merely zeroed bytes. That is also why
+`FpuState::default` writes `MXCSR_DEFAULT` instead of leaving 512 zeroes.
+
+**The `if !unsafe { .. }` restructure appears once more.** `tty::write_from_user`
+had the same shape `fs/` and `interrupts/` did: clippy will not accept a comment
+above an `if` whose condition opens with the block, and there is nowhere inside
+`if !` to put one, so the call becomes a `let copied = unsafe { .. };` binding.
+Expect this in `drivers/` too.

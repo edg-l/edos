@@ -457,6 +457,10 @@ impl DevFsDevice for MouseDevice {
             _padding: [0; 2],
         };
 
+        // SAFETY: `event` is a live local for the whole of `bytes`' use, and
+        // `MouseEvent` is `#[repr(C)]` plain integer data whose trailing padding is
+        // spelled out as a `_padding` field, so all `size_of` bytes are initialised
+        // and every bit pattern is a valid `u8`.
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 &event as *const MouseEvent as *const u8,

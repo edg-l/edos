@@ -24,6 +24,10 @@ pub fn pci_read_u32(addr: PciAddress, offset: u8) -> u32 {
     let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
+    // SAFETY: 0xCF8/0xCFC are the PCI configuration mechanism and this module
+    // is the only thing in the kernel that drives them; the lock held above
+    // keeps the address and data halves of the pair together against every
+    // other CPU.
     unsafe {
         cfg_addr.write(pci_config_address(addr, offset));
         cfg_data.read()
@@ -34,6 +38,10 @@ pub fn pci_write_u32(addr: PciAddress, offset: u8, value: u32) {
     let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
+    // SAFETY: 0xCF8/0xCFC are the PCI configuration mechanism and this module
+    // is the only thing in the kernel that drives them; the lock held above
+    // keeps the address and data halves of the pair together against every
+    // other CPU.
     unsafe {
         cfg_addr.write(pci_config_address(addr, offset));
         cfg_data.write(value);
@@ -52,12 +60,20 @@ pub fn pci_write_u16(addr: PciAddress, offset: u8, value: u16) {
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
     let config_addr = pci_config_address(addr, offset & !3);
     let shift = ((offset & 2) as u32) * 8;
+    // SAFETY: 0xCF8/0xCFC are the PCI configuration mechanism and this module
+    // is the only thing in the kernel that drives them; the lock held above
+    // keeps the address and data halves of the pair together against every
+    // other CPU.
     let current = unsafe {
         cfg_addr.write(config_addr);
         cfg_data.read()
     };
     let mask = !(0xFFFFu32 << shift);
     let new_val = (current & mask) | ((value as u32) << shift);
+    // SAFETY: 0xCF8/0xCFC are the PCI configuration mechanism and this module
+    // is the only thing in the kernel that drives them; the lock held above
+    // keeps the address and data halves of the pair together against every
+    // other CPU.
     unsafe {
         cfg_addr.write(config_addr);
         cfg_data.write(new_val);
@@ -112,12 +128,20 @@ pub fn pci_write_u8(addr: PciAddress, offset: u8, value: u8) {
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
     let config_addr = pci_config_address(addr, offset & !3);
     let shift = ((offset & 3) as u32) * 8;
+    // SAFETY: 0xCF8/0xCFC are the PCI configuration mechanism and this module
+    // is the only thing in the kernel that drives them; the lock held above
+    // keeps the address and data halves of the pair together against every
+    // other CPU.
     let current = unsafe {
         cfg_addr.write(config_addr);
         cfg_data.read()
     };
     let mask = !(0xFFu32 << shift);
     let new_val = (current & mask) | ((value as u32) << shift);
+    // SAFETY: 0xCF8/0xCFC are the PCI configuration mechanism and this module
+    // is the only thing in the kernel that drives them; the lock held above
+    // keeps the address and data halves of the pair together against every
+    // other CPU.
     unsafe {
         cfg_addr.write(config_addr);
         cfg_data.write(new_val);

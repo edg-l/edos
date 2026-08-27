@@ -50,6 +50,8 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
     // NOTE: The interrupt is targeted at the current CPU (the one running this init code).
     // If the xHCI driver thread later runs on a different CPU, the interrupt still fires on
     // this CPU and wake_thread_irq posts to the scheduler — that is safe across CPUs.
+    // SAFETY: the LAPIC is enabled on this CPU long before any driver reaches
+    // MSI setup, and reading its ID register has no side effect.
     let lapic_id = unsafe { get_lapic().id() };
     let msg_addr_low: u32 = 0xFEE0_0000 | ((lapic_id & 0xFF) << 12);
     let msg_addr_high: u32 = 0; // xAPIC mode
@@ -136,7 +138,13 @@ pub fn enable_msix_for_device(
     // If the driver thread later runs on a different CPU, the interrupt still fires on
     // this CPU and wake_thread_irq posts to the scheduler -- that is safe across CPUs.
     let entry_ptr = (table_virt.as_u64() + (table_entry as u64) * 16) as *mut u32;
+    // SAFETY: as above -- the LAPIC is enabled and the ID register is read-only.
     let lapic_id = unsafe { get_lapic().id() };
+    // SAFETY: `table_virt` is the MSI-X table mapped a few lines up over
+    // `table_size` 16-byte entries, and `table_entry` was rejected above unless
+    // it is below `table_size`, so all four naturally aligned dwords of this
+    // entry lie inside the mapping. The device is masked here, so no interrupt
+    // can observe the address and data halves out of step.
     unsafe {
         // msg_addr_lo
         core::ptr::write_volatile(entry_ptr, 0xFEE0_0000 | ((lapic_id & 0xFF) << 12));

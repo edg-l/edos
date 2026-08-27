@@ -4,8 +4,10 @@ use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
 pub mod ahci;
 pub mod block_io;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod dma;
 pub mod e1000e;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod fpu;
 pub mod hda;
 
@@ -69,18 +71,30 @@ pub fn ps2_drain_buffer() {
         sched.wake_thread_irq(handle, crate::thread::scheduler::WakePriority::Interrupt);
     }
 }
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod hpet;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod keyboard;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod mouse;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod msi;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod null;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod nvme;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod pci;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod ramdisk;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod random;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod rtc;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod tty;
 pub mod usb;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod vga;
 pub mod virtio;
 

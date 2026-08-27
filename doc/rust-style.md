@@ -61,14 +61,19 @@ Coverage in `kernel/src`, measured 2026-08-28:
 | quantity | count | command |
 | --- | --- | --- |
 | `unsafe { ... }` blocks | 758 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
-| `// SAFETY:` comments | 500 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
+| `// SAFETY:` comments | 558 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe fn` declarations | 65 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
-| `# Safety` sections | 55 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
+| `# Safety` sections | 67 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe impl` | 38 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
-So the block half is at roughly two thirds and the contract half at roughly five
-sixths. The block figure moves a module at a time, since the twenty-three that
-hold their own `#[deny(clippy::undocumented_unsafe_blocks)]` cannot regress. The
+So the block half is at roughly three quarters. The contract half now has more
+`# Safety` sections than `unsafe fn` declarations, because a section also
+belongs on an `unsafe trait` and on a safe function whose contract lives in a
+raw pointer argument; what it means is that every `unsafe fn` in a module I5a
+has been through carries one. The block figure moves a module at a time, since
+the twenty-three that hold their own
+`#[deny(clippy::undocumented_unsafe_blocks)]` cannot regress, as do the
+fourteen `drivers/` submodules that hold one on their `pub mod` line. The
 two are `ROADMAP-CLEANUP.md` I5, and they are different work: the lint
 `clippy::undocumented_unsafe_blocks` finds blocks and `unsafe impl`, and finds
 nothing about an undocumented `unsafe fn`, whose contract has no lintable form.

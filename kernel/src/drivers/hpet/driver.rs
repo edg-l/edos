@@ -78,6 +78,9 @@ pub fn init() {
                 // Frequency in femtoseconds per tick (bits 32-63)
                 let frequency = caps >> 32;
                 timer.frequency = frequency;
+                // SAFETY: `virt_hpet` was mapped over the base address the
+                // ACPI HPET table reported, a few lines above, so `timer`'s
+                // register window is live.
                 unsafe { timer.enable() };
 
                 timer
@@ -94,17 +97,37 @@ pub fn get_hpet_timer() -> Option<&'static HpetTimer> {
 }
 
 impl HpetTimer {
+    /// # Safety
+    /// `self.base` must be a mapped HPET register window, and `offset` must
+    /// name a register inside it. Every HPET register is a naturally aligned
+    /// 64-bit location, so `offset` must be a multiple of 8.
     unsafe fn read_hpet_reg(&self, offset: usize) -> u64 {
+        // SAFETY: the caller guarantees `self.base + offset` is a naturally
+        // aligned register inside the mapped window. Volatile because the
+        // counter and status registers change under the driver.
         unsafe { core::ptr::read_volatile((self.base.as_u64() + offset as u64) as *const u64) }
     }
 
+    /// # Safety
+    /// As [`Self::read_hpet_reg`], and `offset` must name a writable register:
+    /// the main counter and the configuration register are, the capability
+    /// register is not.
     unsafe fn write_hpet_reg(&self, offset: usize, value: u64) {
+        // SAFETY: the caller guarantees `self.base + offset` is a naturally
+        // aligned writable register inside the mapped window.
         unsafe {
             core::ptr::write_volatile((self.base.as_u64() + offset as u64) as *mut u64, value)
         };
     }
 
+    /// Set `ENABLE_CNF`, which starts the main counter.
+    ///
+    /// # Safety
+    /// `self.base` must be a mapped HPET register window.
     unsafe fn enable(&self) {
+        // SAFETY: `HPET_GENERAL_CONFIG` is an 8-aligned writable register of
+        // the window this function's contract requires; the read-modify-write
+        // only sets bit 0 and leaves every other configuration bit alone.
         unsafe {
             let config = self.read_hpet_reg(HPET_GENERAL_CONFIG);
             self.write_hpet_reg(HPET_GENERAL_CONFIG, config | 1); // enable bit
@@ -112,10 +135,14 @@ impl HpetTimer {
     }
 
     pub fn get_caps(&self) -> u64 {
+        // SAFETY: an `HpetTimer` only exists once `init` mapped its window, and
+        // `HPET_GENERAL_CAPS` is an 8-aligned register inside it.
         unsafe { self.read_hpet_reg(HPET_GENERAL_CAPS) }
     }
 
     pub fn get_counter(&self) -> u64 {
+        // SAFETY: as `get_caps` -- the window is mapped for the life of the
+        // timer and `HPET_MAIN_COUNTER` is an 8-aligned register inside it.
         unsafe { self.read_hpet_reg(HPET_MAIN_COUNTER) }
     }
 }

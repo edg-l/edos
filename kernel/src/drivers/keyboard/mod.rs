@@ -39,6 +39,8 @@ const QUEUE_SIZE: usize = 2048;
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::ps2_drain_buffer();
+    // SAFETY: this is the tail of an interrupt handler, so the LAPIC has this
+    // vector in service and is owed exactly one EOI for it.
     unsafe { get_lapic().end_of_interrupt() };
 }
 

@@ -165,6 +165,8 @@ impl DmaAllocator {
     pub fn allocate<T: Sized>(&self) -> Result<DmaRegion<T>, DmaError> {
         let buffer = self.allocate_sized(core::mem::size_of::<T>())?;
 
+        // SAFETY: `allocate_sized` was just asked for `size_of::<T>()` bytes, which is
+        // the whole of `from_buffer`'s requirement.
         Ok(unsafe { DmaRegion::from_buffer(buffer) })
     }
 

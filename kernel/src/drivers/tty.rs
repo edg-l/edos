@@ -133,9 +133,15 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
         let remaining = len - total_processed;
         let to_copy = remaining.min(CHUNK_SIZE);
 
-        if !unsafe {
+        // SAFETY: `try_copy_from_user` null-checks and `access_ok`s the user
+        // pointer itself and traps the fault, so what this has to bound is the
+        // kernel side: `to_copy` is `remaining.min(CHUNK_SIZE)` and `chunk` is
+        // `CHUNK_SIZE` bytes. `total_processed` stays below `len`, which is the
+        // caller's own byte count for `user_ptr`.
+        let copied = unsafe {
             try_copy_from_user(chunk.as_mut_ptr(), user_ptr.add(total_processed), to_copy)
-        } {
+        };
+        if !copied {
             faulted = true;
             break;
         }
