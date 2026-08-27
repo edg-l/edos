@@ -667,12 +667,19 @@ default one. Two of them argue migration for the same reason `per_cpu.rs` does
 -- both per-CPU cache paths read the GS base inside `without_interrupts` -- and
 four argue that `SIZE_CLASSES` entries are non-zero powers of two, which is what
 `Layout::from_size_align_unchecked` needs. `PerCpuCacheCell::get_mut` gained the
-`# Safety` section its one-line doc comment stood in for.
-514 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+`# Safety` section its one-line doc comment stood in for. `interrupts/` is the
+fifth: `io.rs`'s seven handlers each ended in the same bare
+`get_lapic().end_of_interrupt()`, so they now call one `eoi()` carrying the one
+argument -- an interrupt is in service on this CPU and a handler cannot migrate
+mid-handler, so it cannot name another CPU's LAPIC -- and `idt.rs`'s four
+copies call it too. `read_pte` gained a `# Safety` section, and the four fault
+paths that read `if unsafe { ... }` became named bindings, since the lint will
+not accept a comment above an `if` whose condition opens with the block.
+489 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
 grep -cE '"'"'^\s+--> '"'"'`: `usb/xhci/mod.rs` (77), `ahci/port.rs` (38),
-`virtio/gpu.rs` (33), `thread/scheduler.rs` (26), `interrupts/idt.rs` (18) and
-`fs/efs/mod.rs` (18) first. The lint sits
+`virtio/gpu.rs` (33), `thread/scheduler.rs` (26) and `fs/efs/mod.rs` (18)
+first. The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
@@ -685,9 +692,9 @@ the smaller of the two.
 **Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
-the modules it covers carries a `# Safety` section. The impls are done and four
-modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`) hold their own deny;
-what is left is the rest of the tree, module by module.
+the modules it covers carries a `# Safety` section. The impls are done and five
+modules (`memory/`, `syscalls/`, `util/`, `allocator.rs`, `interrupts/`) hold
+their own deny; what is left is the rest of the tree, module by module.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

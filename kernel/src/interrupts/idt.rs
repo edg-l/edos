@@ -9,14 +9,13 @@ use x86_64::{
 
 use crate::thread::scheduler::thread_exit;
 use crate::{
-    apic::get_lapic,
     boot::boot_info,
     drivers::keyboard::keyboard_interrupt_handler,
     gdt,
     interrupts::{
         InterruptIndex,
         io::{
-            ahci_interrupt_handler, device_not_available_handler, e1000e_interrupt_handler,
+            ahci_interrupt_handler, device_not_available_handler, e1000e_interrupt_handler, eoi,
             hda_interrupt_handler, mouse_interrupt_handler, nvme_interrupt_handler,
             virtio_gpu_interrupt_handler, xhci_interrupt_handler,
         },
@@ -38,6 +37,9 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
     // Avoid assigning the timer/device interrupts to the shared IST stack while the
     // scheduler runs with interrupts enabled: re-entrancy would reset the stack pointer
     // to the IST top and corrupt the in-flight context frame.
+    // SAFETY: `DOUBLE_FAULT_IST_INDEX` names a stack `gdt::init` installed in
+    // this CPU's TSS, and no other entry in this table is given that index, so
+    // the double fault handler is its only user and cannot re-enter it.
     unsafe {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
@@ -55,6 +57,11 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
         .set_handler_fn(general_protection_fault_handler);
 
     // Note: dont use shared ist stack
+    // SAFETY: every address installed here is an `extern "x86-interrupt"`
+    // function in this kernel with the signature its vector requires -- the two
+    // `set_handler_addr` calls name `timer_interrupt_handler`, which is written
+    // in asm to that same convention. None is given an IST index, per the
+    // comment above, so each runs on the stack the interrupt was taken on.
     unsafe {
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
 
@@ -87,7 +94,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         // A user copy takes the same fixup as in the page fault handler: a
         // non-canonical address raises #GP rather than #PF, so without this the
@@ -96,6 +103,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         if uaccess.is_active() {
             let resume_addr = uaccess.fault_resume.load(Ordering::Relaxed);
             uaccess.clear();
+            // SAFETY: this frame belongs to a #GP taken inside a user copy, and
+            // `resume_addr` is the fixup label `setup_fault_resume` recorded for
+            // it, so `iretq` returns into `do_user_copy`'s own error path rather
+            // than anywhere else.
             unsafe {
                 stack_frame.as_mut().update(|frame| {
                     frame.instruction_pointer = VirtAddr::new(resume_addr);
@@ -124,7 +135,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
         log!("Invalid opcode, forcing exit, {stack_frame:#?}");
@@ -137,7 +148,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
         log!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
@@ -180,7 +191,7 @@ extern "x86-interrupt" fn double_fault_handler(
 
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {
     println!("apic error");
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 #[unsafe(no_mangle)]
@@ -225,7 +236,13 @@ extern "x86-interrupt" fn page_fault_handler(
             // same reason. Ring-0 faulters are uaccess-style copy_from/to_user
             // paths that tolerate being preempted during the fixup.
             x86_64::instructions::interrupts::enable();
-            if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) }.is_ok() {
+            // SAFETY: `address` is what `CR2` reported for this fault and
+            // `error_code` is the one the CPU pushed with it, which is the pair
+            // the handler is written to take; the tests above have already
+            // established the address is in the user half and no `NoFaultGuard`
+            // forbids blocking.
+            let filled = unsafe { crate::memory::fault::handle_demand_fault(address, error_code) };
+            if filled.is_ok() {
                 return;
             }
             x86_64::instructions::interrupts::disable();
@@ -248,7 +265,12 @@ extern "x86-interrupt" fn page_fault_handler(
             && !current_cpu_uaccess().is_nofault()
         {
             x86_64::instructions::interrupts::enable();
-            if unsafe { handle_cow_fault(address) } {
+            // SAFETY: same pair of preconditions as the demand path above --
+            // `address` comes from `CR2`, it is in the user half, and no
+            // `NoFaultGuard` is held, so the copy may allocate and take the VMA
+            // lock.
+            let copied = unsafe { handle_cow_fault(address) };
+            if copied {
                 return;
             }
             x86_64::instructions::interrupts::disable();
@@ -262,6 +284,9 @@ extern "x86-interrupt" fn page_fault_handler(
             uaccess.clear();
 
             // Modify the stack frame to resume at the fault handler
+            // SAFETY: the same argument as the #GP handler's fixup: the frame
+            // belongs to a fault taken inside a user copy, and `resume_addr` is
+            // the label that copy registered for it.
             unsafe {
                 stack_frame.as_mut().update(|frame| {
                     frame.instruction_pointer = VirtAddr::new(resume_addr);
@@ -305,14 +330,22 @@ extern "x86-interrupt" fn page_fault_handler(
             && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
             && error_code.contains(PageFaultErrorCode::USER_MODE);
 
-        if is_cow_candidate && unsafe { handle_cow_fault(address) } {
+        // SAFETY: `address` is what `CR2` reported for this fault, and the
+        // error code says a ring-3 write hit a present, protected page, which
+        // is the shape `handle_cow_fault` is written for.
+        let copied = is_cow_candidate && unsafe { handle_cow_fault(address) };
+        if copied {
             return;
         }
 
         // Demand paging: handle non-present pages backed by VMAs
         let mut reject = None;
         if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
-            match unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
+            // SAFETY: `address` and `error_code` are the pair the CPU reported
+            // for this fault, and interrupts were re-enabled above, so the
+            // handler may block filling the page.
+            let filled = unsafe { crate::memory::fault::handle_demand_fault(address, error_code) };
+            match filled {
                 Ok(()) => return,
                 Err(r) => reject = Some(r),
             }
@@ -362,6 +395,10 @@ extern "x86-interrupt" fn page_fault_handler(
             let i2 = ((a >> 21) & 0x1FF) as usize;
             let i1 = ((a >> 12) & 0x1FF) as usize;
             let pt = |f: PhysFrame| -> &'static PageTable {
+                // SAFETY: `f` is a frame this walk read out of a present entry
+                // of a live page table, so it holds a `PageTable` and the HHDM
+                // maps it. Every entry is read, none written, and the walk
+                // stops at any entry that is not present.
                 unsafe { &*(phys_off + f.start_address().as_u64()).as_ptr::<PageTable>() }
             };
             let p4 = pt(cr3_frame);
@@ -423,6 +460,9 @@ fn vmalloc_fault(address: VirtAddr) -> bool {
     // Walk the kernel page table (read-only, no locks needed).
     // PML4
     let p4_idx = (addr >> 39) & 0x1FF;
+    // SAFETY: `kernel_pml4_phys` is the kernel PML4 frame recorded in boot info
+    // and immutable after boot, and an index below 512 times eight stays inside
+    // that frame, so the HHDM address is an entry of a live table.
     let p4_entry = unsafe { read_pte(kernel_pml4_phys + p4_idx * 8, phys_offset) };
     if p4_entry & PageTableFlags::PRESENT.bits() == 0 {
         return false;
@@ -431,6 +471,8 @@ fn vmalloc_fault(address: VirtAddr) -> bool {
     // PDPT
     let p3_phys = p4_entry & 0x000F_FFFF_FFFF_F000;
     let p3_idx = (addr >> 30) & 0x1FF;
+    // SAFETY: `p3_phys` is the frame address the present `p4` entry above
+    // points at, so it holds a live page table and the index stays inside it.
     let p3_entry = unsafe { read_pte(p3_phys + p3_idx * 8, phys_offset) };
     if p3_entry & PageTableFlags::PRESENT.bits() == 0 {
         return false;
@@ -444,6 +486,8 @@ fn vmalloc_fault(address: VirtAddr) -> bool {
     // PD
     let p2_phys = p3_entry & 0x000F_FFFF_FFFF_F000;
     let p2_idx = (addr >> 21) & 0x1FF;
+    // SAFETY: `p2_phys` is the frame address the present `p3` entry above
+    // points at, so it holds a live page table and the index stays inside it.
     let p2_entry = unsafe { read_pte(p2_phys + p2_idx * 8, phys_offset) };
     if p2_entry & PageTableFlags::PRESENT.bits() == 0 {
         return false;
@@ -457,6 +501,8 @@ fn vmalloc_fault(address: VirtAddr) -> bool {
     // PT
     let p1_phys = p2_entry & 0x000F_FFFF_FFFF_F000;
     let p1_idx = (addr >> 12) & 0x1FF;
+    // SAFETY: `p1_phys` is the frame address the present `p2` entry above
+    // points at, so it holds a live page table and the index stays inside it.
     let p1_entry = unsafe { read_pte(p1_phys + p1_idx * 8, phys_offset) };
     if p1_entry & PageTableFlags::PRESENT.bits() == 0 {
         return false;
@@ -468,8 +514,16 @@ fn vmalloc_fault(address: VirtAddr) -> bool {
     true
 }
 
+/// Read one page-table entry through the higher-half direct map.
+///
+/// # Safety
+/// `phys_addr` must be the physical address of an eight-byte-aligned page-table
+/// entry in a live table, and `phys_offset` the HHDM base that maps it.
 unsafe fn read_pte(phys_addr: u64, phys_offset: u64) -> u64 {
     let virt = (phys_offset + phys_addr) as *const u64;
+    // SAFETY: the caller guarantees the address names a live, aligned entry,
+    // and x86-64 writes an entry atomically, so a volatile read of one needs no
+    // lock and cannot tear.
     unsafe { core::ptr::read_volatile(virt) }
 }
 

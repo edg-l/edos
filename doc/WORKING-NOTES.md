@@ -11372,6 +11372,24 @@ has to go between the `if` condition's first operand and the `&&`, which
 `cargo fmt` then keeps in place. The error is identical to having written no
 comment at all, so the fix is not obvious from the diagnostic.
 
+The worse shape is `if unsafe { ... }` and `match unsafe { ... }`, where the
+block opens the condition or scrutinee and there is no earlier operand to hide
+the comment behind. `kernel/src/interrupts/idt.rs` had four of them, both fault
+paths in each of the ring-0 and ring-3 branches. Bind first and test the
+binding:
+
+```rust
+// SAFETY: ...
+let filled = unsafe { crate::memory::fault::handle_demand_fault(address, error_code) };
+if filled.is_ok() {
+```
+
+A `&&` chain still short-circuits when it becomes a `let`, so
+`let copied = is_cow_candidate && unsafe { handle_cow_fault(address) };` does
+not call the handler for a fault that is not a COW candidate. That is worth
+checking rather than assuming, because the same rewrite applied to a `||` or to
+an operand with a side effect would change what runs.
+
 ## Counting what `undocumented_unsafe_blocks` has left, and the flag that reads zero
 
 `grep -c 'unsafe {'` is not the number. It counts blocks the lint already

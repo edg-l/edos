@@ -48,9 +48,22 @@ pub static VIRTIO_GPU_IRQS_FIRED: AtomicU64 = AtomicU64::new(0);
 /// wakes whoever is here. The waiter re-takes `DISPLAY` and looks.
 pub static VIRTIO_GPU_WAITERS: WaitQueue = WaitQueue::new();
 
+/// Acknowledge the interrupt being handled to this CPU's local APIC.
+///
+/// Every handler below ends with this, and none of them may return without it:
+/// the LAPIC holds the vector in-service until the write, and blocks every
+/// interrupt at that priority or lower until it lands.
+pub(super) fn eoi() {
+    // SAFETY: called only from the handlers below, so an interrupt is in
+    // service on this CPU and the LAPIC is expecting exactly one EOI for it.
+    // `get_lapic` resolves the running CPU's own LAPIC, and an interrupt
+    // handler cannot be migrated mid-handler, so it cannot name another's.
+    unsafe { get_lapic().end_of_interrupt() };
+}
+
 pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::ps2_drain_buffer();
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn virtio_gpu_interrupt_handler(
@@ -58,7 +71,7 @@ pub(super) extern "x86-interrupt" fn virtio_gpu_interrupt_handler(
 ) {
     VIRTIO_GPU_IRQS_FIRED.fetch_add(1, Ordering::Relaxed);
     VIRTIO_GPU_WAITERS.wake_all_irq();
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -66,7 +79,7 @@ pub(super) extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: Interr
     if let Some(handle) = AHCI_DRIVER_THREAD_ID.get() {
         sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn nvme_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -74,28 +87,28 @@ pub(super) extern "x86-interrupt" fn nvme_interrupt_handler(_stack_frame: Interr
     if let Some(handle) = NVME_DRIVER_THREAD_ID.get() {
         sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn xhci_interrupt_handler(_stack_frame: InterruptStackFrame) {
     if let Some(handle) = XHCI_DRIVER_THREAD_ID.get() {
         sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn e1000e_interrupt_handler(_stack_frame: InterruptStackFrame) {
     if let Some(handle) = E1000E_DRIVER_THREAD_ID.get() {
         sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFrame) {
     if let Some(handle) = HDA_DRIVER_THREAD_ID.get() {
         sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
-    unsafe { get_lapic().end_of_interrupt() };
+    eoi();
 }
 
 pub(super) extern "x86-interrupt" fn device_not_available_handler(

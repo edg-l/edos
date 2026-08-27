@@ -49,6 +49,7 @@ mod drivers;
 mod fs;
 mod gdt;
 mod graphics;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod interrupts;
 mod loader;
 mod logs;
