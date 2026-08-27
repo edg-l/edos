@@ -1,4 +1,4 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 
@@ -25,33 +25,38 @@ fn print_bytes(bytes: &[u8], n: usize) {
     let _ = out.flush();
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut limit = Limit::Lines(10);
-    let mut files: Vec<&str> = Vec::new();
-    let mut i = 1;
+const SPEC: Spec = Spec::new(
+    "head",
+    "[-n N | -c N] [file...]",
+    &[
+        Opt::arg(
+            'n',
+            "lines",
+            "N",
+            "print the first N lines (the default, N=10)",
+        ),
+        Opt::arg('c', "bytes", "N", "print the first N bytes"),
+    ],
+)
+.numeric('n');
 
-    while i < args.len() {
-        if (args[i] == "-n" || args[i] == "-c") && i + 1 < args.len() {
-            let count = args[i + 1].parse().unwrap_or(10);
-            limit = if args[i] == "-c" {
-                Limit::Bytes(count)
-            } else {
-                Limit::Lines(count)
-            };
-            i += 2;
-        } else if let Some(rest) = args[i].strip_prefix("-c").filter(|r| !r.is_empty()) {
-            limit = Limit::Bytes(rest.parse().unwrap_or(10));
-            i += 1;
-        } else if args[i].starts_with('-') && args[i].len() > 1 {
-            let digits = args[i].strip_prefix("-n").unwrap_or(&args[i][1..]);
-            limit = Limit::Lines(digits.parse().unwrap_or(10));
-            i += 1;
-        } else {
-            files.push(&args[i]);
-            i += 1;
-        }
+fn main() {
+    let m = SPEC.parse_env();
+    let mut limit = Limit::Lines(10);
+    for (opt, value) in m.occurrences() {
+        let n = value.unwrap_or("").parse().unwrap_or_else(|_| {
+            SPEC.fail(&format!("invalid count: {}", value.unwrap_or("")));
+        });
+        limit = match opt.short {
+            Some('c') => Limit::Bytes(n),
+            _ => Limit::Lines(n),
+        };
     }
+    let files: Vec<&String> = m
+        .positional()
+        .iter()
+        .filter(|p| p.as_str() != "-")
+        .collect();
 
     let multi = files.len() > 1;
 

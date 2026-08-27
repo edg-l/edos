@@ -1,40 +1,36 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::{self, BufRead};
 
+const SPEC: Spec = Spec::new(
+    "grep",
+    "[-cinv] PATTERN [file...]",
+    &[
+        Opt::flag('i', "ignore-case", "match without regard to case"),
+        Opt::flag('v', "invert-match", "select the lines that do not match"),
+        Opt::flag('n', "line-number", "prefix each line with its number"),
+        Opt::flag('c', "count", "print only how many lines matched"),
+    ],
+);
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let m = SPEC.parse_env();
+    let ignore_case = m.is_set('i');
+    let invert = m.is_set('v');
+    let line_numbers = m.is_set('n');
+    let count_only = m.is_set('c');
 
-    let mut ignore_case = false;
-    let mut invert = false;
-    let mut line_numbers = false;
-    let mut count_only = false;
-    let mut pattern_idx = 1;
-
-    while pattern_idx < args.len() && args[pattern_idx].starts_with('-') {
-        for c in args[pattern_idx][1..].chars() {
-            match c {
-                'i' => ignore_case = true,
-                'v' => invert = true,
-                'n' => line_numbers = true,
-                'c' => count_only = true,
-                _ => {
-                    eprintln!("grep: unknown option -{}", c);
-                    std::process::exit(1);
-                }
-            }
-        }
-        pattern_idx += 1;
+    let operands = m.positional();
+    if operands.is_empty() {
+        SPEC.fail("no pattern given");
     }
-
-    if pattern_idx >= args.len() {
-        eprintln!("Usage: grep [-ivnc] PATTERN [FILE...]");
-        std::process::exit(1);
-    }
-
-    let pattern = &args[pattern_idx];
+    let pattern = &operands[0];
     let pattern_lower = pattern.to_lowercase();
-    let files: Vec<&str> = args[pattern_idx + 1..].iter().map(|s| s.as_str()).collect();
+    let files: Vec<&str> = operands[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|p| *p != "-")
+        .collect();
     let multi_file = files.len() > 1;
 
     let matches_line = |line: &str| -> bool {

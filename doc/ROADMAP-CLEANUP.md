@@ -9,8 +9,9 @@ Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
 **State as of 2026-08-26.** 25 of the 32 entries are struck; G2 is struck with
-a named remainder. What is open, in the order the evidence suggests: C2 (no
-argument parser), H1 and H3 (two long functions), G3 (split
+a named remainder. What is open, in the order the evidence suggests: C2 (the
+parser exists, 125 programs have not adopted it), B2/B3 (the 477 `errno =`
+assignments and the dispatch match), H1 and H3 (two long functions), G3 (split
 `WORKING-NOTES.md`), and the three gates I2, I5, I6. The numbers each entry
 quotes were remeasured on this date.
 
@@ -240,22 +241,35 @@ for a failed wait, neither of which is `i64`, `isize` or a sentinel `u64`.
 **Done.** No `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a sentinel
 `u64`.
 
-### C2. There is no argument parser, so 110 programs each wrote one (S2, E2)
+### C2. The argument parser exists; 125 of 134 programs do not use it yet (S2, E2)
 
-Seven programs hand-roll the same short-flag loop (`gzip`, `ln`, `sort`, `tee`,
-`wc`, `uniq`, `tar`); the rest do something ad hoc. The result is not
-duplication so much as inconsistency:
+`programs/edos_lib/src/args.rs` is the parser: a `Spec` of `Opt`s, short
+clusters (`-abc`), attached and separated values (`-n5`, `-n 5`,
+`--lines=5`, `--lines 5`), `--` as end-of-options, `-` as the positional that
+means stdin, an implicit `--help` that prints and exits 0, and a `usage()`
+built from the spec. Two shapes the coreutils needed are in it rather than
+around it: `Value::Optional`, a value taken only when attached, which is what
+`sed -i[SUFFIX]` means; and `Spec::numeric`, which makes a bare `-<digits>`
+a value for a named option, which is what `head -20` means.
 
-- 29 of ~110 CLI programs accept `--help`
-- 5 honour `--` as end of options
+The nine text coreutils `texttest` covers — `uniq`, `sort`, `cut`, `tr`, `wc`,
+`head`, `tail`, `sed`, `grep` — parse through it, and `texttest` asserts that
+each answers `--help` on stdout with `usage: <name>` and exit 0, that
+`grep -- -pattern` treats the pattern as a pattern, and that `wc -l -` reads
+stdin. That is the part of this entry that is done.
+
+Counts, measured as `grep -rl '"--help"\|edos_lib::args' programs/*/src/*.rs`
+against 134 program directories:
+
+- 39 accept `--help` (was 29)
+- 14 honour `--` as end of options (was 5)
 - 9 accept `-` as stdin
 
-**Fix.** `edos_lib::args`: a small parser over short clusters, long options,
-`--`, and `-`, plus a `usage()` that prints and exits 2. Adopt it in the seven
-above first; the rest follow as each program is next touched.
+**Remaining.** Adopt `Spec` in the rest, starting with the four hand-rolled
+short-flag loops still outside it (`gzip`, `ln`, `tee`, `tar`); the others
+follow as each program is next touched.
 
-**Done when** a new coreutil gets `--help` and `--` without writing either, and
-the three counts above are all "every CLI program".
+**Done when** the three counts above are all "every CLI program".
 
 ### C3. ~~`edos_lib::mem` returns `u64::MAX as *mut u8`~~ (done)
 

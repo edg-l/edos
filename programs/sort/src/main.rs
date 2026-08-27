@@ -1,55 +1,28 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::{self, BufRead, Write};
 
+const SPEC: Spec = Spec::new(
+    "sort",
+    "[-nru] [file...]",
+    &[
+        Opt::flag('n', "numeric-sort", "compare lines as numbers"),
+        Opt::flag('r', "reverse", "reverse the result of the comparison"),
+        Opt::flag('u', "unique", "print only the first of an equal run"),
+    ],
+);
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let mut reverse = false;
-    let mut numeric = false;
-    let mut unique = false;
-    let mut files: Vec<&str> = Vec::new();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-r" => reverse = true,
-            "-n" => numeric = true,
-            "-u" => unique = true,
-            "-rn" | "-nr" => {
-                reverse = true;
-                numeric = true;
-            }
-            "-ru" | "-ur" => {
-                reverse = true;
-                unique = true;
-            }
-            "-nu" | "-un" => {
-                numeric = true;
-                unique = true;
-            }
-            "-rnu" | "-run" | "-nru" | "-nur" | "-urn" | "-unr" => {
-                reverse = true;
-                numeric = true;
-                unique = true;
-            }
-            arg if arg.starts_with('-') => {
-                for c in arg[1..].chars() {
-                    match c {
-                        'r' => reverse = true,
-                        'n' => numeric = true,
-                        'u' => unique = true,
-                        _ => {
-                            eprintln!("sort: unknown option -{}", c);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-            _ => files.push(&args[i]),
-        }
-        i += 1;
-    }
+    let m = SPEC.parse_env();
+    let reverse = m.is_set('r');
+    let numeric = m.is_set('n');
+    let unique = m.is_set('u');
+    let files: Vec<&str> = m
+        .positional()
+        .iter()
+        .map(String::as_str)
+        .filter(|p| *p != "-")
+        .collect();
 
     let mut lines: Vec<String> = Vec::new();
 

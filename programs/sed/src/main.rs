@@ -2,8 +2,8 @@
 
 mod regex;
 
+use edos_lib::args::{Opt, Spec};
 use regex::{Caps, Regex};
-use std::env;
 use std::fs;
 use std::io::{self, BufRead};
 use std::process::exit;
@@ -527,74 +527,61 @@ struct Options {
     in_place: Option<String>,
 }
 
+const SPEC: Spec = Spec::new(
+    "sed",
+    "[-nEs] [-i[SUFFIX]] [-e SCRIPT] [-f FILE] [SCRIPT] [file...]",
+    &[
+        Opt::flag('n', "quiet", "print only what the script asks for"),
+        Opt::flag('E', "regexp-extended", "use extended regular expressions"),
+        Opt::short_flag('r', "the same as -E"),
+        Opt::short_flag('s', "treat each file separately, which is already the case"),
+        Opt::arg(
+            'e',
+            "expression",
+            "SCRIPT",
+            "add SCRIPT to the commands to run",
+        ),
+        Opt::arg(
+            'f',
+            "file",
+            "FILE",
+            "add the contents of FILE to the commands to run",
+        ),
+        Opt::optional_arg(
+            'i',
+            "in-place",
+            "SUFFIX",
+            "edit files in place, keeping a SUFFIX backup",
+        ),
+    ],
+);
+
 fn main() {
-    let argv: Vec<String> = env::args().collect();
-    let mut opts = Options {
-        quiet: false,
-        ere: false,
-        in_place: None,
+    let m = SPEC.parse_env();
+    let opts = Options {
+        quiet: m.is_set('n'),
+        ere: m.is_set('E') || m.is_set('r'),
+        in_place: m.value('i').map(str::to_string),
     };
     let mut script_parts: Vec<String> = Vec::new();
-    let mut operands: Vec<String> = Vec::new();
-    let mut i = 1;
-    let mut no_more_flags = false;
-
-    while i < argv.len() {
-        let arg = argv[i].clone();
-        i += 1;
-        if no_more_flags || arg == "-" || !arg.starts_with('-') || arg.len() == 1 {
-            operands.push(arg);
-            continue;
-        }
-        if arg == "--" {
-            no_more_flags = true;
-            continue;
-        }
-        let flags: Vec<char> = arg[1..].chars().collect();
-        let mut j = 0;
-        while j < flags.len() {
-            let f = flags[j];
-            j += 1;
-            // Everything after `e`, `f` or `i` in the same argument belongs to it.
-            let rest: String = flags[j..].iter().collect();
-            match f {
-                'n' => opts.quiet = true,
-                'E' | 'r' => opts.ere = true,
-                's' => {}
-                'e' | 'f' => {
-                    let value = if rest.is_empty() {
-                        if i >= argv.len() {
-                            die(&format!("option -{} requires an argument", f));
-                        }
-                        let v = argv[i].clone();
-                        i += 1;
-                        v
-                    } else {
-                        j = flags.len();
-                        rest
-                    };
-                    if f == 'e' {
-                        script_parts.push(value);
-                    } else {
-                        match fs::read_to_string(&value) {
-                            Ok(s) => script_parts.push(s),
-                            Err(e) => die(&format!("{}: {}", value, e)),
-                        }
-                    }
-                }
-                'i' => {
-                    j = flags.len();
-                    opts.in_place = Some(rest);
-                }
-                other => die(&format!("unknown option -{}", other)),
-            }
+    // `-e` and `-f` build one script between them, so the order they were
+    // written in is part of the meaning.
+    for (opt, value) in m.occurrences() {
+        let Some(value) = value else { continue };
+        match opt.short {
+            Some('e') => script_parts.push(value.to_string()),
+            Some('f') => match fs::read_to_string(value) {
+                Ok(s) => script_parts.push(s),
+                Err(e) => die(&format!("{}: {}", value, e)),
+            },
+            _ => {}
         }
     }
+    let mut operands: Vec<String> = m.positional().to_vec();
 
     if script_parts.is_empty() {
         if operands.is_empty() {
-            eprintln!("Usage: sed [-nEi] [-e SCRIPT] [-f FILE] [SCRIPT] [FILE...]");
-            exit(1);
+            SPEC.fail("no script given");
         }
         script_parts.push(operands.remove(0));
     }

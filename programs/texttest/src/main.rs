@@ -32,12 +32,21 @@ const WORDS: &str = "/tmp/texttest/words.txt";
 const SORTED: &str = "/tmp/texttest/sorted.txt";
 /// Colon-separated records for `cut`.
 const FIELDS: &str = "/tmp/texttest/fields.txt";
+/// Lines that begin with a dash, so `--` can be shown to end the options.
+const DASHED: &str = "/tmp/texttest/dashed.txt";
 /// Where a tool's stdout is collected. Rewritten per case.
 const OUT: &str = "/tmp/texttest/out.txt";
 
 const WORDS_TEXT: &str = "banana\napple\napple\ncherry\nbanana\napple\n";
 const SORTED_TEXT: &str = "apple\napple\napple\nbanana\nbanana\ncherry\n";
 const FIELDS_TEXT: &str = "one:two:three\nalpha:beta:gamma\n";
+const DASHED_TEXT: &str = "-pattern\nplain\n--flag\n";
+
+/// Every tool this suite covers. All of them parse through
+/// `edos_lib::args`, so all of them answer `--help` and honour `--`.
+const TOOLS: &[&str] = &[
+    "uniq", "sort", "cut", "tr", "wc", "head", "tail", "sed", "grep",
+];
 
 /// One tool, one argument vector, one fixture on stdin, one expected stdout.
 struct Case {
@@ -197,6 +206,21 @@ const CASES: &[Case] = &[
         stdin: WORDS,
         want: "banana\ncherry\nbanana\n",
     },
+    // `--` ends the options, so a pattern that begins with a dash is a
+    // pattern. Without it `grep -pattern` is a cluster of unknown flags.
+    Case {
+        tool: "grep",
+        args: &["--", "-pattern"],
+        stdin: DASHED,
+        want: "-pattern\n",
+    },
+    // A lone `-` is the positional that means stdin, not an empty cluster.
+    Case {
+        tool: "wc",
+        args: &["-l", "-"],
+        stdin: WORDS,
+        want: "       6\n",
+    },
 ];
 
 /// One line, on stdout. `println!` writes it whole; `eprintln!` is flushed per
@@ -215,6 +239,7 @@ fn fixtures() {
         (WORDS, WORDS_TEXT),
         (SORTED, SORTED_TEXT),
         (FIELDS, FIELDS_TEXT),
+        (DASHED, DASHED_TEXT),
     ] {
         if let Err(e) = fs::write(path, text) {
             fail("fixtures", &format!("writing {path}: {e}"));
@@ -276,6 +301,29 @@ fn main() {
         println!("PASS {what}");
     }
 
-    println!("texttest: OK, {} cases passed", CASES.len());
+    // Every tool answers `--help` on stdout with exit 0, and names itself in
+    // the first line. A tool that parses its own flags by hand answers a
+    // usage error instead, which is how this catches one drifting back.
+    for tool in TOOLS {
+        let what = format!("{tool} --help");
+        let (code, got) = capture(tool, &["--help"], WORDS);
+        if code != 0 {
+            fail(&what, &format!("exited {code}"));
+        }
+        let want_prefix = format!("usage: {tool} ");
+        if !got.starts_with(&want_prefix) {
+            fail(
+                &what,
+                &format!(
+                    "want a first line starting \"{}\", got \"{}\"",
+                    want_prefix,
+                    show(&got)
+                ),
+            );
+        }
+        println!("PASS {what}");
+    }
+
+    println!("texttest: OK, {} cases passed", CASES.len() + TOOLS.len());
     exit(0);
 }

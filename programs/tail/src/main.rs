@@ -1,25 +1,27 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::{self, BufRead};
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut n: usize = 10;
-    let mut files: Vec<&str> = Vec::new();
-    let mut i = 1;
+const SPEC: Spec = Spec::new(
+    "tail",
+    "[-n N] [file...]",
+    &[Opt::arg(
+        'n',
+        "lines",
+        "N",
+        "print the last N lines (the default, N=10)",
+    )],
+)
+.numeric('n');
 
-    while i < args.len() {
-        if args[i] == "-n" && i + 1 < args.len() {
-            n = args[i + 1].parse().unwrap_or(10);
-            i += 2;
-        } else if args[i].starts_with('-') && args[i].len() > 1 {
-            n = args[i][1..].parse().unwrap_or(10);
-            i += 1;
-        } else {
-            files.push(&args[i]);
-            i += 1;
-        }
-    }
+fn main() {
+    let m = SPEC.parse_env();
+    let n: usize = m.parsed('n').unwrap_or(10);
+    let files: Vec<&String> = m
+        .positional()
+        .iter()
+        .filter(|p| p.as_str() != "-")
+        .collect();
 
     let multi = files.len() > 1;
 

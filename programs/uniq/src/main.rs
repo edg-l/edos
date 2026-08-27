@@ -1,4 +1,4 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::{self, BufRead, Write};
 
@@ -45,38 +45,26 @@ where
     }
 }
 
+const SPEC: Spec = Spec::new(
+    "uniq",
+    "[-cdu] [file]",
+    &[
+        Opt::flag(
+            'c',
+            "count",
+            "prefix each line with how many times it repeated",
+        ),
+        Opt::flag('d', "repeated", "print only lines that repeated"),
+        Opt::flag('u', "unique", "print only lines that did not repeat"),
+    ],
+);
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let mut count = false;
-    let mut only_dup = false;
-    let mut only_uniq = false;
-    let mut file: Option<&str> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            arg if arg.starts_with('-') && arg.len() > 1 => {
-                for c in arg[1..].chars() {
-                    match c {
-                        'c' => count = true,
-                        'd' => only_dup = true,
-                        'u' => only_uniq = true,
-                        _ => {
-                            eprintln!("uniq: unknown option -{}", c);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-            _ => {
-                if file.is_none() {
-                    file = Some(&args[i]);
-                }
-            }
-        }
-        i += 1;
-    }
+    let m = SPEC.parse_env();
+    let count = m.is_set('c');
+    let only_dup = m.is_set('d');
+    let only_uniq = m.is_set('u');
+    let file = m.positional().first().filter(|p| p.as_str() != "-");
 
     let stdout = io::stdout();
     let mut out = stdout.lock();

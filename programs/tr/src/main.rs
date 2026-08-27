@@ -1,4 +1,4 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::io::{self, Read, Write};
 
 fn expand_set(s: &str) -> Vec<u8> {
@@ -31,35 +31,31 @@ fn expand_set(s: &str) -> Vec<u8> {
     result
 }
 
+const SPEC: Spec = Spec::new(
+    "tr",
+    "[-ds] SET1 [SET2]",
+    &[
+        Opt::flag('d', "delete", "delete every character in SET1"),
+        Opt::flag(
+            's',
+            "squeeze-repeats",
+            "collapse a run of one output character",
+        ),
+    ],
+);
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let mut delete = false;
-    let mut squeeze = false;
-    let mut arg_idx = 1;
-
-    while arg_idx < args.len() && args[arg_idx].starts_with('-') && args[arg_idx].len() > 1 {
-        for c in args[arg_idx][1..].chars() {
-            match c {
-                'd' => delete = true,
-                's' => squeeze = true,
-                _ => {
-                    eprintln!("tr: unknown option -{}", c);
-                    std::process::exit(1);
-                }
-            }
-        }
-        arg_idx += 1;
+    let m = SPEC.parse_env();
+    let delete = m.is_set('d');
+    let squeeze = m.is_set('s');
+    let sets = m.positional();
+    if sets.is_empty() {
+        SPEC.fail("no set given");
     }
 
-    if arg_idx >= args.len() {
-        eprintln!("usage: tr [-d] [-s] set1 [set2]");
-        std::process::exit(1);
-    }
-
-    let set1 = expand_set(&args[arg_idx]);
-    let set2 = if !delete && arg_idx + 1 < args.len() {
-        expand_set(&args[arg_idx + 1])
+    let set1 = expand_set(&sets[0]);
+    let set2 = if !delete && sets.len() > 1 {
+        expand_set(&sets[1])
     } else {
         Vec::new()
     };

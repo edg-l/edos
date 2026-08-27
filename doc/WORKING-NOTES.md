@@ -11097,6 +11097,17 @@ under test is `std`-only.
 and `run_log.txt` carried `FAIL wc -l: want "       6\n", got "       7\n"`.
 Reverted, green again at 19 suites. A gate never seen red is not a gate.
 
+**That host-compile trick no longer works on these nine, and the replacement
+is `cargo +edos check`.** Converting them to `edos_lib::args` gave every one of
+them a dependency on `edos_lib`, which pulls in `edos_rt` and only builds for
+`x86_64-unknown-edos`, so `rustc +nightly` on a single `main.rs` now fails at
+the `use`. The fast loop is
+`cd programs && cargo +edos check --target x86_64-unknown-edos -p wc -p sed ...`
+-- around a second warm for all nine, and it still costs no image rebuild and
+no boot. What is lost is *running* them on the host, so a new expected string
+has to be validated in the guest now. Any tool still free of `edos_lib` keeps
+the old trick; check its `Cargo.toml` before reaching for either.
+
 **`eprintln!` is the wrong call for a failure line under `guest-check`.** The
 suites run as `name > /dev/klog 2>&1`, so stderr and stdout land in the same
 place -- but stderr is flushed per fragment, and the same message arrived split
@@ -11154,3 +11165,38 @@ Do not run a build, another VM or a gate beside it: a 20-run batch previously
 read 2 wedges in its first 10 and 5 in the next 6 purely from host load. The
 per-run `.qmp` file in the output directory carries the counters and registers
 above; the `.log` beside it is that boot's serial.
+
+## `edos_lib::args`, and the two shapes a generic parser has to have (2026-08-28)
+
+`programs/edos_lib/src/args.rs` replaced the hand-rolled flag loops in the nine
+text coreutils. A program declares a `const SPEC: Spec` of `Opt`s and calls
+`SPEC.parse_env()`; the parser does short clusters, `-n5` / `-n 5` /
+`--lines=5` / `--lines 5`, `--`, `-` as a positional, and an implicit `--help`
+that prints the spec's own usage text and exits 0.
+
+Two things in it are not generic-parser boilerplate; they are the reason a
+naive parser could not have replaced these loops:
+
+- **`Value::Optional`** takes a value only when it is written attached.
+  `sed -i file` must edit `file` in place with no backup suffix, while
+  `sed -i.bak file` must keep one. A required-value option would have eaten
+  `file` as the suffix and left sed with nothing to read.
+- **`Spec::numeric(short)`** maps a bare `-<digits>` onto a named option, which
+  is what `head -20` and `tail -5` have always meant. Without the dial a
+  leading digit is an unknown short option, which is what every other tool
+  wants, so it cannot be unconditional.
+
+`Matches::occurrences()` yields the options in the order they were written.
+`sed` needs exactly that and nothing weaker: `-e` and `-f` build one script
+between them, so `sed -f a.sed -e 's/x/y/'` and the reverse are different
+programs. A parser that only answers "what was the last `-e`" cannot express
+it.
+
+`Matches::parsed()` treats a value that will not parse as a usage error rather
+than falling back to the default. The old `head` did `parse().unwrap_or(10)`,
+so `head -n banana` printed ten lines and looked like it worked.
+
+`texttest` is what holds this: it asserts every one of the nine answers
+`--help` on stdout with a first line of `usage: <name>` and exit 0, that
+`grep -- -pattern` treats the pattern as a pattern, and that `wc -l -` reads
+stdin. A tool that drifts back to parsing its own flags fails those.

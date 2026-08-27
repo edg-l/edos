@@ -1,4 +1,4 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::{self, Read};
 
@@ -33,30 +33,27 @@ fn print_counts(lines: usize, words: usize, bytes: usize, name: &str, show: (boo
     println!();
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut show_lines = false;
-    let mut show_words = false;
-    let mut show_bytes = false;
-    let mut files: Vec<&str> = Vec::new();
+const SPEC: Spec = Spec::new(
+    "wc",
+    "[-lwc] [file...]",
+    &[
+        Opt::flag('l', "lines", "print the newline count"),
+        Opt::flag('w', "words", "print the word count"),
+        Opt::flag('c', "bytes", "print the byte count"),
+    ],
+);
 
-    for arg in &args[1..] {
-        if arg.starts_with('-') && arg.len() > 1 {
-            for c in arg[1..].chars() {
-                match c {
-                    'l' => show_lines = true,
-                    'w' => show_words = true,
-                    'c' => show_bytes = true,
-                    _ => {
-                        eprintln!("wc: unknown option -{}", c);
-                        std::process::exit(1);
-                    }
-                }
-            }
-        } else {
-            files.push(arg);
-        }
-    }
+fn main() {
+    let m = SPEC.parse_env();
+    let mut show_lines = m.is_set('l');
+    let mut show_words = m.is_set('w');
+    let mut show_bytes = m.is_set('c');
+    let files: Vec<&str> = m
+        .positional()
+        .iter()
+        .map(String::as_str)
+        .filter(|p| *p != "-")
+        .collect();
 
     // Default: show all
     if !show_lines && !show_words && !show_bytes {

@@ -304,6 +304,9 @@ dependencies = [
 [[package]]
 name = "cut"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "data-url"
@@ -842,6 +845,9 @@ version = "0.1.0"
 [[package]]
 name = "grep"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "grid"
@@ -881,6 +887,9 @@ dependencies = [
 [[package]]
 name = "head"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "hello"
@@ -1901,6 +1910,9 @@ dependencies = [
 [[package]]
 name = "sed"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "semver"
@@ -2051,6 +2063,9 @@ dependencies = [
 [[package]]
 name = "sort"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "spin"
@@ -2234,6 +2249,9 @@ dependencies = [
 [[package]]
 name = "tail"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "tar"
@@ -2340,6 +2358,9 @@ version = "0.1.0"
 [[package]]
 name = "tr"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "true"
@@ -2373,6 +2394,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "uniq"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "universal-hash"
@@ -2460,6 +2484,9 @@ dependencies = [
 [[package]]
 name = "wc"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "web_atoms"

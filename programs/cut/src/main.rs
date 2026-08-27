@@ -1,39 +1,49 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::io::{self, BufRead, Write};
 
+const SPEC: Spec = Spec::new(
+    "cut",
+    "-d DELIM -f LIST [file...]",
+    &[
+        Opt::arg(
+            'd',
+            "delimiter",
+            "DELIM",
+            "the field separator, one character",
+        ),
+        Opt::arg(
+            'f',
+            "fields",
+            "LIST",
+            "the fields to keep, comma separated, 1-based",
+        ),
+    ],
+);
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: cut -d<delim> -f<fields,...> [file...]");
-        std::process::exit(1);
-    }
-
-    let mut delim = '\t';
-    let mut delim_set = false;
+    let m = SPEC.parse_env();
+    let Some(d) = m.value('d') else {
+        SPEC.fail("-d is required");
+    };
+    let delim = d.chars().next().unwrap_or('\t');
     let mut fields: Vec<usize> = Vec::new();
-
-    let mut files: Vec<String> = Vec::new();
-    for arg in &args[1..] {
-        if let Some(d) = arg.strip_prefix("-d") {
-            delim = d.chars().next().unwrap_or('\t');
-            delim_set = true;
-        } else if let Some(f) = arg.strip_prefix("-f") {
-            for part in f.split(',') {
-                if let Ok(n) = part.parse::<usize>()
-                    && n > 0
-                {
-                    fields.push(n - 1);
-                }
+    if let Some(list) = m.value('f') {
+        for part in list.split(',') {
+            if let Ok(n) = part.parse::<usize>()
+                && n > 0
+            {
+                fields.push(n - 1);
             }
-        } else {
-            files.push(arg.clone());
         }
     }
-
-    if fields.is_empty() || !delim_set {
-        eprintln!("cut: -f and -d are required");
-        std::process::exit(1);
+    if fields.is_empty() {
+        SPEC.fail("-f is required and must name at least one field");
     }
+    let files: Vec<&String> = m
+        .positional()
+        .iter()
+        .filter(|p| p.as_str() != "-")
+        .collect();
 
     fields.sort();
     let stdout = io::stdout();
