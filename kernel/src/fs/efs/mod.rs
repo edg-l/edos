@@ -254,6 +254,11 @@ impl EfsDriver {
         let mut bgd_table = Vec::with_capacity(bgd_count);
         for i in 0..bgd_count {
             let offset = i * BGD_SIZE;
+            // SAFETY: `bgd_flat` is `bgd_pages` whole pages and `bgd_pages` was sized
+            // to cover `bgd_count * BGD_SIZE`, so `offset + BGD_SIZE` is in bounds for every
+            // `i < bgd_count`. `read_unaligned` imposes no alignment requirement, and
+            // `EfsBlockGroupDesc` is `repr(C)`, 64 bytes of integers and a byte array with
+            // no padding and no invalid bit pattern.
             let bgd: EfsBlockGroupDesc = unsafe {
                 core::ptr::read_unaligned(bgd_flat[offset..].as_ptr() as *const EfsBlockGroupDesc)
             };
@@ -350,6 +355,9 @@ impl EfsDriver {
             };
             let jsb_lba = j_lba;
             let mut jsb_block = vec![0u8; 4096];
+            // SAFETY: `updated_jsb` is a live local and `JournalSuperblock` is
+            // `repr(C, packed)`, so its `size_of` bytes are all initialised integer fields
+            // with no padding to read.
             let jsb_bytes: &[u8] = unsafe {
                 core::slice::from_raw_parts(
                     &updated_jsb as *const JournalSuperblock as *const u8,
@@ -472,6 +480,11 @@ impl EfsDriver {
         let offset_in_block = (idx % inodes_per_block) * INODE_SIZE;
 
         let block_data = self.read_block(inode_table_block + block_offset as u64)?;
+        // SAFETY: `read_block` returns a whole `block_size` block and
+        // `offset_in_block` is `(idx % inodes_per_block) * INODE_SIZE`, so
+        // `offset_in_block + INODE_SIZE` is within it. `read_unaligned` needs no
+        // alignment, and `EfsInode` is `repr(C)`, 256 bytes of integers laid out with no
+        // padding and no invalid bit pattern.
         let inode: EfsInode = unsafe {
             core::ptr::read_unaligned(block_data[offset_in_block..].as_ptr() as *const EfsInode)
         };
@@ -494,6 +507,9 @@ impl EfsDriver {
 
         let mut block_data = self.read_block(inode_table_block + block_offset as u64)?;
         let dst = &mut block_data[offset_in_block..offset_in_block + INODE_SIZE];
+        // SAFETY: `inode` is a live `&EfsInode`, and the type is `repr(C)` with
+        // `INODE_SIZE` bytes of integer fields and no padding, so the whole range is
+        // initialised.
         let src: &[u8] = unsafe {
             core::slice::from_raw_parts(inode as *const EfsInode as *const u8, INODE_SIZE)
         };
@@ -713,6 +729,10 @@ impl EfsDriver {
         let mut offset = 0usize;
 
         while offset + DIR_ENTRY_HEADER_SIZE <= data.len() {
+            // SAFETY: the loop condition holds `offset + DIR_ENTRY_HEADER_SIZE <=
+            // data.len()`, and `EfsDirEntryHeader` is `repr(C, packed)` of exactly that
+            // size, so the read is in bounds; `read_unaligned` imposes no alignment, and
+            // every field is an integer with no invalid bit pattern.
             let hdr: EfsDirEntryHeader = unsafe {
                 core::ptr::read_unaligned(data[offset..].as_ptr() as *const EfsDirEntryHeader)
             };
@@ -747,6 +767,9 @@ impl EfsDriver {
         let mut offset = 0usize;
 
         while offset + DIR_ENTRY_HEADER_SIZE <= dir_data.len() {
+            // SAFETY: as in `parse_dir_entries_from_bytes` -- the loop condition bounds
+            // `offset + DIR_ENTRY_HEADER_SIZE` by `dir_data.len()`, and the header is packed
+            // integer data.
             let hdr: EfsDirEntryHeader = unsafe {
                 core::ptr::read_unaligned(dir_data[offset..].as_ptr() as *const EfsDirEntryHeader)
             };
@@ -936,6 +959,9 @@ impl EfsDriver {
             depth: 0,
             reserved: 0,
         };
+        // SAFETY: `hdr` is a live local and `EfsExtentHeader` is `repr(C)`, twelve
+        // bytes of integers with no padding (`efs-common` asserts the size), so
+        // `size_of` bytes are all initialised.
         let hdr_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(
                 &hdr as *const EfsExtentHeader as *const u8,
@@ -950,6 +976,8 @@ impl EfsDriver {
             start_hi: (phys_block >> 32) as u16,
             start_lo: phys_block as u32,
         };
+        // SAFETY: `ext` is a live local and `EfsExtent` is `repr(C)`, twelve bytes
+        // of integers with no padding, so `size_of` bytes are all initialised.
         let ext_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(
                 &ext as *const EfsExtent as *const u8,
@@ -1553,6 +1581,8 @@ impl EfsDriver {
         let mut split_offset: Option<usize> = None;
 
         while offset + DIR_ENTRY_HEADER_SIZE <= dir_data.len() {
+            // SAFETY: the loop condition bounds `offset + DIR_ENTRY_HEADER_SIZE` by
+            // `dir_data.len()`; see `parse_dir_entries_from_bytes` for the header's layout.
             let hdr: EfsDirEntryHeader = unsafe {
                 core::ptr::read_unaligned(dir_data[offset..].as_ptr() as *const EfsDirEntryHeader)
             };
@@ -1576,6 +1606,9 @@ impl EfsDriver {
 
         if let Some(off) = split_offset {
             // Split the entry at `off`: shrink it to min size and insert ours after.
+            // SAFETY: `off` is an offset the scan above stopped at, so it satisfies the
+            // same `off + DIR_ENTRY_HEADER_SIZE <= dir_data.len()` bound the loop condition
+            // enforced.
             let existing_hdr: EfsDirEntryHeader = unsafe {
                 core::ptr::read_unaligned(dir_data[off..].as_ptr() as *const EfsDirEntryHeader)
             };
@@ -1677,6 +1710,8 @@ impl EfsDriver {
         let mut prev_end = 0usize;
 
         while offset + DIR_ENTRY_HEADER_SIZE <= dir_data.len() {
+            // SAFETY: the loop condition bounds `offset + DIR_ENTRY_HEADER_SIZE` by
+            // `dir_data.len()`; the header is packed integer data.
             let hdr: EfsDirEntryHeader = unsafe {
                 core::ptr::read_unaligned(dir_data[offset..].as_ptr() as *const EfsDirEntryHeader)
             };
@@ -1703,6 +1738,9 @@ impl EfsDriver {
                     if prev_end > 0 {
                         let prev_off = prev_end
                             - find_prev_entry_len(&dir_data, prev_end, self.block_size() as usize);
+                        // SAFETY: `find_prev_entry_len` walks the entry chain from the start of the
+                        // block, so `prev_off` is the offset of an entry the scan already parsed within
+                        // `dir_data` and a whole header follows it.
                         let prev_hdr: EfsDirEntryHeader = unsafe {
                             core::ptr::read_unaligned(
                                 dir_data[prev_off..].as_ptr() as *const EfsDirEntryHeader
@@ -2490,6 +2528,8 @@ impl EfsDriver {
             depth: 0,
             reserved: 0,
         };
+        // SAFETY: `hdr` is a live local and `EfsExtentHeader` is `repr(C)` with
+        // `hdr_size` bytes of integers and no padding.
         let hdr_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(&hdr as *const EfsExtentHeader as *const u8, hdr_size)
         };
@@ -2502,6 +2542,8 @@ impl EfsDriver {
             start_lo: phys_block as u32,
         };
         let ext_bytes: &[u8] =
+            // SAFETY: `ext` is a live local and `EfsExtent` is `repr(C)` with
+            // `ext_size` bytes of integers and no padding.
             unsafe { core::slice::from_raw_parts(&ext as *const EfsExtent as *const u8, ext_size) };
         data_area[hdr_size..hdr_size + ext_size].copy_from_slice(ext_bytes);
 
@@ -2834,6 +2876,9 @@ impl EfsDriver {
             // checksum for them before, which is why a live image so often had
             // `efs-fsck` reporting a superblock CRC mismatch it could repair.
             m.superblock.checksum = checksum_superblock(&m.superblock);
+            // SAFETY: the superblock is borrowed from the guard held over this scope,
+            // and `EfsSuperblock` is `repr(C, packed)`, so `size_of` bytes are initialised
+            // integer fields with no padding.
             let sb_bytes: &[u8] = unsafe {
                 core::slice::from_raw_parts(
                     &m.superblock as *const EfsSuperblock as *const u8,
@@ -2862,6 +2907,9 @@ impl EfsDriver {
             let end = (start + bgds_per_block).min(bgd_count);
             for (i, bgd) in m.bgd_table[start..end].iter().enumerate() {
                 let off = i * BGD_SIZE;
+                // SAFETY: `bgd` borrows an element of the table under the same guard, and
+                // `EfsBlockGroupDesc` is `repr(C)`, `BGD_SIZE` bytes of integers and a byte
+                // array with no padding.
                 let bgd_bytes: &[u8] = unsafe {
                     core::slice::from_raw_parts(
                         bgd as *const EfsBlockGroupDesc as *const u8,
@@ -3383,6 +3431,10 @@ impl PageCacheOps for EfsDriver {
 
                 let mut staging = vec![0u8; run_len * needed_bytes];
                 for i in 0..run_len {
+                    // SAFETY: the `Arc<CachedPage>` in `chunk` keeps the frame allocated, and
+                    // `flush_dirty_bulk` pinned every page before it dropped the cache locks, so the
+                    // mapping is live for this whole pass. The bytes are copied into `staging`
+                    // immediately and the borrow does not outlive the copy.
                     let buf = unsafe { chunk[run_start + i].1.as_slice() };
                     staging[i * needed_bytes..(i + 1) * needed_bytes]
                         .copy_from_slice(&buf[..needed_bytes]);
@@ -3459,6 +3511,8 @@ impl EfsDriver {
 
         let mut offset = 0usize;
         while offset + DIR_ENTRY_HEADER_SIZE <= dir_data.len() {
+            // SAFETY: the loop condition bounds `offset + DIR_ENTRY_HEADER_SIZE` by
+            // `dir_data.len()`; the header is packed integer data.
             let hdr: EfsDirEntryHeader = unsafe {
                 core::ptr::read_unaligned(dir_data[offset..].as_ptr() as *const EfsDirEntryHeader)
             };

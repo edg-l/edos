@@ -385,13 +385,18 @@ pub fn page_cache_read_to_user(
         count,
         &mut |_page_idx, slice, copy_start, copy_end| {
             let len = copy_end - copy_start;
-            if !unsafe {
+            // SAFETY: `try_copy_to_user` validates the user pointer and traps its
+            // faults; the kernel source is `slice[copy_start..]`, whose length is
+            // at least `len` because `page_cache_read_core` bounds both offsets by
+            // the page's 4096 bytes.
+            let copied = unsafe {
                 crate::util::uaccess::try_copy_to_user(
                     user_ptr.wrapping_add(pos),
                     slice[copy_start..].as_ptr(),
                     len,
                 )
-            } {
+            };
+            if !copied {
                 return Err(Error::BadAddress);
             }
             pos += len;
@@ -619,6 +624,9 @@ fn page_cache_read_core(
         };
         let copy_end = copy_end.min(4096);
 
+        // SAFETY: `guard` pins the page, so the frame stays allocated and mapped,
+        // and the read-only slice is handed to `output` and dropped before the next
+        // iteration replaces the guard.
         let slice = unsafe { guard.as_slice() };
         output(page_idx, slice, copy_start, copy_end)?;
     }
@@ -722,9 +730,13 @@ pub fn write_from_user(
         // and park, and a thread killed while parked never runs the guard's
         // Drop, which would leave the inode write-locked for good.
         let mut buffer = alloc::vec![0u8; count];
-        if !unsafe {
+        // SAFETY: `try_copy_from_user` validates the user pointer and traps its
+        // faults; the kernel destination is `buffer`, allocated `count` bytes on
+        // the line above, which is the length passed.
+        let copied = unsafe {
             crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count)
-        } {
+        };
+        if !copied {
             return Err(Error::BadAddress);
         }
         // No page-cache ops; reacquire the write lock for the synchronous
@@ -739,6 +751,9 @@ pub fn write_from_user(
         }
     }
     let mut buffer = alloc::vec![0u8; count];
+    // SAFETY: `try_copy_from_user` validates the user pointer and traps its
+    // faults; the kernel destination is `buffer`, allocated `count` bytes on the
+    // line above, which is the length passed.
     if !unsafe { crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count) } {
         return Err(Error::BadAddress);
     }
@@ -839,6 +854,8 @@ pub fn read_to_user(
 
     if let Some(data) = fallback {
         let n = data.len();
+        // SAFETY: `try_copy_to_user` validates the user pointer and traps its
+        // faults; the kernel source is `data` and `n` is its own `len()`.
         if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
             return Err(Error::BadAddress);
         }
@@ -857,6 +874,8 @@ pub fn read_to_user(
             }
             let data = op.fs.read_bytes(&op.relative, offset, count)?;
             let n = data.len();
+            // SAFETY: `try_copy_to_user` validates the user pointer and traps its
+            // faults; the kernel source is `data` and `n` is its own `len()`.
             if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
                 return Err(Error::BadAddress);
             }
@@ -898,13 +917,17 @@ fn page_cache_write_from_user(
     user_ptr: *const u8,
 ) -> Result<u64, Error> {
     page_cache_write_core(inode, pc_ops, offset, count, &mut |start, slice| {
-        if !unsafe {
+        // SAFETY: `try_copy_from_user` validates the user pointer and traps its
+        // faults; the kernel destination is `slice`, and the length passed is its
+        // own `len()`.
+        let copied = unsafe {
             crate::util::uaccess::try_copy_from_user(
                 slice.as_mut_ptr(),
                 user_ptr.wrapping_add(start),
                 slice.len(),
             )
-        } {
+        };
+        if !copied {
             return Err(Error::BadAddress);
         }
         Ok(())
@@ -960,6 +983,11 @@ fn page_cache_write_core(
             })?
         };
 
+        // SAFETY: `guard` pins the page, so the frame stays allocated and mapped.
+        // The page cache is shared interior-mutable storage and `as_slice_mut` takes
+        // `&self` for that reason; what this call has to guarantee is that the borrow
+        // does not outlive the pin, and it does not -- `source` consumes it before the
+        // next iteration replaces the guard.
         let slice = unsafe { guard.as_slice_mut() };
         source(data_pos, &mut slice[write_start..write_end])?;
         data_pos += write_len;

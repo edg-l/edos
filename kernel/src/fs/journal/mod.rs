@@ -45,6 +45,9 @@ fn submit_block_write(
     // SAFETY: ptr..ptr+len is within owner's allocation, which the returned
     // BlockBuffer keeps alive via the cloned Arc for as long as the op lives.
     let ptr = unsafe { owner.as_ptr().add(offset) as *mut u8 };
+    // SAFETY: `ptr` points `offset` bytes into `owner`'s allocation and `len`
+    // bytes remain there, and the cloned `Arc` handed to `BlockBuffer::owned` keeps
+    // that allocation alive for as long as the op does.
     let buffer = unsafe { BlockBuffer::owned(owner.clone(), ptr, len) };
     dev.submit_write(lba, sectors as u32, buffer, WriteFlags::NONE)
 }
@@ -474,7 +477,9 @@ impl Journal {
         // journal region = first_block of the partition journal extent).
         let lba = self.partition_start_lba + self.first_block * SECTORS_PER_BLOCK as u64;
         let mut block = vec![0u8; BLOCK_SIZE];
-        write_struct(&mut block, 0, &jsb);
+        // SAFETY: `JournalSuperblock` is `repr(C, packed)`, so it has no
+        // uninitialised padding.
+        unsafe { write_struct(&mut block, 0, &jsb) };
         block_write_fua(self.device_id, lba, &block)
     }
 
@@ -894,6 +899,9 @@ impl Journal {
             let mut entries: Vec<DescriptorEntry> = Vec::with_capacity(tx.enrolled_blocks.len());
             let mut data_blocks: Vec<Vec<u8>> = Vec::with_capacity(tx.enrolled_blocks.len());
             for (&(_dev, fs_block), page) in &tx.enrolled_blocks {
+                // SAFETY: the enrolled `Arc<CachedBlockPage>` keeps the frame allocated and
+                // mapped for this scope, and the bytes are copied out with `to_vec` before the
+                // commit path can touch the page again.
                 let page_data = unsafe { page.as_slice() };
                 let first_word =
                     u32::from_le_bytes([page_data[0], page_data[1], page_data[2], page_data[3]]);
@@ -1083,8 +1091,11 @@ impl Journal {
 ///
 /// # Safety
 /// `T` must be `repr(C)` (or `repr(C, packed)`) with no uninitialized padding.
-fn write_struct<T>(buf: &mut [u8], offset: usize, val: &T) {
+unsafe fn write_struct<T>(buf: &mut [u8], offset: usize, val: &T) {
     let size = core::mem::size_of::<T>();
+    // SAFETY: `val` is a live `&T` and the caller guarantees `T` is `repr(C)`
+    // with no uninitialised padding, so `size_of::<T>()` bytes from it are all
+    // initialised.
     let bytes = unsafe { core::slice::from_raw_parts(val as *const T as *const u8, size) };
     buf[offset..offset + size].copy_from_slice(bytes);
 }

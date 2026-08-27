@@ -105,6 +105,9 @@ impl CachedPage {
     /// # Safety
     /// Caller must ensure no mutable aliasing exists for this frame.
     pub unsafe fn as_slice(&self) -> &[u8] {
+        // SAFETY: `virt_addr()` is the HHDM mapping of this page's own frame, valid
+        // and `PAGE_SIZE` bytes long for as long as the `CachedPage` lives. The absence
+        // of a concurrent writer is the caller's contract.
         unsafe { core::slice::from_raw_parts(self.virt_addr(), PAGE_SIZE) }
     }
 
@@ -118,6 +121,9 @@ impl CachedPage {
         reason = "the page is pinned by the caller; the contract is on the unsafe fn"
     )]
     pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
+        // SAFETY: the same frame and mapping as `as_slice`; exclusivity is the
+        // caller's contract, since `&self` cannot supply it for shared interior-mutable
+        // storage.
         unsafe { core::slice::from_raw_parts_mut(self.virt_addr(), PAGE_SIZE) }
     }
 
@@ -331,6 +337,9 @@ impl InodePages {
         }
         let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
         if let Some(page) = map.get(&(size / PAGE_SIZE as u64)) {
+            // SAFETY: `zero_tail`'s own contract is that the caller holds the inode
+            // lock for write, which is what keeps a concurrent reader off this page while
+            // the tail is cleared; the page is in `map`, so its frame is live.
             unsafe { page.as_slice_mut()[offset..].fill(0) };
         }
     }
@@ -439,6 +448,10 @@ pub trait PageCacheOps {
             // Pages are pre-pinned by the caller (InodePages::flush_dirty_bulk),
             // but pin again to match the per-page flush_dirty pin/unpin contract.
             page.pin();
+            // SAFETY: the page is pinned across the call -- once by
+            // `flush_dirty_bulk` and again on the line above -- so the frame stays allocated
+            // and mapped, and the read-only slice is consumed by `flush_page` before the
+            // pin is dropped.
             let result = self.flush_page(ino, *page_index, unsafe { page.as_slice() }, PAGE_SIZE);
             page.unpin();
             result?;

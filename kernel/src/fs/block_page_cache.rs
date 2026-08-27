@@ -130,6 +130,10 @@ impl CachedBlockPage {
     /// # Safety
     /// No concurrent mutable access may exist; hold the write_lock if mutating.
     pub unsafe fn as_slice(&self) -> &[u8; PAGE_SIZE] {
+        // SAFETY: `virt_addr()` is the HHDM mapping of this page's own frame, so
+        // the pointer is valid, aligned and `PAGE_SIZE` bytes long for as long as the
+        // `CachedBlockPage` lives. The caller's contract supplies the other half: that
+        // no writer is running against the page concurrently.
         unsafe { &*(self.virt_addr() as *const [u8; PAGE_SIZE]) }
     }
 
@@ -145,6 +149,9 @@ impl CachedBlockPage {
         reason = "the shard lock is held by the caller; the contract is on the unsafe fn"
     )]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
+        // SAFETY: the same frame and mapping as `as_slice`. Exclusion is the
+        // caller's contract -- `write_lock` is what keeps every other reader and writer
+        // off the page, since `&self` does not.
         unsafe { &mut *(self.virt_addr() as *mut [u8; PAGE_SIZE]) }
     }
 
@@ -197,6 +204,10 @@ impl Drop for CachedBlockPage {
             "CachedBlockPage dropped with pin_count={} (guard leaked?)",
             self.pin_count()
         );
+        // SAFETY: the frame came from `frame_allocator()` and belongs to this page
+        // alone. Drop runs when the last `Arc<CachedBlockPage>` goes and `pin_count` is
+        // asserted zero just above, so no slice handed out by `as_slice`/`as_mut_slice`
+        // is still live.
         unsafe { frame_allocator().deallocate_frame(self.frame) };
     }
 }
@@ -232,6 +243,8 @@ impl BlockPageGuard {
         reason = "the shard lock is held by the caller; the contract is on the unsafe fn"
     )]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
+        // SAFETY: the caller of this `unsafe fn` holds the page's `write_lock`,
+        // which is exactly what `CachedBlockPage::as_mut_slice` asks of its own caller.
         unsafe { self.page.as_mut_slice() }
     }
 
@@ -696,6 +709,9 @@ impl BlockPageCache {
         if fill == Fill::FromDisk
             && let Err(e) = read_frame(device_id, page_block_idx, frame)
         {
+            // SAFETY: `frame` came from `allocate_frame` a few lines above and the fill
+            // failed, so it was never wrapped in a `CachedBlockPage` and this is the only
+            // handle to it.
             unsafe { frame_allocator().deallocate_frame(frame) };
             return Err(e);
         }
@@ -765,6 +781,9 @@ impl BlockPageCache {
                 None => {
                     // Free already-allocated frames and bail.
                     for prev in &frames {
+                        // SAFETY: `frames` holds only frames this loop took from the allocator and
+                        // has not published -- no `CachedBlockPage` was built around any of them -- and
+                        // the batch is being abandoned, so each is on its last handle.
                         unsafe { frame_allocator().deallocate_frame(*prev) };
                     }
                     return Err(BlockError::Io);
@@ -779,6 +798,8 @@ impl BlockPageCache {
             Some(d) => d,
             None => {
                 for f in &frames {
+                    // SAFETY: as in the allocation loop above -- these frames are unpublished
+                    // and this path abandons them.
                     unsafe { frame_allocator().deallocate_frame(*f) };
                 }
                 return Err(BlockError::DeviceGone);
@@ -814,6 +835,8 @@ impl BlockPageCache {
 
         if let Err(e) = block_io::read_batch_blocking(&dev, &reqs) {
             for f in &frames {
+                // SAFETY: as in the allocation loop above -- these frames are unpublished
+                // and this path abandons them.
                 unsafe { frame_allocator().deallocate_frame(*f) };
             }
             return Err(e);

@@ -398,6 +398,9 @@ fn finalize_prefetch(inode: &Arc<VfsInode>, handle: &Arc<PageFillHandle>) {
     for (i, fd) in frames.into_iter().enumerate() {
         let page_offset = i as u64;
         {
+            // SAFETY: `fd` owns the frame the allocator just handed it and has not
+            // published it; nothing else can reach the mapping until `forget()` gives the
+            // frame to a `CachedPage`.
             let slice = unsafe { fd.frame_slice_mut() };
             // A page no run covers is a hole in the file and reads as zeros.
             let run = prefetch
@@ -544,6 +547,9 @@ pub fn inline_fill_no_handle(
     let fd = FrameDrop::new(frame);
 
     let fill_result = {
+        // SAFETY: `fd` owns the frame the allocator just handed it and has not
+        // published it; nothing else can reach the mapping until `forget()` gives the
+        // frame to a `CachedPage`.
         let slice = unsafe { fd.frame_slice_mut() };
         fill_fn(slice)
     };
@@ -744,6 +750,9 @@ pub fn get_or_fill_async_sync(
             .take()
             .expect("get_or_fill_async_sync: fill_fn already consumed");
         let fill_result = {
+            // SAFETY: `fd` owns the frame the allocator just handed it and has not
+            // published it; nothing else can reach the mapping until `forget()` gives the
+            // frame to a `CachedPage`.
             let slice = unsafe { fd.frame_slice_mut() };
             fill_fn(slice)
         };
@@ -967,6 +976,9 @@ pub fn get_or_fill_bulk_async_sync(
                 for (i, fd) in frames.into_iter().enumerate() {
                     let data_offset = i * 4096;
                     {
+                        // SAFETY: `fd` owns the frame the allocator just handed it and has not
+                        // published it; nothing else can reach the mapping until `forget()` gives the
+                        // frame to a `CachedPage`.
                         let slice = unsafe { fd.frame_slice_mut() };
                         let available = data.len().saturating_sub(data_offset);
                         let copy = available.min(4096);

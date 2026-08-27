@@ -51,6 +51,7 @@ mod cmdline;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod debug;
 mod drivers;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod fs;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod gdt;
@@ -137,6 +138,9 @@ fn init() {
     // APs allocate (Box::new for PerCpuData) during init_gs_for_this_cpu before
     // their GS is ready, so gs_ready() must return false until all APs are up.
     mark_gs_ready();
+    // SAFETY: the GDT is loaded and the per-CPU GS base is set (`mark_gs_ready`
+    // above), which is the state `setup_syscall` writes the STAR/LSTAR/SFMASK MSRs
+    // to describe; it runs once per CPU during bring-up.
     unsafe { syscalls::setup_syscall() };
     println!("Init done");
 }
@@ -327,6 +331,8 @@ pub fn test_new() -> ! {
 }
 
 extern "C" fn test_thread(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
+    // SAFETY: `arg` is the `Box::into_raw` the spawner passed as this thread's
+    // argument, so it is the only pointer to that allocation and this reclaims it.
     let mb = *unsafe { Box::from_raw(arg) };
     log!("test: Spawned test thread, waiting requests");
     loop {
@@ -339,6 +345,7 @@ extern "C" fn test_thread(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
 }
 
 extern "C" fn test_thread2(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
+    // SAFETY: as in `test_thread` -- the spawner's `Box::into_raw`, reclaimed once.
     let mb = *unsafe { Box::from_raw(arg) };
     log!("test2: Spawned test thread2");
     let mut counter = 0;
@@ -356,6 +363,7 @@ extern "C" fn test_thread2(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
 }
 
 extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
+    // SAFETY: as in `test_thread` -- the spawner's `Box::into_raw`, reclaimed once.
     let mb = *unsafe { Box::from_raw(arg) };
     log!("test3: Spawned test thread3");
     let mut counter = 100;
@@ -387,6 +395,9 @@ struct BootLoadRequest {
 /// fills across binaries — restores the parallelism that disappeared
 /// when the loader migrated from `Vec<u8>` to file-backed mmap.
 extern "C" fn boot_load_thread(arg: *mut u8) -> ! {
+    // SAFETY: `arg` is the `Box::into_raw` of the `BootLoadRequest` the caller
+    // built for this kthread, so it is the only pointer to that allocation and the
+    // box reclaims it.
     let req: Box<BootLoadRequest> = unsafe { Box::from_raw(arg as *mut BootLoadRequest) };
     let path = req.root.join(&req.name).normalize();
 
@@ -612,6 +623,8 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     const MAX_FRAMES: usize = 32;
 
     let mut rbp: u64;
+    // SAFETY: the asm reads the `rbp` register into an output operand. It touches
+    // no memory and has no side effects.
     unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp) };
 
     println!("Backtrace:");
@@ -624,11 +637,20 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
         if (frame_ptr as u64) < KERNEL_BASE || !frame_ptr.is_aligned() {
             break;
         }
+        // SAFETY: the check above put `frame_ptr` at or above `KERNEL_BASE` and
+        // confirmed 8-byte alignment, so the load is aligned and in the half of the
+        // address space the kernel maps. Its *contents* are untrusted: a chain the
+        // walk cannot follow ends the walk at the checks below rather than being
+        // printed. Unlike `profile::walk_kernel` this does not bound `rbp` to the
+        // current stack, so a wild frame pointer into an unmapped kernel page still
+        // faults; the walk runs only from the panic path, where the alternative is
+        // no backtrace at all.
         let ret_addr = unsafe { *frame_ptr.add(1) };
         if ret_addr == 0 {
             break;
         }
         println!("  #{i:>2}: {ret_addr:#018x}");
+        // SAFETY: as above; the range check covered both words of the frame.
         let next_rbp = unsafe { *frame_ptr };
         if next_rbp <= rbp {
             break; // Stack must grow downward; prevent infinite loops

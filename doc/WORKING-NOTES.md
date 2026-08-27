@@ -6,6 +6,58 @@ session.
 
 ---
 
+## `fs/` under `undocumented_unsafe_blocks`, and the two shapes its blocks come in
+
+`kernel/src/fs/` is the last of I5a's three big modules to take its own
+`#[deny(clippy::undocumented_unsafe_blocks)]`: 45 blocks across `efs/mod.rs`,
+`block_page_cache.rs`, `vfs.rs`, `page_fill.rs`, `page_cache.rs` and
+`journal/mod.rs`, plus `main.rs`'s own eight. 344 blocks are left and they are
+in exactly two modules, `drivers/` (295) and `thread/` (49).
+
+Half of `fs/`'s blocks are one of two shapes, and both have a *wrong* comment
+that is easy to write:
+
+- **`read_unaligned` of a `repr(C)` on-disk struct out of a block buffer.**
+  The wrong comment says "the struct is `repr(C)`". That is not the claim: the
+  claim is (a) the loop condition or the modulo arithmetic bounds
+  `offset + size_of::<T>()` by the buffer's length, (b) `read_unaligned` needs
+  no alignment so the cast is fine, and (c) `efs-common` asserts the type's
+  size, which is what says it has no padding and therefore that
+  `from_raw_parts` over it reads only initialised bytes. All three, or the
+  comment says nothing a reviewer can check.
+- **A page-cache frame reached through `as_slice`/`as_slice_mut`.** The wrong
+  comment claims exclusion the page cache does not give. `CachedPage` and
+  `CachedBlockPage` are shared interior-mutable storage behind an `Arc`, and
+  `as_slice_mut` takes `&self` precisely because the borrow checker cannot
+  supply exclusion. What a call site can honestly claim is the *pin*: the
+  frame stays allocated and mapped, and the borrow does not outlive it. Say
+  that, and say who supplies exclusion when someone does (`write_lock` for
+  `block_page_cache`, the inode write lock for `zero_tail`).
+
+Three other things came out of the pass and are worth knowing:
+
+- `journal::write_struct` was a **safe** fn carrying a `# Safety` section.
+  `doc/rust-style.md` rules that shape out and clippy's `unnecessary_safety_doc`
+  does not catch it, because the lint only looks at public items and this one is
+  private. It is an `unsafe fn` now. Grep for the same shape elsewhere with
+  `grep -B8 '# Safety' | grep -v 'unsafe fn'`.
+- `if !unsafe { .. }` has **nowhere to put the comment.** The lint wants it
+  adjacent to the block, and the text before the block on that line is `if !`.
+  A comment above the `if` gives the identical error as no comment at all. The
+  fix is a `let copied = unsafe { .. };` binding and `if !copied`, which reads
+  better anyway; three of `vfs.rs`'s user-copy sites were converted this way.
+- `main.rs`'s eight blocks are documented but **not ratcheted**, because a
+  crate-level `#[deny]` would reach `drivers/` and `thread/` too. They ratchet
+  when the last module does and the lint collapses into
+  `kernel/Cargo.toml`'s `[lints.clippy]`. The panic-path frame-pointer walk at
+  `main.rs:616` is the one to read: unlike `profile::walk_kernel` it checks only
+  `rbp >= KERNEL_BASE`, not that `rbp` is inside the current kernel stack, so a
+  wild frame pointer into an unmapped kernel page faults. Its comment says so
+  rather than pretending otherwise. Bounding it to the stack the way the
+  profiler does is a real improvement and nobody has made it.
+
+---
+
 ## The browser became one, and what the site was actually missing
 
 `edos-web` could fetch and render a page and nothing else: no way to type an

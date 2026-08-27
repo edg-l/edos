@@ -706,17 +706,35 @@ the PIT/APIC calibration, the reset and soft-off port writes, the frame-pointer
 walk the profiler does on untrusted `rbp`, and the emergency serial path that
 bypasses its own lock on purpose. `TimerCalibration::setup_pit_oneshot` gained
 the `# Safety` section it had none of.
-397 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+`fs/` is the last of the three big modules to fall: 45 blocks across
+`efs/mod.rs`, `block_page_cache.rs`, `vfs.rs`, `page_fill.rs`, `page_cache.rs`
+and `journal/mod.rs`. Half of them are the same two shapes and are argued that
+way -- a `read_unaligned` of a `repr(C)` on-disk struct out of a block buffer,
+where the comment names the loop condition that bounds the offset and the
+`efs-common` size assertion that says the type has no padding; and a frame
+reached through the page cache, where the comment names the pin that keeps the
+mapping live rather than claiming an exclusion the page cache does not give.
+`journal::write_struct` was a *safe* fn carrying a `# Safety` section, which is
+the shape `doc/rust-style.md` rules out, and is now an `unsafe fn`. Three
+`if !unsafe { .. }` conditions became `let` bindings, because the lint wants the
+comment adjacent to the block and there is nowhere to put one inside an `if !`.
+`main.rs`'s own eight blocks are documented in the same pass -- the three
+`Box::from_raw` thread entrypoints, `setup_syscall`, and the panic-path
+frame-pointer walk, whose comment says outright that it does not bound `rbp` to
+the current stack the way `profile::walk_kernel` does. They take no `#[deny]`:
+a crate-level one would reach `drivers/` and `thread/` too, so they ratchet
+when the last module does.
+344 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`, and they are in exactly three modules: `drivers/`
-(`usb/xhci/mod.rs` 77, `ahci/port.rs` 38, `virtio/gpu.rs` 33, `virtio/queue.rs`
-14, `nvme/admin.rs` 13, `ahci/controller.rs` 12), `thread/`
-(`scheduler.rs` 26) and `fs/` (`efs/mod.rs` 18). The lint sits
+grep -cE '^\s+--> '`, and they are in exactly two modules: `drivers/` (295;
+`usb/xhci/mod.rs` 77, `ahci/port.rs` 38, `virtio/gpu.rs` 33, `virtio/queue.rs`
+14, `nvme/admin.rs` 13, `ahci/controller.rs` 12) and `thread/` (49;
+`scheduler.rs` 26). The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
 
-**I5b, the contracts.** 64 `unsafe fn` declarations against 50 `# Safety`
+**I5b, the contracts.** 65 `unsafe fn` declarations against 51 `# Safety`
 sections, remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
 modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented
 `unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
@@ -726,8 +744,8 @@ the smaller of the two.
 comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
 the modules it covers carries a `# Safety` section. The impls are done and
-twenty-one of the twenty-four modules in `main.rs` hold their own deny; the
-three left are `drivers/`, `fs/` and `thread/`.
+twenty-two of the twenty-four modules in `main.rs` hold their own deny; the
+two left are `drivers/` and `thread/`.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 
