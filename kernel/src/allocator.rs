@@ -146,6 +146,9 @@ impl PerCpuCache {
 
 /// Wrapper so we can store PerCpuCache in `PerCpuData` (which needs Sync).
 pub struct PerCpuCacheCell(pub UnsafeCell<PerCpuCache>);
+// SAFETY: the cell is a field of `PerCpuData`, which is reached only through
+// the owning CPU's GS base with interrupts disabled, so the `UnsafeCell` is
+// never entered from two CPUs at once.
 unsafe impl Sync for PerCpuCacheCell {}
 unsafe impl Send for PerCpuCacheCell {}
 
@@ -197,6 +200,12 @@ pub fn mark_gs_ready() {
     GS_INITIALIZED.store(true, Ordering::Release);
 }
 
+// SAFETY: `alloc` returns either null or a block of `layout.size()` bytes at
+// `layout.align()` that overlaps no live allocation, and `dealloc` is only
+// handed a pointer this impl returned under the same layout. The per-CPU
+// cache is entered with interrupts disabled and the global heap under its own
+// lock, so two CPUs allocating at once never observe each other's
+// intermediate state.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Try per-CPU cache first (interrupts disabled for the duration).

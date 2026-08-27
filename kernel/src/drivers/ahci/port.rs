@@ -214,11 +214,12 @@ pub struct AhciPort {
     legacy_lock: BlockingMutex<()>,
 }
 
+// SAFETY: all mutable state is behind atomics, `spin::Mutex`, `BlockingMutex`
+// or `WaitQueue`. Per-slot DMA regions (`command_tables`, `slot_pools`) are
+// reached only by the thread that owns the slot, which the atomic `free_slots`
+// allocation guarantees; the `command_list` DMA region is written per-slot at
+// disjoint offsets and is NO_CACHE mapped.
 unsafe impl Send for AhciPort {}
-// Safety: all mutable state is behind atomics, spin::Mutex, BlockingMutex, or WaitQueue.
-// Per-slot DMA regions (command_tables, slot_pools) are accessed only by the thread
-// that owns the slot (guaranteed by atomic free_slots allocation). The command_list
-// DMA region is written per-slot (disjoint offsets) and is NO_CACHE mapped.
 unsafe impl Sync for AhciPort {}
 
 // ---------------------------------------------------------------------------

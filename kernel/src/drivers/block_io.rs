@@ -142,6 +142,11 @@ enum BufferOwner {
     Static,
 }
 
+// SAFETY: `ptr` stays valid for as long as the device may DMA through it,
+// which is what each constructor's `BufferOwner` promises -- see the buffer
+// lifetime contract at the top of this module. Nothing here reads the bytes:
+// the buffer is a description handed to a driver, so moving or sharing it
+// carries no access the contract does not already cover.
 unsafe impl Send for BlockBuffer {}
 unsafe impl Sync for BlockBuffer {}
 

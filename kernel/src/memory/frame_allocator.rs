@@ -547,6 +547,9 @@ pub fn calculate_bitmap_size(memory_regions: &MemmapResponse) -> usize {
     bitmap_bytes + refcount_bytes
 }
 
+// SAFETY: `allocate_frame` hands back only frames the bitmap marks free, and
+// marks each used before returning it, so no frame is handed out twice. Every
+// frame it can reach came from a `MEMMAP_USABLE` region.
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         if let Some(index) = self.find_free_frame() {

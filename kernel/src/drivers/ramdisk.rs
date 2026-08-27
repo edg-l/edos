@@ -32,9 +32,9 @@ pub struct RamBlockDevice {
     len: usize,
 }
 
-// The backing memory is owned exclusively by this device for the life of the
-// boot; concurrent access is serialized by the block layer's callers the same
-// way it is for a real disk.
+// SAFETY: the backing memory is owned exclusively by this device for the life
+// of the boot; concurrent access is serialized by the block layer's callers
+// the same way it is for a real disk.
 unsafe impl Send for RamBlockDevice {}
 unsafe impl Sync for RamBlockDevice {}
 

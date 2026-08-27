@@ -326,6 +326,10 @@ pub struct VirtioGpuDisplay {
     _dma: crate::drivers::dma::DmaBuffer,
 }
 
+// SAFETY: `fb_base` points into the DMA buffer `_dma` keeps alive for the
+// display's whole life. `Send` only, and the display lives inside
+// `DISPLAY: Once<Mutex<Display>>`, so the pointer is followed by one thread
+// at a time.
 unsafe impl Send for VirtioGpuDisplay {}
 
 impl VirtioGpuDisplay {
@@ -551,6 +555,10 @@ pub struct DirectFramebuffer {
     back_page_y_offset: usize,
 }
 
+// SAFETY: `fb_base` is the framebuffer Limine mapped, which stays mapped for
+// the life of the boot. `Send` only, and the framebuffer lives inside
+// `DISPLAY: Once<Mutex<Display>>`, so the pointer is followed by one thread
+// at a time.
 unsafe impl Send for DirectFramebuffer {}
 
 impl DirectFramebuffer {

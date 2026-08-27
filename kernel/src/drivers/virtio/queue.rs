@@ -46,6 +46,10 @@ pub struct Virtqueue {
     pub notify_off: u16,
 }
 
+// SAFETY: `desc`, `avail` and `used` point into the one DMA allocation this
+// queue owns for its whole life, so moving the queue moves the rings with it.
+// `Send` only: nothing here serializes two threads driving one queue, so a
+// `Virtqueue` is never shared -- each lives behind its device's own lock.
 unsafe impl Send for Virtqueue {}
 
 impl Virtqueue {

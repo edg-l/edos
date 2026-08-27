@@ -63,6 +63,10 @@ pub struct BlockingMutex<T> {
     value: UnsafeCell<T>,
 }
 
+// SAFETY: every field but `value` is an atomic or a `WaitQueue`, and `value`
+// is only reached through the guard, which exists for one holder at a time.
+// `T: Send` covers both impls: the mutex never lends `&T` to two threads, so
+// sharing it only ever moves the `T` between them.
 unsafe impl<T: Send> Send for BlockingMutex<T> {}
 unsafe impl<T: Send> Sync for BlockingMutex<T> {}
 

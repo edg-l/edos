@@ -107,6 +107,11 @@ pub struct BootModule {
     pub len: usize,
 }
 
+// SAFETY: `addr` is a higher-half direct-map address into
+// bootloader-reclaimable memory, which the frame allocator never hands out,
+// so the bytes stay valid and privately owned for the life of the boot. They
+// are never written after Limine hands them over, so sharing the value hands
+// out reads only.
 unsafe impl Send for BootModule {}
 unsafe impl Sync for BootModule {}
 
@@ -125,6 +130,10 @@ pub struct BootFramebuffer {
     pub blue_mask_shift: u8,
 }
 
+// SAFETY: the value is a plain record of what Limine reported, stored once in
+// `BOOT_INFO` and only read from there. `addr` names a mapping that lives for
+// the whole boot, and the one owner that draws through it is
+// `graphics::DirectFramebuffer`.
 unsafe impl Send for BootFramebuffer {}
 unsafe impl Sync for BootFramebuffer {}
 

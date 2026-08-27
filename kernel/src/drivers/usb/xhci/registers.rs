@@ -78,8 +78,9 @@ pub struct XhciRegisters {
     max_ports: u8,
 }
 
-// Safety: XhciRegisters wraps a unique MMIO region; the caller is responsible
-// for not sharing it across threads without synchronization.
+// SAFETY: `base` is a unique MMIO mapping this value owns, reached only
+// through the volatile accessors above. `Send` only: nothing here serializes
+// two threads against one register block, so it is never shared.
 unsafe impl Send for XhciRegisters {}
 
 impl XhciRegisters {

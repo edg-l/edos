@@ -131,6 +131,11 @@ pub struct RwLock<T> {
     value: UnsafeCell<T>,
 }
 
+// SAFETY: every field but `value` is an atomic or a `WaitQueue`, and `value`
+// is only reached through a guard the lock hands out -- one writer alone, or
+// readers with no writer. Moving the lock moves the `T` inside it, so `Send`
+// asks only `T: Send`; sharing it lends `&T` to several readers at once, so
+// `Sync` additionally asks `T: Sync`.
 unsafe impl<T: Send> Send for RwLock<T> {}
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 

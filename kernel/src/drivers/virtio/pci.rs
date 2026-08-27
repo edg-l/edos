@@ -125,6 +125,9 @@ pub struct VirtioTransport {
     device_cfg: *mut u8,
 }
 
+// SAFETY: the four pointers address MMIO regions mapped for the device's
+// whole life and reached only through volatile accesses. `Send` only: nothing
+// here serializes two threads against one transport, so it is never shared.
 unsafe impl Send for VirtioTransport {}
 
 impl VirtioTransport {

@@ -101,7 +101,9 @@ pub struct ProducerRing {
     cycle_bit: bool,
 }
 
-// Safety: ProducerRing owns its DMA region and is accessed only from the driver thread.
+// SAFETY: the ring owns the DMA region `trbs` points into and keeps it alive
+// in `dma`. `Send` only: the ring is reached from one driver thread at a
+// time, so nothing shares the raw pointer.
 unsafe impl Send for ProducerRing {}
 
 impl ProducerRing {
@@ -202,7 +204,9 @@ pub struct EventRing {
     cycle_bit: bool, // Expected cycle bit from hardware
 }
 
-// Safety: EventRing owns its DMA regions and is accessed only from the driver thread.
+// SAFETY: the ring owns the DMA regions `trbs` and the segment table point
+// into and keeps them alive in `ring_dma`/`erst_dma`. `Send` only: the ring is
+// reached from one driver thread at a time, so nothing shares the pointer.
 unsafe impl Send for EventRing {}
 
 impl EventRing {

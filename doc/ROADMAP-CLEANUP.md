@@ -609,15 +609,15 @@ counts below are the gap, measured 2026-08-26 with the commands recorded there.
 `// SAFETY:` comments, so about 6%, concentrated in `usb/xhci/mod.rs` (77
 `unsafe`), `ahci/port.rs` (39), `thread/scheduler.rs` (33), `virtio/gpu.rs` (33)
 and `syscalls/mod.rs` (31). `clippy::undocumented_unsafe_blocks` is the gate and
-it covers `unsafe impl` too, which is where the worse ratio is: 38 `unsafe impl`
-(18 `Send`, 14 `Sync`, `GlobalAlloc`, `FrameAllocator`) and **2** carry an
-argument. A bare `unsafe impl Send for T {}` is a hand-made claim that no data
-race can arise, in a preemptive SMP kernel with work-stealing, and it is the
-claim most likely to stop being true when the type later grows a field. Start
-there: 36 sites, each one line of reasoning, and it is the highest
-soundness-per-edit work in this section. Then the blocks, per module, `memory/`
-and `syscalls/` first, since turning the lint on tree-wide at once produces
-hundreds of findings and would be abandoned.
+it covers `unsafe impl` too. ~~A bare `unsafe impl Send for T {}` is a hand-made
+claim that no data race can arise, in a preemptive SMP kernel with work-stealing,
+and it is the claim most likely to stop being true when the type later grows a
+field, so the 38 impls came first.~~ **Done:** all 38 `unsafe impl` in
+`kernel/src` (18 `Send`, 14 `Sync`, `GlobalAlloc`, `FrameAllocator`) now carry a
+`// SAFETY:` naming what makes the claim true, up from 2 with an argument and 6
+more with a `// Safety:` the lint does not recognise. What remains here is the
+blocks, per module, `memory/` and `syscalls/` first, since turning the lint on
+tree-wide at once produces hundreds of findings and would be abandoned.
 
 **I5b, the contracts.** 61 `unsafe fn` declarations against 32 `# Safety`
 sections. No lint finds these and none can: a caller of an undocumented
