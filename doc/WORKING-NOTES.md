@@ -11495,80 +11495,15 @@ called, which looks like aliasing and is not: the type is a handle over MMIO,
 not an owner of it. What callers must not do is write the same redirection
 entry from two of them, and that is what its comment says.
 
-## FIXED: the framebuffer ioctls read past the ioctl buffer, and userspace picked how far
+## FIXED: the framebuffer ioctls read past the ioctl buffer
 
-Found while trying to write `// SAFETY:` comments for `kernel/src/graphics/`,
-which is why that module was the last one without a deny. Fixed in the commit
-carrying this entry; `graphics/` now carries
-`#[deny(clippy::undocumented_unsafe_blocks)]` like the seven modules before it.
+`sys_ioctl` copied `arg_len` user-chosen bytes into a kernel buffer and handed
+the device the pointer alone, so `FB_IOCTL_DRAW` sliced `header.pixel_count`
+u32s past a buffer bounded by nothing. `arg_len` now reaches the device through
+`DevFsDevice::ioctl` / `FileSystem::ioctl`, and every framebuffer arm goes
+through a bounds-checking `IoctlBuf`. `programs/fbtest` is the gate, the
+twentieth suite in `scripts/guest-check`.
 
-**The mechanism.** `sys_ioctl` (`kernel/src/syscalls/ioctl/mod.rs`) allocated
-`vec![0u8; arg_len]` and copied `arg_len` bytes in from the user pointer.
-`arg_len` is a syscall argument, so userspace chose it. The buffer pointer, and
-nothing else, reached the device: `DevFsDevice::ioctl(&self, request, arg)` had
-no length parameter, and neither did `FileSystem::ioctl` or `fs::api::ioctl`
-behind it. Every handler in `graphics/framebuffer.rs` then read its header out
-of that buffer having checked only `arg != 0`.
-
-`FB_IOCTL_DRAW` was the worst shape: it built a slice of `header.pixel_count`
-u32s *after* the header, with `pixel_count` checked against `width * height`
-and against nothing else. `arg_len = size_of::<FramebufferDraw>()` with
-`width = height = 4096` made the kernel form a 64 MB slice over a 32-byte heap
-allocation and blit it to the screen — kernel heap on the display, then a
-page fault in kernel mode once the read walked off the mapped heap.
-`FB_IOCTL_SET_CURSOR` had the identical shape. But the fixed-size handlers were
-no better: `FB_IOCTL_SCREEN_INFO` and `FB_IOCTL_MMAP_INFO` *write* their answer
-through the pointer, so `arg_len = 1` was a 12- and a 40-byte heap overflow.
-
-The comments already in that file said "arg points to kernel-copied ioctl
-buffer (safe to read)". That is true of nothing at all without a length, and it
-is the sentence that hid this. The well-behaved caller
-(`programs/edos_render/src/graphics.rs`) does pass the right length everywhere,
-which is why nothing had tripped over it.
-
-**The fix was at the trait, not the call site.** `arg_len` is known in
-`sys_ioctl` and was thrown away one frame later, so it is now threaded down
-beside the pointer: `DevFsDevice::ioctl(&self, request, arg, arg_len)`,
-`FileSystem::ioctl(&self, path, request, arg, arg_len)`, and the `fs::api` and
-`fs::vfs` hops between them. The doc comment on `DevFsDevice::ioctl` states the
-contract, including that the device is the only layer that can enforce it:
-neither the syscall layer nor devfs knows the shape the request names. On the
-no-buffer path `arg` is a scalar and `arg_len` is passed as **0**, whatever the
-caller said, so a device cannot be tricked into reading a raw user pointer.
-
-**Two things worth knowing beyond the length.**
-
-- The buffer is now `Vec<u64>` of `arg_len.div_ceil(8)`, not `Vec<u8>`.
-  `Vec<u8>` promises alignment 1, and devices read `#[repr(C)]` structs and
-  `u32` slices straight out of it — `ptr::read` and `slice::from_raw_parts`
-  both require alignment, so every one of those was relying on an allocator
-  implementation detail (size-class allocations happen to be aligned to their
-  class). The rounding only ever adds slack past the end and nothing is told
-  about it, so the byte length stays `arg_len`.
-- `graphics/framebuffer.rs` grew a private `IoctlBuf { ptr, len }` with three
-  accessors: `header::<T>()` (checks `len >= size_of::<T>()`), `out::<T>()`
-  (same check, for the requests that write), and
-  `tail_u32::<T>(count)` (checks `size_of::<T>() + count * 4 <= len`, with
-  checked arithmetic so a huge count cannot wrap into a small product). Every
-  arm goes through them, so a new request cannot forget the check by being
-  written in the older style. `IoctlBuf::new` is the one `unsafe fn` and takes
-  a null `arg` as an empty buffer rather than refusing it, which is what lets
-  the scalar requests (`FB_IOCTL_RENDER`, `FB_IOCTL_FLIP`, `FB_IOCTL_FLIP_WAIT`)
-  share the same construction.
-
-`hda` and the block device take `_arg_len` today because both read `arg` as a
-scalar only. The parameter is there so the next variable-length request has the
-length in hand rather than rediscovering this.
-
-**The gate.** `programs/fbtest` is the twentieth suite in `scripts/guest-check`.
-It opens `/dev/fb0` in a real guest and asks each request for more bytes than
-it was given: the two that write their answer through the pointer with room for
-part of it, the four fixed-size headers with a buffer too small to hold one,
-and `FB_IOCTL_DRAW` / `FB_IOCTL_SET_CURSOR` with a header that is internally
-consistent about an 8x8 rectangle in a buffer carrying the header and not one
-pixel, then the same one pixel short. Every case must come back an error.
-
-The first case is the one that makes the rest mean anything: a correctly sized
-`FB_IOCTL_SCREEN_INFO` that must *succeed* and answer a non-zero screen. Without
-it a suite of refusals passes just as well against a machine with no
-framebuffer, or against a device that has started refusing everything.
+Full write-up, including why the buffer became a `Vec<u64>` and how to check
+another device for the same shape:
+`doc/bugs/2026-08-28-the-framebuffer-ioctls-read-past-the-buffer.md`.

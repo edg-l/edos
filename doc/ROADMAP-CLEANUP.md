@@ -485,9 +485,9 @@ house style is `kernel/src/syscalls/io.rs:71`, where the comment on
 `STREAM_STACK_BUF` carries a measurement table and says why the constant is
 small on purpose.
 
-### G3. `doc/WORKING-NOTES.md` is 11,574 lines and `CLAUDE.md` says read it first (S2, E2)
+### G3. `doc/WORKING-NOTES.md` is 11,509 lines and `CLAUDE.md` says read it first (S2, E2)
 
-263 sections (`grep -c '^## '`). `doc/bugs/` holds 26 post-mortems
+263 sections (`grep -c '^## '`). `doc/bugs/` holds 27 post-mortems
 (`ls doc/bugs/*.md | grep -vc README`, which is one less than the file count)
 and a `README.md` stating the format. The line count only ever grows while this
 is open, so remeasure it rather than quoting this one.
