@@ -427,7 +427,10 @@ fn m_node(n: &Node, t: &[char], pos: usize, caps: &mut Caps, ic: bool, k: Cont) 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the repetition matcher threads the node, its bounds, the input position, the captures and the continuation through one frame"
+)]
 fn m_rep(
     node: &Node,
     min: u32,

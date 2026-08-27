@@ -645,9 +645,9 @@ the smaller of the two.
 comment, the lint is denied in `memory/` and `syscalls/` with no suppressions,
 and every `unsafe fn` in those two modules carries a `# Safety` section.
 
-### I6. A `[lints]` table, and what goes in it (S3, E1)
+### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 
-~~There is no `[lints]` table in any manifest in the tree.~~ **Partly done:**
+~~There is no `[lints]` table in any manifest in the tree.~~ **Done:**
 `kernel/Cargo.toml` carries a `[lints.clippy]` table with three of the four
 lints denied, `undocumented_unsafe_blocks` commented out behind I5a's 720
 blocks. Every `#[allow]` and `#[expect]` in `kernel/src` now carries a
@@ -657,10 +657,14 @@ sites plus `main.rs`'s `unreachable_code`, which the `sched-test` build needs
 and the default build does not. Thirteen `unsafe impl` that shared one
 `// SAFETY:` with the impl above them now carry their own, and `ahci/port.rs`
 lost a `/// Safety:` heading on a safe fn and a `// SAFETY:` on an expression
-with no unsafe in it. **What remains:** the same table in `programs/`'s
-workspace manifest (which needs `lints.workspace = true` in 134 member
-manifests) and the 31 reasonless `#[allow]` under `programs/`, `libs/` and
-`tools/`, and the edition bump below.
+with no unsafe in it. The same table is now `[workspace.lints.clippy]` in
+`programs/Cargo.toml` with `lints.workspace = true` in all 133 member
+manifests, and a plain `[lints.clippy]` in each of the nine `libs/` and four
+`tools/` packages, which are standalone rather than workspace members. The 31
+reasonless `#[allow]` outside the kernel became `#[expect(..., reason = "...")]`
+-- 17 under `programs/`, 14 in `tools/efs-fsck` -- and none of them was
+unfulfilled, so nothing outside the kernel was suppressing a lint it had
+outgrown.
 
 **Fix.** A `[lints.clippy]` table carrying `undocumented_unsafe_blocks`,
 `unnecessary_safety_comment`, `unnecessary_safety_doc` and
@@ -674,10 +678,10 @@ those without a reason against 40 `allow`. It is also the lint that finds a
 suppression the code has outgrown, since `expect` warns when the lint it names
 stops firing — two of the kernel's did.
 
-Same manifests, same sitting: `programs/edos-taskbar`, `programs/edos-terminal`
-and `programs/wintest` are still `edition = "2021"` while the other 129 programs,
-the kernel and all eight libs are on 2024. None of the three contains `unsafe`,
-so this is drift rather than a hole.
+~~Same manifests, same sitting: `programs/edos-taskbar`, `programs/edos-terminal`
+and `programs/wintest` are still `edition = "2021"`.~~ Done: all 133 programs,
+the kernel and all nine libs are on `edition = "2024"`. None of the three
+contained `unsafe`, so it was drift rather than a hole.
 
 **Done when** the table exists in `programs/` too, the tree is clean under it,
 and `grep -c 'edition = "2021"' programs/*/Cargo.toml` is zero.

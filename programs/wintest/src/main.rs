@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use edos_render::metrics::{space, CONTROL_HEIGHT, TEXT_CELL_HEIGHT};
+use edos_render::metrics::{CONTROL_HEIGHT, TEXT_CELL_HEIGHT, space};
 use edos_render::surface::Surface;
 use edos_render::widgets::layout::{Alignment, Insets, LinearLayout, SizePolicy};
 use edos_render::widgets::{
@@ -17,8 +17,8 @@ use edos_render::widgets::{
     WidgetId,
 };
 use edos_render::window::{
-    property, window_list, window_send_event, window_set, Window, WindowEvent, WindowEventType,
-    WindowListEntry,
+    Window, WindowEvent, WindowEventType, WindowListEntry, property, window_list,
+    window_send_event, window_set,
 };
 
 /// Margin from the window edge to the content column.

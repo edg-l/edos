@@ -210,11 +210,11 @@ fn main() {
         // Read output from shell and display
         let mut output_len = 0usize;
         if let Some(ref child) = child {
-            if let Ok(n) = child.read(&mut read_buf) {
-                if n > 0 {
-                    output_len = n;
-                    terminal.write_str(&String::from_utf8_lossy(&read_buf[..n]));
-                }
+            if let Ok(n) = child.read(&mut read_buf)
+                && n > 0
+            {
+                output_len = n;
+                terminal.write_str(&String::from_utf8_lossy(&read_buf[..n]));
             }
             // A terminal is a window onto its child. When the shell exits --
             // `exit`, a signal, an EOF on its stdin -- there is nothing left to

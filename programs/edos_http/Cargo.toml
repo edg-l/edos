@@ -27,3 +27,6 @@ webpki-roots = "1"
 # unrecognised target its unmodified form is a compile_error; `custom` replaces
 # that with the registration hook in tls.rs.
 getrandom = { version = "0.2", features = ["custom"] }
+
+[lints]
+workspace = true

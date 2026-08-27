@@ -221,7 +221,10 @@ impl Transport {
         // `if let Some(dir) = &mut self.rx` cannot be used here: `read_exact`
         // below takes `&self`, and a binding into `self.rx` held across it
         // borrows `self` twice. The re-lookups are what keep the borrows short.
-        #[allow(clippy::unnecessary_unwrap)]
+        #[expect(
+            clippy::unnecessary_unwrap,
+            reason = "the `if let` the lint asks for would hold a borrow of `self.rx` across `read_exact`, which takes `&self`"
+        )]
         if self.rx.is_some() {
             // The length lives inside the encryption, so the first block has to
             // be decrypted before the rest of the packet can even be read.

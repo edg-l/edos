@@ -7,3 +7,6 @@ edition = "2024"
 edos_lib = { path = "../edos_lib" }
 efs-common = { path = "../../libs/efs-common" }
 efs-mkfs-core = { path = "../../tools/efs-mkfs" }
+
+[lints]
+workspace = true

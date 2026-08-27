@@ -157,14 +157,20 @@ fn read_u16_at(f: &mut File, offset: u64) -> io::Result<u16> {
 }
 
 /// Write a u32 LE at a given byte offset in the file.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "one corruption helper per field width; each integration test reaches for a different one"
+)]
 fn write_u32_at(f: &mut File, offset: u64, val: u32) -> io::Result<()> {
     f.seek(SeekFrom::Start(offset))?;
     f.write_all(&val.to_le_bytes())
 }
 
 /// Write a u16 LE at a given byte offset in the file.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "one corruption helper per field width; each integration test reaches for a different one"
+)]
 fn write_u16_at(f: &mut File, offset: u64, val: u16) -> io::Result<()> {
     f.seek(SeekFrom::Start(offset))?;
     f.write_all(&val.to_le_bytes())
@@ -176,7 +182,10 @@ pub struct SbInfo {
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub inode_size: u16,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the fixture mirrors the superblock; not every field is corrupted by a test"
+    )]
     pub block_group_count: u16,
     pub journal_first_block: u64,
 }
@@ -220,7 +229,6 @@ pub fn read_sb_info_at(path: &Path, partition_offset: u64) -> io::Result<SbInfo>
 ///   free_blocks_count(4) free_inodes_count(4) used_dirs_count(4)
 ///   reserved(32) checksum(4)
 const BGD_BLOCK_BITMAP_OFF: u64 = 0;
-#[allow(dead_code)]
 const BGD_INODE_BITMAP_OFF: u64 = 8;
 const BGD_INODE_TABLE_OFF: u64 = 16;
 

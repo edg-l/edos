@@ -16,3 +16,8 @@ efs-common = { path = "../../libs/efs-common" }
 
 [dev-dependencies]
 efs-common = { path = "../../libs/efs-common" }
+
+[lints.clippy]
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+allow_attributes_without_reason = "warn"

@@ -20,3 +20,6 @@ sha2 = { version = "0.10", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 ustar = { path = "../../libs/ustar" }
+
+[lints]
+workspace = true

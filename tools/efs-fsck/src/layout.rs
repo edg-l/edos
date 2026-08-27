@@ -25,7 +25,10 @@ pub fn inode_location(
     ))
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the whole superblock-derived layout, of which the checks read a part"
+)]
 /// Runtime layout derived from the on-disk superblock.
 /// Unlike mkfs, fsck does NOT recompute layout; it trusts the superblock fields.
 pub struct RuntimeLayout {
@@ -39,7 +42,6 @@ pub struct RuntimeLayout {
     pub bgd_table_blocks: u64,
 }
 
-#[allow(dead_code)]
 impl RuntimeLayout {
     pub fn from_superblock(sb: &EfsSuperblock) -> Self {
         let block_size = sb.block_size();

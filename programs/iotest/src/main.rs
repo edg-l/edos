@@ -1396,7 +1396,7 @@ fn test19(dir: &str) {
     fs::write(&path, b"nineteen").unwrap_or_else(|e| fail(19, &format!("create: {}", e)));
 
     // Symbolic links, through std rather than through the syscall wrapper.
-    #[allow(deprecated)]
+    #[expect(deprecated, reason = "`fs::soft_link` is the std entry under test")]
     fs::soft_link(&path, &link).unwrap_or_else(|e| fail(19, &format!("soft_link: {}", e)));
     match fs::read_link(&link) {
         Ok(target) if target.to_string_lossy() == path => {}

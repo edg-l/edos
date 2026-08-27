@@ -39,7 +39,10 @@ impl RebuiltBitmap {
     }
 
     /// Count how many bits are set.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the bitmap API is complete; the allocation checks compare bit by bit"
+    )]
     pub fn count_ones(&self) -> u64 {
         self.bits.iter().map(|w| w.count_ones() as u64).sum()
     }
@@ -48,7 +51,10 @@ impl RebuiltBitmap {
     ///
     /// The returned vec has `ceil(len / 8)` bytes; unused trailing bits in the
     /// last byte are 0.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the bitmap API is complete; nothing serialises a bitmap back out until --repair does"
+    )]
     pub fn to_bytes(&self) -> Vec<u8> {
         let byte_count = (self.len as usize).div_ceil(8);
         let mut out = Vec::with_capacity(byte_count);

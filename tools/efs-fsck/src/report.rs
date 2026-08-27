@@ -6,7 +6,6 @@ pub enum Severity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Category {
     Journal,
     Superblock,
@@ -58,12 +57,10 @@ impl Report {
         self.findings.iter().any(|f| f.severity == Severity::Error)
     }
 
-    #[allow(dead_code)]
     pub fn count_fixable(&self) -> usize {
         self.findings.iter().filter(|f| f.fixable).count()
     }
 
-    #[allow(dead_code)]
     pub fn by_category(&self, cat: Category) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(move |f| f.category == cat)
     }

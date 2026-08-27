@@ -93,7 +93,6 @@ impl DirtyRegion {
     }
 
     /// Returns true if there are no dirty regions.
-    #[allow(unused)]
     pub fn is_empty(&self) -> bool {
         !self.full_screen && self.count == 0
     }
@@ -152,7 +151,10 @@ impl DirtyRegion {
     }
 
     /// Compute the bounding box of all dirty rects.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the bounding box of the whole set; the compositor damages each rect on its own"
+    )]
     pub fn merged_bounds(&self) -> Option<DirtyRect> {
         if self.count == 0 {
             return None;

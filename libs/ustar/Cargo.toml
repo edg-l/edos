@@ -2,3 +2,8 @@
 name = "ustar"
 version = "0.1.0"
 edition = "2024"
+
+[lints.clippy]
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+allow_attributes_without_reason = "warn"

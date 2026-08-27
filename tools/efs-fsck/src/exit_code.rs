@@ -2,7 +2,6 @@ use crate::report::Report;
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum FsckExitCode {
     Clean = 0,
     ErrorsFixed = 1,

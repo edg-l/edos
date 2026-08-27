@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 edos_render = { path = "../edos_render" }
+
+[lints]
+workspace = true

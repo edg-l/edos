@@ -9,14 +9,14 @@
 use std::fs;
 
 use edos_lib::io as eio;
-use edos_render::metrics::{space, CONTROL_HEIGHT};
+use edos_render::metrics::{CONTROL_HEIGHT, space};
 use edos_render::surface::Surface;
 use edos_render::text::Style;
 use edos_render::theme::Theme;
-use edos_render::widgets::{text_height, Slider, Widget, WidgetEvent};
+use edos_render::widgets::{Slider, Widget, WidgetEvent, text_height};
 use edos_render::window::{
-    flags::FLAG_UNDECORATED, property, window_set, Window, WindowEvent, WindowEventType,
-    WindowListEntry,
+    Window, WindowEvent, WindowEventType, WindowListEntry, flags::FLAG_UNDECORATED, property,
+    window_set,
 };
 
 /// `/dev/dsp` ioctls, mirroring `kernel/src/drivers/hda/mod.rs`.

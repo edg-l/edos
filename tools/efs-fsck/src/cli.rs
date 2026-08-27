@@ -3,7 +3,6 @@ use std::process;
 
 use crate::exit_code::FsckExitCode;
 
-#[allow(dead_code)]
 pub struct Args {
     pub image: PathBuf,
     pub repair: bool,

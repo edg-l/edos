@@ -11,8 +11,8 @@ use edos_render::text::Style;
 use edos_render::theme::Theme;
 use edos_render::widgets::{text_height, text_width};
 use edos_render::window::{
-    flags::FLAG_DOCK, property, window_list, window_minimize, window_send_event, window_set,
-    Window, WindowEvent, WindowEventType, WindowListEntry,
+    Window, WindowEvent, WindowEventType, WindowListEntry, flags::FLAG_DOCK, property, window_list,
+    window_minimize, window_send_event, window_set,
 };
 
 mod menu;
@@ -478,13 +478,11 @@ fn main() {
         let redraw = painted[slot].as_ref() != Some(&state);
         let present = painted[slot ^ 1].as_ref() != Some(&state);
 
-        if redraw {
-            if let Some(buf) = window.buffer_mut() {
-                let mut surface = Surface::new(buf, w, h);
-                draw_ground(&mut surface);
-                for control in &state.0 {
-                    draw_button(&mut surface, control);
-                }
+        if redraw && let Some(buf) = window.buffer_mut() {
+            let mut surface = Surface::new(buf, w, h);
+            draw_ground(&mut surface);
+            for control in &state.0 {
+                draw_button(&mut surface, control);
             }
         }
 

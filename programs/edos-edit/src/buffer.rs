@@ -253,7 +253,10 @@ impl Buffer {
     /// The character at `pos`, or None past the end of its line or the file.
     /// Read once anything needs to look at an arbitrary character rather than
     /// a whole line — finding a match, or reading either side of the cursor.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the arbitrary-character accessor; the editing paths are still line-oriented"
+    )]
     pub fn char_at(&self, pos: Position) -> Option<char> {
         self.lines.get(pos.line)?.text.chars().nth(pos.col)
     }

@@ -60,7 +60,10 @@ pub fn find_window_at(windows: &[WindowListEntry], x: i32, y: i32) -> Option<&Wi
 /// Focus itself is the kernel registry's: it already moves focus to the window
 /// under a press. Only the desktop-background case has to be reported, since
 /// the kernel leaves focus alone when no window is hit.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one press against the whole desktop: the window list, the point, and the interaction state the hit test reads"
+)]
 pub fn handle_mouse_press(
     windows: &[WindowListEntry],
     mx: i32,

@@ -1,8 +1,11 @@
 [package]
 name = "edos-taskbar"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 edos_lib = { path = "../edos_lib" }
 edos_render = { path = "../edos_render" }
+
+[lints]
+workspace = true

@@ -18,7 +18,6 @@ pub struct Disk {
     pub block_size: u32,
 }
 
-#[allow(dead_code)]
 impl Disk {
     pub fn open(
         path: &Path,

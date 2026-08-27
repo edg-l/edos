@@ -34,3 +34,6 @@ noto-sans-mono-bitmap = { version = "0.3.1", features = [
     "unicode-latin-extended-a",
 ] }
 
+
+[lints]
+workspace = true

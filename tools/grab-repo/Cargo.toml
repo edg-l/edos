@@ -15,3 +15,8 @@ sha2 = "0.10"
 ed25519-dalek = "2"
 toml = "0.9"
 serde = { version = "1", features = ["derive"] }
+
+[lints.clippy]
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+allow_attributes_without_reason = "warn"

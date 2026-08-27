@@ -2,5 +2,15 @@
 resolver = "3"
 members = ["edos_lib", "edos_render", "edos_http", "edos-web", "edos-wm", "edos-taskbar", "edos-terminal", "edos-sh", "hello", "alloctest", "wintest", "echo", "cat", "ls", "stat", "free", "ps", "dmesg", "mkdir", "rmdir", "rm", "mv", "write", "grep", "head", "tail", "wc", "touch", "cp", "uname", "hexdump", "mount", "ping", "dns", "http", "df", "forktest", "sleep", "play", "edos-vi", "yes", "seq", "sort", "uniq", "tee", "tr", "env", "wget", "sync", "mmaptest", "evicttest", "lockordertest", "inflighttest", "true", "false", "kill", "basename", "dirname", "cut", "cal", "find", "du", "diff", "xargs", "sha256sum", "file", "threadtest", "iotest", "tcptest", "vectest", "dnsprobe", "exectest", "killtest", "edos-init", "efs-mkfs", "edos-install", "fstest", "fsbench", "shutdown", "edos-procview", "strace", "sigtest", "date", "tar", "top", "snake", "tcpecho", "imgview", "ln", "watch", "less", "pstree", "sntp", "pmap", "sed", "lsof", "nc", "httpd", "netstat", "nproc", "stdtest", "pollbench", "switchbench", "printenv", "id", "whoami", "dd", "syscallfuzz", "socktest", "orphantest", "sshd", "mkfifo", "svc", "keymap", "edos-files", "edos-edit", "gzip", "grab", "edos-grab", "termbench", "fsck", "auxvtest", "balancebench", "fputest", "latbench", "which", "lookupd", "lookuptest", "screenshot", "allocbench", "pitest", "profile", "texttest"]
 
+# `unsafe` is documented twice, for two readers: `// SAFETY:` above a block says
+# why this operation upholds a contract, `# Safety` on an item says what the
+# contract is. `doc/rust-style.md` states the rule. The two `unnecessary_*`
+# lints are what stop the cheapest way to satisfy the first from being a
+# comment that says nothing.
+[workspace.lints.clippy]
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+allow_attributes_without_reason = "warn"
+
 [profile.dev]
 opt-level = 3

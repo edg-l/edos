@@ -7,3 +7,6 @@ edition = "2024"
 edos_lib = { path = "../edos_lib" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ustar = { path = "../../libs/ustar" }
+
+[lints]
+workspace = true

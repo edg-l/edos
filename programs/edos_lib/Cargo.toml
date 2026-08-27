@@ -8,3 +8,6 @@ edos-trace-abi = { path = "../../libs/edos-trace-abi" }
 edos-profile-abi = { path = "../../libs/edos-profile-abi" }
 edos_rt = "0.0.50"
 syscall-abi = { path = "../../libs/syscall-abi" }
+
+[lints]
+workspace = true

@@ -14,3 +14,6 @@ edos_render = { path = "../edos_render", features = ["svg", "raster"] }
 taffy = { version = "0.9", default-features = false, features = ["std", "taffy_tree", "block_layout", "flexbox", "grid"] }
 html5ever = "0.39"
 markup5ever_rcdom = "0.39.0-unofficial"
+
+[lints]
+workspace = true

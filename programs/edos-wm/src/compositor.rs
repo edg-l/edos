@@ -282,7 +282,10 @@ fn build_lit_ground(width: usize, height: usize, variant: usize) -> Vec<u32> {
 // Every argument is a distinct input to one frame: the destination, what to
 // draw, and three pieces of interaction state the frame reads. Grouping them
 // would only move the same list one level out.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a distinct input to one frame; grouping them would move the same list one level out"
+)]
 pub fn composite(
     screen: &mut Screen,
     windows: &[WindowListEntry],

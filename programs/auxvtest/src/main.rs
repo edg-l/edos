@@ -97,7 +97,10 @@ unsafe fn phdr_u64(phdr: u64, i: usize, off: usize) -> u64 {
 // `main` is the C entry point: its `argv` comes from the runtime's initial
 // stack, not from an arbitrary Rust caller, and the signature is fixed by the
 // ABI so it cannot be marked `unsafe`. `read_auxv` carries the real contract.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "`argv` comes from the runtime's initial stack and the C ABI fixes this signature; `read_auxv` carries the real contract"
+)]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     let mut passed = 0u32;

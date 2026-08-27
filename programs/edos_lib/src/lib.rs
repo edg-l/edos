@@ -31,7 +31,10 @@ pub fn getrandom(buf: &mut [u8]) {
 /// The error carries nothing: `getrandom` here fails only when the kernel has
 /// no entropy source at all, which is not a condition a caller can act on
 /// differently from any other.
-#[allow(clippy::result_unit_err)]
+#[expect(
+    clippy::result_unit_err,
+    reason = "the failure carries nothing a caller could act on: no entropy source at all"
+)]
 pub fn try_getrandom(buf: &mut [u8]) -> Result<(), ()> {
     edos_rt::io::getrandom(buf).map(|_| ()).map_err(|_| ())
 }

@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 edos_lib = { path = "../edos_lib" }
 edos-trace-abi = { path = "../../libs/edos-trace-abi" }
+
+[lints]
+workspace = true

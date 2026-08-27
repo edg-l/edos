@@ -8,3 +8,6 @@ edition = "2024"
 # likely to be a PNG as anything else.
 edos_render = { path = "../edos_render", features = ["raster"] }
 edos_lib = { path = "../edos_lib" }
+
+[lints]
+workspace = true

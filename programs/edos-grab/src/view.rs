@@ -162,7 +162,10 @@ pub fn draw_button(canvas: &mut Surface<'_>, rect: Rect, label: &str, enabled: b
 }
 
 /// One package row: icon, name, version, and the summary under them.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one package row is its target, its rectangle, the four fields drawn into it and two selection flags"
+)]
 pub fn draw_row(
     canvas: &mut Surface<'_>,
     rect: Rect,

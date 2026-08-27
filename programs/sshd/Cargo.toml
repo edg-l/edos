@@ -22,3 +22,6 @@ ed25519-dalek = { version = "2", default-features = false, features = [
     "zeroize",
 ] }
 subtle = { version = "2", default-features = false }
+
+[lints]
+workspace = true

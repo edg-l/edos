@@ -17,3 +17,6 @@ path = "src/bin_gzip.rs"
 [[bin]]
 name = "gunzip"
 path = "src/bin_gunzip.rs"
+
+[lints]
+workspace = true

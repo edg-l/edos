@@ -1,8 +1,11 @@
 [package]
 name = "wintest"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 edos_render = { path = "../edos_render" }
 edos_lib = { path = "../edos_lib" }
+
+[lints]
+workspace = true

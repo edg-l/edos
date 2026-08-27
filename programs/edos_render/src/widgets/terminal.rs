@@ -122,7 +122,6 @@ impl Default for Cell {
 }
 
 /// A terminal widget that displays a text buffer with cursor.
-#[allow(dead_code)]
 pub struct Terminal {
     x: i32,
     y: i32,
@@ -683,7 +682,11 @@ impl Terminal {
     }
 
     /// Get the text content of a specific row.
-    #[allow(private_interfaces, dead_code)]
+    #[expect(
+        private_interfaces,
+        dead_code,
+        reason = "the row accessor hands back the crate-private `Cell`; nothing outside the widget reads a row today"
+    )]
     pub(crate) fn get_row(&self, row: usize) -> Option<&[Cell]> {
         self.buffer.get(row).map(|v| v.as_slice())
     }

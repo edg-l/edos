@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 efs-mkfs-core = { path = "../../tools/efs-mkfs" }
+
+[lints]
+workspace = true

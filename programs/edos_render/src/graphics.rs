@@ -529,7 +529,10 @@ pub type Result<T> = std::result::Result<T, GraphicsError>;
 /// Direct VRAM mapping for zero-copy framebuffer access.
 pub struct VramMapping {
     base: *mut u32,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the mapped byte length, kept beside the base pointer it was mapped with"
+    )]
     total_size: usize,
     /// Pixels per page (page_size / 4).
     page_pixels: usize,
@@ -1213,7 +1216,10 @@ impl Screen {
     /// - `src_x`, `src_y`: where in the source the copy starts
     /// - `dst_x`, `dst_y`: where on screen it lands
     /// - `copy_w`, `copy_h`: how much to copy, before clipping
-    #[allow(clippy::too_many_arguments)] // the compositor's own call shape: a
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the compositor's own call shape: a source rectangle, a destination point and a size, each already a pair"
+    )]
     // source rectangle, a destination point and a size, each already a pair.
     pub fn blit_pixels_clipped(
         &mut self,

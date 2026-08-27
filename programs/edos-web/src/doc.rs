@@ -118,7 +118,6 @@ pub enum Node {
         // Read by the box engine, which arranges the children from it. The
         // flattening path deliberately does not: a container's own box is
         // exactly what a flat list of leaves cannot express.
-        #[allow(dead_code)]
         css: Computed,
         children: Vec<Node>,
     },

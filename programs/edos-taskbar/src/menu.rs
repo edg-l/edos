@@ -9,15 +9,15 @@
 //! bar, and it has to take focus, because losing focus is how it closes.
 
 use edos_lib::io::klog_dump;
-use edos_lib::process::{reboot, spawn, REBOOT_HALT, REBOOT_POWER_OFF, REBOOT_RESTART};
+use edos_lib::process::{REBOOT_HALT, REBOOT_POWER_OFF, REBOOT_RESTART, reboot, spawn};
 use edos_render::icons;
 use edos_render::surface::Surface;
 use edos_render::text::Style;
 use edos_render::theme::Theme;
 use edos_render::widgets::{text_height, text_width};
 use edos_render::window::{
-    flags::FLAG_UNDECORATED, property, window_set, Window, WindowEvent, WindowEventType,
-    WindowListEntry,
+    Window, WindowEvent, WindowEventType, WindowListEntry, flags::FLAG_UNDECORATED, property,
+    window_set,
 };
 
 /// Width of the menu panel.
