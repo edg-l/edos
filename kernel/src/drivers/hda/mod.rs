@@ -558,7 +558,7 @@ impl DevFsDevice for HdaDspDevice {
         Ok(bytes_written)
     }
 
-    fn ioctl(&self, request: u64, arg: u64) -> Result<u64, DevFsError> {
+    fn ioctl(&self, request: u64, arg: u64, _arg_len: usize) -> Result<u64, DevFsError> {
         match request {
             AUDIO_IOCTL_SET_FORMAT => {
                 // arg encodes format as: bits [15:0] = sample_rate,

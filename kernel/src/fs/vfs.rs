@@ -1022,12 +1022,12 @@ pub fn set_times(op: &VfsOp, atime: Option<u64>, mtime: Option<u64>) -> Result<(
     op.fs.set_times(&op.relative, atime, mtime)
 }
 
-pub fn ioctl(op: &VfsOp, request: u64, arg: u64) -> Result<u64, Error> {
+pub fn ioctl(op: &VfsOp, request: u64, arg: u64, arg_len: usize) -> Result<u64, Error> {
     let _guard = op
         .inode
         .as_ref()
         .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
-    op.fs.ioctl(&op.relative, request, arg)
+    op.fs.ioctl(&op.relative, request, arg, arg_len)
 }
 
 // --- Directory mutation operations ---

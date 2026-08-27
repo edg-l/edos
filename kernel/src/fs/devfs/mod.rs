@@ -89,7 +89,20 @@ pub trait DevFsDevice: Send + Sync {
         Err(DevFsError::Unsupported)
     }
 
-    fn ioctl(&self, _request: u64, _arg: u64) -> Result<u64, DevFsError> {
+    /// Device control.
+    ///
+    /// `arg` is either a scalar the request encodes its operands into, or a
+    /// pointer to a kernel-owned buffer of **exactly `arg_len` bytes**, aligned
+    /// to 8, holding a copy of what the caller passed. `arg_len` is zero in the
+    /// scalar case.
+    ///
+    /// The length is the only thing bounding that buffer: userspace chooses it,
+    /// so an implementation reading a header out of it must check
+    /// `arg_len >= size_of::<Header>()` first, and one reading a variable-length
+    /// tail must check the header's own count against the bytes that are left.
+    /// Neither the syscall layer nor devfs can do it, since only the device
+    /// knows the shape the request names.
+    fn ioctl(&self, _request: u64, _arg: u64, _arg_len: usize) -> Result<u64, DevFsError> {
         Err(DevFsError::Unsupported)
     }
 
@@ -406,14 +419,14 @@ impl FileSystem for DevFsHandle {
         })
     }
 
-    fn ioctl(&self, path: &Path, request: u64, arg: u64) -> Result<u64, fs::Error> {
+    fn ioctl(&self, path: &Path, request: u64, arg: u64, arg_len: usize) -> Result<u64, fs::Error> {
         let normalized = path.normalize();
         let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::ioctl", self.shared);
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         drop(state);
 
         if let Some(device) = device {
-            device.ioctl(request, arg).map_err(fs::Error::from)
+            device.ioctl(request, arg, arg_len).map_err(fs::Error::from)
         } else {
             Err(fs::Error::FileNotFound)
         }

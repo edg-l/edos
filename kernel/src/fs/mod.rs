@@ -266,7 +266,9 @@ pub trait FileSystem {
     fn remove_file(&self, path: &Path) -> Result<(), Error>;
     fn flush(&self) -> Result<(), Error>;
 
-    fn ioctl(&self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
+    /// Device control. See [`crate::fs::devfs::DevFsDevice::ioctl`] for what
+    /// `arg` and `arg_len` mean and which of the two bounds the buffer.
+    fn ioctl(&self, _path: &Path, _request: u64, _arg: u64, _arg_len: usize) -> Result<u64, Error> {
         Err(Error::Unsupported)
     }
 

@@ -126,7 +126,7 @@ impl DevFsDevice for BlockDevNode {
             .map_err(|_| DevFsError::IoError)
     }
 
-    fn ioctl(&self, request: u64, _arg: u64) -> Result<u64, DevFsError> {
+    fn ioctl(&self, request: u64, _arg: u64, _arg_len: usize) -> Result<u64, DevFsError> {
         match request {
             BLOCK_IOCTL_FLUSH => BlockPageCache::global()
                 .flush_device(self.device_id)

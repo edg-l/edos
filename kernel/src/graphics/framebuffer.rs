@@ -142,20 +142,90 @@ impl FramebufferDevice {
     }
 }
 
+/// The ioctl buffer, as a device is allowed to see it.
+///
+/// `sys_ioctl` hands a device a pointer and a byte count, and userspace chose
+/// the count: every read out of the buffer has to be bounded by it, and the
+/// tail of a variable-length request has to be bounded by what the header
+/// leaves. Reading a header without checking `len` first is how a caller with
+/// `arg_len = 0` gets the kernel heap blitted to the screen.
+struct IoctlBuf {
+    ptr: *const u8,
+    len: usize,
+}
+
+impl IoctlBuf {
+    /// # Safety
+    ///
+    /// `arg` must be the buffer `sys_ioctl` copied the caller's bytes into and
+    /// `arg_len` its length, per [`DevFsDevice::ioctl`]: `arg_len` bytes
+    /// readable and writable, alive for the call, aligned to 8.
+    ///
+    /// A null `arg` is the scalar case. It is recorded as an empty buffer
+    /// rather than refused, so the requests that take no buffer still work and
+    /// every request that does read one fails its own length check.
+    unsafe fn new(arg: u64, arg_len: usize) -> Self {
+        Self {
+            ptr: arg as *const u8,
+            len: if arg == 0 { 0 } else { arg_len },
+        }
+    }
+
+    /// The request's fixed-size header, by value.
+    fn header<T: Copy>(&self) -> Result<T, DevFsError> {
+        if self.len < size_of::<T>() {
+            return Err(DevFsError::IoError);
+        }
+        // SAFETY: the buffer holds at least `size_of::<T>()` bytes, checked
+        // immediately above, and `sys_ioctl` aligned it to 8, which every
+        // header here needs at most. `T` is `Copy` and every one used with this
+        // is a `#[repr(C)]` struct of integers, so any bit pattern the caller
+        // wrote is a valid value.
+        Ok(unsafe { (self.ptr as *const T).read() })
+    }
+
+    /// The `count` `u32`s following a `T` header, checked against the bytes the
+    /// caller actually passed.
+    fn tail_u32<T>(&self, count: usize) -> Result<&[u32], DevFsError> {
+        let head = size_of::<T>();
+        let bytes = count
+            .checked_mul(size_of::<u32>())
+            .ok_or(DevFsError::IoError)?;
+        if head.checked_add(bytes).ok_or(DevFsError::IoError)? > self.len {
+            return Err(DevFsError::IoError);
+        }
+        // SAFETY: `head + count * 4` bytes are inside the buffer, checked
+        // immediately above, so the slice lies entirely within one allocation.
+        // `sys_ioctl` aligned that allocation to 8 and `head` is a multiple of
+        // 4 in every header this is used with, so the tail is 4-aligned; every
+        // bit pattern of `u32` is valid. The borrow ends before `ioctl`
+        // returns, and the buffer outlives the call.
+        Ok(unsafe { core::slice::from_raw_parts(self.ptr.add(head) as *const u32, count) })
+    }
+
+    /// The buffer as a `T` to write the answer into.
+    fn out<T>(&self) -> Result<*mut T, DevFsError> {
+        if self.len < size_of::<T>() {
+            return Err(DevFsError::IoError);
+        }
+        Ok(self.ptr as *mut T)
+    }
+}
+
 impl DevFsDevice for FramebufferDevice {
-    fn ioctl(&self, request: u64, arg: u64) -> Result<u64, DevFsError> {
+    fn ioctl(&self, request: u64, arg: u64, arg_len: usize) -> Result<u64, DevFsError> {
+        // SAFETY: `arg` and `arg_len` are this call's own parameters, and
+        // `DevFsDevice::ioctl` documents them as exactly the buffer and length
+        // `IoctlBuf` asks for.
+        let buf = unsafe { IoctlBuf::new(arg, arg_len) };
+
         match request {
             FB_IOCTL_RENDER => {
                 // No-op: we write directly to the framebuffer in draw/draw_rect.
                 Ok(0)
             }
             FB_IOCTL_DRAW_RECT => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
-                // arg points to kernel-copied ioctl buffer (safe to read)
-                let rect = unsafe { &*(arg as *const FramebufferRect) };
-
+                let rect: FramebufferRect = buf.header()?;
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 display
                     .lock()
@@ -163,13 +233,7 @@ impl DevFsDevice for FramebufferDevice {
                 Ok(0)
             }
             FB_IOCTL_DRAW => {
-                // The generic ioctl layer has already copied the entire user buffer
-                // (header + pixel data) into a kernel Vec<u8>. The `arg` pointer
-                // points into that kernel buffer, so it is safe to read.
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
-                let header = unsafe { *(arg as *const FramebufferDraw) };
+                let header: FramebufferDraw = buf.header()?;
 
                 if header.width == 0 || header.height == 0 {
                     return Err(DevFsError::IoError);
@@ -184,12 +248,12 @@ impl DevFsDevice for FramebufferDevice {
                     return Err(DevFsError::IoError);
                 }
 
-                // Pixel data follows the header in the same kernel buffer.
-                let data_ptr =
-                    unsafe { (arg as *const u8).add(core::mem::size_of::<FramebufferDraw>()) };
-                let pixels = unsafe {
-                    core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
-                };
+                // The pixels follow the header in the same buffer. `tail_u32`
+                // is what says they are really there: the count agreeing with
+                // `width * height` says only that the caller is consistent
+                // about a rectangle it may never have sent.
+                let count = usize::try_from(header.pixel_count).map_err(|_| DevFsError::IoError)?;
+                let pixels = buf.tail_u32::<FramebufferDraw>(count)?;
 
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 display.lock().draw(
@@ -202,16 +266,16 @@ impl DevFsDevice for FramebufferDevice {
                 Ok(0)
             }
             FB_IOCTL_SCREEN_INFO => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
+                let out = buf.out::<FramebufferInfo>()?;
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 let info = display.lock().screen_info();
-                let info_ptr = arg as *mut FramebufferInfo;
+                // SAFETY: `out` checked the buffer holds a whole
+                // `FramebufferInfo` and `sys_ioctl` aligned it; the write is
+                // the only reference to it in this call.
                 unsafe {
-                    (*info_ptr).width = info.width as u32;
-                    (*info_ptr).height = info.height as u32;
-                    (*info_ptr).refresh_rate = info.refresh_rate;
+                    (*out).width = info.width as u32;
+                    (*out).height = info.height as u32;
+                    (*out).refresh_rate = info.refresh_rate;
                 }
                 Ok(0)
             }
@@ -220,14 +284,14 @@ impl DevFsDevice for FramebufferDevice {
                 Ok(display.lock().flip())
             }
             FB_IOCTL_MMAP_INFO => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
+                let out = buf.out::<FramebufferMmapInfo>()?;
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 let info = display.lock().mmap_info();
-                let info_ptr = arg as *mut FramebufferMmapInfo;
+                // SAFETY: `out` checked the buffer holds a whole
+                // `FramebufferMmapInfo` and `sys_ioctl` aligned it; the write
+                // is the only reference to it in this call.
                 unsafe {
-                    *info_ptr = info;
+                    *out = info;
                 }
                 Ok(0)
             }
@@ -269,10 +333,7 @@ impl DevFsDevice for FramebufferDevice {
                 Ok(0)
             }
             FB_IOCTL_FLIP_RECTS => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
-                let list = unsafe { &*(arg as *const FramebufferFlipRects) };
+                let list: FramebufferFlipRects = buf.header()?;
                 let n = (list.count as usize).min(crate::graphics::MAX_FLIP_RECTS);
                 if n == 0 {
                     return Ok(0);
@@ -293,29 +354,22 @@ impl DevFsDevice for FramebufferDevice {
                 ))
             }
             FB_IOCTL_FLIP_RECT => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
-                let rect = unsafe { *(arg as *const FramebufferFlipRect) };
+                let rect: FramebufferFlipRect = buf.header()?;
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 Ok(display
                     .lock()
                     .flip_rect(rect.x, rect.y, rect.width, rect.height))
             }
             FB_IOCTL_SET_CURSOR => {
-                if arg == 0 {
+                let header: FramebufferSetCursor = buf.header()?;
+                let expected = header
+                    .width
+                    .checked_mul(header.height)
+                    .ok_or(DevFsError::IoError)?;
+                if header.pixel_count != expected {
                     return Err(DevFsError::IoError);
                 }
-                let header = unsafe { *(arg as *const FramebufferSetCursor) };
-                let expected = (header.width * header.height) as u64;
-                if header.pixel_count as u64 != expected {
-                    return Err(DevFsError::IoError);
-                }
-                let data_ptr =
-                    unsafe { (arg as *const u8).add(core::mem::size_of::<FramebufferSetCursor>()) };
-                let pixels = unsafe {
-                    core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
-                };
+                let pixels = buf.tail_u32::<FramebufferSetCursor>(header.pixel_count as usize)?;
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
                 if !display
                     .lock()
@@ -326,10 +380,7 @@ impl DevFsDevice for FramebufferDevice {
                 Ok(0)
             }
             FB_IOCTL_MOVE_CURSOR => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
-                let pos = unsafe { *(arg as *const FramebufferMoveCursor) };
+                let pos: FramebufferMoveCursor = buf.header()?;
                 // A placement that disagrees with where the pointer is, while
                 // the display is following the pointer itself, moves the plane
                 // off the pointer until the next report arrives to correct it.
@@ -353,15 +404,12 @@ impl DevFsDevice for FramebufferDevice {
                 Ok(0)
             }
             FB_IOCTL_TRACK_POINTER => {
-                if arg == 0 {
-                    return Err(DevFsError::IoError);
-                }
-                let enable = unsafe { *(arg as *const u32) } != 0;
+                let enable: u32 = buf.header()?;
                 // Not validated against the display having a plane: a display
                 // without one answers `false` from `move_cursor` and the
                 // tracking store is inert, and the caller learned which it has
                 // from `FB_IOCTL_SET_CURSOR` before asking.
-                CURSOR_TRACKS_POINTER.store(enable, Ordering::Relaxed);
+                CURSOR_TRACKS_POINTER.store(enable != 0, Ordering::Relaxed);
                 Ok(0)
             }
             _ => Err(DevFsError::Unsupported),

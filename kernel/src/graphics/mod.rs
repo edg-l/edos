@@ -412,6 +412,14 @@ impl VirtioGpuDisplay {
         for (src_row, dst_y) in (src_offset_y..).zip(start_y..end_y) {
             let src_start = src_row * src_width + src_offset_x;
             let dst_start = dst_y * pixels_per_row + start_x;
+            // SAFETY: `fb` is the mapped framebuffer, `pixels_per_row * height`
+            // `u32`s long. `dst_y < end_y <= height` and
+            // `start_x + row_len = end_x <= width <= pixels_per_row`, so the
+            // destination row lies inside it. The source is bounded by the
+            // `last_src_index > src.len()` check above, which covers the last
+            // row this loop reads and so every earlier one. The two are
+            // distinct allocations: `src` is a caller's slice and `fb` is
+            // device memory.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     src[src_start..].as_ptr(),
@@ -445,6 +453,12 @@ impl VirtioGpuDisplay {
 
         // Fill first row, then memcpy to remaining rows.
         let first_dst = start_y * pixels_per_row + start_x;
+        // SAFETY: every offset written is `dst_y * pixels_per_row + start_x + i`
+        // with `dst_y < end_y <= height` and
+        // `start_x + i < start_x + row_len = end_x <= width <= pixels_per_row`,
+        // so all of them are inside the mapped framebuffer. The copies read the
+        // first row, which the loop above has just filled, and write a later
+        // one; distinct rows of the same allocation cannot overlap.
         unsafe {
             for i in 0..row_len {
                 fb.add(first_dst + i).write(color);
@@ -765,6 +779,11 @@ impl DirectFramebuffer {
                 let src_start = src_row * src_width + src_offset_x;
                 let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
 
+                // SAFETY: the same bounds as the slow path below, plus the
+                // `last_src_index > src.len()` check above bounding the source.
+                // `back_y + dst_y` is a row of the back page, which is inside
+                // the mapping by construction: `back_page_y_offset` is 0 or one
+                // screen height, and the buffer is sized for both pages.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         src[src_start..].as_ptr(),
@@ -796,6 +815,12 @@ impl DirectFramebuffer {
                     conv[i] = red_lut[r] | green_lut[g] | blue_lut[b];
                 }
 
+                // SAFETY: `conv` is `converted_row_buffer` narrowed to
+                // `row_len`, so it holds exactly the `row_len` `u32`s being
+                // read, and the loop above wrote all of them. The destination
+                // is the same in-bounds back-page row as the fast path. The
+                // row buffer is a heap allocation and the framebuffer is device
+                // memory, so they do not overlap.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         conv.as_ptr(),
@@ -837,6 +862,11 @@ impl DirectFramebuffer {
 
         for dst_y in start_y..end_y {
             let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
+            // SAFETY: `row_buf` is `converted_row_buffer` narrowed to `row_len`
+            // and filled immediately above. `dst_y < end_y <= height` and
+            // `start_x + row_len = end_x <= width <= pixels_per_row`, so the
+            // destination row is inside the back page and inside the mapping.
+            // Heap buffer and device memory do not overlap.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     row_buf.as_ptr(),

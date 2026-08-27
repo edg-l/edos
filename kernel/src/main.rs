@@ -50,6 +50,7 @@ mod debug;
 mod drivers;
 mod fs;
 mod gdt;
+#[deny(clippy::undocumented_unsafe_blocks)]
 mod graphics;
 #[deny(clippy::undocumented_unsafe_blocks)]
 mod interrupts;

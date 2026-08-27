@@ -110,7 +110,12 @@ impl DevFsDevice for LogDevfs {
         Ok(data.len())
     }
 
-    fn ioctl(&self, _request: u64, _arg: u64) -> Result<u64, crate::fs::DevFsError> {
+    fn ioctl(
+        &self,
+        _request: u64,
+        _arg: u64,
+        _arg_len: usize,
+    ) -> Result<u64, crate::fs::DevFsError> {
         Err(crate::fs::DevFsError::Unsupported)
     }
 

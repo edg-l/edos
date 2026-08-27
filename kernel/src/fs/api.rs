@@ -320,9 +320,9 @@ pub fn flush_file(path: &Path, inode: Option<Arc<VfsInode>>) -> Result<(), Error
     vfs::flush_file(&op)
 }
 
-pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
+pub fn ioctl(path: &Path, request: u64, arg: u64, arg_len: usize) -> Result<u64, Error> {
     on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
-        vfs::ioctl(op, request, arg)
+        vfs::ioctl(op, request, arg, arg_len)
     })
 }
 

@@ -61,14 +61,19 @@ pub fn sys_ioctl(
                     return Err(Errno::EFAULT);
                 }
 
-                let mut buffer: Vec<u8> = vec![0u8; arg_len];
+                // A `u64` element type rather than `u8`, so the allocation is
+                // 8-aligned: devices read structs and `u32` slices straight out
+                // of it, and `Vec<u8>` promises alignment 1. The byte length
+                // stays `arg_len`; the rounding only ever adds slack past the
+                // end, which nothing is told about.
+                let mut buffer: Vec<u64> = vec![0u64; arg_len.div_ceil(8)];
+                let buf_ptr = buffer.as_mut_ptr() as *mut u8;
 
                 if copy_in
-                    // SAFETY: `buffer` was allocated with `arg_len` bytes
-                    // immediately above, which is the length named.
-                    && !unsafe {
-                        try_copy_from_user(buffer.as_mut_ptr(), user_ptr as *const u8, arg_len)
-                    }
+                    // SAFETY: `buffer` holds `arg_len.div_ceil(8)` `u64`s,
+                    // which is at least `arg_len` bytes, and every bit pattern
+                    // of `u64` is valid so writing bytes into it is defined.
+                    && !unsafe { try_copy_from_user(buf_ptr, user_ptr as *const u8, arg_len) }
                 {
                     return Err(Errno::EFAULT);
                 }
@@ -77,20 +82,21 @@ pub fn sys_ioctl(
 
                 let result = if let Some(ref device) = devfs_device {
                     device
-                        .ioctl(request, buffer.as_mut_ptr() as u64)
+                        .ioctl(request, buf_ptr as u64, arg_len)
                         .map(|v| v as i64)
                         .map_err(crate::fs::Error::from)
                 } else {
-                    fs_api::ioctl(&file.path, request, buffer.as_mut_ptr() as u64).map(|v| v as i64)
+                    fs_api::ioctl(&file.path, request, buf_ptr as u64, arg_len).map(|v| v as i64)
                 };
 
                 match result {
                     Ok(value) => {
                         if copy_out
-                            // SAFETY: `buffer` is still the `arg_len`
-                            // allocation made above; the driver wrote into it
-                            // in place and cannot have changed its length.
-                            && !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) }
+                            // SAFETY: `buffer` is still the allocation made
+                            // above and still at least `arg_len` bytes; the
+                            // driver wrote into it in place and cannot have
+                            // changed its length.
+                            && !unsafe { try_copy_to_user(user_ptr, buf_ptr, arg_len) }
                         {
                             return Err(Errno::EFAULT);
                         }
@@ -101,13 +107,16 @@ pub fn sys_ioctl(
             } else {
                 interrupts::enable();
 
+                // No buffer was copied, so `arg` is a scalar and there are no
+                // bytes behind it: `arg_len` 0 tells the device exactly that,
+                // whatever the caller passed.
                 let result = if let Some(ref device) = devfs_device {
                     device
-                        .ioctl(request, arg)
+                        .ioctl(request, arg, 0)
                         .map(|v| v as i64)
                         .map_err(crate::fs::Error::from)
                 } else {
-                    fs_api::ioctl(&file.path, request, arg).map(|v| v as i64)
+                    fs_api::ioctl(&file.path, request, arg, 0).map(|v| v as i64)
                 };
 
                 match result {

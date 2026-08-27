@@ -684,11 +684,19 @@ each I/O direction and referred to from the rest. `enable_lapic` and
 called once", `enable_io_apic`'s single 75-line `unsafe` block around mostly
 safe mapping code became four blocks around the four calls that are actually
 unsafe, and its two byte-identical redirection-entry setups became one loop.
-463 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+`graphics/` is the eighth, and it took a fix before it could take a comment:
+three of its blocks were not sound, because `DevFsDevice::ioctl` had no length
+parameter and the framebuffer handlers read headers and pixel tails out of a
+buffer userspace had chosen the size of. `arg_len` is now threaded from
+`sys_ioctl` through `fs::api`, `fs::vfs` and `FileSystem::ioctl` down to the
+device, the buffer is a `Vec<u64>` so the structs read out of it are aligned,
+and every framebuffer arm goes through a bounds-checking `IoctlBuf`.
+`doc/WORKING-NOTES.md` carries the mechanism.
+445 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '"'"'^\s+--> '"'"'`: `usb/xhci/mod.rs` (77), `ahci/port.rs` (38),
+grep -cE '^\s+--> '`: `usb/xhci/mod.rs` (77), `ahci/port.rs` (38),
 `virtio/gpu.rs` (33), `thread/scheduler.rs` (26), `fs/efs/mod.rs` (18) and
-`graphics/` (18) first. The lint sits
+`virtio/queue.rs` (14) first. The lint sits
 commented out in `kernel/Cargo.toml`'s `[lints.clippy]` beside the three that
 are on: moving it up from the last module's `mod` declaration is the commit
 that closes this entry.
