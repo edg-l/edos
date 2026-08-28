@@ -460,6 +460,10 @@ impl<'a, T: Linked> Drop for Drain<'a, T> {
 #[macro_export]
 macro_rules! impl_linked {
     ($type:ty, $field:ident) => {
+        // SAFETY: `$field` is a `Link` field of `$type`, so `links` hands back a
+        // pointer into the container it was given and `from_link` subtracts the
+        // same field's offset to get back to it. The two are inverses for every
+        // pointer to a live `$type`, which is what `Linked` asks of an impl.
         unsafe impl $crate::Linked for $type {
             #[inline]
             unsafe fn links(ptr: *const Self) -> *mut $crate::Link {

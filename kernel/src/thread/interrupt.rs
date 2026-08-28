@@ -10,7 +10,16 @@ use crate::{
     },
 };
 
-// Naked function for timer interrupt handler
+/// Timer interrupt entry.
+///
+/// # Safety
+/// This is an interrupt entry point, not a function: its address may only be
+/// installed in an IDT gate for the LAPIC timer vector, which `idt.rs` does.
+/// It assumes the CPU has pushed an interrupt frame, it pivots the stack and
+/// it leaves through `iretq`, so calling it from Rust returns to whatever the
+/// registers below the call happen to spell. The CPU it runs on must already
+/// have its GS base, its per-CPU scheduler stack and its runqueue in place,
+/// since the tick reaches all three.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_interrupt_handler() {

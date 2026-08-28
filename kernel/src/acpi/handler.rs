@@ -28,6 +28,13 @@ pub struct AcpiHandler;
 
 // ACPI handler manages its own "virtual address space", this is why using the physical address mapping isnt correct here, and we need to actually map
 impl Handler for AcpiHandler {
+    /// # Safety
+    /// `physical_address` must name `size` bytes of physical memory that hold a
+    /// valid `T` and that no other mapping writes for as long as the returned
+    /// `PhysicalMapping` lives -- that is, firmware-owned ACPI tables and
+    /// nothing the kernel's own frame allocator hands out. The mapping is
+    /// released by `unmap_physical_region`, so the caller must not leak it: the
+    /// virtual range comes from `vmalloc` and is not reclaimed otherwise.
     unsafe fn map_physical_region<T>(
         &self,
         physical_address: usize,

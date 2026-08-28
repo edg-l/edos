@@ -585,6 +585,11 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
 }
 
 impl FrameDeallocator<Size4KiB> for BitmapFrameAllocator {
+    /// # Safety
+    /// `frame` must have come from this allocator and must no longer be reachable
+    /// through any page table or any other reference: the frame goes straight
+    /// back on the free bitmap, so a surviving mapping becomes a use-after-free
+    /// the next allocation hands to an unrelated owner.
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
         // SAFETY: forwards to the inherent deallocate_frame, whose contract is the
         // trait method's: the caller guarantees the frame is unused and came from

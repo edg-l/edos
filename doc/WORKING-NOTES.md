@@ -11818,3 +11818,54 @@ which is why it survived; that is not a reason it was sound.
 `setup_framebuffer`, when nothing is in flight, so it never misbehaved -- but
 the invariant is "the buffer is drained before it is written", and one path
 exempting itself is how it stops being true. It calls it now.
+
+## I5b, the `unsafe fn` contracts: what a script has to look for (2026-08-28)
+
+I5a's half is a lint; I5b's has none and can have none, because a caller of an
+undocumented `unsafe fn` has nothing to uphold and so there is nothing to check
+mechanically. The sweep is a script, and `grep` is wrong in both directions:
+
+- `grep -B3 'unsafe fn'` reports seven declarations as bare when they are not.
+  Their `# Safety` section sits above a **multi-line `#[expect(...)]`** -- the
+  `mut_from_ref` suppressions on the page caches -- so a fixed-size window of
+  preceding lines lands inside the attribute. The walk-back has to skip
+  attributes, including their continuation lines, before it gives up.
+- `grep -c '\bunsafe fn '` misses `unsafe extern "C" fn`, which is where the
+  kernel's three entry points are: `kmain`, `ap_start` and the naked
+  `timer_interrupt_handler`. That is why the tree-wide count read 65 while a
+  real parse read 73.
+
+The seven that were genuinely bare split two ways, and neither is the shape
+I5a's blocks were.
+
+**Trait impl methods** (`GlobalAlloc::alloc`/`dealloc`,
+`FrameDeallocator::deallocate_frame`, `AcpiHandler::map_physical_region`) cannot
+restate the trait's contract, since the trait owns it. What they can say is
+which part of it *this* implementation leans on. `dealloc`'s is the interesting
+one: a block may be freed on a CPU other than the one that allocated it, because
+`try_percpu_dealloc` derives the size class from `layout` alone and pushes onto
+whichever CPU is doing the freeing. The pair (`ptr`, `layout`) matters; the CPU
+does not. Somebody will eventually read the per-CPU cache and assume the
+opposite.
+
+**`extern "C"` entry points** have a contract that is about *who* enters and how
+many times, not about pointer validity: Limine once on the BSP for `kmain`,
+Limine once per AP for `ap_start` with that AP's own `MpInfo` (its `lapic_id` is
+taken as the identity of the CPU executing), and, for
+`timer_interrupt_handler`, an IDT gate for the LAPIC timer vector on a CPU that
+already has its GS base and per-CPU scheduler stack. That last one is not
+callable from Rust at all -- it assumes a CPU-pushed interrupt frame, pivots the
+stack and leaves through `iretq` -- and saying so is the whole value of the
+section.
+
+**The plausible wrong rule: "no `unsafe` block in the body, so it should be a
+safe fn".** Sixteen `unsafe fn` across the tree have a body with no unsafe
+operation in it. `BlockBuffer::owned` stores a raw pointer; `deallocate_frame`
+returns a frame to the bitmap; `uaccess::setup_fault_resume` hands out the
+address of per-CPU state. Every one is safe to *execute* and unsound to *have
+executed* -- the UB is deferred to whoever next dereferences, maps, or migrates.
+Do not strip `unsafe` from these. The one real instance of the mistake was
+`programs/fstest`'s `edos_sync`, an `unsafe fn` around a `sync` syscall that
+takes no arguments and therefore has no contract; it is a safe fn now, and
+`scripts/fs-regression` is what proves it still flushes (it writes, syncs,
+reboots, and reads back from a cold cache).

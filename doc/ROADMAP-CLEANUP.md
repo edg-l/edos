@@ -10,14 +10,15 @@ named. Where it does not, the entry says so.
 
 **State as of 2026-08-28.** 27 of the 32 entries are struck: I6 landed with the
 `[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`,
-G2's named `uaccess.rs` remainder is closed, and I5a is finished -- every
-`unsafe` block in `kernel/src` carries a `// SAFETY:` and
-`undocumented_unsafe_blocks` is denied crate-wide in `kernel/Cargo.toml`. Five
-are open, in the order the evidence suggests: C2 (the parser exists, 125
-programs have not adopted it), H1 and H3 (two long functions), G3 (split
-`WORKING-NOTES.md`), and the gates I2 and I5b. The numbers each entry quotes were remeasured on the date it names, and
-the count above is `grep -c '^### ' minus the struck ones`, not a tally kept by
-hand.
+G2's named `uaccess.rs` remainder is closed, and I5 is finished in both halves
+-- every `unsafe` block in `kernel/src` carries a `// SAFETY:` with
+`undocumented_unsafe_blocks` denied crate-wide in `kernel/Cargo.toml`, and every
+`unsafe fn` in the crate carries a `# Safety` section. Five are open, in the
+order the evidence suggests: C2 (the parser exists, 125 programs have not
+adopted it), H1 and H3 (two long functions), G3 (split `WORKING-NOTES.md`), and
+the gate I2. The numbers each entry quotes were remeasured on the date it names,
+and the count above is `grep '^### ' | grep -c '~~'` against `grep -c '^### '`,
+not a tally kept by hand.
 
 The conventions these entries are written against, and the sources behind them,
 are `doc/rust-style.md`. I5 and I6 are its measurements; the rest of this file
@@ -628,7 +629,7 @@ unused, and restores the tree from a copy taken before the first edit -- on a
 signal too, and without running git, so a dirty tree is safe. It reports the ten
 survivors E1 annotated and nothing else.
 
-### I5. Document the kernel's unsafe, both halves (S2, E3) -- I5a done
+### ~~I5. Document the kernel's unsafe, both halves~~ (S2, E3) -- done
 
 `unsafe` is documented twice, for two different readers, and this entry used to
 name only the first. `doc/rust-style.md` states the rule and the sources; the
@@ -816,20 +817,48 @@ came out and the lint moved into the manifest, which is where the entry set out
 to put it. Verify with `cd kernel && touch src/main.rs && cargo clippy --target
 x86_64-unknown-none 2>&1 | grep -cE '^\s+--> '`, which reports 0.
 
-**I5b, the contracts.** 65 `unsafe fn` declarations against 70 `# Safety`
-sections -- a section also belongs on an `unsafe trait` and on a safe fn whose
-contract is in a raw pointer, so the surplus is not slack -- remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
-modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented
-`unsafe fn` has nothing to uphold and cannot be reviewed. Independent of I5a and
-the smaller of the two.
+**~~I5b, the contracts.~~ Done.** 65 `unsafe fn` declarations against 75
+`# Safety` sections -- a section also belongs on an `unsafe trait` and on a safe
+fn whose contract is in a raw pointer, so the surplus is not slack -- remeasured
+2026-08-28 with `doc/rust-style.md`'s commands. No lint finds these and none can:
+a caller of an undocumented `unsafe fn` has nothing to uphold and cannot be
+reviewed, so the sweep is a script rather than a gate, and the one that closed it
+walks back over each declaration's attributes and doc comment looking for the
+section (`grep` alone reports the seven multi-line `#[expect(...)]` sites as
+missing when they are not, and misses `unsafe extern "C" fn` entirely).
 
-**Done when** every `unsafe impl` in `kernel/src` carries a `// SAFETY:`
-comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
-`kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
-the modules it covers carries a `# Safety` section. The impls are done,
-twenty-three of the twenty-four modules in `main.rs` hold their own deny, and
-inside the one left -- `drivers/` -- eighteen of its twenty-one submodules do
-too.
+Seven were left in `kernel/src`, and they fall in two shapes. Four are trait
+impl methods, where the trait states the contract and the impl states which part
+of it this implementation actually leans on: `GlobalAlloc::dealloc` accepts a
+block freed on a CPU other than the one that allocated it, because the size
+class comes from `layout` and the cache it lands in is whichever CPU is freeing;
+`FrameDeallocator::deallocate_frame` needs the frame unreachable through any
+page table, since it goes straight back on the bitmap; `AcpiHandler::map_physical_region`
+needs firmware-owned physical memory the frame allocator will never hand out.
+The other three are `extern "C"` entry points nothing in Rust calls -- `kmain`,
+`ap_start` and the naked `timer_interrupt_handler` -- whose contract is *who*
+may enter and how many times: the bootloader once on the BSP, the bootloader
+once per AP with that AP's own `MpInfo`, and an IDT gate for the LAPIC timer
+vector on a CPU whose GS base and scheduler stack are already in place. Outside
+the kernel, `libs/intrusive_list`'s two are the `impl_linked!` macro's expansion
+of a trait whose declaration carries both sections (the `unsafe impl` it emits
+gained the field-offset argument), and `programs/fstest`'s `edos_sync` was an
+`unsafe fn` with no contract at all -- a bare `sync` syscall taking no
+arguments -- so it became a safe fn over an `unsafe` block, per
+`doc/rust-style.md`'s rule that merely dangerous is not `unsafe`.
+
+Sixteen `unsafe fn` across the tree have a body containing no `unsafe`
+operation, which is *not* the same defect. `BlockBuffer::owned` stores a raw
+pointer, `deallocate_frame` returns a frame to the bitmap, `setup_fault_resume`
+hands out the address of per-CPU state: each is safe to execute and unsound to
+*have executed*, so the UB is deferred rather than absent and `unsafe fn` is the
+right signature. `doc/rust-style.md` records the distinction, because "no
+`unsafe` block, so it should be a safe fn" is the plausible wrong rule.
+
+**~~Done when~~ Done:** every `unsafe impl` in `kernel/src` carries a
+`// SAFETY:` comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide
+from `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn`
+in the crate carries a `# Safety` section.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 

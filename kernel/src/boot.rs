@@ -150,6 +150,15 @@ pub fn boot_info() -> &'static BootInfo {
     unsafe { BOOT_INFO.get().unwrap_unchecked() }
 }
 
+/// Kernel entry point.
+///
+/// # Safety
+/// Only Limine may call this, once, on the BSP, with the boot protocol's state
+/// still intact: the base revision answered, the requests filled in, and the
+/// bootloader-provided stack and identity mappings still live. It is the first
+/// Rust to run, so it installs the BSP's GS base and fills `BOOT_INFO` before
+/// anything else can read either; a second entry would redo that under a
+/// kernel that is already scheduling.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     // All limine requests must also be referenced in a called function, otherwise they may be

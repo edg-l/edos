@@ -62,7 +62,7 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            unsafe { edos_sync() };
+            edos_sync();
             report(&format!("FSTEST WROTE {} files", SIZES.len()));
         }
         "verify" => {
@@ -109,7 +109,10 @@ fn main() {
     }
 }
 
-unsafe fn edos_sync() {
+/// Flush the page cache to disk (`SYS_SYNC`, 162).
+fn edos_sync() {
+    // SAFETY: `sync` takes no arguments and returns none, so the only registers
+    // the call touches are the ones the clobber list names.
     unsafe {
         core::arch::asm!("syscall", in("rax") 162u64, out("rcx") _, out("r11") _);
     }

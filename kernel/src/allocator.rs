@@ -219,6 +219,11 @@ pub fn mark_gs_ready() {
 // lock, so two CPUs allocating at once never observe each other's
 // intermediate state.
 unsafe impl GlobalAlloc for Allocator {
+    /// # Safety
+    /// `layout` must have a non-zero size, as `GlobalAlloc::alloc` requires. The
+    /// per-CPU fast path additionally reads the current CPU's cache through the
+    /// GS base, so a caller that has disabled interrupts must not be moved
+    /// between CPUs while this runs; `try_percpu_alloc` establishes that itself.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Try per-CPU cache first (interrupts disabled for the duration).
         let ptr = if gs_ready()
@@ -238,6 +243,12 @@ unsafe impl GlobalAlloc for Allocator {
         ptr
     }
 
+    /// # Safety
+    /// `ptr` must be a block this allocator returned, still live, and `layout`
+    /// must be the one it was allocated with. A block may be freed on a CPU
+    /// other than the one that allocated it -- the per-CPU cache it lands in is
+    /// whichever CPU is freeing, and the size class is derived from `layout`
+    /// alone -- so the pair matters and the CPU does not.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         #[cfg(feature = "heap-poison")]
         // SAFETY: `GlobalAlloc::dealloc` is handed the live allocation `layout`

@@ -166,6 +166,13 @@ pub fn init() {
 }
 
 /// Limine AP entrypoint.
+///
+/// # Safety
+/// Only the bootloader may call this, once per application processor, on the
+/// AP itself and with that AP's own `MpInfo`: `lapic_id` is taken as the
+/// identity of the CPU executing, and the whole body is one-time bring-up --
+/// GS base, GDT, IDT, LAPIC -- that a second entry would redo underneath the
+/// CPU's own running threads. The BSP goes through `kmain` instead.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
     // Per-CPU data and core-local tables

@@ -63,7 +63,7 @@ Coverage in `kernel/src`, measured 2026-08-28:
 | `unsafe { ... }` blocks | 729 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
 | `// SAFETY:` comments | 770 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe fn` declarations | 65 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
-| `# Safety` sections | 68 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
+| `# Safety` sections | 75 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe impl` | 41 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
 So the block half is done: `undocumented_unsafe_blocks` is denied crate-wide in
@@ -80,7 +80,27 @@ nothing about an undocumented `unsafe fn`, whose contract has no lintable form.
 
 `unsafe` marks a risk of undefined behaviour and nothing else. A function that is
 merely dangerous to call is a safe function with a `# Panics` section or a
-`Result`, not an `unsafe fn`.
+`Result`, not an `unsafe fn`. `programs/fstest`'s `edos_sync` was the tree's last
+example of the mistake: a `sync` syscall taking no arguments, so its caller had
+nothing to uphold, and it is now a safe fn over an `unsafe` block.
+
+The converse rule does not hold, and the plausible version of it is wrong.
+Sixteen `unsafe fn` in this tree have a body with no `unsafe` operation in it --
+`BlockBuffer::owned` stores a raw pointer, `BitmapFrameAllocator::deallocate_frame`
+returns a frame to the bitmap, `uaccess::setup_fault_resume` hands out the
+address of per-CPU state. Each is safe to *execute* and unsound to *have
+executed*: the undefined behaviour is deferred to whoever next dereferences the
+pointer, maps the frame, or migrates off the CPU. The contract is the reason for
+`unsafe fn`, not the presence of a block, so "no `unsafe` block, therefore it
+should be a safe fn" would strip the marker off exactly the functions whose
+obligation outlives the call.
+
+No lint finds a missing `# Safety` section and none can, so the sweep is a
+script: walk back from each declaration over its attributes and doc comment and
+look for the heading. A plain `grep` is not enough in either direction -- it
+reports the seven declarations preceded by a multi-line `#[expect(...)]` as
+missing when they are not, and `\bunsafe fn ` misses `unsafe extern "C" fn`
+entirely, which is where the kernel's three entry points live.
 
 ## Traits
 
