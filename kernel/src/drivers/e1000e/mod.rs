@@ -38,8 +38,15 @@ pub const NUM_TX_DESC: usize = 256;
 pub const RX_BUFFER_SIZE: usize = 4096;
 
 pub struct E1000e {
+    /// Base of the NIC's BAR0 window, mapped uncached by [`E1000e::new`] and
+    /// never unmapped. Register accesses through it are volatile: the 82574
+    /// writes its own status, interrupt-cause and head registers.
     mmio_base: VirtAddr,
+    /// The receive descriptor ring, `NUM_RX_DESC` [`RxDescriptor`]s, programmed
+    /// into RDBAL/RDBAH and written by the NIC as packets land.
     rx_ring: DmaBuffer,
+    /// The transmit descriptor ring, `NUM_TX_DESC` [`TxDescriptor`]s, programmed
+    /// into TDBAL/TDBAH; the NIC sets DD in each as it drains one.
     tx_ring: DmaBuffer,
     rx_buffers: Box<[Option<DmaBuffer>; NUM_RX_DESC]>,
     tx_buffers: Box<[Option<DmaBuffer>; NUM_TX_DESC]>,
@@ -50,11 +57,17 @@ pub struct E1000e {
 }
 
 impl E1000e {
+    // Both accessors take an `offset` from the 82574 register map, and every
+    // caller passes one of the module's own constants, so `mmio_base + offset`
+    // lands inside the mapped BAR0 window at the register's natural 4-byte
+    // alignment. Both are volatile because the NIC drives the registers.
     fn read_reg(&self, offset: u32) -> u32 {
+        // SAFETY: see the note above this pair.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset as u64).as_ptr::<u32>()) }
     }
 
     fn write_reg(&self, offset: u32, val: u32) {
+        // SAFETY: see the note above this pair.
         unsafe {
             core::ptr::write_volatile((self.mmio_base + offset as u64).as_mut_ptr::<u32>(), val)
         }
@@ -143,6 +156,11 @@ impl E1000e {
         nic.write_reg(ITR, 0x0028);
 
         // Zero-fill descriptor rings
+        // SAFETY: both rings are DMA buffers `nic` owns, and each is zeroed over
+        // exactly its own recorded `size`. The ring base registers have not been
+        // programmed yet and the NIC's interrupts were just masked, so no DMA
+        // engine is reading either buffer. All-zero is a valid descriptor: it is
+        // what "not ready" means for both rings.
         unsafe {
             core::ptr::write_bytes(nic.rx_ring.as_ptr(), 0, nic.rx_ring.size);
             core::ptr::write_bytes(nic.tx_ring.as_ptr(), 0, nic.tx_ring.size);
@@ -155,6 +173,11 @@ impl E1000e {
                 .allocate_sized(RX_BUFFER_SIZE)
                 .map_err(|e| format!("rx buf alloc: {:?}", e))?;
             let phys = buf.phys_addr().as_u64();
+            // SAFETY: `rx_ring` holds `NUM_RX_DESC` descriptors and `i` is below
+            // that, so the entry is in bounds and naturally aligned. The `&mut`
+            // is unique -- the ring is still private to this bring-up and the
+            // NIC has not been given RDBAL/RDBAH yet, so nothing else reads or
+            // writes the descriptor.
             unsafe {
                 let desc = &mut *rx_descs.add(i);
                 desc.buffer_addr = phys;
@@ -247,6 +270,12 @@ impl E1000e {
 
     pub fn receive(&mut self) -> Option<(DmaBuffer, usize)> {
         let rx_descs = self.rx_ring.as_ptr() as *mut RxDescriptor;
+        // SAFETY: `rx_tail` is kept modulo `NUM_RX_DESC`, which is how many
+        // descriptors the ring holds, so the entry is in bounds and naturally
+        // aligned. The `&mut` is unique because `&mut self` gives this the whole
+        // NIC, and the NIC owns only [RDH, RDT) -- `rx_tail` is the slot just
+        // outside it, handed back only by the RDT write at the end of this
+        // function.
         let desc = unsafe { &mut *rx_descs.add(self.rx_tail) };
 
         if desc.status & RX_STATUS_DD == 0 {
@@ -279,6 +308,10 @@ impl E1000e {
     pub fn reclaim_tx_buffers(&mut self) {
         let tx_descs = self.tx_ring.as_ptr() as *mut TxDescriptor;
         while self.tx_clean != self.tx_tail {
+            // SAFETY: `tx_clean` is kept modulo `NUM_TX_DESC`, so the entry is
+            // in bounds and naturally aligned. `&mut self` makes the reference
+            // unique on the software side, and the NIC only sets DD in a
+            // descriptor it has finished with, which is what the loop tests.
             let desc = unsafe { &*tx_descs.add(self.tx_clean) };
             if desc.status & TX_STATUS_DD == 0 {
                 break;
@@ -303,11 +336,19 @@ impl E1000e {
         }
 
         let buf = dma().allocate_sized(4096).map_err(|_| "dma alloc failed")?;
+        // SAFETY: `buf` is a freshly allocated 4096-byte DMA buffer, and
+        // `data.len()` is bounded by the 1514-byte check above, so the copy
+        // stays inside it. The two allocations are distinct, so they cannot overlap,
+        // and the buffer has not been handed to the NIC yet.
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), buf.as_ptr(), data.len());
         }
 
         let tx_descs = self.tx_ring.as_ptr() as *mut TxDescriptor;
+        // SAFETY: `tx_tail` is kept modulo `NUM_TX_DESC`, so the entry is in
+        // bounds and naturally aligned. The `&mut` is unique: `&mut self` owns
+        // the ring, and the NIC owns only [TDH, TDT), which this slot joins only
+        // when TDT is advanced past it below.
         let desc = unsafe { &mut *tx_descs.add(self.tx_tail) };
         desc.buffer_addr = buf.phys_addr().as_u64();
         desc.length = data.len() as u16;
@@ -463,6 +504,12 @@ pub extern "C" fn e1000e_driver_main() -> ! {
                     ranked_lock!(RANK_NET_STACK, "e1000e::rx", crate::net::stack::net_stack());
                 let pkt = match stack.nic.receive() {
                     Some((buf, len)) => {
+                        // SAFETY: `receive` returns the buffer it took out of
+                        // the ring together with the descriptor's own length,
+                        // which the NIC bounds by `RX_BUFFER_SIZE`, so the slice
+                        // stays inside the buffer and covers bytes the NIC wrote.
+                        // The descriptor has been refilled with a different
+                        // buffer, so no DMA is landing in this one.
                         let data =
                             unsafe { core::slice::from_raw_parts(buf.as_ptr(), len) }.to_vec();
                         let _ = dma().dealloc(buf);

@@ -748,7 +748,7 @@ a data race against a writer arriving in between, so it now goes through a new
 
 `drivers/` is the last module, and it is taken a submodule at a time rather
 than whole: the `#[deny]` goes on each `pub mod` line in `drivers/mod.rs`, so
-fourteen of its twenty-one submodules are already ratcheted while the rest
+eighteen of its twenty-one submodules are already ratcheted while the rest
 catch up. The first batch is the tail -- `nvme/` (23 blocks), `pci/`, `fpu.rs`,
 `hpet/`, `msi/`, `rtc.rs`, `ramdisk.rs`, `random.rs`, `vga/`, `dma.rs`,
 `tty.rs`, `keyboard/`, `mouse/`, `null.rs` -- 58 blocks. Two shapes carry it: a
@@ -764,11 +764,23 @@ require a non-migratable caller, and `restore_fpu_state` requires an image
 `FXSAVE` wrote, since `FXRSTOR` raises `#GP` on a reserved `MXCSR` bit that
 arbitrary bytes can carry.
 
-237 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+The second batch is the three DMA-ring drivers -- `ahci/` (56 blocks), `hda/`
+(10) and `e1000e/` (9), plus `block_io.rs`, which had none and is denied so it
+stays that way. A third shape carries most of these, beside the two above: a
+copy between a caller's buffer and a driver-owned DMA buffer, where the comment
+has to say what bounds the length *and* that the device is not touching the
+buffer at that moment. That second half is where the argument lives -- a
+pool-page copy is sound because the slot's `SACT` bit has cleared or the command
+has not been issued, not because the pointers are in range. AHCI's per-slot
+command tables and command headers take the same shape once rather than
+seventeen times, since every setup path opens with the identical `DmaRegion`
+argument: the slot came out of `free_slots`, so the `&mut` is unique, and the
+HBA does not read the table until `CI`/`SACT` names the slot.
+
+162 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`, and they are all in the seven `drivers/` submodules left:
-`usb/` 97 (`xhci/mod.rs` 77), `virtio/` 55, `ahci/` 56, `hda/` 10, `e1000e/` 9,
-`drivers/mod.rs` itself 10. The lint sits commented out in `kernel/Cargo.toml`'s
+grep -cE '^\s+--> '`, and they are all in the three `drivers/` submodules left:
+`usb/` 97 (`xhci/mod.rs` 77), `virtio/` 55, and `drivers/mod.rs` itself 10. The lint sits commented out in `kernel/Cargo.toml`'s
 `[lints.clippy]` beside the three that are on: moving it up once the last
 submodule holds its own deny is the commit that closes this entry.
 
@@ -784,7 +796,7 @@ comment, `clippy::undocumented_unsafe_blocks` is denied crate-wide from
 `kernel/Cargo.toml` with no per-module suppressions, and every `unsafe fn` in
 the modules it covers carries a `# Safety` section. The impls are done,
 twenty-three of the twenty-four modules in `main.rs` hold their own deny, and
-inside the one left -- `drivers/` -- fourteen of its twenty-one submodules do
+inside the one left -- `drivers/` -- eighteen of its twenty-one submodules do
 too.
 
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done

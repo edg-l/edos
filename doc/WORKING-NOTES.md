@@ -11664,9 +11664,9 @@ one sitting (295 blocks when it opened, `usb/xhci/mod.rs` alone 77). The
 `#[deny(clippy::undocumented_unsafe_blocks)]` therefore goes on each `pub mod`
 line inside `kernel/src/drivers/mod.rs` rather than on `mod drivers;` in
 `main.rs`, which lets a finished submodule be locked in while its neighbours are
-still bare. Fourteen of the twenty-one now hold one: `dma`, `fpu`, `hpet`,
-`keyboard`, `mouse`, `msi`, `null`, `nvme`, `pci`, `ramdisk`, `random`, `rtc`,
-`tty`, `vga`. Left: `ahci`, `block_io`, `e1000e`, `hda`, `usb`, `virtio`, and
+still bare. Eighteen of the twenty-one now hold one: `ahci`, `block_io`, `dma`,
+`e1000e`, `fpu`, `hda`, `hpet`, `keyboard`, `mouse`, `msi`, `null`, `nvme`,
+`pci`, `ramdisk`, `random`, `rtc`, `tty`, `vga`. Left: `usb`, `virtio`, and
 `drivers/mod.rs`'s own ten blocks, which cannot be denied until every sibling
 is, because a deny on the parent reaches the children.
 
@@ -11693,6 +11693,31 @@ worth knowing: `FXRSTOR` raises `#GP` if the saved `MXCSR` has a reserved bit
 set, so the contract is that the image came from `save_fpu_state` or
 `init_fpu_state` and not from arbitrary or merely zeroed bytes. That is also why
 `FpuState::default` writes `MXCSR_DEFAULT` instead of leaving 512 zeroes.
+
+**A third shape, and it is the one that carries the DMA-ring drivers.**
+`ahci/`, `hda/` and `e1000e/` are not mostly register pokes; they are mostly
+copies between a caller's buffer and a driver-owned DMA buffer. The in-range
+half of such a comment is the easy half and is not where the soundness lives.
+The load-bearing half is **why the device is not touching that buffer right
+now**, and it is a different sentence in each direction: a submit-side copy into
+a pool page is sound because the command has not been issued yet, a
+completion-side copy out of one is sound because the slot's `SACT` bit has
+cleared or `wait_for_completion` returned, and an `e1000e` descriptor `&mut` is
+sound because the NIC owns only `[RDH, RDT)` and this slot is the one just
+outside it. Write that clause first; if it cannot be written, the code is the
+problem rather than the comment. `AhciPort::fail_all_ncq_slots` is the same
+argument already made in prose in `restart_port`'s doc comment, which is what a
+correct comment here looks like.
+
+**Say the shared argument once.** AHCI's four `setup_*_command_table` functions
+and its two `issue_*` functions open with byte-identical `DmaRegion` reasoning,
+and HDA has eight MMIO accessors that differ only in width. Repeating the same
+six lines six or eight times is worse than useless: it is six places to drift.
+Both took one comment above the group plus a one-line `// SAFETY: see the note
+above this group.` on each block, which is what the lint actually requires and
+leaves exactly one copy of the argument to keep true. Note that `cargo fmt`
+re-indents those one-liners with the block they sit above, so grep for them by
+text and not by column when checking that the deny is honest.
 
 **The `if !unsafe { .. }` restructure appears once more.** `tty::write_from_user`
 had the same shape `fs/` and `interrupts/` did: clippy will not accept a comment

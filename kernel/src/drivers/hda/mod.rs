@@ -36,6 +36,10 @@ pub const AUDIO_IOCTL_GET_VOLUME: u64 = 5;
 
 /// Intel HDA controller state.
 pub struct HdaController {
+    /// Base of the controller's BAR0 window, mapped uncached by
+    /// [`HdaController::new`] and never unmapped. Every register access below
+    /// goes through it and is volatile, because the controller writes these
+    /// registers itself.
     mmio_base: VirtAddr,
     /// CORB DMA buffer (256 entries * 4 bytes = 1KB)
     corb: DmaBuffer,
@@ -64,31 +68,44 @@ pub struct HdaController {
 impl HdaController {
     // --- MMIO register access helpers ---
 
+    // The four read/write pairs below share one argument: `offset` is a register
+    // offset from the HDA specification, and every caller passes one of the
+    // module's own constants, so `mmio_base + offset` lands inside the mapped
+    // BAR0 window at the register's natural alignment. All eight accesses are
+    // volatile because the controller drives the registers -- status bits, the
+    // CORB/RIRB pointers and the stream descriptors all change under software.
+    // `&mut self` on the writers keeps them serialised against each other.
     fn read32(&self, offset: u32) -> u32 {
+        // SAFETY: see the note above this group.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset as u64).as_ptr::<u32>()) }
     }
 
     fn write32(&self, offset: u32, val: u32) {
+        // SAFETY: see the note above this group.
         unsafe {
             core::ptr::write_volatile((self.mmio_base + offset as u64).as_mut_ptr::<u32>(), val)
         }
     }
 
     fn read16(&self, offset: u32) -> u16 {
+        // SAFETY: see the note above this group.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset as u64).as_ptr::<u16>()) }
     }
 
     fn write16(&self, offset: u32, val: u16) {
+        // SAFETY: see the note above this group.
         unsafe {
             core::ptr::write_volatile((self.mmio_base + offset as u64).as_mut_ptr::<u16>(), val)
         }
     }
 
     fn read8(&self, offset: u32) -> u8 {
+        // SAFETY: see the note above this group.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset as u64).as_ptr::<u8>()) }
     }
 
     fn write8(&self, offset: u32, val: u8) {
+        // SAFETY: see the note above this group.
         unsafe {
             core::ptr::write_volatile((self.mmio_base + offset as u64).as_mut_ptr::<u8>(), val)
         }
@@ -324,6 +341,12 @@ impl HdaController {
         // Write verb to next CORB slot
         let wp = (self.corb_wp + 1) % 256;
         let corb_ptr = self.corb.as_ptr() as *mut u32;
+        // SAFETY: `self.corb` is the 1 KiB CORB DMA buffer this controller owns
+        // and has programmed into CORBLBASE, laid out as 256 four-byte verbs;
+        // `wp` is taken modulo 256, so the entry is in bounds and 4-byte
+        // aligned. Volatile because the controller's DMA engine reads the slot
+        // once CORBWP is bumped below, and `&mut self` means no other verb is
+        // being written.
         unsafe { core::ptr::write_volatile(corb_ptr.add(wp as usize), verb) };
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
 
@@ -345,6 +368,11 @@ impl HdaController {
         // Read the next response (each RIRB entry is 8 bytes: [0..4] = response, [4..8] = response_ex)
         let next_rp = (self.rirb_rp + 1) % 256;
         let rirb_ptr = self.rirb.as_ptr() as *const u64;
+        // SAFETY: `self.rirb` is the 2 KiB RIRB DMA buffer this controller owns
+        // and has programmed into RIRBLBASE, laid out as 256 eight-byte
+        // responses; `next_rp` is taken modulo 256, so the entry is in bounds
+        // and 8-byte aligned. Volatile because the controller's DMA engine
+        // wrote it, and RIRBWP was polled above to confirm it has.
         let entry = unsafe { core::ptr::read_volatile(rirb_ptr.add(next_rp as usize)) };
         self.rirb_rp = next_rp;
 
@@ -413,6 +441,11 @@ impl HdaController {
                 length: AUDIO_BUF_SIZE as u32,
                 flags: ioc,
             };
+            // SAFETY: `bdl_buf` was allocated for `BDL_ENTRIES` `BdlEntry`
+            // values and `i` indexes `audio_bufs`, which has exactly that many,
+            // so the entry is in bounds and naturally aligned. Volatile because
+            // the stream's DMA engine reads the list once SD_BDLPL/SD_BDLPU and
+            // the run bit are programmed, which happens below.
             unsafe { core::ptr::write_volatile(bdl_ptr.add(i), entry) };
         }
 
@@ -536,6 +569,13 @@ impl DevFsDevice for HdaDspDevice {
             };
             let copy_len = remaining.len().min(AUDIO_BUF_SIZE);
 
+            // SAFETY: `buf_ptr` is the `cursor`-th audio DMA buffer, allocated
+            // with `AUDIO_BUF_SIZE` bytes, and `copy_len` is clamped to that
+            // size, so both the copy and the zero-fill of the remainder stay
+            // inside it. The source is a caller slice in a distinct allocation,
+            // so the two do not overlap. The ring position is only advanced past
+            // an entry the DMA engine has consumed, so this entry is not being
+            // read while it is refilled.
             unsafe {
                 core::ptr::copy_nonoverlapping(remaining.as_ptr(), buf_ptr, copy_len);
                 if copy_len < AUDIO_BUF_SIZE {

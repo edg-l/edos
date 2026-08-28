@@ -126,6 +126,11 @@ fn virt_buffer_to_sg_list(
 
 pub struct AhciPort {
     pub port_idx: usize,
+    /// This port's register block inside the controller's ABAR window, mapped
+    /// uncached by `AhciController::new` and never unmapped. Every field in it
+    /// is a naturally aligned u32 and every access is volatile, because the HBA
+    /// writes them: CI and SACT clear on completion, IS and SERR are raised by
+    /// the device, and CMD.CR/FR track the engines.
     pub port_regs: *mut HbaPort,
     pub device_type: DeviceType,
     ncq_enabled: AtomicBool,
@@ -240,6 +245,12 @@ impl AhciPort {
         let command_list = dma().allocate()?;
         let fis_area = dma().allocate()?;
 
+        // SAFETY: `port_regs` is one entry of the ABAR window's port array, and
+        // `stop_port` above has cleared ST and FRE, so the HBA is not reading
+        // CLB/FB while they are reprogrammed (AHCI 1.3.1 §10.1.2). The two DMA
+        // regions live in `Self` for as long as the port does, so the physical
+        // addresses handed to the HBA stay valid. Bring-up runs single-threaded
+        // and this port is not yet published, so there is no other writer.
         unsafe {
             ptr::write_volatile(
                 &raw mut (*port_regs).clb,
@@ -269,6 +280,8 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
         }
 
+        // SAFETY: same port register block; IE is a naturally aligned u32 the
+        // HBA reads to decide which events raise PxIS.
         unsafe {
             // Enable interrupts: DHRS, DSS, SDBS (NCQ completion), DPS, TFES.
             let ie = (1 << 0)   // DHRS  - Device to Host Register FIS
@@ -281,10 +294,14 @@ impl AhciPort {
 
         // The signature register is only meaningful after the port is started,
         // and a freshly started port can report 0xffffffff for a few ms.
+        // SAFETY: same port register block; SIG is a naturally aligned u32 the
+        // HBA latches from the device's first D2H FIS, which is exactly why it
+        // is read volatile and re-read below.
         let mut signature = unsafe { ptr::read_volatile(&raw const (*port_regs).sig) };
         let mut attempts = 0;
         while signature == 0xffffffff && attempts < 5 {
             thread_sleep(Duration::from_millis(5));
+            // SAFETY: as above.
             signature = unsafe { ptr::read_volatile(&raw const (*port_regs).sig) };
             attempts += 1;
         }
@@ -402,6 +419,12 @@ impl AhciPort {
     }
 
     fn stop_port(port_regs: *mut HbaPort) -> Result<(), AhciError> {
+        // SAFETY: `port_regs` is a port register block inside the ABAR window,
+        // so CMD is a naturally aligned u32 in it. The read-modify-write is not
+        // synchronised against other CMD writers because every caller is a
+        // bring-up or a restart round, both of which hold the port to
+        // themselves. Volatile throughout: AHCI 1.3.1 §10.1.2 has the HBA clear
+        // CR after ST and FR after FRE, which is what these loops wait on.
         unsafe {
             let mut cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             if cmd & PORT_CMD_ST != 0 {
@@ -457,6 +480,12 @@ impl AhciPort {
     fn restart_port(&self, fail_all: impl FnOnce()) -> Result<(), AhciError> {
         Self::stop_port(self.port_regs)?;
         fail_all();
+        // SAFETY: `self.port_regs` is this port's block in the ABAR window and
+        // `stop_port` has just cleared ST/FRE, so the HBA is not reading CLB/FB
+        // while they are reprogrammed. `command_list` and `fis_area` are owned
+        // by `self`, so their physical addresses outlive the port. Every access
+        // below is a naturally aligned u32; SERR and IS are write-1-to-clear and
+        // SACT/CI are read volatile because only the HBA clears them.
         unsafe {
             let residual_sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
             let residual_ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
@@ -513,6 +542,10 @@ impl AhciPort {
     ///
     /// Returns `CommandTimeout` if the drive fails to re-establish within 1 s.
     fn comreset(&self) -> Result<(), AhciError> {
+        // SAFETY: `self.port_regs` is this port's block in the ABAR window;
+        // SCTL and SSTS are naturally aligned u32s in it. The caller has stopped
+        // the port, so nothing else drives these registers, and SSTS is read
+        // volatile because the HBA reports the link state through it.
         unsafe {
             let mut sctl = ptr::read_volatile(&raw const (*self.port_regs).sctl);
             sctl = (sctl & !0xF) | 0x1;
@@ -911,6 +944,14 @@ impl AhciPort {
 
         let has_data = buffer_size > 0;
 
+        // SAFETY: `table_ref` is the slot's `DmaRegion<CommandTable>`, allocated
+        // once by `init_io_pools` and owned by `self`, so `get()` yields a
+        // properly aligned, dereferenceable pointer to a whole `CommandTable`.
+        // `CommandTable` is plain data, so the all-zero pattern is a valid
+        // value. The `&mut` is unique because a slot is owned by exactly one
+        // submitter at a time -- it was claimed from `free_slots` -- and the HBA
+        // does not read the table until CI or SACT names the slot, which happens
+        // after this returns.
         unsafe {
             let table = table_ref.get();
             table.write(core::mem::zeroed());
@@ -945,6 +986,14 @@ impl AhciPort {
 
         let table_ref = self.command_table(slot);
 
+        // SAFETY: `table_ref` is the slot's `DmaRegion<CommandTable>`, allocated
+        // once by `init_io_pools` and owned by `self`, so `get()` yields a
+        // properly aligned, dereferenceable pointer to a whole `CommandTable`.
+        // `CommandTable` is plain data, so the all-zero pattern is a valid
+        // value. The `&mut` is unique because a slot is owned by exactly one
+        // submitter at a time -- it was claimed from `free_slots` -- and the HBA
+        // does not read the table until CI or SACT names the slot, which happens
+        // after this returns.
         unsafe {
             let table = table_ref.get();
             table.write(core::mem::zeroed());
@@ -983,6 +1032,14 @@ impl AhciPort {
 
         let table_ref = self.command_table(slot);
 
+        // SAFETY: `table_ref` is the slot's `DmaRegion<CommandTable>`, allocated
+        // once by `init_io_pools` and owned by `self`, so `get()` yields a
+        // properly aligned, dereferenceable pointer to a whole `CommandTable`.
+        // `CommandTable` is plain data, so the all-zero pattern is a valid
+        // value. The `&mut` is unique because a slot is owned by exactly one
+        // submitter at a time -- it was claimed from `free_slots` -- and the HBA
+        // does not read the table until CI or SACT names the slot, which happens
+        // after this returns.
         unsafe {
             let table = table_ref.get();
             table.write(core::mem::zeroed());
@@ -1027,6 +1084,14 @@ impl AhciPort {
 
         let table_ref = self.command_table(slot);
 
+        // SAFETY: `table_ref` is the slot's `DmaRegion<CommandTable>`, allocated
+        // once by `init_io_pools` and owned by `self`, so `get()` yields a
+        // properly aligned, dereferenceable pointer to a whole `CommandTable`.
+        // `CommandTable` is plain data, so the all-zero pattern is a valid
+        // value. The `&mut` is unique because a slot is owned by exactly one
+        // submitter at a time -- it was claimed from `free_slots` -- and the HBA
+        // does not read the table until CI or SACT names the slot, which happens
+        // after this returns.
         unsafe {
             let table = table_ref.get();
             table.write(core::mem::zeroed());
@@ -1062,6 +1127,12 @@ impl AhciPort {
         let table_ref = self.command_table(slot);
 
         // Write command header via raw pointer to avoid &mut aliasing over the full array.
+        // SAFETY: `self.command_list` is the port's `DmaRegion<[CommandHeader; 32]>`,
+        // owned by `self` and programmed into PxCLB, so `get()` yields an
+        // aligned pointer to the full array; `slot` came from `free_slots` and
+        // is below 32. The raw-pointer form avoids forming a `&mut` over the
+        // whole array while other slots are in flight, and the writes are
+        // volatile because the HBA reads this header once the slot is issued.
         unsafe {
             let header = &raw mut (*self.command_list.get())[slot];
             ptr::write_volatile(&raw mut (*header).flags, 5 | flags);
@@ -1084,6 +1155,10 @@ impl AhciPort {
         // read window. mmio_lock is retained to keep CI/SACT writes on this
         // port ordered with respect to each other.
         let _lock = ranked_lock!(RANK_AHCI_MMIO, "AhciPort.mmio_lock", self.mmio_lock);
+        // SAFETY: `self.port_regs` is this port's block in the ABAR window and
+        // CI is a naturally aligned u32 in it. `mmio_lock` is the only writer of
+        // CI and SACT on this port, and the write is volatile because the HBA
+        // clears the bit on completion.
         unsafe {
             ptr::write_volatile(&raw mut (*self.port_regs).ci, 1u32 << slot);
         }
@@ -1095,6 +1170,12 @@ impl AhciPort {
     fn issue_ncq_command(&self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
         let table_ref = self.command_table(slot);
 
+        // SAFETY: `self.command_list` is the port's `DmaRegion<[CommandHeader; 32]>`,
+        // owned by `self` and programmed into PxCLB, so `get()` yields an
+        // aligned pointer to the full array; `slot` came from `free_slots` and
+        // is below 32. The raw-pointer form avoids forming a `&mut` over the
+        // whole array while other slots are in flight, and the writes are
+        // volatile because the HBA reads this header once the slot is issued.
         unsafe {
             let header = &raw mut (*self.command_list.get())[slot];
             ptr::write_volatile(&raw mut (*header).flags, 5 | flags);
@@ -1115,6 +1196,10 @@ impl AhciPort {
         // registers are W1S per AHCI 1.3.1 -- writing only the new bit is
         // spec-correct and skips the prior RMW's stale-read window.
         let _lock = ranked_lock!(RANK_AHCI_MMIO, "AhciPort.mmio_lock", self.mmio_lock);
+        // SAFETY: as in `issue_command` -- naturally aligned u32s in this port's
+        // mapped register block, written under `mmio_lock`, which is what keeps
+        // the SACT-before-CI order this comment's caller depends on. Volatile
+        // because the HBA clears both bits itself.
         unsafe {
             ptr::write_volatile(&raw mut (*self.port_regs).sact, 1u32 << slot);
             ptr::write_volatile(&raw mut (*self.port_regs).ci, 1u32 << slot);
@@ -1129,14 +1214,23 @@ impl AhciPort {
         let port_regs = self.port_regs;
 
         loop {
+            // SAFETY: `port_regs` is this port's block in the ABAR window, so
+            // CI, IS and TFD are naturally aligned u32s in it. All three are
+            // read volatile because the HBA owns them: CI clears on completion,
+            // IS raises TFES on a task-file error, and TFD carries the device's
+            // status and error bytes. Reading them races with nothing -- the
+            // driver never writes CI or TFD, and PxIS is cleared only by the
+            // dispatcher.
             let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
             if ci & (1 << slot) == 0 {
                 return Ok(());
             }
 
+            // SAFETY: as above.
             let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
             if is & PORT_IS_TFES != 0 {
                 // Don't clear port IS here; the dispatch thread handles it.
+                // SAFETY: as above.
                 let tfd = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
                 log!(
                     "AHCI port {}: Command error - Status: {:#x}, Error: {:#x}",
@@ -1157,7 +1251,11 @@ impl AhciPort {
             }
 
             thread_park_while(|| {
+                // SAFETY: the same two registers as the loop head, read the same
+                // way; the predicate re-samples them so a completion that lands
+                // between the checks is not slept through.
                 let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
+                // SAFETY: as above.
                 let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
                 ci & (1 << slot) != 0 && is & PORT_IS_TFES == 0 && start.elapsed() < timeout
             });
@@ -1310,6 +1408,9 @@ impl AhciPort {
         // `!issued`-skip window. Run completion manually if SACT[slot] is
         // already clear. The CAS inside `complete_ncq_slot` makes this
         // race-safe versus a concurrent IRQ.
+        // SAFETY: `self.port_regs` is this port's block in the ABAR window and
+        // SACT is a naturally aligned u32 in it, read volatile because the HBA
+        // clears a slot's bit when the drive completes it.
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
         if sact & (1u32 << slot) == 0 || self.reset_generation.load(Ordering::Acquire) != start_gen
         {
@@ -1384,6 +1485,13 @@ impl AhciPort {
             let mut offset = 0;
             for i in 0..num_pages {
                 let copy_len = (expected_size - offset).min(4096);
+                // SAFETY: `num_pages` is `expected_size.div_ceil(4096)` and the
+                // pool holds that many 4096-byte DMA buffers, so `pages[i]` has
+                // room for `copy_len`. `offset` never passes `expected_size`,
+                // which the caller checked against the buffer's length, so the
+                // source range stays inside it. The two allocations are
+                // distinct, so they cannot overlap, and the command has not been
+                // issued yet, so the HBA is not reading the pool.
                 unsafe {
                     ptr::copy_nonoverlapping(src.add(offset), pool.pages[i].as_ptr(), copy_len);
                 }
@@ -1416,6 +1524,9 @@ impl AhciPort {
             .store(Instant::now().as_nanos(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
         crate::drivers::ahci::watchdog::ncq_inflight_inc();
+        // SAFETY: `self.port_regs` is this port's block in the ABAR window and
+        // SACT is a naturally aligned u32 in it, read volatile because the HBA
+        // clears a slot's bit when the drive completes it.
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
         if sact & (1u32 << slot) == 0 || self.reset_generation.load(Ordering::Acquire) != start_gen
         {
@@ -1452,6 +1563,8 @@ impl AhciPort {
         // restart round, whose COMRESET clears SACT on its own schedule.
         let cur_gen = self.reset_generation.load(Ordering::Acquire);
         if cur_gen == op.start_gen {
+            // SAFETY: as in the post-issue self-check -- a volatile read of the
+            // naturally aligned SACT register in this port's mapped block.
             let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
             if sact & (1u32 << slot) != 0 {
                 return;
@@ -1488,6 +1601,12 @@ impl AhciPort {
                         let mut offset = 0;
                         for i in 0..num_pages {
                             let copy_len = (expected_size - offset).min(4096);
+                            // SAFETY: the mirror of the submit-side copy --
+                            // `num_pages` pool pages of 4096 bytes each cover
+                            // `expected_size`, `offset` stays below it, and
+                            // `dest` is the op's own buffer of at least that
+                            // length. The slot's SACT bit has cleared, so the
+                            // HBA is done writing the pool pages.
                             unsafe {
                                 ptr::copy_nonoverlapping(
                                     pool.pages[i].as_ptr(),
@@ -1571,6 +1690,9 @@ impl AhciPort {
         // use-after-free whose writer is the HBA, so it is counted where it
         // would happen rather than left to be reasoned about. Logged once: a
         // regression here fires on every restart.
+        // SAFETY: `self.port_regs` is this port's block in the ABAR window; CMD
+        // is a naturally aligned u32 in it and CR is set by the HBA while the
+        // command engine runs, which is what makes the read volatile.
         if unsafe { ptr::read_volatile(&raw const (*self.port_regs).cmd) } & PORT_CMD_CR != 0 {
             crate::drivers::ahci::watchdog::FAILED_WHILE_RUNNING.fetch_add(1, Ordering::Relaxed);
             static REPORTED: AtomicBool = AtomicBool::new(false);
@@ -1738,6 +1860,9 @@ impl AhciPort {
     /// and wakes legacy slot waiters so the sync poll loop can re-check `CI`.
     pub fn on_port_irq(self: &Arc<Self>, port_is: u32) {
         if port_is & PORT_IS_TFES != 0 {
+            // SAFETY: this port's block in the ABAR window; TFD is a naturally
+            // aligned u32 the HBA fills from the device's status and error
+            // registers, so the read is volatile.
             let tfd = unsafe { ptr::read_volatile(&raw const (*self.port_regs).tfd) };
             log!(
                 "AHCI port {}: TFES status={:#x} error={:#x}; failing all in-flight NCQ slots",
@@ -1773,6 +1898,8 @@ impl AhciPort {
         let busy = self.busy_slots();
 
         // NCQ slots: check SACT for clears
+        // SAFETY: this port's block in the ABAR window; SACT is a naturally
+        // aligned u32 whose bits the HBA clears as commands complete.
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
         let mut pending = busy & !sact;
         while pending != 0 {
@@ -1857,6 +1984,13 @@ impl AhciPort {
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
+                    // SAFETY: `num_pages` is `expected_size.div_ceil(4096)` and
+                    // the pool holds that many 4096-byte buffers, so `pages[i]`
+                    // holds `copy_len` bytes; `offset` stays below
+                    // `expected_size`, which the caller checked against
+                    // `buffer`'s length. `wait_for_completion` returned, so the
+                    // HBA is done with the pool pages, and the two allocations
+                    // are distinct.
                     unsafe {
                         ptr::copy_nonoverlapping(
                             pool.pages[i].as_ptr(),
@@ -1912,6 +2046,11 @@ impl AhciPort {
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
+                    // SAFETY: the write-side mirror of the read path above --
+                    // `num_pages` 4096-byte pool pages cover `expected_size`,
+                    // `offset` stays below it and below `buffer`'s length, and
+                    // the command has not been issued yet, so the HBA is not
+                    // reading the pool. Distinct allocations, so no overlap.
                     unsafe {
                         ptr::copy_nonoverlapping(
                             buffer.as_ptr().add(offset),
@@ -2024,6 +2163,11 @@ impl AhciPort {
             Duration::from_secs(5),
         )?;
 
+        // SAFETY: `data_buffer` is a DMA buffer of at least 512 bytes, still
+        // owned here, and IDENTIFY completed above, so the HBA has finished
+        // writing it and every byte is initialised. `[u8; 512]` has alignment 1,
+        // so the cast is aligned, and the borrow ends before the deallocation
+        // below.
         let result = unsafe { &*data_buffer.as_ptr().cast::<[u8; 512]>() };
         let info = DeviceIdentifyInfo::from_identify_data(result);
         let _ = dma().dealloc(data_buffer);
@@ -2058,6 +2202,11 @@ impl AhciPort {
             self.issue_command(slot, CMD_HEADER_ATAPI, prdtl)?;
             self.wait_for_completion(slot, timeout)?;
 
+            // SAFETY: `self.command_list` is the port's command-header array,
+            // owned by `self`, and `slot` came from `with_slot_try` so it is
+            // below 32. PRDBC is a naturally aligned u32 the HBA writes with the
+            // byte count actually transferred, which is why it is read volatile
+            // and only after `wait_for_completion` returned.
             let prdbc = unsafe {
                 let header = &raw const (*self.command_list.get())[slot];
                 ptr::read_volatile(&raw const (*header).prdbc)
@@ -2090,6 +2239,10 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
+        // SAFETY: `transferred` is the PRDBC byte count clamped to the buffer's
+        // size, so the slice stays inside `data_buffer`, which is still owned
+        // here. The command completed, so those bytes are initialised, and `u8`
+        // has alignment 1.
         let inquiry_data =
             unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), transferred) };
         let mut device_info = DeviceIdentifyInfo::from_scsi_inquiry(inquiry_data);
@@ -2127,6 +2280,10 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
+        // SAFETY: `data_buffer` was allocated with at least
+        // `READ_CAPACITY_10_LEN` bytes and is still owned here; the command
+        // completed with at least that many bytes transferred, checked just
+        // above, so they are initialised. `u8` has alignment 1.
         let data =
             unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), READ_CAPACITY_10_LEN) };
         let last_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -2200,6 +2357,11 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
+        // SAFETY: `data_buffer` was allocated with `expected_size` bytes and the
+        // transfer of that many has just been checked, so the source range is
+        // initialised and in bounds; `buffer` is the caller's, of at least
+        // `expected_size`. The DMA buffer and the caller's buffer are distinct
+        // allocations, so they do not overlap.
         unsafe {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), expected_size);
         }
@@ -2280,12 +2442,19 @@ impl AsyncBlockDevice for AhciPort {
         let buf_ptr = buffer.as_mut_ptr();
         let result = match self.device_type {
             DeviceType::Ata => {
+                // SAFETY: `buf_ptr`/`buf_len` come from the `BlockBuffer` this
+                // function owns and which is dropped only after the call below
+                // returns, so the slice covers live memory of exactly that
+                // length. Taking the pointer before the match is what keeps the
+                // `BlockBuffer` from being borrowed across the call; no other
+                // reference to it exists here.
                 let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_len) };
                 self.legacy_ata_read(lba, slice, sectors_u16)
             }
             DeviceType::Atapi => {
                 let _guard =
                     ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
+                // SAFETY: as in the ATA arm above.
                 let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_len) };
                 self.atapi_read(lba, slice, sectors_u16)
             }
@@ -2322,6 +2491,10 @@ impl AsyncBlockDevice for AhciPort {
         let buf_ptr = buffer.as_ptr();
         let result = match self.device_type {
             DeviceType::Ata => {
+                // SAFETY: `buf_ptr`/`buf_len` come from the `BlockBuffer` this
+                // function owns, dropped only after the write below returns, so
+                // the slice covers live memory of exactly that length and is
+                // only read from.
                 let slice = unsafe { core::slice::from_raw_parts(buf_ptr, buf_len) };
                 if needs_fua {
                     // FUA requested but device doesn't support it (or NCQ disabled):

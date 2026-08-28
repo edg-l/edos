@@ -2,13 +2,17 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod ahci;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod block_io;
 #[deny(clippy::undocumented_unsafe_blocks)]
 pub mod dma;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod e1000e;
 #[deny(clippy::undocumented_unsafe_blocks)]
 pub mod fpu;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod hda;
 
 /// Spinlock for serializing 8042 PS/2 controller data port access.

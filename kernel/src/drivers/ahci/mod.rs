@@ -241,6 +241,10 @@ pub extern "C" fn ahci_driver_main() -> ! {
     loop {
         thread_park_while(|| {
             !controllers.iter().any(|c| {
+                // SAFETY: `c.hba` is the controller's ABAR window, mapped for the
+                // life of the kernel by `AhciController::new`; IS is a naturally
+                // aligned u32 inside it. The read is volatile because the HBA
+                // sets the bits.
                 let hba_is = unsafe { ptr::read_volatile(&raw const (*c.hba).is) };
                 hba_is != 0
             })
@@ -249,6 +253,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
         AHCI_DISPATCHER_PASSES.fetch_add(1, Ordering::Relaxed);
 
         for controller in &controllers {
+            // SAFETY: as in the park predicate above — a volatile read of IS in
+            // the controller's mapped ABAR window.
             let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
             if hba_is == 0 {
                 continue;
@@ -259,9 +265,19 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 let port_idx = pending_ports.trailing_zeros() as usize;
                 pending_ports &= pending_ports - 1;
 
+                // SAFETY: `port_idx` comes from a set bit of IS, so it is below
+                // 32 and indexes the ABAR window's port array. This dispatcher
+                // is the only writer of a port's IS: the completion walker
+                // reached below reads other port registers but never IS.
                 let port_regs = unsafe { &mut (*controller.hba).ports[port_idx] };
+                // SAFETY: `port_regs` is that port's register block; IS is a
+                // naturally aligned u32 the HBA sets on completion or error.
                 let port_is = unsafe { ptr::read_volatile(&port_regs.is) };
                 if port_is != 0 {
+                    // SAFETY: same register. AHCI 1.3.1 §3.3.5: PxIS is
+                    // write-1-to-clear, so writing back what was read
+                    // acknowledges exactly the bits observed and cannot drop one
+                    // the HBA raised in between.
                     unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
                     // Hand off to the port's IRQ-side completion walker:
@@ -278,6 +294,9 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 }
             }
 
+            // SAFETY: the controller's ABAR window again. AHCI 1.3.1 §3.1.3:
+            // GHC.IS is write-1-to-clear and must be acknowledged after the port
+            // bits, so this write closes the interrupt out.
             unsafe { ptr::write_volatile(&mut (*controller.hba).is, hba_is) };
         }
     }

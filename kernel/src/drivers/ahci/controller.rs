@@ -28,6 +28,9 @@ use crate::{
 };
 
 pub struct AhciController {
+    /// The HBA's ABAR window (BAR5), mapped uncached by [`AhciController::new`]
+    /// and never unmapped, so it stays valid for the life of the kernel. Every
+    /// access through it is volatile: the HBA writes these registers itself.
     pub hba: *mut HbaMemory,
     /// Discovered ports, taken by the direct layer once it registers them.
     pub ports: Vec<Option<Arc<AhciPort>>>,
@@ -105,6 +108,9 @@ impl AhciController {
 
         // Read HBA capabilities before reset (reset may clear transient state
         // but CAP is a read-only register that persists).
+        // SAFETY: `hba` points at the ABAR window mapped just above, so `cap` is
+        // a naturally aligned u32 inside it. CAP is read-only to software but
+        // owned by the HBA, hence volatile.
         let cap = unsafe { ptr::read_volatile(&raw const (*hba).cap) };
         let supports_ncq = cap & (1 << 30) != 0;
         let num_command_slots = (((cap >> 8) & 0x1F) as u8) + 1; // NCS is 0-based
@@ -169,6 +175,11 @@ impl AhciController {
     }
 
     fn enable_controller_interrupts(hba: *mut HbaMemory) -> Result<(), AhciError> {
+        // SAFETY: `hba` is the caller's ABAR window; GHC is a naturally aligned
+        // u32 within it. Read-modify-write is unsynchronised because this runs
+        // once, from the single bring-up path, before any other CPU can reach
+        // the controller. AHCI 1.3.1 §3.1.2: setting GHC.IE unmasks HBA
+        // interrupts.
         unsafe {
             // Enable global interrupts
             let mut ghc = ptr::read_volatile(&raw const (*hba).ghc);
@@ -180,12 +191,19 @@ impl AhciController {
 
     fn reset_controller(&mut self) -> Result<(), AhciError> {
         // Request HBA reset
+        // SAFETY: `self.hba` is the ABAR window; GHC is a naturally aligned u32
+        // inside it, volatile because the HBA clears the reset bit itself.
         let mut ghc = unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) };
         ghc |= 1; // HBA Reset bit
+        // SAFETY: same register, same window. AHCI 1.3.1 §3.1.2: writing
+        // GHC.HR starts a controller reset; nothing else drives GHC during
+        // bring-up.
         unsafe { ptr::write_volatile(&raw mut (*self.hba).ghc, ghc) };
 
         // Wait for reset to complete (should clear the bit)
         let start = Instant::now();
+        // SAFETY: as above; the HBA clears HR when the reset finishes, which is
+        // exactly what makes this read volatile.
         while unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) } & 1 != 0 {
             if start.elapsed().as_millis() > 5000 {
                 return Err(AhciError::CommandTimeout);
@@ -198,12 +216,17 @@ impl AhciController {
     }
 
     fn enable_ahci(&mut self) -> Result<(), AhciError> {
+        // SAFETY: `self.hba` is the ABAR window and GHC is a naturally aligned
+        // u32 inside it; the HBA owns the register, so the access is volatile.
         let mut ghc = unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) };
         ghc |= GHC_AE; // Enable AHCI
+        // SAFETY: same register, same window; this runs on the bring-up path
+        // with no other writer.
         unsafe { ptr::write_volatile(&raw mut (*self.hba).ghc, ghc) };
 
         // Wait for AHCI to be enabled (AE bit should remain set)
         let start = Instant::now();
+        // SAFETY: as above; AE is read back from the HBA, so volatile.
         while unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) } & GHC_AE == 0 {
             if start.elapsed().as_millis() > 1000 {
                 return Err(AhciError::CommandTimeout);
@@ -216,14 +239,22 @@ impl AhciController {
     }
 
     fn discover_ports(&mut self) -> Result<(), AhciError> {
+        // SAFETY: `self.hba` is the ABAR window; PI is a naturally aligned u32
+        // inside it, and the HBA owns its value.
         let pi = unsafe { ptr::read_volatile(&raw const (*self.hba).pi) };
         self.ports.resize_with(32, || None);
 
         for i in 0..32 {
             if pi & (1 << i) != 0 {
                 log!("=== Checking Port {} ===", i);
+                // SAFETY: `self.hba` is the ABAR window, which is mapped for the
+                // whole 0x1100-byte HBA including the 32-entry port array, and
+                // `i` is below 32. Taking the address does not read the port.
                 let port_ptr = unsafe { &raw mut (*self.hba).ports[i] };
 
+                // SAFETY: `port_ptr` is that port's register block; SSTS is a
+                // naturally aligned u32 in it, written by the HBA as the link
+                // comes up.
                 let ssts = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
 
                 if !ssts_device_ready(ssts) {
@@ -262,6 +293,13 @@ impl AhciController {
     ) -> Result<(), AhciError> {
         log!("Initializing port {} registers", port_idx);
 
+        // SAFETY: `port_ptr` is one entry of the ABAR window's port array, taken
+        // by `discover_ports` above, so every field read or written below is a
+        // naturally aligned u32 inside the mapped window. All of them are
+        // volatile because the HBA drives them: CMD.CR clears when the command
+        // engine stops, SSTS reports the link, and IS/SERR are
+        // write-1-to-clear. Nothing else touches this port yet — `AhciPort::new`
+        // has not run, so there is no concurrent writer.
         unsafe {
             // First ensure the port is stopped
             let mut cmd = ptr::read_volatile(&raw const (*port_ptr).cmd);
