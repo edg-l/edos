@@ -1,4 +1,4 @@
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::debug::lock_order::RANK_PTY;
 use crate::ranked_lock;
@@ -66,7 +66,17 @@ pub fn sys_ioctl(
                 // of it, and `Vec<u8>` promises alignment 1. The byte length
                 // stays `arg_len`; the rounding only ever adds slack past the
                 // end, which nothing is told about.
-                let mut buffer: Vec<u64> = vec![0u64; arg_len.div_ceil(8)];
+                //
+                // `try_reserve_exact` rather than `vec!`, because `arg_len` is
+                // whatever the caller put in `r10`: an infallible allocation of
+                // a user-chosen size answers a bad length with
+                // `handle_alloc_error`, which is a panic, and a panic here is
+                // the whole machine. The `resize` cannot allocate again, since
+                // the capacity it needs is the one just reserved.
+                let words = arg_len.div_ceil(8);
+                let mut buffer: Vec<u64> = Vec::new();
+                buffer.try_reserve_exact(words).map_err(|_| Errno::ENOMEM)?;
+                buffer.resize(words, 0);
                 let buf_ptr = buffer.as_mut_ptr() as *mut u8;
 
                 if copy_in
