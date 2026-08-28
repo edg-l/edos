@@ -61,19 +61,19 @@ Coverage in `kernel/src`, measured 2026-08-28:
 | quantity | count | command |
 | --- | --- | --- |
 | `unsafe { ... }` blocks | 729 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
-| `// SAFETY:` comments | 662 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
+| `// SAFETY:` comments | 770 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe fn` declarations | 65 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
-| `# Safety` sections | 70 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
+| `# Safety` sections | 68 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe impl` | 41 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
-So the block half is at roughly nine tenths. The contract half now has more
-`# Safety` sections than `unsafe fn` declarations, because a section also
-belongs on an `unsafe trait` and on a safe function whose contract lives in a
-raw pointer argument; what it means is that every `unsafe fn` in a module I5a
-has been through carries one. The block figure moves a module at a time, since
-the twenty-three that hold their own
-`#[deny(clippy::undocumented_unsafe_blocks)]` cannot regress, as do the
-eighteen `drivers/` submodules that hold one on their `pub mod` line. The
+So the block half is done: `undocumented_unsafe_blocks` is denied crate-wide in
+`kernel/Cargo.toml` and reports nothing, which is why there are more `// SAFETY:`
+comments than blocks -- a comment also sits above each `unsafe impl` and above
+several `unsafe fn` bodies whose single block is the whole function. The
+contract half has more `# Safety` sections than `unsafe fn` declarations,
+because a section also belongs on an `unsafe trait` and on a safe function whose
+contract lives in a raw pointer argument; what it means is that every `unsafe
+fn` in a module I5a has been through carries one. The
 two are `ROADMAP-CLEANUP.md` I5, and they are different work: the lint
 `clippy::undocumented_unsafe_blocks` finds blocks and `unsafe impl`, and finds
 nothing about an undocumented `unsafe fn`, whose contract has no lintable form.
@@ -174,7 +174,7 @@ What is worth adding, and only this:
 
 ```toml
 [lints.clippy]
-undocumented_unsafe_blocks = "warn"   # I5, the block half
+undocumented_unsafe_blocks = "deny"   # I5a, the block half -- done
 unnecessary_safety_comment = "warn"   # a SAFETY: on something that is not unsafe
 unnecessary_safety_doc = "warn"       # a # Safety section on a safe item
 allow_attributes_without_reason = "warn"
@@ -185,11 +185,14 @@ The two `unnecessary_*` lints are the reason to adopt these as a set rather than
 first is to write a comment that says nothing, and the coverage number then
 measures comments instead of arguments.
 
-`undocumented_unsafe_blocks` is enabled per module, starting with `memory/` and
-`syscalls/`, where the safety argument is about user input and is the one worth
-writing down. Turning it on tree-wide at once produces hundreds of findings in
-`usb/xhci/mod.rs` (77 `unsafe`), `ahci/port.rs` (39) and `thread/scheduler.rs`
-(33) and would be abandoned.
+`undocumented_unsafe_blocks` was enabled a module at a time rather than tree-wide
+at once, each finished module carrying `#[deny(...)]` on its own `mod`
+declaration so it could not regress while the rest caught up. Turning it on
+whole would have produced hundreds of findings at once -- `usb/xhci/mod.rs` held
+77 blocks, `ahci/port.rs` 39, `thread/scheduler.rs` 33 -- and been abandoned.
+With the last module done the ratchets came out and the lint moved into the
+manifest, which is the shape to repeat for any lint this tree adopts against an
+existing body of code.
 
 Rejected, with the reason, so it is not re-proposed:
 

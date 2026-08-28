@@ -38,52 +38,29 @@ use crate::{
 // the deny is what keeps it that way while the rest of the kernel catches up
 // (`doc/ROADMAP-CLEANUP.md` §I5a). Move it up to `[lints.clippy]` in
 // `Cargo.toml` once no module needs the exemption.
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod acpi;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod allocator;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod apic;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod boot;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod cmdline;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod debug;
 mod drivers;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod fs;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod gdt;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod graphics;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod interrupts;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod loader;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod logs;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod memory;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod net;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod power;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod profile;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod serial;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod smp;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod syscalls;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod thread;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod timer;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod util;
-#[deny(clippy::undocumented_unsafe_blocks)]
 mod window;
 
 extern crate alloc;

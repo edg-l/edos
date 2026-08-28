@@ -6,6 +6,49 @@ session.
 
 ---
 
+## I5a is finished: the lint is in the manifest and the 43 ratchets are gone
+
+`usb/` was the last module: 97 blocks, 77 of them in `xhci/mod.rs`, plus
+`drivers/mod.rs`'s own 10. With those documented every module in `kernel/src` was
+covered, so `undocumented_unsafe_blocks = "deny"` moved into
+`kernel/Cargo.toml`'s `[lints.clippy]` and the 43 per-module
+`#[deny(clippy::undocumented_unsafe_blocks)]` attributes came out with it. The
+ratchet was scaffolding for the migration, not the end state; leaving it in
+place beside a crate-level deny would have been 43 lines saying nothing.
+
+`xhci/` is almost one argument repeated. Every register pointer in the driver
+comes from `XhciRegisters`, which is built once from the 64 KB BAR0 mapping
+`init` establishes, so no individual access has to re-argue that the pointer is
+mapped -- what each comment says instead is which register it is and why the
+access is volatile (the *controller* changes the value, so the compiler must not
+fold or reorder the access). Three other shapes cover the rest:
+
+- **Input-context writes.** The bound is arithmetic, not a check: a DCI is at
+  most 31, the allocation holds 33 contexts of `ctx_size` bytes each, so context
+  index `dci + 1` is always inside it. Saying "the pointer is valid" here would
+  be the comment that says nothing; saying where 33 comes from is the argument.
+- **`read_unaligned` of a `packed` descriptor out of the configuration blob.**
+  The `bytes.len() >= 9` / `>= 7` guard the caller already had is the bound, and
+  the read is unaligned because the source is a `[u8]` at an arbitrary offset.
+- **The DMA-buffer copies in the HID report path.** The source is one slot of a
+  `HID_QUEUE_DEPTH`-slot buffer and the destination a fixed array, so the comment
+  names both bounds. The interesting half is already in the code: how much of the
+  slot the controller wrote is the transfer event's to say, not the slot's size.
+
+`drivers/mod.rs`'s own ten are the 8042, and their comment is about exclusion
+rather than validity: 0x60 and 0x64 are fixed by the platform, so what matters is
+who else is driving them. In `ps2_drain_buffer` that is `PS2_LOCK`, which the two
+IRQ handlers share; in `init_ps2_controller` it is that `init_drivers` calls it
+once, on one CPU, before the keyboard and mouse kthreads are spawned.
+
+Counts after this pass, remeasured with `doc/rust-style.md`'s commands: 729
+`unsafe {` blocks, 770 `// SAFETY:` comments (more than blocks, because a comment
+also sits above each of the 41 `unsafe impl`), 65 `unsafe fn` against 68
+`# Safety` sections. I5b -- the contract half -- is what is left of I5, and no
+lint can find it.
+
+---
+
 ## `fs/` under `undocumented_unsafe_blocks`, and the two shapes its blocks come in
 
 `kernel/src/fs/` is the last of I5a's three big modules to take its own

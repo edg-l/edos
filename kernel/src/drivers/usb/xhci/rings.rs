@@ -116,11 +116,16 @@ impl ProducerRing {
         let phys = dma.phys_addr().as_u64();
 
         // Zero all TRBs: a recycled buffer carries its previous owner's bytes.
+        // SAFETY: `dma` was just allocated with `size * size_of::<Trb>()` bytes
+        // and `trbs` is its start, so the whole span written here is inside it.
         unsafe { core::ptr::write_bytes(trbs, 0, size) };
 
         // Set up Link TRB in the last slot: points back to ring start, with Toggle Cycle.
         // The cycle bit on the Link TRB starts as 0 and will be set when the ring wraps.
         let link_idx = size - 1;
+        // SAFETY: `link_idx` is the last of the `size` TRBs in the allocation,
+        // and `write_bytes` above initialised every one of them, so this is a
+        // valid, aligned, initialised `Trb` to take a reference to.
         unsafe {
             let link = &mut *trbs.add(link_idx);
             link.parameter = phys;
@@ -146,6 +151,9 @@ impl ProducerRing {
         }
 
         let idx = self.enqueue_idx;
+        // SAFETY: `enqueue_idx` is kept below `size - 1` by the wrap below, so
+        // it indexes a TRB inside the ring allocation. The write is volatile
+        // because the controller reads the same memory concurrently.
         unsafe { core::ptr::write_volatile(self.trbs.add(idx), trb) };
 
         let trb_phys = self.dma.phys_addr().as_u64() + (idx * core::mem::size_of::<Trb>()) as u64;
@@ -155,6 +163,10 @@ impl ProducerRing {
         if self.enqueue_idx >= self.size - 1 {
             // Update the Link TRB's cycle bit via volatile read-modify-write.
             // The Link TRB control field is at byte offset 12 within the TRB (the 4th u32).
+            // SAFETY: the Link TRB is the last of the `size` TRBs in the ring
+            // allocation and `Trb` is four `u32`s, so `link_ptr.add(3)` is its
+            // control field and stays inside the allocation. Volatile because
+            // the controller is reading the same word.
             unsafe {
                 let link_ptr = self.trbs.add(self.size - 1) as *mut u32;
                 let ctrl_ptr = link_ptr.add(3); // control is the 4th u32 (offset 12)
@@ -218,6 +230,8 @@ impl EventRing {
         let trbs = ring_dma.as_ptr() as *mut Trb;
 
         // Zero all TRBs so cycle bits start as 0; we poll expecting cycle=1 first
+        // SAFETY: `ring_dma` was just allocated with `size * size_of::<Trb>()`
+        // bytes and `trbs` is its start, so the span written here is inside it.
         unsafe { core::ptr::write_bytes(trbs, 0, size) };
 
         // Allocate ERST with one entry
@@ -225,6 +239,10 @@ impl EventRing {
             .allocate_sized(core::mem::size_of::<ErstEntry>())
             .expect("xhci: failed to allocate ERST");
         let erst_entry = erst_dma.as_ptr() as *mut ErstEntry;
+        // SAFETY: `erst_dma` was allocated with exactly `size_of::<ErstEntry>()`
+        // bytes, so writing each field of the single entry it holds is in
+        // bounds. The whole entry is initialised before the controller is
+        // pointed at it.
         unsafe {
             (*erst_entry).ring_segment_base = ring_dma.phys_addr().as_u64();
             (*erst_entry).ring_segment_size = size as u16;
@@ -243,12 +261,17 @@ impl EventRing {
 
     /// Check if an event TRB is ready without consuming it.
     pub fn peek(&self) -> bool {
+        // SAFETY: `dequeue_idx` is wrapped to `size` by `poll`, so it indexes a
+        // TRB inside the ring allocation, which `new` zeroed. Volatile because
+        // the controller writes this slot behind our back.
         let trb = unsafe { core::ptr::read_volatile(self.trbs.add(self.dequeue_idx)) };
         trb.cycle_bit() == self.cycle_bit
     }
 
     /// Poll for the next event TRB. Returns `Some(trb)` if one is ready.
     pub fn poll(&mut self) -> Option<Trb> {
+        // SAFETY: same slot `peek` reads — `dequeue_idx` stays below `size`, and
+        // the read is volatile because the controller produces into it.
         let trb = unsafe { core::ptr::read_volatile(self.trbs.add(self.dequeue_idx)) };
 
         if trb.cycle_bit() == self.cycle_bit {

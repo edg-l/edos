@@ -58,6 +58,9 @@ pub struct InterrupterRegisters {
 /// # Safety
 /// The caller must ensure `ptr` points to a valid, mapped MMIO register.
 pub unsafe fn reg_read(ptr: *const u32) -> u32 {
+    // SAFETY: the caller guarantees `ptr` is a mapped MMIO register, so a
+    // volatile read of it is a well-formed load that the compiler must not
+    // fold away or reorder against the other register accesses around it.
     unsafe { ptr::read_volatile(ptr) }
 }
 
@@ -66,6 +69,9 @@ pub unsafe fn reg_read(ptr: *const u32) -> u32 {
 /// # Safety
 /// The caller must ensure `ptr` points to a valid, mapped MMIO register.
 pub unsafe fn reg_write(ptr: *mut u32, val: u32) {
+    // SAFETY: the caller guarantees `ptr` is a mapped MMIO register, so a
+    // volatile store to it is a well-formed store the compiler must emit
+    // exactly once and must not reorder against neighbouring accesses.
     unsafe { ptr::write_volatile(ptr, val) }
 }
 
@@ -92,7 +98,9 @@ impl XhciRegisters {
     /// `base` must be a valid, mapped pointer to the xHCI BAR0 MMIO region.
     pub unsafe fn new(base: *mut u8) -> Self {
         let cap = base as *const CapabilityRegisters;
-        // Safety: caller guarantees `base` points to a valid, mapped xHCI MMIO region.
+        // SAFETY: the caller guarantees `base` points to a mapped xHCI BAR0, and
+        // the capability registers sit at offset 0 of it, so `cap` is in bounds
+        // for every field read here. All four are read-only hardware values.
         let (cap_length, db_offset, rts_offset, hcsparams1) = unsafe {
             (
                 ptr::read_volatile(&(*cap).caplength),
@@ -117,6 +125,9 @@ impl XhciRegisters {
     }
 
     pub fn op(&self) -> *mut OperationalRegisters {
+        // SAFETY: `base` is a mapped BAR0 and CAPLENGTH, read from the controller
+        // itself, is the offset of the operational registers within it (xHCI 1.2
+        // §5.3.1), so the result stays inside the same mapping.
         unsafe { self.base.add(self.cap_length as usize) as *mut OperationalRegisters }
     }
 
@@ -125,6 +136,9 @@ impl XhciRegisters {
     /// Port registers start at op_base + 0x400, each set is 16 bytes.
     pub fn port(&self, index: u8) -> *mut PortRegisters {
         assert!(index < self.max_ports, "port index out of range");
+        // SAFETY: the port register sets are a `max_ports`-long array at
+        // op_base + 0x400 (xHCI 1.2 §5.4.8), and the assert above bounds `index`
+        // to that array, so the offset stays inside the BAR0 mapping.
         unsafe {
             self.base
                 .add(self.cap_length as usize + 0x400 + (index as usize) * 16)
@@ -133,6 +147,9 @@ impl XhciRegisters {
     }
 
     pub fn doorbell(&self, index: u8) -> *mut u32 {
+        // SAFETY: `db_offset` is DBOFF as the controller reported it, and the
+        // doorbell array that starts there is indexed by slot id, of which the
+        // driver never allocates more than MaxSlots, so this stays in the BAR.
         unsafe {
             self.base
                 .add(self.db_offset as usize + (index as usize) * 4) as *mut u32
@@ -143,6 +160,9 @@ impl XhciRegisters {
     ///
     /// Runtime registers are at base + rts_offset; interrupters start at +0x20, each 32 bytes.
     pub fn interrupter(&self, index: u16) -> *mut InterrupterRegisters {
+        // SAFETY: `rts_offset` is RTSOFF as the controller reported it, and the
+        // interrupter array begins 0x20 into the runtime registers (xHCI 1.2
+        // §5.5). This driver only ever uses interrupter 0, well inside the BAR.
         unsafe {
             self.base
                 .add(self.rts_offset as usize + 0x20 + (index as usize) * 32)

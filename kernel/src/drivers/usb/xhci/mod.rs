@@ -164,10 +164,17 @@ impl XhciController {
                 }
             }
 
+            // SAFETY: `bar_virt` is the HHDM address of BAR0 and the block above
+            // mapped 64 KB of MMIO there, which covers the whole xHCI register
+            // space, so it is the valid mapped BAR0 pointer `new` requires.
             let regs = unsafe { XhciRegisters::new(bar_virt.as_mut_ptr()) };
 
             // Log controller version and capabilities.
+            // SAFETY: `regs.cap()` points at the capability registers inside the
+            // mapping just established, and both fields are read-only hardware
+            // values, so a volatile read of each is well formed.
             let version = unsafe { core::ptr::read_volatile(&(*regs.cap()).hciversion) };
+            // SAFETY: as above, the adjacent HCSPARAMS1 register.
             let hcsparams1 = unsafe { core::ptr::read_volatile(&(*regs.cap()).hcsparams1) };
             let max_slots = hcsparams1 & 0xFF;
             let max_ports = (hcsparams1 >> 24) & 0xFF;
@@ -204,14 +211,22 @@ impl XhciController {
         Self::reset(&regs)?;
 
         // 4. Read capabilities
+        // SAFETY: the caller built `regs` from a mapped BAR0, so `regs.cap()`
+        // is inside that mapping and each of these three is a read-only
+        // capability register within it.
         let hcsparams1 = unsafe { reg_read(&(*regs.cap()).hcsparams1) };
+        // SAFETY: as above, HCSPARAMS2.
         let hcsparams2 = unsafe { reg_read(&(*regs.cap()).hcsparams2) };
+        // SAFETY: as above, HCCPARAMS1.
         let hccparams1 = unsafe { reg_read(&(*regs.cap()).hccparams1) };
 
         let max_slots = (hcsparams1 & 0xFF) as u8;
         let context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
 
         // 5. Set MaxSlotsEn in CONFIG register
+        // SAFETY: `regs.op()` is the operational register block inside the
+        // mapped BAR0. The controller is halted and reset at this point, so it
+        // is not consuming CONFIG concurrently.
         unsafe {
             reg_write(&mut (*regs.op()).config, max_slots as u32);
         }
@@ -237,6 +252,8 @@ impl XhciController {
                 .allocate_sized((num_scratch as usize) * 8)
                 .map_err(|_| "xhci: failed to allocate scratchpad array")?;
 
+            // SAFETY: `regs.op()` is inside the mapped BAR0 and PAGESIZE is a
+            // read-only register within it.
             let pagesize_reg = unsafe { reg_read(&(*regs.op()).pagesize) };
             // PAGESIZE register: bit N set means page size is 2^(N+12). Use trailing_zeros to
             // find the lowest set bit.
@@ -247,6 +264,10 @@ impl XhciController {
                     .allocate_sized(page_size)
                     .map_err(|_| "xhci: failed to allocate scratchpad page")?;
                 let page_phys = page.phys_addr().as_u64();
+                // SAFETY: `scratch_array` is a DMA allocation of `num_scratch`
+                // `u64`s and `i` is bounded by that count, so the write is in
+                // bounds. DMA buffers are page aligned, so every entry is
+                // `u64`-aligned.
                 unsafe {
                     core::ptr::write_volatile(
                         (scratch_array.as_ptr() as *mut u64).add(i),
@@ -257,6 +278,9 @@ impl XhciController {
             }
 
             // Write scratchpad array physical address into DCBAA[0]
+            // SAFETY: the DCBAA is `max_slots + 1` `u64`s, so entry 0 exists;
+            // the controller has not been given DCBAAP yet, so nothing else is
+            // reading it.
             unsafe {
                 core::ptr::write_volatile(
                     dcbaa.as_ptr() as *mut u64,
@@ -267,6 +291,8 @@ impl XhciController {
         }
 
         // Write DCBAAP (split into two 32-bit writes)
+        // SAFETY: `regs.op()` is inside the mapped BAR0. The controller is
+        // still halted, so it cannot observe the halves separately.
         unsafe {
             reg_write(&mut (*regs.op()).dcbaap_lo, dcbaa_phys as u32);
             reg_write(&mut (*regs.op()).dcbaap_hi, (dcbaa_phys >> 32) as u32);
@@ -276,6 +302,8 @@ impl XhciController {
         //    Bit 0 of CRCR_LO is the initial Consumer Cycle State (cycle=1 matches our ring).
         let command_ring = CommandRing::new(256);
         let cr_phys = command_ring.phys_addr();
+        // SAFETY: `regs.op()` is inside the mapped BAR0, and the controller is
+        // still halted, so the two halves of CRCR cannot be read apart.
         unsafe {
             reg_write(&mut (*regs.op()).crcr_lo, (cr_phys as u32) | 1);
             reg_write(&mut (*regs.op()).crcr_hi, (cr_phys >> 32) as u32);
@@ -286,6 +314,10 @@ impl XhciController {
         let event_ring = EventRing::new(256);
         let er = &event_ring;
         let intr = regs.interrupter(0);
+        // SAFETY: `regs.interrupter(0)` is the first interrupter register set
+        // inside the mapped BAR0's runtime region, and every xHCI controller
+        // implements at least interrupter 0. The order below is the one the
+        // spec requires: ERSTBA last, because writing it is what arms the ring.
         unsafe {
             // ERSTSZ = 1 (one segment)
             reg_write(&mut (*intr).erstsz, 1);
@@ -316,6 +348,9 @@ impl XhciController {
         }
 
         // 11. Start the controller: set Run/Stop (bit 0) and Interrupter Enable (bit 2).
+        // SAFETY: `regs.op()` is inside the mapped BAR0. Every ring and array
+        // the controller will touch has been allocated and programmed above,
+        // so it is safe for it to start consuming them.
         unsafe {
             let cmd = reg_read(&(*regs.op()).usbcmd);
             reg_write(&mut (*regs.op()).usbcmd, cmd | (1 << 0) | (1 << 2));
@@ -323,6 +358,8 @@ impl XhciController {
 
         // Wait for HCHalted (bit 0 of USBSTS) to clear, confirming the controller is running.
         for _ in 0..1_000_000u32 {
+            // SAFETY: `regs.op()` is inside the mapped BAR0 and USBSTS is a
+            // register within it; the read is volatile so the poll re-reads it.
             let sts = unsafe { reg_read(&(*regs.op()).usbsts) };
             if sts & (1 << 0) == 0 {
                 println!("xhci: controller started");
@@ -345,6 +382,8 @@ impl XhciController {
     /// Wait until Controller Not Ready (CNR, bit 11 of USBSTS) clears.
     fn wait_for_ready(regs: &XhciRegisters) -> Result<(), &'static str> {
         for _ in 0..1_000_000u32 {
+            // SAFETY: `regs.op()` is inside the mapped BAR0 and USBSTS is a
+            // register within it; the read is volatile so the poll re-reads it.
             let sts = unsafe { reg_read(&(*regs.op()).usbsts) };
             if sts & (1 << 11) == 0 {
                 return Ok(());
@@ -356,11 +395,14 @@ impl XhciController {
 
     /// Halt the controller by clearing the Run/Stop bit and waiting for HCHalted.
     fn halt(regs: &XhciRegisters) -> Result<(), &'static str> {
+        // SAFETY: `regs.op()` is inside the mapped BAR0. Clearing Run/Stop is
+        // a read-modify-write of USBCMD, and this driver is the only writer.
         unsafe {
             let cmd = reg_read(&(*regs.op()).usbcmd);
             reg_write(&mut (*regs.op()).usbcmd, cmd & !(1 << 0));
         }
         for _ in 0..1_000_000u32 {
+            // SAFETY: as above — a volatile poll of USBSTS inside the BAR.
             let sts = unsafe { reg_read(&(*regs.op()).usbsts) };
             if sts & (1 << 0) != 0 {
                 return Ok(());
@@ -372,10 +414,14 @@ impl XhciController {
 
     /// Reset the controller by setting HCRST and waiting for it to clear.
     fn reset(regs: &XhciRegisters) -> Result<(), &'static str> {
+        // SAFETY: `regs.op()` is inside the mapped BAR0. The controller is
+        // halted by the caller before HCRST is set, which is what the spec
+        // requires of a reset (xHCI 1.2 §4.2).
         unsafe {
             reg_write(&mut (*regs.op()).usbcmd, 1 << 1); // HCRST
         }
         for _ in 0..1_000_000u32 {
+            // SAFETY: as above — a volatile poll of USBCMD inside the BAR.
             let cmd = unsafe { reg_read(&(*regs.op()).usbcmd) };
             if cmd & (1 << 1) == 0 {
                 // HCRST cleared; also wait for CNR to clear before returning
@@ -394,6 +440,9 @@ impl XhciController {
         let cmd_phys = self.command_ring.push(trb);
 
         // Ring doorbell 0 — Host Controller Command doorbell.
+        // SAFETY: `self.regs` owns the mapped BAR0, and doorbell 0 is the
+        // command doorbell every controller implements. The TRB it announces
+        // was written to the command ring above.
         unsafe {
             reg_write(self.regs.doorbell(0), 0);
         }
@@ -405,6 +454,10 @@ impl XhciController {
                 // Acknowledge the event by advancing the ERDP and clearing EHB (bit 3).
                 let erdp = self.event_ring.dequeue_phys();
                 let intr = self.regs.interrupter(0);
+                // SAFETY: `self.regs` owns the mapped BAR0 and interrupter 0 is
+                // inside its runtime region. `erdp` is the event ring's own
+                // dequeue address, so handing it back is what tells the
+                // controller the slot is free again.
                 unsafe {
                     reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
                     reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
@@ -458,6 +511,9 @@ impl XhciController {
 
         // 1. Setup Stage TRB — the 8-byte setup packet is placed directly in the parameter
         //    field (Immediate Data flag set), so no separate DMA buffer is needed for it.
+        // SAFETY: `SetupPacket` is `#[repr(C, packed)]` and exactly the eight
+        // bytes of a USB setup packet (USB 2.0 §9.3), and `setup` is a live
+        // local, so the slice covers initialised bytes it owns for this scope.
         let setup_bytes =
             unsafe { core::slice::from_raw_parts(&setup as *const SetupPacket as *const u8, 8) };
         let mut setup_param = [0u8; 8];
@@ -497,6 +553,9 @@ impl XhciController {
         ring.push(status_trb);
 
         // Ring doorbell for this slot, endpoint 0 (doorbell target = 1).
+        // SAFETY: `self.regs` owns the mapped BAR0, and `slot_id` came from an
+        // Enable Slot completion, so it indexes a doorbell the controller
+        // allocated. Target 1 is EP0's DCI.
         unsafe {
             reg_write(self.regs.doorbell(device.slot_id), 1);
         }
@@ -506,6 +565,10 @@ impl XhciController {
             if let Some(event) = self.event_ring.poll() {
                 let erdp = self.event_ring.dequeue_phys();
                 let intr = self.regs.interrupter(0);
+                // SAFETY: `self.regs` owns the mapped BAR0 and interrupter 0 is
+                // inside its runtime region. `erdp` is the event ring's own
+                // dequeue address, so handing it back is what tells the
+                // controller the slot is free again.
                 unsafe {
                     reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
                     reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
@@ -545,6 +608,8 @@ impl XhciController {
         // port_id in xHCI events is 1-based; regs.port() takes a 0-based index.
         let port = self.regs.port(port_id - 1);
 
+        // SAFETY: `port` came from `regs.port()`, which asserts the index is
+        // below MaxPorts and returns a pointer inside the mapped BAR0.
         let portsc = unsafe { reg_read(&(*port).portsc) };
 
         // Preserve Port Power (bit 9).  Write 1 to the W1C status bits to clear them.
@@ -557,6 +622,9 @@ impl XhciController {
             | (1 << 21)               // PRC – Port Reset Change
             | (1 << 22)               // PLC – Port Link State Change
             | (1 << 23); // CEC – Port Config Error Change
+        // SAFETY: `port` is inside the mapped BAR0, as above. Writing the W1C
+        // change bits back is how they are cleared; Port Power is carried over
+        // so the write does not turn the port off.
         unsafe {
             reg_write(&mut (*port).portsc, (portsc & pp_bit) | w1c_bits);
         }
@@ -573,15 +641,19 @@ impl XhciController {
         if ped == 0 {
             // Port is connected but not yet enabled.  For USB 2.0 devices we must issue a
             // port reset, which the controller performs and then sets PRC when done.
+            // SAFETY: `port` is inside the mapped BAR0, as above.
             unsafe {
                 let sc = reg_read(&(*port).portsc);
                 reg_write(&mut (*port).portsc, (sc & pp_bit) | (1 << 4)); // PR – Port Reset
             }
 
             for _ in 0..1_000_000u32 {
+                // SAFETY: as above — a volatile poll of the same PORTSC.
                 let sc = unsafe { reg_read(&(*port).portsc) };
                 if sc & (1 << 21) != 0 {
                     // Clear PRC (Port Reset Change) by writing 1 to it.
+                    // SAFETY: as above; PRC is W1C and Port Power is carried
+                    // over so clearing it does not turn the port off.
                     unsafe { reg_write(&mut (*port).portsc, (sc & pp_bit) | (1 << 21)) };
                     break;
                 }
@@ -589,6 +661,7 @@ impl XhciController {
             }
 
             // Re-read PORTSC after the reset completes to get the updated speed and PED.
+            // SAFETY: as above — the same in-BAR register, read volatile.
             let portsc_new = unsafe { reg_read(&(*port).portsc) };
             if portsc_new & (1 << 1) == 0 {
                 // Port still not enabled after reset.
@@ -637,13 +710,20 @@ impl XhciController {
         // Offset 0 = Drop Context Flags, offset 4 = Add Context Flags.
         // We add Slot (bit 0) and EP0 (bit 1) → Add Flags = 0b11 = 0x3.
         let icc_ptr = input_ctx.as_ptr() as *mut u32;
+        // SAFETY: `input_ctx` is a `33 * ctx_size` DMA allocation whose first
+        // `ctx_size` bytes are the Input Control Context, and `ctx_size` is 32
+        // or 64, so both dwords are in bounds. DMA buffers are page aligned.
         unsafe {
             core::ptr::write_volatile(icc_ptr, 0); // Drop Context Flags = 0
             core::ptr::write_volatile(icc_ptr.add(1), 0x3); // Add Context Flags: Slot + EP0
         }
 
         // Step 5 — Fill Slot Context (at offset 1 × context_size).
+        // SAFETY: the Slot Context is the second of the 33 contexts in the
+        // `33 * ctx_size` allocation, so this offset is in bounds.
         let slot_ctx_ptr = unsafe { input_ctx.as_ptr().add(ctx_size) as *mut u32 };
+        // SAFETY: `slot_ctx_ptr` starts a `ctx_size`-byte context, so dwords 0
+        // and 1 are inside it, and the allocation is page aligned.
         unsafe {
             // Dword 0: Speed (bits [23:20]), Context Entries = 1 (bits [31:27]).
             let dword0 = (speed.to_slot_speed() << 20) | (1 << 27);
@@ -655,8 +735,12 @@ impl XhciController {
 
         // Step 6 — Fill EP0 Context (at offset 2 × context_size).
         // EP Type 4 = Control Bidirectional.
+        // SAFETY: the EP0 Context is the third of the 33 contexts in the
+        // allocation, so this offset is in bounds.
         let ep0_ctx_ptr = unsafe { input_ctx.as_ptr().add(2 * ctx_size) as *mut u32 };
         let max_packet = speed.default_max_packet_size();
+        // SAFETY: `ep0_ctx_ptr` starts a `ctx_size`-byte context and `ctx_size`
+        // is at least 32, so dwords 1 through 4 are inside it.
         unsafe {
             // Dword 1: EP Type (bits [5:3] = 4), Max Packet Size (bits [31:16]).
             let dword1 = (4u32 << 3) | ((max_packet as u32) << 16);
@@ -676,6 +760,10 @@ impl XhciController {
             .map_err(|_| XhciError::InvalidDevice)?;
         let output_ctx_phys = output_ctx.phys_addr().as_u64();
 
+        // SAFETY: the DCBAA holds `max_slots + 1` `u64`s and `slot_id` came
+        // from an Enable Slot completion, so the controller allocated it within
+        // MaxSlots and the entry is in bounds. The write is volatile because
+        // the controller reads the array itself.
         unsafe {
             let entry = (self.dcbaa.as_ptr() as *mut u64).add(slot_id as usize);
             core::ptr::write_volatile(entry, output_ctx_phys);
@@ -742,6 +830,9 @@ impl XhciController {
         // bytes the device actually sent may be read; the rest of the descriptor stays zero.
         let valid = transferred.min(18);
         let mut raw = [0u8; 18];
+        // SAFETY: `buf` is an 18-byte DMA allocation, `raw` is an 18-byte
+        // array and `valid` is clamped to 18, so both sides are in bounds; the
+        // two are distinct allocations.
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), raw.as_mut_ptr(), valid);
         }
@@ -751,6 +842,9 @@ impl XhciController {
         if valid < 8 {
             return Err(XhciError::InvalidDevice);
         }
+        // SAFETY: `DeviceDescriptor` is the 18-byte wire layout (USB 2.0
+        // §9.6.1) and `raw` is 18 initialised bytes, so the read is in bounds.
+        // It is unaligned because the type is `packed` and `raw` is a `[u8]`.
         Ok(unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const DeviceDescriptor) })
     }
 
@@ -782,9 +876,14 @@ impl XhciController {
         // A pooled DMA buffer is not zeroed on reuse, so a short transfer would otherwise
         // hand back the previous owner's bytes as a descriptor.
         let mut hdr_raw = [0u8; 9];
+        // SAFETY: `hdr_buf` is a 9-byte DMA allocation, `hdr_raw` is a 9-byte
+        // array and the count is clamped to 9, so both sides are in bounds.
         unsafe {
             core::ptr::copy_nonoverlapping(hdr_buf.as_ptr(), hdr_raw.as_mut_ptr(), hdr_len.min(9));
         }
+        // SAFETY: `ConfigDescriptor` is the 9-byte wire layout (USB 2.0
+        // §9.6.3) and `hdr_raw` is 9 initialised bytes. Unaligned because the
+        // type is `packed` and the source is a `[u8]`.
         let config_hdr =
             unsafe { core::ptr::read_unaligned(hdr_raw.as_ptr() as *const ConfigDescriptor) };
         let total_len = config_hdr.w_total_length;
@@ -813,6 +912,8 @@ impl XhciController {
         // that does not fit, so a short transfer truncates the blob rather than parsing
         // whatever the pooled buffer held before.
         let mut data = alloc::vec![0u8; full_len.min(total_len as usize)];
+        // SAFETY: `full_buf` is a `total_len`-byte DMA allocation and `data` is
+        // at most that long, so `data.len()` bytes are in bounds on both sides.
         unsafe {
             core::ptr::copy_nonoverlapping(full_buf.as_ptr(), data.as_mut_ptr(), data.len());
         }
@@ -877,6 +978,9 @@ impl XhciController {
             Ok(len) => {
                 let len = len.min(length as usize);
                 let mut out = alloc::vec![0u8; len];
+                // SAFETY: `buf` is a `length`-byte DMA allocation and `out` is
+                // `len` bytes with `len <= length`, so the copy is in bounds on
+                // both sides; the two are distinct allocations.
                 unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), out.as_mut_ptr(), len) };
                 Ok(out)
             }
@@ -959,6 +1063,9 @@ impl XhciController {
 
         // Clear and set Input Control Context
         let icc = input_ctx.as_ptr() as *mut u32;
+        // SAFETY: `input_ctx` is the device's `33 * ctx_size` DMA allocation
+        // and the Input Control Context is its first `ctx_size` bytes, so both
+        // dwords are in bounds and `u32`-aligned.
         unsafe {
             // Drop Context Flags = 0
             core::ptr::write_volatile(icc, 0);
@@ -967,7 +1074,13 @@ impl XhciController {
         }
 
         // Update Slot Context: set Context Entries to the maximum of the current value and ep_dci
+        // SAFETY: the Slot Context is the second of the 33 contexts in the
+        // allocation, so this offset is in bounds.
         let slot_ctx = unsafe { input_ctx.as_ptr().add(ctx_size) } as *mut u32;
+        // SAFETY: `slot_ctx` starts a `ctx_size`-byte context, so dword 0 is
+        // inside it. The read-modify-write is not racy: the controller only
+        // consumes the input context while a Configure Endpoint command is in
+        // flight, and this driver thread issues that command below.
         unsafe {
             let dword0 = core::ptr::read_volatile(slot_ctx);
             // Context Entries is bits [31:27] - must cover all configured endpoints
@@ -978,8 +1091,12 @@ impl XhciController {
         }
 
         // Set up Endpoint Context for the interrupt IN endpoint
+        // SAFETY: `ep_dci` is at most 31, so context index `ep_dci + 1` is at
+        // most 32 and stays inside the 33-context allocation.
         let ep_ctx =
             unsafe { input_ctx.as_ptr().add((ep_dci as usize + 1) * ctx_size) } as *mut u32;
+        // SAFETY: `ep_ctx` starts a `ctx_size`-byte context and `ctx_size` is
+        // at least 32, so dwords 0 through 4 are inside it.
         unsafe {
             // Dword 0: Interval (bits [23:16]). What `bInterval` means depends
             // on the speed; see `UsbSpeed::interrupt_interval`.
@@ -1034,6 +1151,9 @@ impl XhciController {
 
         let input_ctx = &device.input_ctx;
         let icc = input_ctx.as_ptr() as *mut u32;
+        // SAFETY: `input_ctx` is the device's `33 * ctx_size` DMA allocation
+        // and the Input Control Context is its first `ctx_size` bytes, so both
+        // dwords are in bounds and `u32`-aligned.
         unsafe {
             // Drop Context Flags = 0
             core::ptr::write_volatile(icc, 0);
@@ -1042,7 +1162,11 @@ impl XhciController {
         }
 
         // Update Slot Context: Context Entries must cover the highest DCI used
+        // SAFETY: the Slot Context is the second of the 33 contexts in the
+        // allocation, so this offset is in bounds.
         let slot_ctx = unsafe { input_ctx.as_ptr().add(ctx_size) as *mut u32 };
+        // SAFETY: `slot_ctx` starts a `ctx_size`-byte context, so dword 0 is
+        // inside it, and only this driver thread writes the input context.
         unsafe {
             let dword0 = core::ptr::read_volatile(slot_ctx);
             let current_entries = (dword0 >> 27) & 0x1F;
@@ -1051,8 +1175,12 @@ impl XhciController {
         }
 
         // EP Context for bulk IN (type 6)
+        // SAFETY: `ep_in_dci` is `(addr & 0x0F) * 2 + 1`, at most 31, so
+        // context index `ep_in_dci + 1` stays inside the 33-context allocation.
         let ep_in_ctx =
             unsafe { input_ctx.as_ptr().add((ep_in_dci as usize + 1) * ctx_size) as *mut u32 };
+        // SAFETY: `ep_in_ctx` starts a `ctx_size`-byte context and `ctx_size`
+        // is at least 32, so dwords 0 through 4 are inside it.
         unsafe {
             core::ptr::write_volatile(ep_in_ctx, 0); // Dword 0
             // Dword 1: EP Type=6 (Bulk IN), Max Packet Size, CErr=3
@@ -1067,8 +1195,12 @@ impl XhciController {
         }
 
         // EP Context for bulk OUT (type 2)
+        // SAFETY: `ep_out_dci` is `(addr & 0x0F) * 2`, at most 30, so context
+        // index `ep_out_dci + 1` stays inside the 33-context allocation.
         let ep_out_ctx =
             unsafe { input_ctx.as_ptr().add((ep_out_dci as usize + 1) * ctx_size) as *mut u32 };
+        // SAFETY: `ep_out_ctx` starts a `ctx_size`-byte context and `ctx_size`
+        // is at least 32, so dwords 0 through 4 are inside it.
         unsafe {
             core::ptr::write_volatile(ep_out_ctx, 0); // Dword 0
             // Dword 1: EP Type=2 (Bulk OUT), Max Packet Size, CErr=3
@@ -1115,6 +1247,9 @@ impl XhciController {
         ring.push(trb);
 
         // Ring the doorbell for this slot/endpoint
+        // SAFETY: `self.regs` owns the mapped BAR0, and `slot_id` came from an
+        // Enable Slot completion, so it indexes a doorbell the controller
+        // allocated. The TRB it announces was pushed to the ring above.
         unsafe {
             reg_write(self.regs.doorbell(slot_id), ep_dci);
         }
@@ -1124,6 +1259,10 @@ impl XhciController {
             if let Some(event) = self.event_ring.poll() {
                 let erdp = self.event_ring.dequeue_phys();
                 let intr = self.regs.interrupter(0);
+                // SAFETY: `self.regs` owns the mapped BAR0 and interrupter 0 is
+                // inside its runtime region. `erdp` is the event ring's own
+                // dequeue address, so handing it back is what tells the
+                // controller the slot is free again.
                 unsafe {
                     reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
                     reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
@@ -1149,6 +1288,10 @@ impl XhciController {
             } else {
                 // No event ready -- clear IMAN.IP and USBSTS.EINT so the controller
                 // can deliver new events.
+                // SAFETY: `self.regs` owns the mapped BAR0, so interrupter 0
+                // and the operational registers are both inside it. IP and
+                // EINT are write-1-to-clear, so writing the bit back is what
+                // acknowledges the interrupt and lets the next one arrive.
                 unsafe {
                     let intr = self.regs.interrupter(0);
                     let iman = reg_read(&(*intr).iman);
@@ -1172,6 +1315,9 @@ impl XhciController {
 /// Runs off the xHCI driver thread because registration triggers block reads
 /// that only that thread can answer.
 extern "C" fn usb_register_partition_thread(arg: *mut u8) -> ! {
+    // SAFETY: the only spawner of this kthread passes a `Partition` leaked with
+    // `Box::into_raw`, so `arg` is that box's pointer, owned by exactly this
+    // thread and reclaimed here.
     let partition: Box<crate::fs::gpt::Partition> = unsafe { Box::from_raw(arg.cast()) };
     if let Err(e) = crate::fs::api::register_partition(*partition) {
         println!("xhci: failed to register USB partition: {:?}", e);
@@ -1217,6 +1363,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
     // Scan all ports for already-connected devices.
     let max_ports = controller.regs.max_ports();
     for port in 1..=max_ports {
+        // SAFETY: `port` runs from 1 to `max_ports`, so `port - 1` is a valid
+        // zero-based index and `regs.port()` returns a pointer inside the
+        // mapped BAR0.
         let portsc = unsafe { reg_read(&(*controller.regs.port(port - 1)).portsc) };
         let ccs = portsc & 1; // Current Connect Status
         if ccs != 0 {
@@ -1606,6 +1755,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
                 control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
             });
         }
+        // SAFETY: `controller.regs` owns the mapped BAR0, and `dev.slot_id`
+        // came from an Enable Slot completion, so it indexes a doorbell the
+        // controller allocated. Every TRB it announces is already on the ring.
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         crate::drivers::keyboard::USB_KEYBOARD_ACTIVE
             .store(true, core::sync::atomic::Ordering::Relaxed);
@@ -1625,6 +1777,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
                 control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
             });
         }
+        // SAFETY: `controller.regs` owns the mapped BAR0, and `dev.slot_id`
+        // came from an Enable Slot completion, so it indexes a doorbell the
+        // controller allocated. Every TRB it announces is already on the ring.
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         crate::drivers::mouse::USB_MOUSE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -1653,6 +1808,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
         } else {
             // No key held: park indefinitely until interrupt or mailbox.
             thread_park_while(|| {
+                // SAFETY: `er` is a raw pointer to `controller.event_ring`,
+                // taken so the closure does not hold a borrow of `controller`
+                // across the park. `controller` is a live local of this
+                // function, and this driver thread is the only one that touches
+                // its event ring, so the pointer stays valid and unaliased.
                 let has_event = unsafe { (*er).peek() };
                 let has_mailbox = USB_BLOCK_MAILBOX.get().is_some_and(|mb| !mb.is_empty());
                 !has_event && !has_mailbox
@@ -1663,6 +1823,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
         while let Some(event) = controller.event_ring.poll() {
             let erdp = controller.event_ring.dequeue_phys();
             let intr = controller.regs.interrupter(0);
+            // SAFETY: `controller.regs` owns the mapped BAR0 and interrupter 0
+            // is inside its runtime region. `erdp` is the event ring's own
+            // dequeue address, so handing it back frees the slot.
             unsafe {
                 reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
                 reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
@@ -1692,6 +1855,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             let mut report = [0u8; 8];
                             let residual = (event.status & 0x00FF_FFFF) as usize;
                             let kbd_len = report.len().saturating_sub(residual);
+                            // SAFETY: `kbd_report_buf` is a DMA allocation of
+                            // `HID_QUEUE_DEPTH` eight-byte slots and `kbd_slot`
+                            // is kept below that depth, so the source range is
+                            // in bounds; `kbd_len` is at most `report.len()`,
+                            // which bounds the destination.
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     kbd_report_buf.as_ptr().add(kbd_slot * 8),
@@ -1737,6 +1905,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     status: 8,
                                     control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
                                 });
+                                // SAFETY: the mapped BAR0's doorbell for a slot
+                                // the controller allocated, announcing the TRB
+                                // just pushed above.
                                 unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
                             }
                             kbd_slot = (kbd_slot + 1) % HID_QUEUE_DEPTH;
@@ -1776,6 +1947,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             }
                             let len = mouse_report_len.saturating_sub(residual).min(report.len());
+                            // SAFETY: `mouse_report_buf` is a DMA allocation of
+                            // `HID_QUEUE_DEPTH` slots of `mouse_report_len`
+                            // bytes and `mouse_slot` is kept below that depth,
+                            // so the source range is in bounds; `len` is
+                            // clamped to `report.len()`, which bounds the
+                            // destination.
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     mouse_report_buf.as_ptr().add(mouse_slot * mouse_report_len),
@@ -1802,6 +1979,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     status: mouse_report_len as u32,
                                     control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
                                 });
+                                // SAFETY: the mapped BAR0's doorbell for a slot
+                                // the controller allocated, announcing the TRB
+                                // just pushed above.
                                 unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
                             }
                             mouse_slot = (mouse_slot + 1) % HID_QUEUE_DEPTH;
@@ -1835,6 +2015,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
         // Clear interrupt bits so the controller can deliver new MSI-X interrupts:
         // - IMAN.IP (bit 0, W1C) on Interrupter 0
         // - USBSTS.EINT (bit 3, W1C) on the controller
+        // SAFETY: `controller.regs` owns the mapped BAR0, so interrupter 0 and
+        // the operational registers are both inside it. IP and EINT are
+        // write-1-to-clear, so writing the bit back acknowledges the interrupt.
         unsafe {
             let intr = controller.regs.interrupter(0);
             let iman = reg_read(&(*intr).iman);
@@ -1873,6 +2056,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     ) {
                                         Ok(()) => {
                                             let mut out = alloc::vec![0u8; byte_count];
+                                            // SAFETY: `buf` is a DMA
+                                            // allocation of at least
+                                            // `byte_count` bytes (grown just
+                                            // above) and `out` is exactly that
+                                            // long, so both sides are in
+                                            // bounds and distinct.
                                             unsafe {
                                                 core::ptr::copy_nonoverlapping(
                                                     buf.as_ptr(),
@@ -1903,6 +2092,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             match io_buf {
                                 Some(ref buf) => {
                                     let copy_len = byte_count.min(data.len());
+                                    // SAFETY: `copy_len` is bounded by both
+                                    // `data.len()` and `byte_count`, and `buf`
+                                    // is a DMA allocation of at least
+                                    // `byte_count` bytes, so both sides are in
+                                    // bounds and distinct.
                                     unsafe {
                                         core::ptr::copy_nonoverlapping(
                                             data.as_ptr(),
@@ -1985,6 +2179,10 @@ fn find_hid_interfaces(config_data: &[u8]) -> Vec<(InterfaceDescriptor, Endpoint
 
     for (desc_type, bytes) in DescriptorIter::new(config_data) {
         if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
+            // SAFETY: `InterfaceDescriptor` is the 9-byte wire layout (USB 2.0
+            // §9.6.5) and the `bytes.len() >= 9` guard above bounds the read.
+            // Unaligned because the type is `packed` and the source is a `[u8]`
+            // at an arbitrary offset into the configuration blob.
             let iface =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
             current_iface = (iface.b_interface_class == USB_CLASS_HID).then_some(iface);
@@ -1999,6 +2197,9 @@ fn find_hid_interfaces(config_data: &[u8]) -> Vec<(InterfaceDescriptor, Endpoint
             && bytes.len() >= 7
             && let Some(iface) = current_iface
         {
+            // SAFETY: `EndpointDescriptor` is the 7-byte wire layout (USB 2.0
+            // §9.6.6) and the `bytes.len() >= 7` guard above bounds the read.
+            // Unaligned for the same reason as the interface descriptor.
             let ep =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
             if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
@@ -2025,6 +2226,10 @@ fn find_hid_interface(
 
     for (desc_type, bytes) in DescriptorIter::new(config_data) {
         if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
+            // SAFETY: `InterfaceDescriptor` is the 9-byte wire layout (USB 2.0
+            // §9.6.5) and the `bytes.len() >= 9` guard above bounds the read.
+            // Unaligned because the type is `packed` and the source is a `[u8]`
+            // at an arbitrary offset into the configuration blob.
             let iface =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
             if iface.b_interface_class == USB_CLASS_HID && iface.b_interface_protocol == protocol {
@@ -2036,6 +2241,9 @@ fn find_hid_interface(
             && bytes.len() >= 7
             && let Some(iface) = current_iface
         {
+            // SAFETY: `EndpointDescriptor` is the 7-byte wire layout (USB 2.0
+            // §9.6.6) and the `bytes.len() >= 7` guard above bounds the read.
+            // Unaligned for the same reason as the interface descriptor.
             let ep =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
             // Accept only IN interrupt endpoints
@@ -2065,6 +2273,10 @@ fn find_mass_storage(
     for (desc_type, bytes) in DescriptorIter::new(config_data) {
         if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
             // Starting a new interface; reset endpoint state.
+            // SAFETY: `InterfaceDescriptor` is the 9-byte wire layout (USB 2.0
+            // §9.6.5) and the `bytes.len() >= 9` guard above bounds the read.
+            // Unaligned because the type is `packed` and the source is a `[u8]`
+            // at an arbitrary offset into the configuration blob.
             let iface =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
             if iface.b_interface_class == USB_CLASS_MASS_STORAGE
@@ -2080,6 +2292,9 @@ fn find_mass_storage(
                 ep_out = None;
             }
         } else if desc_type == DESC_ENDPOINT && bytes.len() >= 7 && current_iface.is_some() {
+            // SAFETY: `EndpointDescriptor` is the 7-byte wire layout (USB 2.0
+            // §9.6.6) and the `bytes.len() >= 7` guard above bounds the read.
+            // Unaligned for the same reason as the interface descriptor.
             let ep =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
             // Only accept bulk endpoints (bmAttributes bits [1:0] == 2)

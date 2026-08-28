@@ -145,6 +145,9 @@ impl UsbMassStorage {
         // pooled buffer still holds whatever its previous owner left there.
         let mut result = [0u8; 36];
         let valid = transferred.min(36);
+        // SAFETY: `data_buf` is a 36-byte DMA allocation and `result` is a
+        // 36-byte array, and `valid` is clamped to 36, so both sides of the
+        // copy are in bounds. The regions are distinct allocations.
         unsafe {
             core::ptr::copy_nonoverlapping(data_buf.as_ptr(), result.as_mut_ptr(), valid);
         }
@@ -187,7 +190,13 @@ impl UsbMassStorage {
         )?;
 
         // Both fields are big-endian 32-bit integers.
+        // SAFETY: `data_buf` is an 8-byte DMA allocation, so both `u32` reads
+        // are in bounds. DMA buffers come from the page allocator and are page
+        // aligned, so both offsets are `u32`-aligned. The `transferred < 8`
+        // check below is what decides whether the bytes read are meaningful.
         let last_lba = unsafe { u32::from_be(core::ptr::read(data_buf.as_ptr() as *const u32)) };
+        // SAFETY: as above — the second parameter-data word, at offset 4 of the
+        // same 8-byte allocation.
         let block_size =
             unsafe { u32::from_be(core::ptr::read(data_buf.as_ptr().add(4) as *const u32)) };
 
@@ -379,6 +388,12 @@ impl UsbMassStorage {
 
         // 1. Build and send CBW on bulk OUT using the pre-allocated buffer.
         let cbw_phys = self.cbw_buf.phys_addr().as_u64();
+        // SAFETY: `cbw_buf` is a 31-byte DMA allocation owned by `self` and
+        // `Cbw` is that exact wire layout (USB BOT §5.1), so zeroing 31 bytes
+        // and writing each field stays inside it. `cbwcb` is a 16-byte array
+        // and `scsi_cmd` is `&[u8; 16]`, so the copy is in bounds on both
+        // sides. Nothing else aliases the buffer: the controller only reads it
+        // after the doorbell below.
         unsafe {
             let cbw = self.cbw_buf.as_ptr() as *mut Cbw;
             core::ptr::write_bytes(cbw as *mut u8, 0, 31);
@@ -421,12 +436,19 @@ impl UsbMassStorage {
 
         // 3. Read CSW on bulk IN using the pre-allocated buffer.
         let csw_phys = self.csw_buf.phys_addr().as_u64();
+        // SAFETY: `csw_buf` is a 13-byte DMA allocation owned by `self`, so
+        // zeroing 13 bytes of it is in bounds. Clearing it first means a
+        // transfer that never lands cannot be read as the previous CSW.
         unsafe {
             core::ptr::write_bytes(self.csw_buf.as_ptr(), 0, 13);
         }
         controller.bulk_transfer(self.slot_id, in_ring, self.ep_in_dci, csw_phys, 13, true)?;
 
         // Validate the CSW.
+        // SAFETY: `csw_buf` is a 13-byte DMA allocation and `Csw` is that exact
+        // wire layout (USB BOT §5.2), so the read is in bounds; the buffer was
+        // zeroed above and the device has since written every byte of it. `Csw`
+        // is `packed`, so the read is by value rather than through a reference.
         let csw = unsafe { core::ptr::read(self.csw_buf.as_ptr() as *const Csw) };
         // Read packed fields into locals before use.
         let sig = csw.d_csw_signature;

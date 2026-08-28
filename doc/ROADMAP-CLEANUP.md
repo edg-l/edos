@@ -8,12 +8,14 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-28.** 26 of the 32 entries are struck: I6 landed with the
-`[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`, and
-G2's named `uaccess.rs` remainder is closed. Six are open, in the order the
-evidence suggests: C2 (the parser exists, 125 programs have not adopted it),
-H1 and H3 (two long functions), G3 (split `WORKING-NOTES.md`), and the gates I2
-and I5. The numbers each entry quotes were remeasured on the date it names, and
+**State as of 2026-08-28.** 27 of the 32 entries are struck: I6 landed with the
+`[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`,
+G2's named `uaccess.rs` remainder is closed, and I5a is finished -- every
+`unsafe` block in `kernel/src` carries a `// SAFETY:` and
+`undocumented_unsafe_blocks` is denied crate-wide in `kernel/Cargo.toml`. Five
+are open, in the order the evidence suggests: C2 (the parser exists, 125
+programs have not adopted it), H1 and H3 (two long functions), G3 (split
+`WORKING-NOTES.md`), and the gates I2 and I5b. The numbers each entry quotes were remeasured on the date it names, and
 the count above is `grep -c '^### ' minus the struck ones`, not a tally kept by
 hand.
 
@@ -626,15 +628,20 @@ unused, and restores the tree from a copy taken before the first edit -- on a
 signal too, and without running git, so a dirty tree is safe. It reports the ten
 survivors E1 annotated and nothing else.
 
-### I5. Document the kernel's unsafe, both halves (S2, E3)
+### I5. Document the kernel's unsafe, both halves (S2, E3) -- I5a done
 
 `unsafe` is documented twice, for two different readers, and this entry used to
 name only the first. `doc/rust-style.md` states the rule and the sources; the
 counts below are the gap, measured 2026-08-26 with the commands recorded there.
 
-**I5a, the blocks and the impls.** `clippy::undocumented_unsafe_blocks` is the
-gate, and it covers `unsafe impl` too. It reported 720 blocks across 84 files
-when this entry opened; the current figure and where it is concentrated are at
+**~~I5a, the blocks and the impls.~~ Done.** `clippy::undocumented_unsafe_blocks`
+is the gate, and it covers `unsafe impl` too. It reported 720 blocks across 84
+files when this entry opened and reports none now:
+`undocumented_unsafe_blocks = "deny"` sits in `kernel/Cargo.toml`'s
+`[lints.clippy]` beside the other three, the 43 per-module `#[deny]` ratchets
+are gone with it, and `make -C kernel clippy` is clean under all eleven feature
+sets. The narrative below is the order the modules fell in and the arguments
+that recur; the current figure and where it is concentrated are at
 the end of this entry, with the command that measures them. ~~A bare `unsafe impl Send for T {}` is a hand-made
 claim that no data race can arise, in a preemptive SMP kernel with work-stealing,
 and it is the claim most likely to stop being true when the type later grows a
@@ -794,12 +801,20 @@ handed `reclaim` the descriptor id the DEVICE wrote into the used ring and
 one layer down. It is bounded and logged now. `doc/WORKING-NOTES.md` carries
 both.
 
-107 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
---target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`, and they are all in the two `drivers/` submodules left:
-`usb/` 97 (`xhci/mod.rs` 77) and `drivers/mod.rs` itself 10. The lint sits commented out in `kernel/Cargo.toml`'s
-`[lints.clippy]` beside the three that are on: moving it up once the last
-submodule holds its own deny is the commit that closes this entry.
+The fourth batch closes it: `usb/` (97 blocks, 77 of them in `xhci/mod.rs`) and
+`drivers/mod.rs`'s own 10. `xhci/` is one shape almost throughout -- a register
+reached through `XhciRegisters`, whose every accessor derives from the one
+mapped BAR0, so each comment names the field's offset in the spec rather than
+re-arguing the mapping -- plus the input-context writes, where the bound is that
+a DCI is at most 31 and the allocation holds 33 contexts, and the descriptor
+parse, where a `read_unaligned` of a `packed` wire struct is bounded by the
+`bytes.len() >=` guard the caller already had. `drivers/mod.rs`'s own are the
+8042: the comment names `PS2_LOCK` or the single-CPU bring-up that makes each
+port access the only one in flight. With the last submodule done the
+per-submodule ratchet had nothing left to guard, so the 43 `#[deny]` attributes
+came out and the lint moved into the manifest, which is where the entry set out
+to put it. Verify with `cd kernel && touch src/main.rs && cargo clippy --target
+x86_64-unknown-none 2>&1 | grep -cE '^\s+--> '`, which reports 0.
 
 **I5b, the contracts.** 65 `unsafe fn` declarations against 70 `# Safety`
 sections -- a section also belongs on an `unsafe trait` and on a safe fn whose

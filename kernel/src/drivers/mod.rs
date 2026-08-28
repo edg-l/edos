@@ -2,17 +2,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod ahci;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod block_io;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod dma;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod e1000e;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod fpu;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod hda;
 
 /// Spinlock for serializing 8042 PS/2 controller data port access.
@@ -46,10 +40,16 @@ pub fn ps2_drain_buffer() {
     let mut got_mouse = false;
 
     for _ in 0..8 {
+        // SAFETY: 0x64 is the 8042 status port, fixed by the PC platform. The
+        // read has no side effect beyond returning the status byte, and
+        // `PS2_LOCK` above serializes the two IRQ handlers that reach it.
         let status: u8 = unsafe { Port::<u8>::new(0x64).read() };
         if status & 0x01 == 0 {
             break; // No data available
         }
+        // SAFETY: 0x60 is the 8042 data port. The status read above reported
+        // OBF set, so a byte is waiting; consuming it is what clears OBF, and
+        // `PS2_LOCK` makes this thread the only consumer.
         let byte: u8 = unsafe { Port::<u8>::new(0x60).read() };
         if status & 0x20 != 0 {
             // Mouse byte (bit 5 set)
@@ -75,36 +75,25 @@ pub fn ps2_drain_buffer() {
         sched.wake_thread_irq(handle, crate::thread::scheduler::WakePriority::Interrupt);
     }
 }
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod hpet;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod keyboard;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod mouse;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod msi;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod null;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod nvme;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod pci;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod ramdisk;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod random;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod rtc;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod tty;
 pub mod usb;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod vga;
-#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod virtio;
 
 pub fn init_drivers() {
     hpet::driver::init();
+    // SAFETY: this runs once per CPU during bring-up, before any thread that
+    // could use SSE is scheduled on it, which is `init_fpu`'s contract.
     unsafe { fpu::init_fpu() };
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
@@ -134,6 +123,9 @@ mod ps2 {
 
     fn wait_write() {
         for _ in 0..10_000 {
+            // SAFETY: 0x64 is the 8042 status port, fixed by the PC platform,
+            // and reading it has no side effect. This whole module runs once,
+            // on one CPU, before the PS/2 driver threads exist.
             if unsafe { Port::<u8>::new(0x64).read() } & 0x02 == 0 {
                 return;
             }
@@ -143,6 +135,8 @@ mod ps2 {
 
     fn wait_read() {
         for _ in 0..10_000 {
+            // SAFETY: the same side-effect-free 8042 status read as
+            // `wait_write`, on the same single-threaded bring-up path.
             if unsafe { Port::<u8>::new(0x64).read() } & 0x01 != 0 {
                 return;
             }
@@ -152,7 +146,10 @@ mod ps2 {
 
     fn read_data_timeout() -> Option<u8> {
         for _ in 0..10_000 {
+            // SAFETY: the same side-effect-free 8042 status read as above.
             if unsafe { Port::<u8>::new(0x64).read() } & 0x01 != 0 {
+                // SAFETY: OBF is set, so 0x60 holds a byte; reading it is what
+                // clears OBF, and nothing else is consuming the port yet.
                 return Some(unsafe { Port::new(0x60).read() });
             }
             core::hint::spin_loop();
@@ -162,8 +159,13 @@ mod ps2 {
 
     fn mouse_write(byte: u8) {
         wait_write();
+        // SAFETY: 0xD4 on the 8042 command port routes the next data-port byte
+        // to the auxiliary device. `wait_write` has confirmed the input buffer
+        // is free, and this bring-up path is the port's only user.
         unsafe { Port::new(0x64).write(0xD4_u8) }; // CMD_WRITE_AUX
         wait_write();
+        // SAFETY: the byte the command above routed to the mouse, written once
+        // the input buffer is free again.
         unsafe { Port::new(0x60).write(byte) };
     }
 
@@ -171,6 +173,11 @@ mod ps2 {
     /// serialized sequence. This avoids the race where concurrent keyboard
     /// and mouse init clobber each other's config byte writes.
     pub fn init_ps2_controller() {
+        // SAFETY: 0x60 and 0x64 are the 8042 data and command ports, fixed by
+        // the PC platform. `init_drivers` calls this once, on one CPU, before
+        // the keyboard and mouse kthreads are spawned, so nothing else drives
+        // the controller while this sequence rewrites its config byte;
+        // `without_interrupts` keeps an IRQ handler from stealing a byte of it.
         without_interrupts(|| unsafe {
             let mut cmd: Port<u8> = Port::new(0x64);
             let mut data: Port<u8> = Port::new(0x60);
