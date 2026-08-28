@@ -863,9 +863,9 @@ in the crate carries a `# Safety` section.
 ### ~~I6. A `[lints]` table, and what goes in it~~ (S3, E1) -- done
 
 ~~There is no `[lints]` table in any manifest in the tree.~~ **Done:**
-`kernel/Cargo.toml` carries a `[lints.clippy]` table with three of the four
-lints denied, `undocumented_unsafe_blocks` commented out behind I5a's remaining
-blocks. Every `#[allow]` and `#[expect]` in `kernel/src` now carries a
+`kernel/Cargo.toml` carries a `[lints.clippy]` table with all four lints
+enabled, `undocumented_unsafe_blocks` at `deny` and the other three at `warn`.
+Every `#[allow]` and `#[expect]` in `kernel/src` now carries a
 `reason = "..."`: 34 `allow` became `expect`, two were dropped as unfulfilled,
 and the four that stay `allow` are the three `cfg_attr` feature-conditional
 sites plus `main.rs`'s `unreachable_code`, which the `sched-test` build needs

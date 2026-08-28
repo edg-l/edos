@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-26
+# Working notes, sessions of 2026-08-08 to 2026-08-28
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -43,9 +43,10 @@ once, on one CPU, before the keyboard and mouse kthreads are spawned.
 
 Counts after this pass, remeasured with `doc/rust-style.md`'s commands: 729
 `unsafe {` blocks, 770 `// SAFETY:` comments (more than blocks, because a comment
-also sits above each of the 41 `unsafe impl`), 65 `unsafe fn` against 68
-`# Safety` sections. I5b -- the contract half -- is what is left of I5, and no
-lint can find it.
+also sits above each of the 41 `unsafe impl`), 65 `unsafe fn` against 75
+`# Safety` sections. I5b -- the contract half, which no lint can find -- closed
+after this; the section at the end of this file, "I5b, the `unsafe fn`
+contracts", is what that took.
 
 ---
 
@@ -2252,9 +2253,8 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-19 (at `d97b802a`, after the NVMe driver landed
-whole, `evicttest` went back into `guest-check`, `sys_sync` learned to wait for
-the open transaction, and the gates learned to hold one QEMU slot)
+## Counts, remeasured 2026-08-28 (at `a2a95302`, after `texttest` and `fbtest`
+joined `guest-check`, `edos_lib::args` landed, and I5 closed both halves)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2262,20 +2262,20 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 122 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 122 — a mismatch is the bug |
-| userspace programs | 128 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| syscalls | 124 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 124 — a mismatch is the bug |
+| userspace programs | 131 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 129 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 116,323 code lines across 466 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,979 code lines | `tokei -t=Rust kernel/src` |
-| NVMe driver | 2,199 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,537 | `git rev-list --count HEAD`, counting the commit that states it |
+| binaries in `filesystem/bin` | 132 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
+| Rust | 115,532 code lines across 478 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,618 code lines | `tokei -t=Rust kernel/src` |
+| NVMe driver | 2,268 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
+| commits | 1,653 | `git rev-list --count HEAD`, counting the commit that states it |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none` passes too — both targets name `-accel kvm` since 2026-08-19, so no `QEMUFLAGS` is needed |
-| host unit tests | 138 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
+| host unit tests | 164 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| guest suites | 17 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
+| guest suites | 20 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
 | `nvme-check` cases | 5 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, install-and-reboot, and the watchdog under `nvme_timeout_ms=0` |
-| `unwrap()`/`expect()` in `kernel/src` | 170, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 169, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
@@ -2354,7 +2354,14 @@ The places to check, because a count lives in more than one of them:
 `npm run build` in that checkout IS the deploy -- nginx serves `dist/` directly,
 so the build publishes before any commit does. Commit and push the source too.
 
-The `unwrap` figure includes 19 in test code that is not worth converting: 11 in
+**As of 2026-08-28 the site has not been updated against the table above and is
+stale in every one of those places**: 122 syscalls against 124, 128 programs
+against 131, 116,323 Rust lines against 115,532, 53,979 kernel lines against
+53,618, and 1,537 commits against 1,653. The Rust total went *down* while the
+tree grew, which is the I5 pass: `virtio/` alone deleted 29 `unsafe` blocks that
+did not need to exist, and comment lines are not code lines.
+
+The `unwrap` figure includes 26 in test code that is not worth converting: 18 in
 `thread/sched_test.rs` and all 8 in `drivers/usb/hid/report.rs`, whose unwraps
 are in its own descriptor-parsing tests and not on any driver path.
 `drivers/usb/xhci/mod.rs` came off this list at 19 → 5 by folding `init()` into
