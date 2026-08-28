@@ -3,9 +3,9 @@
 //! One implementation behind two names, the way the tools have always been
 //! paired: `gunzip` is `gzip -d`, and nothing else about it differs.
 
+use edos_lib::args::{Opt, Spec, Value};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{
-    env,
     fs::{self, File},
     io::{self, Read, Write},
     process::ExitCode,
@@ -24,19 +24,62 @@ struct Options {
     files: Vec<String>,
 }
 
+/// A digit is a level, and it has to be nine separate options rather than
+/// `Spec::numeric`: `gzip -9k` is a cluster, so the digit must be a short
+/// option the cluster loop can recognise, and `numeric` only ever sees an
+/// argument that is digits all the way through.
+const OPTS: &[Opt] = &[
+    Opt::flag('d', "decompress", "decompress"),
+    Opt {
+        short: None,
+        long: Some("uncompress"),
+        value: Value::None,
+        help: "a spelling of -d",
+    },
+    Opt::flag('c', "stdout", "write to stdout and keep every input"),
+    Opt {
+        short: None,
+        long: Some("to-stdout"),
+        value: Value::None,
+        help: "a spelling of -c",
+    },
+    Opt::flag('k', "keep", "keep the input file"),
+    Opt::flag('f', "force", "overwrite an existing output file"),
+    Opt {
+        short: None,
+        long: Some("fast"),
+        value: Value::None,
+        help: "a spelling of -1",
+    },
+    Opt {
+        short: None,
+        long: Some("best"),
+        value: Value::None,
+        help: "a spelling of -9",
+    },
+    Opt::short_flag('1', "fastest"),
+    Opt::short_flag('2', ""),
+    Opt::short_flag('3', ""),
+    Opt::short_flag('4', ""),
+    Opt::short_flag('5', ""),
+    Opt::short_flag('6', "the default"),
+    Opt::short_flag('7', ""),
+    Opt::short_flag('8', ""),
+    Opt::short_flag('9', "smallest"),
+];
+
+const SYNOPSIS: &str =
+    "[-cdfk] [-1..-9] [FILE...]\n\nWith no FILE, or with `-`, the standard streams are used.";
+
+const GZIP: Spec = Spec::new("gzip", SYNOPSIS, OPTS);
+const GUNZIP: Spec = Spec::new("gunzip", SYNOPSIS, OPTS);
+
 /// `decompress` is what the two binaries differ by, and a `-d` on the command
 /// line can still turn it on.
 pub fn run(decompress: bool) -> ExitCode {
-    let name = if decompress { "gunzip" } else { "gzip" };
-
-    let opts = match parse_args(decompress) {
-        Ok(opts) => opts,
-        Err(message) => {
-            eprintln!("{}: {}", name, message);
-            usage(name);
-            return ExitCode::from(2);
-        }
-    };
+    let spec = if decompress { &GUNZIP } else { &GZIP };
+    let name = spec.name;
+    let opts = parse_args(spec, decompress);
 
     if opts.files.is_empty() {
         return match through_stdio(&opts) {
@@ -63,57 +106,38 @@ pub fn run(decompress: bool) -> ExitCode {
     }
 }
 
-fn parse_args(mut decompress: bool) -> Result<Options, String> {
+/// One pass over the options in the order they were written, because the level
+/// is last-wins: `gzip -9 -1` compresses fast, not small.
+fn parse_args(spec: &Spec, mut decompress: bool) -> Options {
+    let m = spec.parse_env();
     let mut stdout = false;
     let mut keep = false;
     let mut force = false;
     let mut level = Compression::default();
-    let mut files = Vec::new();
-    let mut end_of_options = false;
 
-    for arg in env::args().skip(1) {
-        if end_of_options || !arg.starts_with('-') || arg == "-" {
-            files.push(arg);
-            continue;
-        }
-        if arg == "--" {
-            end_of_options = true;
-            continue;
-        }
-        match arg.as_str() {
-            "--decompress" | "--uncompress" => decompress = true,
-            "--stdout" | "--to-stdout" => stdout = true,
-            "--keep" => keep = true,
-            "--force" => force = true,
-            "--fast" => level = Compression::fast(),
-            "--best" => level = Compression::best(),
-            "--help" => return Err("help".to_string()),
-            _ if arg.starts_with("--") => return Err(format!("unknown option {}", arg)),
-            _ => {
-                for c in arg[1..].chars() {
-                    match c {
-                        'd' => decompress = true,
-                        'c' => stdout = true,
-                        'k' => keep = true,
-                        'f' => force = true,
-                        '1'..='9' => {
-                            level = Compression::new(c.to_digit(10).unwrap());
-                        }
-                        _ => return Err(format!("unknown option -{}", c)),
-                    }
-                }
+    for (opt, _) in m.occurrences() {
+        match (opt.short, opt.long) {
+            (Some('d'), _) | (_, Some("uncompress")) => decompress = true,
+            (Some('c'), _) | (_, Some("to-stdout")) => stdout = true,
+            (Some('k'), _) => keep = true,
+            (Some('f'), _) => force = true,
+            (_, Some("fast")) => level = Compression::fast(),
+            (_, Some("best")) => level = Compression::best(),
+            (Some(c), _) if c.is_ascii_digit() => {
+                level = Compression::new(c.to_digit(10).expect("checked ascii digit"));
             }
+            _ => {}
         }
     }
 
-    Ok(Options {
+    Options {
         decompress,
         stdout,
         keep,
         force,
         level,
-        files,
-    })
+        files: m.positional().to_vec(),
+    }
 }
 
 /// With no file operands the stream is the whole job, and the result always
@@ -197,14 +221,4 @@ fn convert(opts: &Options, source: &mut dyn Read, output: &mut dyn Write) -> Res
         encoder.finish().map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-fn usage(name: &str) {
-    eprintln!("usage: {} [-cdfk] [-1..-9] [FILE...]", name);
-    eprintln!("  -c  write to stdout and keep every input");
-    eprintln!("  -d  decompress");
-    eprintln!("  -f  overwrite an existing output file");
-    eprintln!("  -k  keep the input file");
-    eprintln!("  -1  fastest, -9 smallest (default 6)");
-    eprintln!("With no FILE, or with '-', the standard streams are used.");
 }

@@ -1,6 +1,6 @@
 //! ln - create symbolic links
 
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs;
 use std::io::Error;
 use std::process::ExitCode;
@@ -55,38 +55,29 @@ fn link_one(target: &str, link: &str, force: bool, verbose: bool) -> bool {
     true
 }
 
-fn main() -> ExitCode {
-    let mut symbolic = false;
-    let mut force = false;
-    let mut verbose = false;
-    let mut operands: Vec<String> = Vec::new();
-    let mut no_more_flags = false;
+const SPEC: Spec = Spec::new(
+    "ln",
+    "-s [-f] [-v] <target>... <link|directory>",
+    &[
+        Opt::flag(
+            's',
+            "symbolic",
+            "make a symbolic link (the only kind there is)",
+        ),
+        Opt::flag('f', "force", "remove an existing destination first"),
+        Opt::flag('v', "verbose", "print each link as it is made"),
+    ],
+);
 
-    for arg in env::args().skip(1) {
-        if no_more_flags || !arg.starts_with('-') || arg == "-" {
-            operands.push(arg);
-            continue;
-        }
-        if arg == "--" {
-            no_more_flags = true;
-            continue;
-        }
-        for c in arg.chars().skip(1) {
-            match c {
-                's' => symbolic = true,
-                'f' => force = true,
-                'v' => verbose = true,
-                _ => {
-                    eprintln!("ln: unknown option '-{}'", c);
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-    }
+fn main() -> ExitCode {
+    let m = SPEC.parse_env();
+    let symbolic = m.is_set('s');
+    let force = m.is_set('f');
+    let verbose = m.is_set('v');
+    let operands = m.positional();
 
     if operands.is_empty() {
-        eprintln!("Usage: ln -s [-f] [-v] <target>... <link|directory>");
-        return ExitCode::FAILURE;
+        SPEC.fail("a target is required");
     }
 
     // The kernel has no link(2) and EFS inodes carry no link count, so there
@@ -114,15 +105,15 @@ fn main() -> ExitCode {
 
     // Otherwise the last operand is the destination: a directory to fill, or,
     // with exactly one target, the link's own path.
-    let dest = operands.pop().expect("checked non-empty above");
-    let dest_is_dir = fs::metadata(&dest).map(|m| m.is_dir()).unwrap_or(false);
+    let (dest, targets) = operands.split_last().expect("checked non-empty above");
+    let dest_is_dir = fs::metadata(dest).map(|m| m.is_dir()).unwrap_or(false);
 
     if !dest_is_dir {
-        if operands.len() > 1 {
+        if targets.len() > 1 {
             eprintln!("ln: {}: not a directory", dest);
             return ExitCode::FAILURE;
         }
-        return if link_one(&operands[0], &dest, force, verbose) {
+        return if link_one(&targets[0], dest, force, verbose) {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -130,14 +121,14 @@ fn main() -> ExitCode {
     }
 
     let mut failed = false;
-    for target in &operands {
+    for target in targets {
         let name = basename(target);
         if name.is_empty() {
             eprintln!("ln: {}: cannot infer a link name", target);
             failed = true;
             continue;
         }
-        if !link_one(target, &join(&dest, name), force, verbose) {
+        if !link_one(target, &join(dest, name), force, verbose) {
             failed = true;
         }
     }

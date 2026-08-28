@@ -8,14 +8,15 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-28.** 27 of the 32 entries are struck: I6 landed with the
+**State as of 2026-08-29.** 27 of the 32 entries are struck: I6 landed with the
 `[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`,
 G2's named `uaccess.rs` remainder is closed, and I5 is finished in both halves
 -- every `unsafe` block in `kernel/src` carries a `// SAFETY:` with
 `undocumented_unsafe_blocks` denied crate-wide in `kernel/Cargo.toml`, and every
 `unsafe fn` in the crate carries a `# Safety` section. Five are open, in the
-order the evidence suggests: C2 (the parser exists, 125 programs have not
-adopted it), H1 and H3 (two long functions), G3 (split `WORKING-NOTES.md`), and
+order the evidence suggests: C2 (the parser exists, 122 programs have not
+adopted it, and no hand-rolled short-flag loop is left), H1 and H3 (two long
+functions), G3 (split `WORKING-NOTES.md`), and
 the gate I2. The numbers each entry quotes were remeasured on the date it names,
 and the count above is `grep '^### ' | grep -c '~~'` against `grep -c '^### '`,
 not a tally kept by hand.
@@ -246,7 +247,7 @@ for a failed wait, neither of which is `i64`, `isize` or a sentinel `u64`.
 **Done.** No `pub fn` in `edos_lib` returns a bare `i64`, `isize` or a sentinel
 `u64`.
 
-### C2. The argument parser exists; 125 of 134 programs do not use it yet (S2, E2)
+### C2. The argument parser exists; 122 of 135 programs do not use it yet (S2, E2)
 
 `programs/edos_lib/src/args.rs` is the parser: a `Spec` of `Opt`s, short
 clusters (`-abc`), attached and separated values (`-n5`, `-n 5`,
@@ -257,28 +258,46 @@ around it: `Value::Optional`, a value taken only when attached, which is what
 `sed -i[SUFFIX]` means; and `Spec::numeric`, which makes a bare `-<digits>`
 a value for a named option, which is what `head -20` means.
 
-The nine text coreutils `texttest` covers — `uniq`, `sort`, `cut`, `tr`, `wc`,
-`head`, `tail`, `sed`, `grep` — parse through it, and `texttest` asserts that
-each answers `--help` on stdout with `usage: <name>` and exit 0, that
-`grep -- -pattern` treats the pattern as a pattern, and that `wc -l -` reads
-stdin. That is the part of this entry that is done.
+Thirteen programs parse through it. The nine text coreutils `texttest` covers
+— `uniq`, `sort`, `cut`, `tr`, `wc`, `head`, `tail`, `sed`, `grep` — plus the
+four that had hand-rolled short-flag loops, `gzip`, `ln`, `tee` and `tar`.
+`texttest` asserts that each of the nine answers `--help` on stdout with
+`usage: <name>` and exit 0, that `grep -- -pattern` treats the pattern as a
+pattern, and that `wc -l -` reads stdin; `filetest` does the same for the other
+four, as round trips rather than stdout diffs, because an archive that lists
+and extracts and a stream that survives a compression cycle are what those
+tools are for. Both are `make guest-check` suites. That is the part of this
+entry that is done.
 
-Counts against 134 program directories, remeasured 2026-08-28. Adopting the
+`gzip` is the one worth reading before adopting the parser elsewhere. Its
+`-1`..`-9` are nine short options rather than one `Spec::numeric`, because
+`gzip -9k` is a cluster and `numeric` only ever sees an argument that is digits
+all the way through. `filetest` has that exact case, and it was watched failing
+against a `numeric` spelling before the nine were written.
+
+Counts against 135 program directories, remeasured 2026-08-29. Adopting the
 parser moves a program out of the literal-string greps, since `--` and `-` are
-handled inside `args.rs` and never appear in the caller, so each count is the
-union of the literal and the adopters:
+handled inside `args.rs` and never appear in the caller, so the first two are
+the union of the literal and the adopters:
 
-- 39 accept `--help` (was 29) --
+- 43 accept `--help` (was 39) --
   `grep -rl '"--help"\|edos_lib::args' programs/*/src/*.rs`
-- 15 honour `--` as end of options (was 5) --
+- 18 honour `--` as end of options (was 15) --
   `grep -rl '"--"' ...` union `grep -rl 'edos_lib::args' ...`
-- 9 accept `-` as stdin -- `grep -rlE '== "-"' programs/*/src/*.rs`
+- 8 accept `-` as stdin -- `grep -rlE '== "-"' programs/*/src/*.rs`
 
-**Remaining.** Adopt `Spec` in the rest, starting with the four hand-rolled
-short-flag loops still outside it (`gzip`, `ln`, `tee`, `tar`); the others
-follow as each program is next touched.
+The third is a literal count and cannot be unioned: `args.rs` gives every
+adopter `-` as a *positional*, but whether a positional named `-` then means
+the standard stream is the program's own business. `wc` routes it there and
+`ln` does not, and both are adopters. The count went 9 to 8 for that reason,
+not because a program lost the behaviour: `ln`'s literal check disappeared into
+the parser, and `ln -s -` was never stdin anyway.
 
-**Done when** the three counts above are all "every CLI program".
+**Remaining.** Adopt `Spec` in the rest as each program is next touched. No
+hand-rolled short-flag loop is left; what remains is programs that take no
+options at all, or read `env::args()` positionally.
+
+**Done when** the first two counts are "every CLI program".
 
 ### C3. ~~`edos_lib::mem` returns `u64::MAX as *mut u8`~~ (done)
 

@@ -1,5 +1,6 @@
 //! tar - create, list and extract ustar archives
 
+use edos_lib::args::{Opt, Spec};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::env;
 use std::fs::{self, File};
@@ -9,7 +10,29 @@ use std::process::ExitCode;
 use std::time::UNIX_EPOCH;
 use ustar::{self as header, BLOCK, Decoded, Entry, Kind};
 
-const USAGE: &str = "usage: tar -c|-t|-x [-vz] [-f archive] [-C dir] [path...]";
+const SPEC: Spec = Spec::new(
+    "tar",
+    "-c|-t|-x [-vz] [-f archive] [-C dir] [path...]",
+    &[
+        Opt::flag('c', "create", "create an archive"),
+        Opt::flag('t', "list", "list an archive's contents"),
+        Opt::flag('x', "extract", "extract an archive"),
+        Opt::flag('v', "verbose", "name each entry as it is handled"),
+        Opt::flag('z', "gzip", "filter the archive through gzip"),
+        Opt::arg(
+            'f',
+            "file",
+            "ARCHIVE",
+            "the archive, or `-` for the standard stream",
+        ),
+        Opt::arg(
+            'C',
+            "directory",
+            "DIR",
+            "change to DIR before creating or extracting",
+        ),
+    ],
+);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Mode {
@@ -28,17 +51,10 @@ struct Options {
 }
 
 fn main() -> ExitCode {
-    let mut opts = match parse_args(env::args().skip(1)) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("tar: {}\n{}", e, USAGE);
-            return ExitCode::FAILURE;
-        }
-    };
+    let mut opts = parse_args();
 
     let Some(mode) = opts.mode else {
-        eprintln!("tar: one of -c, -t or -x is required\n{}", USAGE);
-        return ExitCode::FAILURE;
+        SPEC.fail("one of -c, -t or -x is required");
     };
 
     // `-f` names the archive relative to where the command was run, not to the
@@ -81,47 +97,27 @@ fn main() -> ExitCode {
 
 /// Accept both the clustered form (`-xvf a.tar`) and separate flags. `f` and
 /// `C` take the next argument when they end a cluster.
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
-    let mut opts = Options {
-        mode: None,
-        verbose: false,
-        gzip: false,
-        archive: None,
-        directory: None,
-        paths: Vec::new(),
-    };
-    let mut pending: Option<char> = None;
-
-    for arg in args {
-        if let Some(flag) = pending.take() {
-            match flag {
-                'f' => opts.archive = Some(arg),
-                _ => opts.directory = Some(arg),
-            }
-            continue;
-        }
-
-        if arg.starts_with('-') && arg.len() > 1 {
-            for c in arg[1..].chars() {
-                match c {
-                    'c' => opts.mode = Some(Mode::Create),
-                    't' => opts.mode = Some(Mode::List),
-                    'x' => opts.mode = Some(Mode::Extract),
-                    'v' => opts.verbose = true,
-                    'z' => opts.gzip = true,
-                    'f' | 'C' => pending = Some(c),
-                    _ => return Err(format!("unknown option '-{}'", c)),
-                }
-            }
-        } else {
-            opts.paths.push(arg);
-        }
+/// The mode flags are last-wins, which `occurrences()` is what preserves:
+/// `-c` and `-x` in one command line mean whichever was written second.
+fn parse_args() -> Options {
+    let m = SPEC.parse_env();
+    let mut mode = None;
+    for (opt, _) in m.occurrences() {
+        mode = match opt.short {
+            Some('c') => Some(Mode::Create),
+            Some('t') => Some(Mode::List),
+            Some('x') => Some(Mode::Extract),
+            _ => continue,
+        };
     }
-
-    if let Some(flag) = pending {
-        return Err(format!("option '-{}' needs an argument", flag));
+    Options {
+        mode,
+        verbose: m.is_set('v'),
+        gzip: m.is_set('z'),
+        archive: m.value('f').map(str::to_string),
+        directory: m.value('C').map(str::to_string),
+        paths: m.positional().to_vec(),
     }
-    Ok(opts)
 }
 
 /// `-f -`, or no `-f` at all, means the standard stream.

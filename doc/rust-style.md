@@ -230,7 +230,7 @@ Rejected, with the reason, so it is not re-proposed:
   list is made of; two entries there sounded obviously right and made the system
   slower. Reach for `profile` and `fsbench` first, then change one thing.
 - **`[workspace.dependencies]` for the programs workspace.** Only `flate2`,
-  `sha2` and `ed25519-dalek` have more than one consumer, and the 85
+  `sha2` and `ed25519-dalek` have more than one consumer, and the 88
   `edos_lib = { path = "../edos_lib" }` lines carry no version to drift. The
-  134 duplicated `version` and `edition` keys could inherit from the workspace
+  135 duplicated `version` and `edition` keys could inherit from the workspace
   and that is the whole of what it would buy.

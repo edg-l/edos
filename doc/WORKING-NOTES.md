@@ -2253,8 +2253,9 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-28 (at `a2a95302`, after `texttest` and `fbtest`
-joined `guest-check`, `edos_lib::args` landed, and I5 closed both halves)
+## Counts, remeasured 2026-08-29 (at `0922f7a1`, after `texttest`, `fbtest` and
+`filetest` joined `guest-check`, `edos_lib::args` landed and the last four
+hand-rolled flag loops adopted it, and I5 closed both halves)
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -2263,17 +2264,17 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 124 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 124 — a mismatch is the bug |
-| userspace programs | 131 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| userspace programs | 132 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 132 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 115,532 code lines across 478 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,618 code lines | `tokei -t=Rust kernel/src` |
+| binaries in `filesystem/bin` | 133 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
+| Rust | 115,770 code lines across 479 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 53,634 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,268 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,653 at `a2a95302` | `git rev-list --count <rev>`; state the rev, because the count moves under a row that names only `HEAD` and the row itself is a commit |
+| commits | 1,657 at `0922f7a1` | `git rev-list --count <rev>`; state the rev, because the count moves under a row that names only `HEAD` and the row itself is a commit |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none` passes too — both targets name `-accel kvm` since 2026-08-19, so no `QEMUFLAGS` is needed |
 | host unit tests | 164 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| guest suites | 20 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
+| guest suites | 21 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
 | `nvme-check` cases | 5 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, install-and-reboot, and the watchdog under `nvme_timeout_ms=0` |
 | `unwrap()`/`expect()` in `kernel/src` | 169, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
@@ -11267,6 +11268,55 @@ Do not run a build, another VM or a gate beside it: a 20-run batch previously
 read 2 wedges in its first 10 and 5 in the next 6 purely from host load. The
 per-run `.qmp` file in the output directory carries the counters and registers
 above; the `.log` beside it is that boot's serial.
+
+## `gzip -9k` is why a level is not `Spec::numeric` (2026-08-29)
+
+`gzip`, `ln`, `tee` and `tar` were the four hand-rolled short-flag loops
+`ROADMAP-CLEANUP` §C2 named, and they now parse through `edos_lib::args`.
+Three were mechanical. `gzip` was not, and the reason is worth keeping,
+because the obvious spelling is wrong and compiles.
+
+`Spec::numeric(short)` maps a bare `-<digits>` argument onto a named option, so
+`gzip -9` setting the compression level looks like exactly what it is for. It
+is not: `numeric` is checked before the cluster loop and only fires when the
+argument is digits **all the way through**, and `gzip -9k` is a cluster of a
+digit and a flag. Under a `numeric` spelling that argument falls to the cluster
+loop, finds no short option `9`, and the tool dies with "unknown option -9".
+
+So the nine levels are nine `Opt::short_flag('1'..'9')` entries and the level
+is read out of `occurrences()`, last-wins, which is also what makes
+`gzip -9 -1` compress fast rather than small. The seven middle digits carry an
+empty help string, so `--help` prints them as bare rows between `-1 fastest`
+and `-9 smallest`.
+
+The general rule: `Spec::numeric` is for a digit run that is the *whole*
+argument, as in `head -20`. A digit that can appear inside a cluster has to be
+a short option like any other.
+
+`programs/filetest` is the gate. It was watched failing on exactly this case:
+swap the nine entries for `Spec::numeric('L')`, rebuild, and `make guest-check`
+reports `FAIL gzip -9k /tmp/filetest/gz-plain: exited 1`.
+
+## `filetest`, and why its cases are round trips (2026-08-29)
+
+Nothing in the tree ran `tar`, `gzip`, `gunzip`, `ln` or `tee` before this.
+`texttest` had closed the same blind spot for the nine text coreutils; these
+five were the other half of it, and all five had just had their argument
+parsing replaced, which is the change a compile is least able to judge.
+
+Its cases are round trips rather than stdout diffs, which is a different shape
+from `texttest` on purpose. An archive that lists and extracts to the bytes
+that went in, and a stream that survives a compression cycle, are what these
+tools are for; more usefully, a round trip is what fails loudly when an option
+is read as a filename, and that is the failure a rewritten parser actually
+produces. `tar -cf ARCHIVE -C DIR one.txt` is the case that matters: three
+operands, two of them values belonging to options, one a positional.
+
+One trap in writing it: `capture` read the tool's stdout with
+`read_to_string`, and `gzip -c` writes a deflate stream there, so the suite
+failed with "stream did not contain valid UTF-8" against a tool that was
+working. It reads bytes now, and the `-c` case asserts the RFC 1952 magic
+(`1f 8b`) rather than a string, which is the better assertion anyway.
 
 ## `edos_lib::args`, and the two shapes a generic parser has to have (2026-08-28)
 

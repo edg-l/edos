@@ -1,35 +1,23 @@
-use std::env;
+use edos_lib::args::{Opt, Spec};
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 
+const SPEC: Spec = Spec::new(
+    "tee",
+    "[-a] [file...]",
+    &[Opt::flag(
+        'a',
+        "append",
+        "append to the files rather than truncating them",
+    )],
+);
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let mut append = false;
-    let mut files: Vec<&str> = Vec::new();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-a" => append = true,
-            arg if arg.starts_with('-') && arg.len() > 1 => {
-                for c in arg[1..].chars() {
-                    match c {
-                        'a' => append = true,
-                        _ => {
-                            eprintln!("tee: unknown option -{}", c);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-            _ => files.push(&args[i]),
-        }
-        i += 1;
-    }
+    let m = SPEC.parse_env();
+    let append = m.is_set('a');
 
     let mut handles: Vec<Box<dyn Write>> = Vec::new();
-    for path in &files {
+    for path in m.positional() {
         let f = match OpenOptions::new()
             .write(true)
             .create(true)

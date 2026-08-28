@@ -713,6 +713,13 @@ name = "file"
 version = "0.1.0"
 
 [[package]]
+name = "filetest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "find"
 version = "0.1.0"
 
@@ -877,6 +884,7 @@ dependencies = [
 name = "gzip"
 version = "0.1.0"
 dependencies = [
+ "edos_lib",
  "flate2",
 ]
 
@@ -2286,6 +2294,9 @@ dependencies = [
 [[package]]
 name = "tee"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "tendril"

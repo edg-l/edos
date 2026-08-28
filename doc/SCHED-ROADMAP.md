@@ -604,7 +604,7 @@ window before the clock starts is outside the timed span — it is a fixed cost 
 both sides, so leaving it in would not change which run is faster, but it would
 drag the ratio towards 1 and understate the mechanism.
 
-`pitest` is in `make guest-check`, which is 20 suites now.
+`pitest` is in `make guest-check`, which is 21 suites now.
 
 ## 7. Done: an idle CPU could halt with a runnable thread of its own (2026-08-19)
 
