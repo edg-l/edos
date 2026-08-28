@@ -872,10 +872,18 @@ sites plus `main.rs`'s `unreachable_code`, which the `sched-test` build needs
 and the default build does not. Thirteen `unsafe impl` that shared one
 `// SAFETY:` with the impl above them now carry their own, and `ahci/port.rs`
 lost a `/// Safety:` heading on a safe fn and a `// SAFETY:` on an expression
-with no unsafe in it. The same table is now `[workspace.lints.clippy]` in
+with no unsafe in it. Three of the four are `[workspace.lints.clippy]` in
 `programs/Cargo.toml` with `lints.workspace = true` in all 134 member
-manifests, and a plain `[lints.clippy]` in each of the nine `libs/` and four
-`tools/` packages, which are standalone rather than workspace members. The 31
+manifests, and a plain `[lints.clippy]` in each of the eight Rust `libs/` and
+three Rust `tools/` packages, which are standalone rather than workspace
+members (`libs/libgloss-edos` is a C library and `tools/debug` is one gdb
+script, so neither has a manifest;
+`ls libs/*/Cargo.toml tools/*/Cargo.toml | wc -l` is the count). The fourth,
+`undocumented_unsafe_blocks`, is deliberately kernel-only for now: userspace
+holds 216 `unsafe` blocks against 6 `// SAFETY:` comments
+(`grep -rn 'unsafe {' programs --exclude-dir=target | wc -l`), most of them the
+raw syscall wrappers in `edos_lib`, and denying it outside the kernel is its
+own pass rather than a line in this one. The 31
 reasonless `#[allow]` outside the kernel became `#[expect(..., reason = "...")]`
 -- 17 under `programs/`, 14 in `tools/efs-fsck` -- and none of them was
 unfulfilled, so nothing outside the kernel was suppressing a lint it had
@@ -895,7 +903,7 @@ stops firing — two of the kernel's did.
 
 ~~Same manifests, same sitting: `programs/edos-taskbar`, `programs/edos-terminal`
 and `programs/wintest` are still `edition = "2021"`.~~ Done: all 134 programs,
-the kernel and all nine libs are on `edition = "2024"`. None of the three
+the kernel and all eight Rust libs are on `edition = "2024"`. None of the three
 contained `unsafe`, so it was drift rather than a hole.
 
 **Done when** the table exists in `programs/` too, the tree is clean under it,

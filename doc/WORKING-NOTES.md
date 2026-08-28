@@ -2269,7 +2269,7 @@ does not have to invent them.
 | Rust | 115,532 code lines across 478 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 53,618 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,268 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,653 | `git rev-list --count HEAD`, counting the commit that states it |
+| commits | 1,653 at `a2a95302` | `git rev-list --count <rev>`; state the rev, because the count moves under a row that names only `HEAD` and the row itself is a commit |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none` passes too — both targets name `-accel kvm` since 2026-08-19, so no `QEMUFLAGS` is needed |
 | host unit tests | 164 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
