@@ -100,6 +100,7 @@ pub mod tty;
 pub mod usb;
 #[deny(clippy::undocumented_unsafe_blocks)]
 pub mod vga;
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub mod virtio;
 
 pub fn init_drivers() {

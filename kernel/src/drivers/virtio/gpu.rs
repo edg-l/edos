@@ -63,7 +63,7 @@ const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 // -------- GPU command/response structures --------
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuCtrlHdr {
     type_: u32,
     flags: u32,
@@ -74,7 +74,7 @@ struct VirtioGpuCtrlHdr {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct VirtioGpuRect {
     pub x: u32,
     pub y: u32,
@@ -98,7 +98,7 @@ struct VirtioGpuRespDisplayInfo {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuResourceCreate2d {
     hdr: VirtioGpuCtrlHdr,
     resource_id: u32,
@@ -108,7 +108,7 @@ struct VirtioGpuResourceCreate2d {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuResourceAttachBacking {
     hdr: VirtioGpuCtrlHdr,
     resource_id: u32,
@@ -116,7 +116,7 @@ struct VirtioGpuResourceAttachBacking {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuMemEntry {
     addr: u64,
     length: u32,
@@ -124,7 +124,7 @@ struct VirtioGpuMemEntry {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuSetScanout {
     hdr: VirtioGpuCtrlHdr,
     rect: VirtioGpuRect,
@@ -133,7 +133,7 @@ struct VirtioGpuSetScanout {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuTransferToHost2d {
     hdr: VirtioGpuCtrlHdr,
     rect: VirtioGpuRect,
@@ -143,7 +143,7 @@ struct VirtioGpuTransferToHost2d {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuResourceFlush {
     hdr: VirtioGpuCtrlHdr,
     rect: VirtioGpuRect,
@@ -152,7 +152,7 @@ struct VirtioGpuResourceFlush {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuResourceCreateBlob {
     hdr: VirtioGpuCtrlHdr,
     resource_id: u32,
@@ -164,7 +164,7 @@ struct VirtioGpuResourceCreateBlob {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuSetScanoutBlob {
     hdr: VirtioGpuCtrlHdr,
     rect: VirtioGpuRect,
@@ -179,7 +179,7 @@ struct VirtioGpuSetScanoutBlob {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuCmdGetEdid {
     hdr: VirtioGpuCtrlHdr,
     scanout: u32,
@@ -196,7 +196,7 @@ struct VirtioGpuRespEdid {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuCursorPos {
     scanout_id: u32,
     x: u32,
@@ -205,7 +205,7 @@ struct VirtioGpuCursorPos {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct VirtioGpuUpdateCursor {
     hdr: VirtioGpuCtrlHdr,
     pos: VirtioGpuCursorPos,
@@ -213,6 +213,88 @@ struct VirtioGpuUpdateCursor {
     hot_x: u32,
     hot_y: u32,
     padding: u32,
+}
+
+// -------- Scratch buffer access --------
+
+/// A structure the device writes into a DMA buffer.
+///
+/// # Safety
+///
+/// The implementor must be `#[repr(C)]` and hold nothing but integers and
+/// arrays of them, so that whatever bytes the device leaves behind are a valid
+/// value. Nothing checks a response before it is read.
+unsafe trait DeviceResponse: Sized {}
+
+// SAFETY: the three response structures are `#[repr(C)]` over `u32`, `u64` and
+// `[u8; N]`, none of which has an invalid bit pattern.
+unsafe impl DeviceResponse for VirtioGpuCtrlHdr {}
+// SAFETY: as above.
+unsafe impl DeviceResponse for VirtioGpuRespDisplayInfo {}
+// SAFETY: as above.
+unsafe impl DeviceResponse for VirtioGpuRespEdid {}
+
+/// Place `cmd`'s bytes in `buf` at byte offset `off`.
+///
+/// This only writes the bytes. Whether the device may be reading that range is
+/// the queue discipline's business, not this function's: a command's slot is
+/// owned by the descriptor carrying it until the used ring reports it read.
+///
+/// # Panics
+///
+/// If the command would run past the end of `buf`.
+fn write_at<Cmd: Sized>(buf: &DmaBuffer, off: usize, cmd: &Cmd) {
+    let len = core::mem::size_of::<Cmd>();
+    assert!(
+        off + len <= buf.size,
+        "virtio-gpu: command past the end of its DMA buffer"
+    );
+    // SAFETY: the bound above puts `off..off + len` inside the mapped
+    // allocation `buf` owns, and `cmd` is a separate value the caller holds by
+    // reference, so the two ranges cannot overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping((cmd as *const Cmd).cast::<u8>(), buf.as_ptr().add(off), len)
+    };
+}
+
+/// Zero `len` bytes of `buf` at byte offset `off`.
+///
+/// Response areas are zeroed before submission so that a header read back with
+/// a type of zero -- a code no device returns -- is recognisable as a response
+/// the device never wrote.
+///
+/// # Panics
+///
+/// If the range would run past the end of `buf`.
+fn zero_at(buf: &DmaBuffer, off: usize, len: usize) {
+    assert!(
+        off + len <= buf.size,
+        "virtio-gpu: response area past the end of its DMA buffer"
+    );
+    // SAFETY: the bound above puts `off..off + len` inside the mapped
+    // allocation `buf` owns.
+    unsafe { core::ptr::write_bytes(buf.as_ptr().add(off), 0, len) };
+}
+
+/// Read a response back out of `buf` at byte offset `off`.
+///
+/// Volatile because the DEVICE wrote it: the compiler has seen only the zeroing
+/// above and would otherwise be free to fold this into it.
+///
+/// # Panics
+///
+/// If the response would run past the end of `buf`.
+fn read_at<Resp: DeviceResponse>(buf: &DmaBuffer, off: usize) -> Resp {
+    let len = core::mem::size_of::<Resp>();
+    assert!(
+        off + len <= buf.size,
+        "virtio-gpu: response past the end of its DMA buffer"
+    );
+    // SAFETY: the bound above puts the response inside the mapped allocation
+    // `buf` owns, `DmaBuffer` starts on a page boundary and every offset here
+    // is eight-byte aligned, and `DeviceResponse` is the promise that any bytes
+    // the device left are a valid `Resp`.
+    unsafe { core::ptr::read_volatile(buf.as_ptr().add(off).cast::<Resp>()) }
 }
 
 // -------- VirtioGpu driver --------
@@ -360,9 +442,7 @@ impl VirtioGpu {
         let scratch_phys = self.scratch.phys_addr().as_u64();
 
         // Zero the response area before submission.
-        unsafe {
-            core::ptr::write_bytes(self.scratch.as_ptr().add(resp_offset), 0, resp_size);
-        }
+        zero_at(&self.scratch, resp_offset, resp_size);
 
         let bufs = [
             (scratch_phys, cmd_size as u32, 0u16),
@@ -396,12 +476,7 @@ impl VirtioGpu {
                     self.pending = self.pending.saturating_sub(1);
                     continue;
                 }
-                let resp = unsafe {
-                    core::ptr::read_volatile(
-                        self.scratch.as_ptr().add(resp_offset) as *const VirtioGpuCtrlHdr
-                    )
-                };
-                return resp;
+                return read_at::<VirtioGpuCtrlHdr>(&self.scratch, resp_offset);
             }
             core::hint::spin_loop();
         }
@@ -431,13 +506,7 @@ impl VirtioGpu {
     fn send_command<Cmd: Sized>(&mut self, cmd: &Cmd, resp_size: usize) -> VirtioGpuCtrlHdr {
         self.begin_command();
         let cmd_size = core::mem::size_of::<Cmd>();
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                cmd as *const Cmd as *const u8,
-                self.scratch.as_ptr(),
-                cmd_size,
-            );
-        }
+        write_at(&self.scratch, 0, cmd);
         // Align response offset to 8 bytes.
         let resp_offset = (cmd_size + 7) & !7;
         self.execute_scratch(cmd_size, resp_offset, resp_size)
@@ -455,30 +524,22 @@ impl VirtioGpu {
     )]
     pub fn get_display_info(&mut self) -> (u32, u32) {
         self.begin_command();
-        let mut hdr: VirtioGpuCtrlHdr = unsafe { core::mem::zeroed() };
-        hdr.type_ = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+        let hdr = VirtioGpuCtrlHdr {
+            type_: VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+            ..Default::default()
+        };
 
         let cmd_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
         let resp_size = core::mem::size_of::<VirtioGpuRespDisplayInfo>();
 
         // Write the command header to scratch.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &hdr as *const VirtioGpuCtrlHdr as *const u8,
-                self.scratch.as_ptr(),
-                cmd_size,
-            );
-        }
+        write_at(&self.scratch, 0, &hdr);
 
         let resp_offset = (cmd_size + 7) & !7;
         self.execute_scratch(cmd_size, resp_offset, resp_size);
 
         // Read the full response (not just the header) from scratch.
-        let resp = unsafe {
-            core::ptr::read_volatile(
-                self.scratch.as_ptr().add(resp_offset) as *const VirtioGpuRespDisplayInfo
-            )
-        };
+        let resp = read_at::<VirtioGpuRespDisplayInfo>(&self.scratch, resp_offset);
 
         if resp.hdr.type_ != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
             println!(
@@ -502,29 +563,19 @@ impl VirtioGpu {
     /// Returns None if EDID is not supported or the data can't be parsed.
     pub fn get_refresh_rate(&mut self) -> Option<u32> {
         self.begin_command();
-        let mut cmd: VirtioGpuCmdGetEdid = unsafe { core::mem::zeroed() };
+        let mut cmd = VirtioGpuCmdGetEdid::default();
         cmd.hdr.type_ = VIRTIO_GPU_CMD_GET_EDID;
         cmd.scanout = 0;
 
         let cmd_size = core::mem::size_of::<VirtioGpuCmdGetEdid>();
         let resp_size = core::mem::size_of::<VirtioGpuRespEdid>();
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &cmd as *const _ as *const u8,
-                self.scratch.as_ptr(),
-                cmd_size,
-            );
-        }
+        write_at(&self.scratch, 0, &cmd);
 
         let resp_offset = (cmd_size + 7) & !7;
         self.execute_scratch(cmd_size, resp_offset, resp_size);
 
-        let resp = unsafe {
-            core::ptr::read_volatile(
-                self.scratch.as_ptr().add(resp_offset) as *const VirtioGpuRespEdid
-            )
-        };
+        let resp = read_at::<VirtioGpuRespEdid>(&self.scratch, resp_offset);
 
         if resp.hdr.type_ != VIRTIO_GPU_RESP_OK_EDID || resp.size < 128 {
             return None;
@@ -590,7 +641,7 @@ impl VirtioGpu {
         backing_len: u32,
     ) {
         // RESOURCE_CREATE_2D
-        let mut create: VirtioGpuResourceCreate2d = unsafe { core::mem::zeroed() };
+        let mut create = VirtioGpuResourceCreate2d::default();
         create.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
         create.resource_id = resource_id;
         create.format = format;
@@ -615,28 +666,20 @@ impl VirtioGpu {
         let attach_size = core::mem::size_of::<VirtioGpuResourceAttachBacking>();
         let entry_size = core::mem::size_of::<VirtioGpuMemEntry>();
 
-        let mut attach: VirtioGpuResourceAttachBacking = unsafe { core::mem::zeroed() };
+        let mut attach = VirtioGpuResourceAttachBacking::default();
         attach.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
         attach.resource_id = resource_id;
         attach.nr_entries = 1;
 
-        let mut entry: VirtioGpuMemEntry = unsafe { core::mem::zeroed() };
-        entry.addr = backing_phys;
-        entry.length = backing_len;
+        let entry = VirtioGpuMemEntry {
+            addr: backing_phys,
+            length: backing_len,
+            ..Default::default()
+        };
 
         // Write both structs contiguously into scratch.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &attach as *const _ as *const u8,
-                self.scratch.as_ptr(),
-                attach_size,
-            );
-            core::ptr::copy_nonoverlapping(
-                &entry as *const _ as *const u8,
-                self.scratch.as_ptr().add(attach_size),
-                entry_size,
-            );
-        }
+        write_at(&self.scratch, 0, &attach);
+        write_at(&self.scratch, attach_size, &entry);
 
         let total_cmd_size = attach_size + entry_size;
         let resp_offset = (total_cmd_size + 7) & !7;
@@ -812,19 +855,13 @@ impl VirtioGpu {
         for (i, rect) in rects.iter().enumerate() {
             let cmd_off = i * slot;
             let resp_off = cmd_off + ((xfer_size + 7) & !7);
-            let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
+            let mut xfer = VirtioGpuTransferToHost2d::default();
             xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
             xfer.rect = *rect;
             xfer.offset = (rect.y as u64) * (stride as u64) + (rect.x as u64) * 4;
             xfer.resource_id = resource_id;
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    &xfer as *const _ as *const u8,
-                    self.scratch.as_ptr().add(cmd_off),
-                    xfer_size,
-                );
-                core::ptr::write_bytes(self.scratch.as_ptr().add(resp_off), 0, hdr_size);
-            }
+            write_at(&self.scratch, cmd_off, &xfer);
+            zero_at(&self.scratch, resp_off, hdr_size);
             let bufs = [
                 (scratch_phys + cmd_off as u64, xfer_size as u32, 0u16),
                 (
@@ -847,18 +884,12 @@ impl VirtioGpu {
 
         let flush_cmd_off = slot * rects.len();
         let flush_resp_off = flush_cmd_off + ((flush_size + 7) & !7);
-        let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
+        let mut flush = VirtioGpuResourceFlush::default();
         flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
         flush.rect = flush_rect;
         flush.resource_id = resource_id;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &flush as *const _ as *const u8,
-                self.scratch.as_ptr().add(flush_cmd_off),
-                flush_size,
-            );
-            core::ptr::write_bytes(self.scratch.as_ptr().add(flush_resp_off), 0, hdr_size);
-        }
+        write_at(&self.scratch, flush_cmd_off, &flush);
+        zero_at(&self.scratch, flush_resp_off, hdr_size);
         let flush_bufs = [
             (scratch_phys + flush_cmd_off as u64, flush_size as u32, 0u16),
             (
@@ -889,19 +920,13 @@ impl VirtioGpu {
 
         if self.use_blob {
             // Zero-copy path: just flush, QEMU reads directly from guest memory.
-            let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
+            let mut flush = VirtioGpuResourceFlush::default();
             flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
             flush.rect = rect;
             flush.resource_id = resource_id;
             let resp_off = (flush_size + 7) & !7;
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    &flush as *const _ as *const u8,
-                    self.scratch.as_ptr(),
-                    flush_size,
-                );
-                core::ptr::write_bytes(self.scratch.as_ptr().add(resp_off), 0, hdr_size);
-            }
+            write_at(&self.scratch, 0, &flush);
+            zero_at(&self.scratch, resp_off, hdr_size);
             let phys = self.scratch.phys_addr().as_u64();
             let bufs = [
                 (phys, flush_size as u32, 0u16),
@@ -924,33 +949,21 @@ impl VirtioGpu {
         // Write TRANSFER_TO_HOST_2D command.
         // offset = byte position in the backing buffer matching rect.y/rect.x,
         // so QEMU reads the correct source pixels for the given rect.
-        let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
+        let mut xfer = VirtioGpuTransferToHost2d::default();
         xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
         xfer.rect = rect;
         xfer.offset = (rect.y as u64) * (stride as u64) + (rect.x as u64) * 4;
         xfer.resource_id = resource_id;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &xfer as *const _ as *const u8,
-                self.scratch.as_ptr(),
-                xfer_size,
-            );
-            core::ptr::write_bytes(self.scratch.as_ptr().add(xfer_resp_off), 0, hdr_size);
-        }
+        write_at(&self.scratch, 0, &xfer);
+        zero_at(&self.scratch, xfer_resp_off, hdr_size);
 
         // Write RESOURCE_FLUSH command
-        let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
+        let mut flush = VirtioGpuResourceFlush::default();
         flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
         flush.rect = rect;
         flush.resource_id = resource_id;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &flush as *const _ as *const u8,
-                self.scratch.as_ptr().add(flush_cmd_off),
-                flush_size,
-            );
-            core::ptr::write_bytes(self.scratch.as_ptr().add(flush_resp_off), 0, hdr_size);
-        }
+        write_at(&self.scratch, flush_cmd_off, &flush);
+        zero_at(&self.scratch, flush_resp_off, hdr_size);
 
         let scratch_phys = self.scratch.phys_addr().as_u64();
 
@@ -990,7 +1003,7 @@ impl VirtioGpu {
 
     /// Switch scanout to a different resource.
     pub fn set_scanout(&mut self, scanout_id: u32, resource_id: u32, width: u32, height: u32) {
-        let mut cmd: VirtioGpuSetScanout = unsafe { core::mem::zeroed() };
+        let mut cmd = VirtioGpuSetScanout::default();
         cmd.hdr.type_ = VIRTIO_GPU_CMD_SET_SCANOUT;
         cmd.rect = VirtioGpuRect {
             x: 0,
@@ -1013,10 +1026,11 @@ impl VirtioGpu {
         backing_phys: u64,
         backing_len: u32,
     ) -> bool {
+        self.begin_command();
         let cmd_size = core::mem::size_of::<VirtioGpuResourceCreateBlob>();
         let entry_size = core::mem::size_of::<VirtioGpuMemEntry>();
 
-        let mut cmd: VirtioGpuResourceCreateBlob = unsafe { core::mem::zeroed() };
+        let mut cmd = VirtioGpuResourceCreateBlob::default();
         cmd.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
         cmd.resource_id = resource_id;
         cmd.blob_mem = VIRTIO_GPU_BLOB_MEM_GUEST;
@@ -1025,23 +1039,15 @@ impl VirtioGpu {
         cmd.blob_id = 0;
         cmd.size = backing_len as u64;
 
-        let mut entry: VirtioGpuMemEntry = unsafe { core::mem::zeroed() };
-        entry.addr = backing_phys;
-        entry.length = backing_len;
+        let entry = VirtioGpuMemEntry {
+            addr: backing_phys,
+            length: backing_len,
+            ..Default::default()
+        };
 
         // Pack cmd + entry contiguously in scratch (same pattern as create_resource)
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &cmd as *const _ as *const u8,
-                self.scratch.as_ptr(),
-                cmd_size,
-            );
-            core::ptr::copy_nonoverlapping(
-                &entry as *const _ as *const u8,
-                self.scratch.as_ptr().add(cmd_size),
-                entry_size,
-            );
-        }
+        write_at(&self.scratch, 0, &cmd);
+        write_at(&self.scratch, cmd_size, &entry);
 
         let total_cmd_size = cmd_size + entry_size;
         let resp_offset = (total_cmd_size + 7) & !7;
@@ -1068,7 +1074,7 @@ impl VirtioGpu {
     }
 
     fn set_scanout_blob(&mut self, scanout_id: u32, resource_id: u32, width: u32, height: u32) {
-        let mut cmd: VirtioGpuSetScanoutBlob = unsafe { core::mem::zeroed() };
+        let mut cmd = VirtioGpuSetScanoutBlob::default();
         cmd.hdr.type_ = VIRTIO_GPU_CMD_SET_SCANOUT_BLOB;
         cmd.rect = VirtioGpuRect {
             x: 0,
@@ -1114,6 +1120,12 @@ impl VirtioGpu {
 
         // Copy pixel data into 64x64 buffer, adding alpha.
         // Source pixels: 0x00000000 = transparent, 0x00RRGGBB = opaque.
+        // SAFETY: `cursor_buf` was allocated with exactly `byte_len` bytes for
+        // a 64x64 image, so the fill covers it and no write below reaches past
+        // it: both loop bounds are clamped to 64 and the destination index is
+        // `y * 64 + x`. The buffer is four-byte aligned (it starts on a page),
+        // and the device is not reading it: the resource is attached to it
+        // after this returns, and a later reshape is a synchronous command.
         unsafe {
             core::ptr::write_bytes(cursor_ptr, 0, byte_len);
             let dst = cursor_ptr as *mut u32;
@@ -1145,7 +1157,7 @@ impl VirtioGpu {
         }
 
         // Transfer cursor to host (must use control queue with FENCE for cursor)
-        let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
+        let mut xfer = VirtioGpuTransferToHost2d::default();
         xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
         xfer.hdr.flags = 1; // VIRTIO_GPU_FLAG_FENCE
         xfer.hdr.fence_id = 1;
@@ -1165,7 +1177,7 @@ impl VirtioGpu {
         // move anything: a zero here parks the pointer in the top-left corner
         // on every shape change, and the pointer does not move when its picture
         // does.
-        let mut cmd: VirtioGpuUpdateCursor = unsafe { core::mem::zeroed() };
+        let mut cmd = VirtioGpuUpdateCursor::default();
         cmd.hdr.type_ = VIRTIO_GPU_CMD_UPDATE_CURSOR;
         cmd.pos = VirtioGpuCursorPos {
             scanout_id: 0,
@@ -1190,7 +1202,7 @@ impl VirtioGpu {
     /// Move the hardware cursor to (x, y). Fire-and-forget on the cursor queue.
     pub fn move_cursor(&mut self, x: u32, y: u32) {
         self.cursor_pos = (x, y);
-        let mut cmd: VirtioGpuUpdateCursor = unsafe { core::mem::zeroed() };
+        let mut cmd = VirtioGpuUpdateCursor::default();
         cmd.hdr.type_ = VIRTIO_GPU_CMD_MOVE_CURSOR;
         cmd.pos = VirtioGpuCursorPos {
             scanout_id: 0,
@@ -1228,13 +1240,7 @@ impl VirtioGpu {
             offset + cmd_size <= CURSOR_SCRATCH_BYTES,
             "cursor scratch too small for a slot per descriptor"
         );
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                cmd as *const _ as *const u8,
-                self.cursor_scratch.as_ptr().add(offset),
-                cmd_size,
-            );
-        }
+        write_at(&self.cursor_scratch, offset, cmd);
         let phys = self.cursor_scratch.phys_addr().as_u64() + offset as u64;
         // Cursor queue: single device-readable descriptor, no response descriptor.
         let bufs = [(phys, cmd_size as u32, 0u16)];

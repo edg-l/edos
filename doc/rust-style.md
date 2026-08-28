@@ -60,13 +60,13 @@ Coverage in `kernel/src`, measured 2026-08-28:
 
 | quantity | count | command |
 | --- | --- | --- |
-| `unsafe { ... }` blocks | 758 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
-| `// SAFETY:` comments | 633 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
+| `unsafe { ... }` blocks | 729 | `grep -rhoE 'unsafe \{' kernel/src --include='*.rs' \| wc -l` |
+| `// SAFETY:` comments | 662 | `grep -rhoE '//\s*SAFETY:' kernel/src --include='*.rs' \| wc -l` |
 | `unsafe fn` declarations | 65 | `grep -rhoE '\bunsafe fn ' kernel/src --include='*.rs' \| wc -l` |
-| `# Safety` sections | 67 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
-| `unsafe impl` | 38 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
+| `# Safety` sections | 70 | `grep -rhoE '^\s*(///\|//!) # Safety' kernel/src --include='*.rs' \| wc -l` |
+| `unsafe impl` | 41 | `grep -rhoE 'unsafe impl' kernel/src --include='*.rs' \| wc -l` |
 
-So the block half is at roughly five sixths. The contract half now has more
+So the block half is at roughly nine tenths. The contract half now has more
 `# Safety` sections than `unsafe fn` declarations, because a section also
 belongs on an `unsafe trait` and on a safe function whose contract lives in a
 raw pointer argument; what it means is that every `unsafe fn` in a module I5a
@@ -94,9 +94,11 @@ is answering a different question; a generic parameter cannot express "whichever
 filesystem this mount turned out to be". Do not convert them.
 
 The obligation that does bind here comes from the other direction, from traits
-this tree implements rather than declares. `kernel/src` declares no `unsafe
-trait` and writes 38 `unsafe impl`: 18 `Send`, 14 `Sync`, plus `GlobalAlloc` and
-`FrameAllocator`. Two of the 38 carry a `// SAFETY:` comment.
+this tree implements rather than declares. `kernel/src` declares one `unsafe
+trait` -- `virtio::gpu::DeviceResponse`, the bound that lets a device response be
+read out of a DMA buffer by a safe function -- and writes 41 `unsafe impl`: 18
+`Send`, 14 `Sync`, the three `DeviceResponse`, plus `GlobalAlloc` and
+`FrameAllocator`. All of them carry a `// SAFETY:` comment.
 
 A bare `unsafe impl Send for T {}` is a claim that no data race can arise from
 moving `T` between threads, made by hand, in a preemptive SMP kernel with

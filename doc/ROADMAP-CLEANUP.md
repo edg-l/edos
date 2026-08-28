@@ -748,7 +748,7 @@ a data race against a writer arriving in between, so it now goes through a new
 
 `drivers/` is the last module, and it is taken a submodule at a time rather
 than whole: the `#[deny]` goes on each `pub mod` line in `drivers/mod.rs`, so
-eighteen of its twenty-one submodules are already ratcheted while the rest
+nineteen of its twenty-one submodules are already ratcheted while the rest
 catch up. The first batch is the tail -- `nvme/` (23 blocks), `pci/`, `fpu.rs`,
 `hpet/`, `msi/`, `rtc.rs`, `ramdisk.rs`, `random.rs`, `vga/`, `dma.rs`,
 `tty.rs`, `keyboard/`, `mouse/`, `null.rs` -- 58 blocks. Two shapes carry it: a
@@ -777,14 +777,31 @@ seventeen times, since every setup path opens with the identical `DmaRegion`
 argument: the slot came out of `free_slots`, so the `&mut` is unique, and the
 HBA does not read the table until `CI`/`SACT` names the slot.
 
-162 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
+The third batch is `virtio/`, and it is the one where the *counting* pass paid
+off rather than the commenting pass: 55 blocks went in and 26 came out, with no
+comment written for the 29 that went away. Seventeen were `core::mem::zeroed()`
+on a `#[repr(C)]` command struct, which `#[derive(Default)]` does with none of
+the obligation, and twelve more were the same three lines against the
+virtio-gpu scratch buffer -- copy a command in at an offset, zero a response
+area, read a response back -- now three safe bounds-checking free functions
+(`write_at`, `zero_at`, `read_at`) over `DmaBuffer`'s own `size`. `read_at` is
+generic over bytes the device wrote, so its bound is a private `unsafe trait
+DeviceResponse` with a `# Safety` section, implemented for the three response
+structs: this tree's only `unsafe trait`, and worth it for a safe call site.
+Writing one of the queue comments turned up a real defect, since `poll_used`
+handed `reclaim` the descriptor id the DEVICE wrote into the used ring and
+`reclaim` formed a pointer from it with no bound -- the framebuffer-ioctl shape
+one layer down. It is bounded and logged now. `doc/WORKING-NOTES.md` carries
+both.
+
+107 blocks remain, measured with `cd kernel && touch src/main.rs && cargo clippy
 --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-grep -cE '^\s+--> '`, and they are all in the three `drivers/` submodules left:
-`usb/` 97 (`xhci/mod.rs` 77), `virtio/` 55, and `drivers/mod.rs` itself 10. The lint sits commented out in `kernel/Cargo.toml`'s
+grep -cE '^\s+--> '`, and they are all in the two `drivers/` submodules left:
+`usb/` 97 (`xhci/mod.rs` 77) and `drivers/mod.rs` itself 10. The lint sits commented out in `kernel/Cargo.toml`'s
 `[lints.clippy]` beside the three that are on: moving it up once the last
 submodule holds its own deny is the commit that closes this entry.
 
-**I5b, the contracts.** 65 `unsafe fn` declarations against 67 `# Safety`
+**I5b, the contracts.** 65 `unsafe fn` declarations against 70 `# Safety`
 sections -- a section also belongs on an `unsafe trait` and on a safe fn whose
 contract is in a raw pointer, so the surplus is not slack -- remeasured 2026-08-28 with `doc/rust-style.md`'s commands; the
 modules I5a has been through are where the gap closed. No lint finds these and none can: a caller of an undocumented

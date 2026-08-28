@@ -11724,3 +11724,54 @@ had the same shape `fs/` and `interrupts/` did: clippy will not accept a comment
 above an `if` whose condition opens with the block, and there is nowhere inside
 `if !` to put one, so the call becomes a `let copied = unsafe { .. };` binding.
 Expect this in `drivers/` too.
+
+## `virtio/`: the fourth shape is a scratch buffer, and most of its `unsafe` was not unsafe
+
+`drivers/virtio/` came out of I5a smaller than it went in: 55 blocks to 26,
+without a single comment written for the 29 that went away.
+
+**Seventeen of them were `core::mem::zeroed()` on a command struct.** Every
+virtio-gpu command is a `#[repr(C)]` of `u32`, `u64` and small integer arrays,
+so a `#[derive(Default)]` is exactly the same bytes with none of the
+obligation. The rule this is an instance of: before writing a `// SAFETY:`,
+check whether the operation needs `unsafe` at all. A comment justifying a
+`zeroed()` that `Default` would do is a true comment on a block that should not
+exist, and the lint is satisfied either way, which is why the pass has to look.
+`clippy::field_reassign_with_default` then fires on `let mut x = X::default();
+x.field = ...` and wants the struct literal, so the two go together.
+
+**Twelve more were the same three lines against a DMA scratch buffer**: copy a
+command struct in at an offset, zero a response area at another offset, read a
+response back. `DmaBuffer` carries its own `size`, so those became three safe
+free functions -- `write_at`, `zero_at`, `read_at` -- that assert the range is
+inside the buffer and hold the one `unsafe` each. That is not the "moves the
+block without removing it" shape that got a `read_at<T>` rejected in `acpi/`:
+there the helper would have been an `unsafe fn` and every caller would still
+have opened a block. These are safe, because the bound is *checked* rather than
+asserted in prose, and the caller has nothing left to uphold.
+
+`read_at` is generic and reads bytes the device wrote, so a safe signature over
+any `T` would be a lie (`read_at::<bool>` is instant UB). The bound is a private
+`unsafe trait DeviceResponse` with a `# Safety` section saying the implementor
+must be `#[repr(C)]` integer data, implemented for the three response structs.
+Three documented `unsafe impl` in exchange for a safe call site is the right
+trade; a marker trait is the cheapest way to say "this type has no invalid bit
+pattern" until Rust has one of its own.
+
+**A real bug came out of writing one of these comments.** `Virtqueue::reclaim`
+walks the descriptor table with a head index, and `poll_used` handed it the `id`
+the DEVICE wrote into the used ring, unchecked. An id at or above the queue's
+size would have the driver write past the descriptor table -- the same shape as
+the framebuffer ioctls in
+`doc/bugs/2026-08-28-the-framebuffer-ioctls-read-past-the-buffer.md`, one layer
+down. `poll_used` now refuses such an entry and logs it. The tell is the same
+one that doc names: a length or an index that came from outside the kernel and
+is used to form a pointer without a bound in between. QEMU never does this,
+which is why it survived; that is not a reason it was sound.
+
+`create_resource_blob` also wrote the scratch buffer without calling
+`begin_command()` first, which every other command path does and which
+`begin_command`'s own doc comment claims they all do. It is reached only during
+`setup_framebuffer`, when nothing is in flight, so it never misbehaved -- but
+the invariant is "the buffer is drained before it is written", and one path
+exempting itself is how it stops being true. It calls it now.

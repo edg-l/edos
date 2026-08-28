@@ -168,6 +168,9 @@ impl VirtioTransport {
                 let bar_phys = read_bar_phys(addr, cap.bar);
                 if bar_phys.as_u64() != 0 {
                     let bar_virt = map_bar(bar_phys, cap.offset + cap.length);
+                    // SAFETY: `map_bar` just mapped `cap.offset + cap.length`
+                    // bytes from the BAR's physical base, so the capability's
+                    // own window starts inside that mapping.
                     let mmio_ptr = unsafe { bar_virt.add(cap.offset as usize) };
 
                     match cap.cfg_type {
@@ -224,6 +227,12 @@ impl VirtioTransport {
     fn cfg_read_u32(&self, offset: usize) -> u32 {
         let addr = self.common_cfg as usize + offset;
         let val: u32;
+        // SAFETY: `addr` is a field of the common-configuration window, which
+        // `new` mapped for the device's whole life; the callers below pass only
+        // the `COMMON_*` offsets, and virtio 1.2 §4.1.3.1 gives every field in
+        // that structure its natural alignment. The asm touches no memory Rust
+        // owns, and is where the volatile semantics come from: the compiler may
+        // not elide, reorder against other asm, or duplicate it.
         unsafe {
             core::arch::asm!("mov {0:e}, [{1}]", out(reg) val, in(reg) addr, options(nostack, readonly))
         };
@@ -233,6 +242,7 @@ impl VirtioTransport {
     /// Volatile write a u32 to common_cfg at the given byte offset.
     fn cfg_write_u32(&self, offset: usize, val: u32) {
         let addr = self.common_cfg as usize + offset;
+        // SAFETY: as `cfg_read_u32`, writing the field instead of reading it.
         unsafe {
             core::arch::asm!("mov [{1}], {0:e}", in(reg) val, in(reg) addr, options(nostack))
         };
@@ -242,6 +252,7 @@ impl VirtioTransport {
     fn cfg_read_u16(&self, offset: usize) -> u16 {
         let addr = self.common_cfg as usize + offset;
         let val: u16;
+        // SAFETY: as `cfg_read_u32`, for a two-byte field.
         unsafe {
             core::arch::asm!("mov {0:x}, [{1}]", out(reg) val, in(reg) addr, options(nostack, readonly))
         };
@@ -251,6 +262,7 @@ impl VirtioTransport {
     /// Volatile write a u16 to common_cfg at the given byte offset.
     fn cfg_write_u16(&self, offset: usize, val: u16) {
         let addr = self.common_cfg as usize + offset;
+        // SAFETY: as `cfg_read_u32`, writing a two-byte field.
         unsafe {
             core::arch::asm!("mov [{1}], {0:x}", in(reg) val, in(reg) addr, options(nostack))
         };
@@ -265,10 +277,15 @@ impl VirtioTransport {
     // ---- Common configuration accessors (volatile MMIO) ----
 
     pub fn read_status(&self) -> u8 {
+        // SAFETY: `COMMON_STATUS` is a byte inside the common-configuration
+        // window `new` mapped, so alignment is nothing to establish. Volatile
+        // because the DEVICE clears these bits: `reset` spins on this read
+        // waiting for it to answer 0.
         unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_STATUS)) }
     }
 
     pub fn write_status(&self, val: u8) {
+        // SAFETY: as `read_status`, driving the byte the device watches.
         unsafe { core::ptr::write_volatile(self.common_cfg.add(COMMON_STATUS), val) }
     }
 
@@ -370,6 +387,12 @@ impl VirtioTransport {
     pub fn notify_queue(&self, queue_index: u16, notify_off: u16) {
         let addr =
             self.notify_base as usize + notify_off as usize * self.notify_off_multiplier as usize;
+        // SAFETY: `addr` is the notification address the device itself named --
+        // `notify_base` is the mapped notify window, and the offset is the
+        // queue's own `queue_notify_off` scaled by the multiplier the device
+        // published beside the capability (virtio 1.2 §4.1.4.4). As in
+        // `cfg_read_u32`, the asm touches no memory Rust owns and carries the
+        // volatile semantics itself.
         unsafe {
             core::arch::asm!("mov [{1}], {0:x}", in(reg) queue_index, in(reg) addr, options(nostack))
         };

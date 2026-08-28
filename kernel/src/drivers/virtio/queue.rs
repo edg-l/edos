@@ -1,6 +1,7 @@
 use core::sync::atomic::{Ordering, fence};
 
 use crate::drivers::dma::{DmaBuffer, DmaError, dma};
+use crate::log;
 
 pub const VIRTQ_DESC_F_NEXT: u16 = 1;
 /// Buffer is device-writable (used for responses written by the device).
@@ -83,12 +84,23 @@ impl Virtqueue {
         let base = dma.virt_addr.as_u64() as *mut u8;
 
         let desc = base as *mut VirtqDesc;
+        // SAFETY: `dma` was asked for `used_offset + used_size` bytes, so both
+        // offsets are inside the one allocation `base` addresses. Its start is
+        // page-aligned, `desc_size` is a multiple of 16 and `used_offset` is
+        // rounded up to a page, so each region is aligned for what is written
+        // through it.
         let avail = unsafe { base.add(desc_size) };
+        // SAFETY: as above.
         let used = unsafe { base.add(used_offset) };
 
         // Initialise the free list: descriptor i points to i+1; the last
         // descriptor uses 0xFFFF as sentinel.
         for i in 0..size as usize {
+            // SAFETY: `i < size` and the allocation opens with `size`
+            // descriptors, so this is the i'th of them. Nothing else refers to
+            // the table yet -- the queue is not published to the device until
+            // `set_queue_desc`, and the reference dies at the end of the
+            // iteration.
             let d = unsafe { &mut *desc.add(i) };
             d.addr = 0;
             d.len = 0;
@@ -101,12 +113,17 @@ impl Virtqueue {
         }
 
         // Avail ring: flags = 0, idx = 0 (already zeroed by DMA allocator, but be explicit)
+        // SAFETY: `avail` addresses at least the six bytes of ring header
+        // inside the allocation, two-byte aligned by the layout above. Volatile
+        // because the DEVICE reads these two fields.
         unsafe {
             core::ptr::write_volatile(avail as *mut u16, 0u16); // flags
             core::ptr::write_volatile((avail as *mut u16).add(1), 0u16); // idx
         }
 
         // Used ring: flags = 0, idx = 0
+        // SAFETY: as the available ring, for the region at `used_offset`. The
+        // device writes `idx` from here on, so the write is volatile.
         unsafe {
             core::ptr::write_volatile(used as *mut u16, 0u16); // flags
             core::ptr::write_volatile((used as *mut u16).add(1), 0u16); // idx
@@ -163,6 +180,12 @@ impl Virtqueue {
         // Walk through the buffers, filling in one free descriptor per entry.
         let mut cur = self.free_head;
         for (i, &(addr, len, flags)) in bufs.iter().enumerate() {
+            // SAFETY: `cur` walks the free list, which is built from indices
+            // below `size` in `new` and only ever fed indices `reclaim` took
+            // back out of it, so it addresses a descriptor in the table. The
+            // reference dies at the end of the iteration, and the device is not
+            // reading this descriptor: it is free until the avail-ring write
+            // below publishes it.
             let desc = unsafe { &mut *self.desc.add(cur as usize) };
             let next_free = desc.next; // save before we overwrite
 
@@ -233,6 +256,18 @@ impl Virtqueue {
         let (id, len) = self.read_used_ring(ring_slot);
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
+        // The DEVICE chooses this id and `reclaim` walks the descriptor table
+        // with it, so an id outside the table would have the driver write past
+        // it. Every id the queue hands out is below `size`.
+        if id >= self.size as u32 {
+            log!(
+                "virtio: used ring named descriptor {} in a {}-descriptor queue",
+                id,
+                self.size
+            );
+            return None;
+        }
+
         Some((id as u16, len))
     }
 
@@ -244,6 +279,10 @@ impl Virtqueue {
     pub fn reclaim(&mut self, head: u16) {
         let mut idx = head;
         loop {
+            // SAFETY: `idx` starts at a head `push` returned and then follows
+            // that chain's own `next` links, both of which are indices below
+            // `size`; `poll_used` refuses any other id the device names. The
+            // chain has been reported complete, so the device is done with it.
             let desc = unsafe { &mut *self.desc.add(idx as usize) };
             let has_next = desc.flags & VIRTQ_DESC_F_NEXT != 0;
             let next = desc.next;
@@ -266,10 +305,16 @@ impl Virtqueue {
     // ---- Available ring helpers ----
 
     fn read_avail_idx(&self) -> u16 {
+        // SAFETY: `idx` is the second u16 of the available ring header, inside
+        // the allocation and two-byte aligned. Volatile only for symmetry with
+        // the write: the driver owns this field, but the device reads it.
         unsafe { core::ptr::read_volatile((self.avail as *const u16).add(1)) }
     }
 
     fn write_avail_idx(&self, val: u16) {
+        // SAFETY: as `read_avail_idx`. Volatile because publishing this field
+        // is what hands the chain to the DEVICE, so it may not be sunk past the
+        // notify that follows.
         unsafe { core::ptr::write_volatile((self.avail as *mut u16).add(1), val) }
     }
 
@@ -277,6 +322,10 @@ impl Virtqueue {
     ///
     /// The ring array starts at avail+4 (after flags u16 + idx u16).
     fn write_avail_ring(&self, ring_idx: u16, desc_idx: u16) {
+        // SAFETY: the only caller passes `avail_idx % self.size`, and the ring
+        // holds `size` u16 entries after the two-u16 header, all inside the
+        // allocation and two-byte aligned. Volatile because the device reads
+        // the slot once `idx` names it.
         unsafe {
             core::ptr::write_volatile(
                 (self.avail as *mut u16).add(2 + ring_idx as usize),
@@ -288,6 +337,10 @@ impl Virtqueue {
     // ---- Used ring helpers ----
 
     fn read_used_idx(&self) -> u16 {
+        // SAFETY: `idx` is the second u16 of the used ring header, inside the
+        // allocation and two-byte aligned. Volatile because the DEVICE writes
+        // it: a non-volatile read would be hoisted out of the poll loop that
+        // waits for it to move.
         unsafe { core::ptr::read_volatile((self.used as *const u16).add(1)) }
     }
 
@@ -296,8 +349,16 @@ impl Virtqueue {
     /// Used ring layout: flags u16 | idx u16 | entries[size]*(id u32, len u32)
     /// So entries start at offset 4, each entry is 8 bytes.
     fn read_used_ring(&self, ring_idx: u16) -> (u32, u32) {
+        // SAFETY: the only caller passes `last_used_idx % self.size`, and the
+        // ring holds `size` eight-byte entries after its four-byte header, so
+        // the entry is inside the allocation. `used_offset` is page-aligned and
+        // the entry offset is a multiple of four, so both u32 reads are
+        // aligned. Volatile because the DEVICE writes these entries; the values
+        // are untrusted, which is what the bound in `poll_used` is for.
         let entry_ptr = unsafe { self.used.add(4 + ring_idx as usize * 8) };
+        // SAFETY: as above, the entry's `id`.
         let id = unsafe { core::ptr::read_volatile(entry_ptr as *const u32) };
+        // SAFETY: as above, the `len` beside it.
         let len = unsafe { core::ptr::read_volatile((entry_ptr as *const u32).add(1)) };
         (id, len)
     }
