@@ -601,28 +601,43 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     const MAX_FRAMES: usize = 32;
 
     let mut rbp: u64;
-    // SAFETY: the asm reads the `rbp` register into an output operand. It touches
-    // no memory and has no side effects.
-    unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp) };
+    let rsp: u64;
+    // SAFETY: the asm reads the `rbp` and `rsp` registers into output operands.
+    // It touches no memory and has no side effects.
+    unsafe { core::arch::asm!("mov {}, rbp", "mov {}, rsp", out(reg) rbp, out(reg) rsp) };
+
+    // The chain is untrusted data read at the worst possible moment: a wild
+    // `rbp` into an unmapped kernel page faults inside the panic handler, and
+    // what is lost then is the machine, not just the backtrace. So the walk is
+    // bounded to the stack it is standing on. `rsp` is the exact lower bound --
+    // a frame pointer is always at or above the stack pointer of the frame it
+    // belongs to -- and one stack's length above it is a ceiling, since `rsp`
+    // is somewhere inside a stack that long.
+    //
+    // The bound is taken from a register rather than from
+    // `profile::current_kernel_stack`, which reads per-CPU data and then
+    // dereferences the current thread's `Arc` to reach `kstack_top`. That is a
+    // heap read, and a corrupt heap is a common reason to be here at all.
+    let stack_lo = rsp;
+    let stack_hi = rsp.saturating_add(memory::KTHREAD_STACK_SIZE);
 
     println!("Backtrace:");
     for i in 0..MAX_FRAMES {
-        if rbp == 0 || rbp < KERNEL_BASE {
+        // Both words of the frame must lie inside the window, so the range
+        // check covers the pair.
+        if rbp < stack_lo
+            || rbp.saturating_add(16) > stack_hi
+            || rbp < KERNEL_BASE
+            || !rbp.is_multiple_of(8)
+        {
             break;
         }
         let frame_ptr = rbp as *const u64;
-        // Validate the pointer is in kernel space and aligned
-        if (frame_ptr as u64) < KERNEL_BASE || !frame_ptr.is_aligned() {
-            break;
-        }
-        // SAFETY: the check above put `frame_ptr` at or above `KERNEL_BASE` and
-        // confirmed 8-byte alignment, so the load is aligned and in the half of the
-        // address space the kernel maps. Its *contents* are untrusted: a chain the
-        // walk cannot follow ends the walk at the checks below rather than being
-        // printed. Unlike `profile::walk_kernel` this does not bound `rbp` to the
-        // current stack, so a wild frame pointer into an unmapped kernel page still
-        // faults; the walk runs only from the panic path, where the alternative is
-        // no backtrace at all.
+        // SAFETY: the check above put both words of the frame inside the stack
+        // this handler is running on and confirmed 8-byte alignment, so the
+        // loads are aligned and mapped. Their *contents* are untrusted: a chain
+        // the walk cannot follow ends the walk at the checks below rather than
+        // being printed.
         let ret_addr = unsafe { *frame_ptr.add(1) };
         if ret_addr == 0 {
             break;
