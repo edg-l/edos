@@ -2253,7 +2253,7 @@ value that might be missing. A controller that fails to start is now skipped and
 the probe moves to the next PCI candidate, instead of being returned in a
 half-built state for the caller to notice.
 
-## Counts, remeasured 2026-08-29 (at `0922f7a1`, after `texttest`, `fbtest` and
+## Counts, remeasured 2026-08-29 (at `a33c6196`, after `texttest`, `fbtest` and
 `filetest` joined `guest-check`, `edos_lib::args` landed and the last four
 hand-rolled flag loops adopted it, and I5 closed both halves)
 
@@ -2267,10 +2267,10 @@ does not have to invent them.
 | userspace programs | 132 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 133 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 115,770 code lines across 479 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| Rust | 115,794 code lines across 479 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
 | kernel Rust | 53,634 code lines | `tokei -t=Rust kernel/src` |
 | NVMe driver | 2,268 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,657 at `0922f7a1` | `git rev-list --count <rev>`; state the rev, because the count moves under a row that names only `HEAD` and the row itself is a commit |
+| commits | 1,659 at `a33c6196` | `git rev-list --count <rev>`; state the rev, because the count moves under a row that names only `HEAD` and the row itself is a commit |
 | in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none` passes too — both targets name `-accel kvm` since 2026-08-19, so no `QEMUFLAGS` is needed |
 | host unit tests | 164 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
