@@ -247,28 +247,36 @@ impl Virtqueue {
     /// request, or `None` if the used ring has no new entries.
     pub fn poll_used(&mut self) -> Option<(u16, u32)> {
         fence(Ordering::Acquire);
-        let used_idx = self.read_used_idx();
-        if self.last_used_idx == used_idx {
-            return None;
+        loop {
+            let used_idx = self.read_used_idx();
+            if self.last_used_idx == used_idx {
+                return None;
+            }
+
+            let ring_slot = self.last_used_idx % self.size;
+            let (id, len) = self.read_used_ring(ring_slot);
+            self.last_used_idx = self.last_used_idx.wrapping_add(1);
+
+            // The DEVICE chooses this id and `reclaim` walks the descriptor
+            // table with it, so an id outside the table would have the driver
+            // write past it. Every id the queue hands out is below `size`.
+            //
+            // The entry is dropped and the scan goes on rather than returning:
+            // `None` is how the caller is told the ring is empty, and a drain
+            // loop that stopped on a refused entry would leave the entries
+            // behind it unreported. Its chain stays out of the free list, since
+            // there is no id to reclaim it by.
+            if id >= self.size as u32 {
+                log!(
+                    "virtio: used ring named descriptor {} in a {}-descriptor queue",
+                    id,
+                    self.size
+                );
+                continue;
+            }
+
+            return Some((id as u16, len));
         }
-
-        let ring_slot = self.last_used_idx % self.size;
-        let (id, len) = self.read_used_ring(ring_slot);
-        self.last_used_idx = self.last_used_idx.wrapping_add(1);
-
-        // The DEVICE chooses this id and `reclaim` walks the descriptor table
-        // with it, so an id outside the table would have the driver write past
-        // it. Every id the queue hands out is below `size`.
-        if id >= self.size as u32 {
-            log!(
-                "virtio: used ring named descriptor {} in a {}-descriptor queue",
-                id,
-                self.size
-            );
-            return None;
-        }
-
-        Some((id as u16, len))
     }
 
     // ---- Descriptor reclaim ----

@@ -1772,6 +1772,12 @@ pub fn thread_exit(code: i32) -> ! {
         t.assert_no_borrowed_dma("thread_exit");
     }
 
+    // A heartbeat registration is by thread id, and thread ids are reused, so a
+    // slot left behind would stop counting some later thread's switches as
+    // work and quietly make the detector unfirable again.
+    #[cfg(feature = "stall-dump")]
+    crate::debug::stall::clear_heartbeat(tid.0);
+
     // Log lifetime stats before the without_interrupts fast path (log! allocates).
     if let Some(t) = get_thread_by_id(tid) {
         // Publishes the death to a tracer and, if this thread was the tracer,

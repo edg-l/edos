@@ -100,6 +100,14 @@ pub fn mark_heartbeat() {
     emergency_println!("stall: heartbeat registry full, tid {tid} counts as work");
 }
 
+/// Release `tid`'s registration, so a later thread that is handed the same id
+/// is counted as work again. Called from `thread_exit`.
+pub fn clear_heartbeat(tid: u64) {
+    for slot in &HEARTBEATS {
+        let _ = slot.compare_exchange(tid, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
 fn is_heartbeat(tid: u64) -> bool {
     HEARTBEATS
         .iter()
