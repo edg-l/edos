@@ -559,8 +559,13 @@ clippy: programs
 	cd programs && cargo +edos clippy --all-targets -- -D warnings
 
 .PHONY: programs
+# Refreshes the manifest as its last step: `scripts/edos-vm start` decides an
+# image is stale by comparing it against the manifest's mtime, so a binary this
+# target copied in must move the manifest here, or `make programs` followed by
+# `start` boots the previous binary.
 programs:
 	$(MAKE) -C programs build
+	@$(update-manifest)
 
 DISK_UUID := 12345678-1234-5678-9abc-123456789abc
 PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed
