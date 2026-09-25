@@ -125,7 +125,13 @@ fn supervise(service: Arc<Service>, control: Arc<Control>) {
             });
             println!("init: {name} started, pid {pid}");
 
-            let code = process::waitpid(pid);
+            let code = match process::waitpid(pid) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("init: {name}: waitpid {pid}: {e:?}");
+                    1
+                }
+            };
             let ran_for = started.elapsed();
             let wanted_up = control
                 .update(name, |e| {

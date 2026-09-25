@@ -142,7 +142,7 @@ fn main() {
     if let Ok(child) = child {
         let cross = time_yield(iters) / 2.0;
         let _ = edos_lib::process::kill(child, edos_lib::process::SIGKILL);
-        edos_lib::process::waitpid(child);
+        let _ = edos_lib::process::waitpid(child);
         out.line(&format!(
             "switchbench yield process {cross:.0} ns per handover, {:.0} ns over a shared \
              address space",
@@ -213,8 +213,8 @@ fn pipe_no_block(out: &mut Tee, iters: u64) {
             failed = true;
         }
     });
-    close(r);
-    close(w);
+    let _ = close(r);
+    let _ = close(w);
     if failed {
         out.line("switchbench: non-blocking pipe echo failed");
         return;
@@ -341,9 +341,9 @@ fn pipe_round_trip_threads(out: &mut Tee, iters: u64, touch: usize) {
         }
     });
 
-    close(up_w);
+    let _ = close(up_w);
     let _ = peer.join();
-    close(down_r);
+    let _ = close(down_r);
 
     if failed {
         out.line("switchbench: thread round trip failed");
@@ -366,8 +366,8 @@ fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
 
     let child = fork();
     if child == Ok(0) {
-        close(up_w);
-        close(down_r);
+        let _ = close(up_w);
+        let _ = close(down_r);
         let mut byte = [0u8; 1];
         let mut set = WorkingSet::new(touch);
         loop {
@@ -386,8 +386,8 @@ fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
         out.line("switchbench: fork failed, skipping the pipe case");
         return;
     };
-    close(up_r);
-    close(down_w);
+    let _ = close(up_r);
+    let _ = close(down_w);
 
     // Best of batches, with warmup, exactly as the thread case above -- and
     // that matters more here than anywhere else in this file. A `fork`ed child
@@ -408,10 +408,10 @@ fn pipe_round_trip(out: &mut Tee, iters: u64, touch: usize) {
         }
     });
 
-    close(up_w);
-    close(down_r);
+    let _ = close(up_w);
+    let _ = close(down_r);
     let _ = edos_lib::process::kill(child, edos_lib::process::SIGKILL);
-    edos_lib::process::waitpid(child);
+    let _ = edos_lib::process::waitpid(child);
 
     if failed {
         out.line("switchbench: pipe round trip failed");

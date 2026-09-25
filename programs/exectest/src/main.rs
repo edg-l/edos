@@ -242,12 +242,13 @@ fn main() {
 
     let child = process::spawn(SELF_PATH, &["stage1"], 0, 1, 2)
         .unwrap_or_else(|e| fail("test 2", &format!("spawn of stage 1 failed: {e:?}")));
-    let code = process::waitpid(child);
-    if code != OK {
-        fail(
+    match process::waitpid(child) {
+        Ok(OK) => {}
+        Ok(code) => fail(
             "test 2",
             &format!("stage 2 exited {}: {}", code, describe(code)),
-        );
+        ),
+        Err(e) => fail("test 2", &format!("waitpid failed: {e:?}")),
     }
     pass(
         "test 2",
@@ -259,12 +260,13 @@ fn main() {
     // -------------------------------------------------------------------
     let child = process::spawn(SELF_PATH, &["stage3"], 0, 1, 2)
         .unwrap_or_else(|e| fail("test 3", &format!("spawn failed: {e:?}")));
-    let code = process::waitpid(child);
-    if code != 0 {
-        fail(
+    match process::waitpid(child) {
+        Ok(0) => {}
+        Ok(code) => fail(
             "test 3",
             &format!("expected the exec'd /bin/true to exit 0, got {}", code),
-        );
+        ),
+        Err(e) => fail("test 3", &format!("waitpid failed: {e:?}")),
     }
     pass("test 3", "the exec'd image's exit status is the process's");
 
@@ -273,16 +275,17 @@ fn main() {
     // -------------------------------------------------------------------
     let child = process::spawn(SELF_PATH, &["stage4"], 0, 1, 2)
         .unwrap_or_else(|e| fail("test 4", &format!("spawn failed: {e:?}")));
-    let code = process::waitpid(child);
-    if code != 0 {
-        fail(
+    match process::waitpid(child) {
+        Ok(0) => {}
+        Ok(code) => fail(
             "test 4",
             &format!(
                 "exec from a 5-thread process exited {}: {}",
                 code,
                 describe(code)
             ),
-        );
+        ),
+        Err(e) => fail("test 4", &format!("waitpid failed: {e:?}")),
     }
     pass(
         "test 4",
@@ -294,16 +297,17 @@ fn main() {
     // -------------------------------------------------------------------
     let child = process::spawn(SELF_PATH, &["stage5"], 0, 1, 2)
         .unwrap_or_else(|e| fail("test 5", &format!("spawn failed: {e:?}")));
-    let code = process::waitpid(child);
-    if code != 0 {
-        fail(
+    match process::waitpid(child) {
+        Ok(0) => {}
+        Ok(code) => fail(
             "test 5",
             &format!(
                 "exec with 4 user-spinning siblings exited {}: {}",
                 code,
                 describe(code)
             ),
-        );
+        ),
+        Err(e) => fail("test 5", &format!("waitpid failed: {e:?}")),
     }
     pass("test 5", "exec quiesced siblings that make no syscalls");
 

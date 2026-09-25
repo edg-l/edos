@@ -63,7 +63,10 @@ fn capture_bytes(tool: &str, args: &[&str], stdin_path: &str) -> (i32, Vec<u8>) 
         Ok(pid) => pid,
         Err(e) => fail(&what, &format!("spawn of {path} failed: {e:?}")),
     };
-    let code = process::waitpid(pid);
+    let code = match process::waitpid(pid) {
+        Ok(code) => code,
+        Err(e) => fail(&what, &format!("waitpid of {path} failed: {e:?}")),
+    };
 
     let _ = io::close(inp);
     let _ = io::close(outp);

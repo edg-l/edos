@@ -423,7 +423,7 @@ fn run_builtin_redirected(cmd: &str, args: &[String], fds: [u64; 3]) -> command:
     for (i, restore) in saved.iter().enumerate() {
         if let Some(restore) = *restore {
             let _ = edos_lib::process::dup2(restore, i as u64);
-            edos_lib::process::close(restore);
+            let _ = edos_lib::process::close(restore);
         }
     }
     result
@@ -457,7 +457,7 @@ pub fn heredoc_pipe(content: &str) -> Option<u64> {
             }
             sent += n;
         }
-        edos_lib::process::close(write_fd);
+        let _ = edos_lib::process::close(write_fd);
     });
     Some(read_fd)
 }
@@ -498,7 +498,13 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> SegmentResult {
         let code = if let Some(pid) =
             edos_lib::process::spawn_program_with_fds(cmd, &rest, fds[0], fds[1], fds[2])
         {
-            edos_lib::process::waitpid(pid)
+            match edos_lib::process::waitpid(pid) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("sh: waitpid {pid}: {e:?}");
+                    1
+                }
+            }
         } else {
             eprintln!("Command not found: {}", cmd);
             127
@@ -597,7 +603,13 @@ pub fn run_chain(input: &str) -> SegmentResult {
                     last_exit = 0;
                     command::set_last_exit_code(0);
                 } else {
-                    let code = edos_lib::process::waitpid(pid);
+                    let code = match edos_lib::process::waitpid(pid) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            eprintln!("sh: waitpid {pid}: {e:?}");
+                            1
+                        }
+                    };
                     last_exit = code;
                     command::set_last_exit_code(code);
                 }
@@ -1164,7 +1176,7 @@ fn main() {
 
             if let Some(read_fd) = heredoc_pipe(&expanded) {
                 let result = run_segment_with_stdin(&cleaned_line, read_fd);
-                edos_lib::process::close(read_fd);
+                let _ = edos_lib::process::close(read_fd);
                 match result {
                     SegmentResult::Done(code) => command::set_last_exit_code(code),
                     SegmentResult::Exit(code) => std::process::exit(code),

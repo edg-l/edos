@@ -146,7 +146,13 @@ fn collect(
     let mut draining = false;
 
     loop {
-        let n = profile::read(&mut buf, if draining { 0 } else { 100 });
+        let n = match profile::read(&mut buf, if draining { 0 } else { 100 }) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("profile: read failed: {e:?}");
+                return;
+            }
+        };
         for sample in &buf[..n] {
             let mode = if sample.flags & SAMPLE_IDLE != 0 {
                 'i'

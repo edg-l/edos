@@ -101,7 +101,7 @@ impl Child {
     /// also the output, and a terminal's input never ends while it is open.
     fn close_input(&mut self) {
         if !self.is_pty && self.input_open {
-            process::close(self.write_fd);
+            let _ = process::close(self.write_fd);
             self.input_open = false;
         }
     }
@@ -109,7 +109,7 @@ impl Child {
 
 impl Drop for Child {
     fn drop(&mut self) {
-        process::close(self.read_fd);
+        let _ = process::close(self.read_fd);
         self.close_input();
 
         // Closing the descriptors is not enough to end the shell: a command
@@ -453,8 +453,8 @@ impl<'a> Session<'a> {
                     return Ok(false);
                 };
                 let Some((stdout_read, stdout_write)) = process::pipe() else {
-                    process::close(stdin_read);
-                    process::close(stdin_write);
+                    let _ = process::close(stdin_read);
+                    let _ = process::close(stdin_write);
                     return Ok(false);
                 };
                 (stdin_read, stdout_write, stdout_read, stdin_write, false)
@@ -498,15 +498,15 @@ impl<'a> Session<'a> {
         );
         // The child's ends belong to the child now; holding them here would
         // keep a pipe from ever reporting end of file.
-        process::close(child_in);
+        let _ = process::close(child_in);
         if child_out != child_in {
-            process::close(child_out);
+            let _ = process::close(child_out);
         }
 
         let Ok(pid) = pid else {
-            process::close(read_fd);
+            let _ = process::close(read_fd);
             if !is_pty {
-                process::close(write_fd);
+                let _ = process::close(write_fd);
             }
             eprintln!("sshd: cannot start {}", self.cfg.shell);
             return Ok(false);

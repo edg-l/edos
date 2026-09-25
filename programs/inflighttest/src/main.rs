@@ -124,7 +124,7 @@ fn main() -> ExitCode {
                 println!("inflighttest: FAIL fork {i}: {e:?}");
                 // Wait for any already-forked children before returning.
                 for &cpid in &child_pids {
-                    process::waitpid(cpid);
+                    let _ = process::waitpid(cpid);
                 }
                 let _ = fs::remove_file(FILE_PATH);
                 return ExitCode::from(1);
@@ -153,8 +153,8 @@ fn main() -> ExitCode {
     let mut child_failed = false;
     for cpid in child_pids {
         let code = process::waitpid(cpid);
-        if code != 0 {
-            println!("inflighttest: child pid={cpid} exited with code {code}");
+        if code != Ok(0) {
+            println!("inflighttest: child pid={cpid} exited with code {code:?}");
             child_failed = true;
         }
     }

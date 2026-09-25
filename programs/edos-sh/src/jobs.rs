@@ -136,7 +136,13 @@ impl JobList {
         for job in &mut self.jobs {
             if job.status == JobStatus::Running {
                 for &pid in &job.pids {
-                    last_code = process::waitpid(pid);
+                    last_code = match process::waitpid(pid) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            eprintln!("sh: waitpid {pid}: {e:?}");
+                            1
+                        }
+                    };
                 }
                 job.status = JobStatus::Done(last_code);
             }
@@ -158,7 +164,13 @@ impl JobList {
         };
         match self.jobs[pos].status {
             JobStatus::Running => {
-                let code = process::waitpid(pid);
+                let code = match process::waitpid(pid) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("sh: waitpid {pid}: {e:?}");
+                        1
+                    }
+                };
                 self.jobs.remove(pos);
                 code
             }

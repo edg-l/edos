@@ -101,7 +101,7 @@ fn test1() {
     if bad != 0 {
         fail(1, "the syscall stub did not restore the caller's registers");
     }
-    if code != 0 {
+    if code != Ok(0) {
         fail(
             1,
             "the child returned from fork with registers its parent still had",
@@ -131,7 +131,7 @@ fn test2() {
     }
 
     let code = process::waitpid(pid);
-    if code != 0 {
+    if code != Ok(0) {
         fail(2, "the child could not write to its own copy");
     }
     if x != 42 {
@@ -156,11 +156,11 @@ fn test3() {
             std::process::exit(7);
         }
         let code = process::waitpid(grandchild);
-        std::process::exit(if code == 7 { 0 } else { 1 });
+        std::process::exit(if code == Ok(7) { 0 } else { 1 });
     }
 
     let code = process::waitpid(pid);
-    if code != 0 {
+    if code != Ok(0) {
         fail(3, "a grandchild's exit code did not reach the child");
     }
     pass(3, "fork nests and exit codes propagate");

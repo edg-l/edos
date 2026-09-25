@@ -136,13 +136,13 @@ fn run_command(command: &[String], exec: bool) -> Result<Run, String> {
     };
 
     let Some(pid) = spawn_program_with_fds(&program, &args, 0, write_fd, write_fd) else {
-        close(read_fd);
-        close(write_fd);
+        let _ = close(read_fd);
+        let _ = close(write_fd);
         return Err(format!("{program}: command not found"));
     };
     // The child holds the only other write end now; without this close the read
     // below never sees EOF.
-    close(write_fd);
+    let _ = close(write_fd);
 
     let mut output: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
@@ -152,9 +152,15 @@ fn run_command(command: &[String], exec: bool) -> Result<Run, String> {
         }
         output.extend_from_slice(&buf[..n]);
     }
-    close(read_fd);
+    let _ = close(read_fd);
 
-    let status = waitpid(pid);
+    let status = match waitpid(pid) {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("watch: waitpid {pid}: {e:?}");
+            1
+        }
+    };
     let text = String::from_utf8_lossy(&output).into_owned();
     let mut lines: Vec<String> = text.split('\n').map(|l| l.to_string()).collect();
     // A trailing newline ends the last line; it does not start an empty one.

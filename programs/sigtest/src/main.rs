@@ -134,7 +134,7 @@ fn stop_and_continue() {
     if process::kill(child, SIGCONT).is_err() {
         fail("cont", "could not send SIGCONT");
     }
-    if process::waitpid(child) != 7 {
+    if process::waitpid(child) != Ok(7) {
         fail("cont", "child did not resume and exit cleanly");
     }
     pass("cont", "SIGCONT resumed it and it ran to completion");
@@ -173,7 +173,7 @@ fn group_delivery() {
 
     for child in &children {
         let status = process::waitpid(*child);
-        if status != 128 + SIGTERM as i32 {
+        if status != Ok(128 + SIGTERM as i32) {
             fail("group", "a group member survived the signal");
         }
     }
@@ -189,7 +189,7 @@ fn sigpipe_terminates() {
 
     let pid = process::fork();
     if pid == Ok(0) {
-        process::close(read_fd);
+        let _ = process::close(read_fd);
         // Without SIGPIPE this never ends and grows the kernel heap.
         let buf = [b'x'; 4096];
         loop {
@@ -200,11 +200,11 @@ fn sigpipe_terminates() {
         fail("sigpipe", "fork failed");
     };
 
-    process::close(read_fd);
-    process::close(write_fd);
+    let _ = process::close(read_fd);
+    let _ = process::close(write_fd);
 
     let status = process::waitpid(pid);
-    if status != 128 + 13 {
+    if status != Ok(128 + 13) {
         fail("sigpipe", "writer was not killed by SIGPIPE");
     }
     pass("sigpipe", "a write with no reader raised SIGPIPE");

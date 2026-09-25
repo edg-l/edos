@@ -3,7 +3,7 @@
 //! The record layout and the argument encoding come from `edos_trace_abi`,
 //! which the kernel links too.
 
-use crate::sys;
+use crate::sys::{self, Errno};
 
 pub use edos_trace_abi::{
     ArgKind, TRACE_DIED, TRACE_ENTER, TRACE_EXIT, TRACE_STR_FAULT, TRACE_STR_TRUNCATED,
@@ -38,15 +38,15 @@ pub fn unmark(tid: u64) -> bool {
 
 /// Records the kernel discarded because the ring was full and this tracer was
 /// not draining it fast enough.
-pub fn dropped() -> u64 {
-    unsafe { sys::syscall2(sys::SYS_TRACE_CTL, ctl::DROPPED, 0) }
+pub fn dropped() -> Result<u64, Errno> {
+    sys::sys_result(unsafe { sys::syscall2(sys::SYS_TRACE_CTL, ctl::DROPPED, 0) })
 }
 
 /// Drain up to `buf.len()` records, parking for at most `timeout_ms` if none
 /// are waiting.
 ///
-/// Returns the number of records written, which is 0 on timeout.
-pub fn read(buf: &mut [TraceRecord], timeout_ms: u64) -> usize {
+/// Answers the number of records written, which is 0 on timeout.
+pub fn read(buf: &mut [TraceRecord], timeout_ms: u64) -> Result<usize, Errno> {
     let n = unsafe {
         sys::syscall3(
             sys::SYS_TRACE_READ,
@@ -55,7 +55,7 @@ pub fn read(buf: &mut [TraceRecord], timeout_ms: u64) -> usize {
             timeout_ms,
         )
     };
-    if sys::is_err(n) { 0 } else { n as usize }
+    sys::sys_count(n)
 }
 
 /// One row of `/proc/syscalls`: what the kernel calls a number, and what its

@@ -660,7 +660,7 @@ fn test10(dir: &str) {
     if pid == 0 {
         fail(10, "spawning a program through a symbolic link failed");
     }
-    if process::waitpid(pid) != 0 {
+    if process::waitpid(pid) != Ok(0) {
         fail(
             10,
             "a program spawned through a symbolic link did not exit 0",
@@ -888,7 +888,7 @@ fn test13(dir: &str) {
     if pwrite(fd as u64, b"at", 0) != Ok(2) {
         fail(13, "write through an openat descriptor failed");
     }
-    close(fd as u64);
+    let _ = close(fd as u64);
 
     match fstatat(dirfd as i64, "made", 0) {
         Some(st) if st.size == 2 => {}
@@ -907,7 +907,7 @@ fn test13(dir: &str) {
     if pread(fd as u64, &mut buf, 0) != Ok(2) || &buf != b"at" {
         fail(13, "read back the wrong contents through openat");
     }
-    close(fd as u64);
+    let _ = close(fd as u64);
 
     if mkdirat(dirfd as i64, "sub").is_err() {
         fail(13, "mkdirat failed");
@@ -939,7 +939,7 @@ fn test13(dir: &str) {
     if openat(filefd as i64, "x", 0).is_ok() {
         fail(13, "openat accepted a descriptor that is not a directory");
     }
-    close(filefd);
+    let _ = close(filefd);
     if openat(4242, "x", 0).is_ok() {
         fail(13, "openat accepted a closed descriptor");
     }
@@ -985,7 +985,7 @@ fn test13(dir: &str) {
         fail(13, "fstatat accepted a flag it cannot honour");
     }
 
-    close(dirfd);
+    let _ = close(dirfd);
     let _ = fs::remove_dir_all(&base);
     pass(
         13,
@@ -1202,7 +1202,7 @@ fn test17(dir: &str) {
     if pwrite(fd as u64, b"body", 0) != Ok(4) {
         fail(17, "write through an openat descriptor failed");
     }
-    close(fd as u64);
+    let _ = close(fd as u64);
 
     // faccessat: a relative name resolves against the descriptor, an absolute
     // one ignores it, and a flag that cannot be honoured is refused.
@@ -1283,8 +1283,8 @@ fn test17(dir: &str) {
         fail(17, "renameat accepted a closed descriptor");
     }
 
-    close(subfd as u64);
-    close(dirfd as u64);
+    let _ = close(subfd as u64);
+    let _ = close(dirfd as u64);
     let _ = fs::remove_dir_all(&base);
     pass(
         17,

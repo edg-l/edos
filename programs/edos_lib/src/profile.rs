@@ -3,7 +3,7 @@
 //! The sample layout comes from `edos_profile_abi`, which the kernel links
 //! too.
 
-use crate::sys;
+use crate::sys::{self, Errno};
 
 pub use edos_profile_abi::{
     MAX_FRAMES, MAX_PERIOD_NS, MIN_PERIOD_NS, SAMPLE_BROKEN_CHAIN, SAMPLE_IDLE, SAMPLE_TRUNCATED,
@@ -42,8 +42,8 @@ pub fn stats() -> Option<Stats> {
 /// Drain up to `buf.len()` samples, parking for at most `timeout_ms` if none
 /// are waiting.
 ///
-/// Returns the number of samples written, which is 0 on timeout.
-pub fn read(buf: &mut [Sample], timeout_ms: u64) -> usize {
+/// Answers the number of samples written, which is 0 on timeout.
+pub fn read(buf: &mut [Sample], timeout_ms: u64) -> Result<usize, Errno> {
     let n = unsafe {
         sys::syscall3(
             sys::SYS_PROFILE_READ,
@@ -52,7 +52,7 @@ pub fn read(buf: &mut [Sample], timeout_ms: u64) -> usize {
             timeout_ms,
         )
     };
-    if sys::is_err(n) { 0 } else { n as usize }
+    sys::sys_count(n)
 }
 
 /// Convert a sampling frequency in hertz to the period the kernel wants.

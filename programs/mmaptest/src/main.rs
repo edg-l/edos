@@ -7,6 +7,7 @@ use edos_lib::mem::{
     munmap,
 };
 use edos_lib::process;
+use edos_lib::sys::Errno;
 
 const PAGE: u64 = 4096;
 
@@ -355,18 +356,17 @@ fn test5(dir: &str) {
     let exit_code = process::waitpid(child_pid);
     let _ = munmap(ptr, PAGE * 2);
 
-    if exit_code == 11 {
-        check_touch(5, dir, unsafe { ptr.add(PAGE as usize) });
-        pass(5, dir, "past-EOF fault killed child with code 11: ok");
-    } else {
-        fail(
+    match exit_code {
+        Ok(11) => {
+            check_touch(5, dir, unsafe { ptr.add(PAGE as usize) });
+            pass(5, dir, "past-EOF fault killed child with code 11: ok");
+        }
+        Ok(code) => fail(
             5,
             dir,
-            &format!(
-                "expected child exit code 11 (SIGSEGV-equiv), got {}",
-                exit_code
-            ),
-        );
+            &format!("expected child exit code 11 (SIGSEGV-equiv), got {}", code),
+        ),
+        Err(e) => fail(5, dir, &format!("waitpid failed: {e:?}")),
     }
 }
 
@@ -425,18 +425,17 @@ fn test6(dir: &str) {
     let exit_code = process::waitpid(child_pid);
     let _ = munmap(ptr, PAGE * 2);
 
-    if exit_code == 11 {
-        check_touch(6, dir, unsafe { ptr.add(PAGE as usize) });
-        pass(6, dir, "post-truncate fault killed child with code 11: ok");
-    } else {
-        fail(
+    match exit_code {
+        Ok(11) => {
+            check_touch(6, dir, unsafe { ptr.add(PAGE as usize) });
+            pass(6, dir, "post-truncate fault killed child with code 11: ok");
+        }
+        Ok(code) => fail(
             6,
             dir,
-            &format!(
-                "expected child exit code 11 after truncate, got {}",
-                exit_code
-            ),
-        );
+            &format!("expected child exit code 11 after truncate, got {}", code),
+        ),
+        Err(e) => fail(6, dir, &format!("waitpid failed: {e:?}")),
     }
 }
 
@@ -544,7 +543,7 @@ fn test8(dir: &str) {
     }
 
     let exit_code = process::waitpid(child_pid);
-    if exit_code != 0 {
+    if exit_code != Ok(0) {
         let _ = munmap(ptr, PAGE);
         // The child is not supposed to fault here at all, so say which address
         // it was working from: a child holding an address its parent does not
@@ -552,16 +551,16 @@ fn test8(dir: &str) {
         let held = fs::read(touch_record(8, dir))
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_else(|_| "?".into());
-        fail(
-            8,
-            dir,
-            &format!(
+        let detail = match exit_code {
+            Ok(code) => format!(
                 "child exited {}, expected 0 (child held {}, parent holds {})",
-                exit_code,
+                code,
                 held.trim(),
                 ptr as usize
             ),
-        );
+            Err(e) => format!("waitpid failed: {e:?}"),
+        };
+        fail(8, dir, &detail);
     }
     let _ = fs::remove_file(touch_record(8, dir));
 
@@ -731,11 +730,14 @@ fn test10(dir: &str) {
     // Clean up regardless of result.
     let _ = fs::remove_file(&dst);
 
-    if exit_code != 0 {
+    if exit_code != Ok(0) {
         fail(
             10,
             dir,
-            &format!("spawned binary exited with code {}, expected 0", exit_code),
+            &format!(
+                "spawned binary exited with code {:?}, expected 0",
+                exit_code
+            ),
         );
     }
 
@@ -798,16 +800,16 @@ fn test11(dir: &str) {
 /// A write the mapping does not allow must kill the child, so the child exiting
 /// 0 is the failure: it means the store landed. Nothing else can tell the two
 /// apart from inside the process that performed it.
-fn child_survives_write(ptr: *mut u8) -> bool {
+fn child_survives_write(ptr: *mut u8) -> Result<bool, Errno> {
     let pid = process::fork();
     if pid == Ok(0) {
         unsafe { core::ptr::write_volatile(ptr, 0x5a) };
         std::process::exit(0);
     }
     let Ok(pid) = pid else {
-        return false;
+        return Ok(false);
     };
-    process::waitpid(pid) == 0
+    process::waitpid(pid).map(|code| code == 0)
 }
 
 // -----------------------------------------------------------------------
@@ -838,8 +840,10 @@ fn test12(dir: &str) {
     if unsafe { core::ptr::read_volatile(ptr) } != 0x11 {
         fail(12, dir, "read-only mapping lost its contents");
     }
-    if child_survives_write(ptr) {
-        fail(12, dir, "a write to a PROT_READ mapping was allowed");
+    match child_survives_write(ptr) {
+        Ok(true) => fail(12, dir, "a write to a PROT_READ mapping was allowed"),
+        Ok(false) => {}
+        Err(e) => fail(12, dir, &format!("waitpid failed: {e:?}")),
     }
 
     // Back to writable. The page is shared with nothing now, but it carried
@@ -913,8 +917,10 @@ fn test13(dir: &str) {
         fail(13, dir, "anonymous page was not zero-filled");
     }
 
-    if child_survives_write(ptr) {
-        fail(13, dir, "a forked child wrote to a PROT_READ mapping");
+    match child_survives_write(ptr) {
+        Ok(true) => fail(13, dir, "a forked child wrote to a PROT_READ mapping"),
+        Ok(false) => {}
+        Err(e) => fail(13, dir, &format!("waitpid failed: {e:?}")),
     }
 
     let _ = munmap(ptr, PAGE);

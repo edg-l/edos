@@ -107,18 +107,23 @@ fn main() {
         print_summary(&table, out.as_mut(), &stats);
     }
 
-    let dropped = trace::dropped();
-    if dropped > 0 {
-        let _ = writeln!(
-            out,
-            "strace: {dropped} records lost (the trace ring filled up)"
-        );
+    match trace::dropped() {
+        Ok(dropped) if dropped > 0 => {
+            let _ = writeln!(
+                out,
+                "strace: {dropped} records lost (the trace ring filled up)"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = writeln!(out, "strace: could not read dropped-record count: {e:?}");
+        }
     }
 
     // The trace already reported the exit status; this only collects the
     // record so the child is not left for init to reap.
     if spawned {
-        process::waitpid(root);
+        let _ = process::waitpid(root);
     }
 }
 
@@ -170,7 +175,13 @@ fn follow(
         // Once nothing is left alive the remaining records are already in the
         // ring, so stop parking for more.
         let timeout = if live.is_empty() { 0 } else { 200 };
-        let count = trace::read(&mut buf, timeout);
+        let count = match trace::read(&mut buf, timeout) {
+            Ok(count) => count,
+            Err(e) => {
+                let _ = writeln!(out, "strace: trace read failed: {e:?}");
+                break;
+            }
+        };
 
         if count == 0 {
             // The death record is what normally ends this, but it travels

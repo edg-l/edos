@@ -28,8 +28,8 @@ pub fn pipe() -> Option<(u64, u64)> {
 }
 
 /// Close a file descriptor.
-pub fn close(fd: u64) -> i32 {
-    unsafe { sys::syscall1(sys::SYS_CLOSE, fd) as i32 }
+pub fn close(fd: u64) -> Result<(), Errno> {
+    sys::sys_ok(unsafe { sys::syscall1(sys::SYS_CLOSE, fd) })
 }
 
 /// Read from a file descriptor, answering how many bytes landed in `buf`.
@@ -324,9 +324,8 @@ fn current_env_strings() -> Vec<Vec<u8>> {
     out
 }
 
-/// Wait for a process to exit (blocking).
-/// Returns the exit code of the child process, or -1 on failure.
-pub fn waitpid(pid: u64) -> i32 {
+/// Wait for a process to exit (blocking), answering its exit code.
+pub fn waitpid(pid: u64) -> Result<i32, Errno> {
     let mut status: i32 = -1;
     let ret = unsafe {
         sys::syscall3(
@@ -336,7 +335,7 @@ pub fn waitpid(pid: u64) -> i32 {
             &mut status as *mut i32 as u64,
         )
     };
-    if sys::is_err(ret) { -1 } else { status }
+    sys::sys_ok(ret).map(|()| status)
 }
 
 /// `waitpid` flags.
@@ -455,10 +454,10 @@ impl ChildProcess {
         );
 
         // Parent closes the slave end regardless of spawn outcome
-        close(slave_fd);
+        let _ = close(slave_fd);
 
         let Ok(pid) = pid else {
-            close(master_fd);
+            let _ = close(master_fd);
             return None;
         };
 
@@ -493,7 +492,7 @@ impl ChildProcess {
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        close(self.master_fd);
+        let _ = close(self.master_fd);
         // Note: we don't wait for the child or kill it here
     }
 }
@@ -565,7 +564,7 @@ pub fn spawn_program_with_fds(
 /// Try to spawn an external program and wait for it to complete.
 pub fn spawn_program(command: &str, args: &[String]) {
     if let Some(pid) = spawn_program_with_fds(command, args, 0, 1, 2) {
-        waitpid(pid);
+        let _ = waitpid(pid);
     } else {
         eprintln!("Command not found: {}", command);
     }
@@ -630,7 +629,7 @@ pub fn spawn_pipeline(stages: &[PipelineStage]) -> Vec<u64> {
                     eprintln!("Failed to create pipe");
                     // Close any still-open read end from the previous stage
                     if let Some(fd) = prev_read_fd {
-                        close(fd);
+                        let _ = close(fd);
                     }
                     return pids;
                 }
@@ -650,17 +649,17 @@ pub fn spawn_pipeline(stages: &[PipelineStage]) -> Vec<u64> {
 
         // Close pipe ends the parent no longer needs after spawning
         if let Some(fd) = prev_read_fd {
-            close(fd);
+            let _ = close(fd);
         }
         if let Some(fd) = write_fd {
-            close(fd);
+            let _ = close(fd);
         }
 
         let Some(pid) = pid else {
             eprintln!("Command not found: {}", stage.command);
             // Close the read end of the pipe we just created (if any)
             if let Some(fd) = read_fd {
-                close(fd);
+                let _ = close(fd);
             }
             return pids;
         };

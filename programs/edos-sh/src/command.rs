@@ -93,8 +93,8 @@ fn capture_command_output(cmd: &str) -> String {
     // Parse cmd into program + args
     let parts = parse_command_simple(cmd);
     if parts.is_empty() {
-        edos_lib::process::close(read_fd);
-        edos_lib::process::close(write_fd);
+        let _ = edos_lib::process::close(read_fd);
+        let _ = edos_lib::process::close(write_fd);
         return String::new();
     }
     let program = &parts[0];
@@ -103,7 +103,7 @@ fn capture_command_output(cmd: &str) -> String {
     let pid = spawn::spawn_program_with_fds(program, &args, 0, write_fd, 2);
 
     // Parent closes write end so read end gets EOF when child exits
-    edos_lib::process::close(write_fd);
+    let _ = edos_lib::process::close(write_fd);
 
     match pid {
         Some(child_pid) => {
@@ -115,14 +115,14 @@ fn capture_command_output(cmd: &str) -> String {
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            edos_lib::process::close(read_fd);
-            edos_lib::process::waitpid(child_pid);
+            let _ = edos_lib::process::close(read_fd);
+            let _ = edos_lib::process::waitpid(child_pid);
             let s = String::from_utf8_lossy(&buf).into_owned();
             // Strip trailing newlines
             s.trim_end_matches('\n').to_string()
         }
         None => {
-            edos_lib::process::close(read_fd);
+            let _ = edos_lib::process::close(read_fd);
             String::new()
         }
     }
@@ -476,7 +476,7 @@ impl OpenRedirects {
     /// Close every file this opened.
     pub fn close(self) {
         for fd in self.opened {
-            edos_lib::process::close(fd);
+            let _ = edos_lib::process::close(fd);
         }
     }
 }
@@ -988,7 +988,13 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             // Not a valid assignment, fall through to external program
             edos_lib::io::pty_set_canonical(0);
             if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
-                let code = edos_lib::process::waitpid(pid);
+                let code = match edos_lib::process::waitpid(pid) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("sh: waitpid {pid}: {e:?}");
+                        1
+                    }
+                };
                 edos_lib::io::pty_set_raw(0);
                 if code == 0 {
                     ExecResult::Success(0)
@@ -1013,7 +1019,13 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             // Restore canonical mode for child (echo + line buffering)
             edos_lib::io::pty_set_canonical(0);
             if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
-                let code = edos_lib::process::waitpid(pid);
+                let code = match edos_lib::process::waitpid(pid) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("sh: waitpid {pid}: {e:?}");
+                        1
+                    }
+                };
                 edos_lib::io::pty_set_raw(0);
                 if code == 0 {
                     ExecResult::Success(0)

@@ -46,14 +46,14 @@ fn spawn_ready(test: &str, mode: &str) -> u64 {
         fail(test, "pipe failed");
     };
     let child = process::spawn(SELF_PATH, &[mode], 0, write_fd, 2);
-    process::close(write_fd);
+    let _ = process::close(write_fd);
     let Ok(child) = child else {
         fail(test, "spawn failed");
     };
 
     let mut buf = [0u8; 8];
     let n = process::read(read_fd, &mut buf);
-    process::close(read_fd);
+    let _ = process::close(read_fd);
     if !matches!(n, Ok(n) if n > 0) {
         fail(test, "child never reported ready");
     }

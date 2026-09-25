@@ -179,8 +179,8 @@ fn case_another_process_gets_the_hit() {
 
     check(
         "cross-process-hit",
-        code == 0 && counted,
-        format!("dns exited {code}, hits {before:?} -> {:?}", stat("hits")),
+        code == Ok(0) && counted,
+        format!("dns exited {code:?}, hits {before:?} -> {:?}", stat("hits")),
     );
 }
 
@@ -225,7 +225,7 @@ fn case_a_dead_owner_does_not_hold_the_override() {
         );
         return;
     };
-    if process::waitpid(pid) != 0 {
+    if process::waitpid(pid) != Ok(0) {
         check(
             "revocation",
             false,

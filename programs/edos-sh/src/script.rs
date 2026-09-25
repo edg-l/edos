@@ -467,11 +467,11 @@ fn execute_block(block: &Block) -> FlowControl {
             let code = match crate::run_segment_with_stdin(line, read_fd) {
                 SegmentResult::Done(code) => code,
                 SegmentResult::Exit(code) => {
-                    edos_lib::process::close(read_fd);
+                    let _ = edos_lib::process::close(read_fd);
                     return FlowControl::Exit(code);
                 }
             };
-            edos_lib::process::close(read_fd);
+            let _ = edos_lib::process::close(read_fd);
 
             command::set_last_exit_code(code);
             if code != 0 && command::exit_on_error() {
