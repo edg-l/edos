@@ -8,7 +8,7 @@ decide choices. Open work lives in engram (`engram-cli todo list`), post-mortems
 
 ### The NVMe hostile-boot wedge is all four CPUs halted, not a live-lock
 
-The one live bug. Engram tracks it ("NVMe hostile boot wedges about 1 in 10"); this is
+One of two live bugs; the other is below. Engram tracks it ("NVMe hostile boot wedges about 1 in 10"); this is
 the reproduction detail.
 
 `edos-nvme-hostile.iso` boots with `nvme_timeout_ms=0`, so the NVMe watchdog fires on
@@ -77,6 +77,29 @@ fair A/B.
 The two earlier hostile-boot defects are closed and written up in
 `doc/bugs/2026-08-26-the-hostile-nvme-boot-is-two-bugs-and-neither-is-the-log.md` and
 its two siblings.
+
+### `inflighttest` can hang a reader on a fill that already finished
+
+Intermittent: one of two consecutive `make guest-check` runs on the default NVMe
+root, four CPUs. Engram tracks it ("Lost wakeup in the in-flight page-fill join
+path"); this is what the stuck guest showed.
+
+- Three of `inflighttest`'s four forked readers finished the 8 MiB file; the fourth
+  never returned from `read`. Every suite after it timed out, because the shell
+  running them waits on `inflighttest` first. A column of `TIMED OUT` after one
+  suite is this shape, not many failures.
+- `IDLE_CPU_MASK` 0xf, `NVME_INFLIGHT` 0 and `WATCHDOG_RESETS` 0, read with the
+  `symbol_addrs`/`sample_counters` helpers in `scripts/wedge-probe`.
+- `info lapic` on every CPU: no ISR or IRR bit set, and the one-shot timer armed and
+  counting down. Ticks still fire and the storage layer holds nothing, so a reader
+  is parked on a fill that completed without waking it.
+- The signature matches the NVMe wedge above (all CPUs idle) on a normal boot, so the
+  two may share a mechanism.
+
+To catch it: keep the guest up when the timeouts start, open a gdbstub with
+`scripts/edos-vm qmp human-monitor-command '{"command-line":"gdbserver
+tcp::1234"}'`, and run `tools/debug/dump_threads.gdb` to name the parked reader and
+its last syscall. A `--features stall-dump` build prints the same with backtraces.
 
 ## How to work
 
