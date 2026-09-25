@@ -1,10 +1,9 @@
-use spin::RwLock;
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{PageTable, PageTableFlags},
 };
 
-use crate::boot::boot_info;
+use crate::{boot::boot_info, thread::preempt::PreemptRwLock};
 
 pub mod cow;
 pub mod fault;
@@ -19,8 +18,8 @@ pub mod vma;
 
 /// Allowlist of physical address ranges that userspace may map via MAP_PHYSICAL.
 /// Each entry is (start, end) inclusive of start, exclusive of end.
-static ALLOWED_PHYS_RANGES: RwLock<heapless::Vec<(u64, u64), 8>> =
-    RwLock::new(heapless::Vec::new());
+static ALLOWED_PHYS_RANGES: PreemptRwLock<heapless::Vec<(u64, u64), 8>> =
+    PreemptRwLock::new(heapless::Vec::new());
 
 /// Register a physical address range as safe for userspace mapping.
 pub fn allow_physical_range(start: u64, size: u64) {

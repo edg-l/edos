@@ -120,7 +120,7 @@ impl XhciController {
     /// Returns `None` if no xHCI device is found, or if none of the ones found could be
     /// started.
     pub fn find_and_init() -> Option<Self> {
-        let devices = pci_manager().read().get_devices().to_vec();
+        let devices = pci_manager().get_devices().to_vec();
 
         for dev in &devices {
             if dev.header.class_code != PCI_CLASS_SERIAL_BUS
@@ -334,7 +334,7 @@ impl XhciController {
         }
 
         // 10. Enable MSI-X (with MSI fallback) so the controller can signal interrupts.
-        let devices = pci_manager().read().get_devices().to_vec();
+        let devices = pci_manager().get_devices().to_vec();
         if let Some(dev) = devices.iter().find(|d| d.address == pci_addr)
             && let Err(e) =
                 crate::drivers::msi::enable_msix_for_device(dev, InterruptIndex::Xhci.as_u8(), 0)

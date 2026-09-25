@@ -676,7 +676,7 @@ pub extern "C" fn hda_driver_main() -> ! {
     thread.set_priority(IO_PRIORITY);
     HDA_DRIVER_THREAD_ID.call_once(|| Arc::downgrade(&thread));
 
-    let devices = pci_manager().read().get_devices().to_vec();
+    let devices = pci_manager().get_devices().to_vec();
     let pci_dev = devices
         .iter()
         .find(|d| d.header.class_code == 0x04 && d.header.subclass == 0x03)

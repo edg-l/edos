@@ -389,7 +389,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
     thread.set_priority(IO_PRIORITY);
     E1000E_DRIVER_THREAD_ID.call_once(|| Arc::downgrade(&thread));
 
-    let devices = pci_manager().read().get_devices().to_vec();
+    let devices = pci_manager().get_devices().to_vec();
     let pci_dev = devices
         .iter()
         .find(|d| d.header.vendor_id == 0x8086 && d.header.device_id == 0x10D3)

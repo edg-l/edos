@@ -615,6 +615,15 @@ inner lock, no allocation, no park and no copy inside the scope, and it is only
 ever reached after the slot lock (182) has been released. A rank would add a
 stack entry and forbid nothing that take-exactly-once does not already forbid.
 
+### `ALLOWED_PHYS_RANGES`
+
+`PreemptRwLock<heapless::Vec<(u64, u64), 8>>` in `memory/mod.rs`: the physical
+ranges `MAP_PHYSICAL` may map. Written by `allow_physical_range` while graphics
+initialises, read by `is_physical_range_allowed` from `sys_mmap`.
+
+Leaf by construction: every site is one push or one scan of at most eight
+entries, with no inner lock, no allocation and no park inside the scope.
+
 ### `WaitQueue.inner`
 
 `spin::Mutex<Deque<Weak<Thread>>>` in `thread/waitqueue.rs`.

@@ -124,7 +124,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
     let thread = current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
 
-    let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
+    let devices: Vec<PciDevice> = pci_manager().get_devices().to_vec();
 
     let mut controllers = Vec::new();
 

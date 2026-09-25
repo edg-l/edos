@@ -108,13 +108,10 @@ fn try_init_virtio_gpu() -> Option<Display> {
     use crate::drivers::virtio::pci::VirtioTransport;
 
     // Scan for virtio-gpu PCI device (vendor 0x1AF4, device 0x1050).
-    let manager = pci_manager().read();
-    let gpu_dev = manager
+    let gpu_dev = *pci_manager()
         .get_devices()
         .iter()
         .find(|d| d.header.vendor_id == 0x1AF4 && d.header.device_id == 0x1050)?;
-    let gpu_dev = *gpu_dev; // copy before releasing the lock
-    drop(manager);
 
     println!(
         "virtio-gpu: found PCI device at {:02x}:{:02x}.{}",

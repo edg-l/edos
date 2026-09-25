@@ -414,7 +414,7 @@ pub extern "C" fn nvme_driver_main() -> ! {
     crate::interrupts::io::NVME_DRIVER_THREAD_ID
         .call_once(|| current_thread_weak().unwrap_or_default());
 
-    let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
+    let devices: Vec<PciDevice> = pci_manager().get_devices().to_vec();
 
     let mut controllers: Vec<Arc<NvmeController>> = Vec::new();
     for device in devices {
