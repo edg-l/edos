@@ -3,15 +3,18 @@
 # Usage:
 #   1. Boot EDOS with `-s` (gdbstub on :1234) — all `make run*` targets do
 #      this except `make run-emu`. Any target that uses KVM or TCG with `-s`
-#      works.
+#      works. A guest started by `scripts/edos-vm` opens one on demand:
+#        scripts/edos-vm qmp human-monitor-command \
+#            '{"command-line":"gdbserver tcp::1234"}'
 #   2. While QEMU is running (hung or not), from the edos-v2 repo root:
 #        rust-gdb -q -batch -x tools/debug/dump_threads.gdb \
 #            kernel/target/x86_64-unknown-none/debug/edos-kernel
 #
-# The script force-registers the Rust `BTreeMap` pretty-printer (rust-gdb's
-# auto-load does not always attach for kernel ELFs that lack
-# `.debug_gdb_scripts`), then iterates `THREADS.map` and prints each
-# thread's state, CPU, kind (user vs kernel), exit code, and name.
+# The script walks `THREADS.map` itself rather than through the toolchain's
+# BTreeMap pretty-printer, which cannot unwrap a `ManuallyDrop` that holds a
+# `MaybeDangling`, and prints each thread's state, CPU, kind (user vs kernel),
+# pending wake, last syscall and name. It reads the syscall names from the
+# kernel source, so run it from the repo root.
 #
 # Handy for diagnosing missed-wakeup / scheduler-class hangs.  All four
 # CPUs halted in `Scheduler::run_idle` + a Parked user thread with no
@@ -23,40 +26,25 @@ set confirm off
 
 python
 
-import sys
-
-RUST_ETC = "/data2/edgar/edos-programs/toolchain/edos/lib/rustlib/etc"
-sys.path.insert(0, RUST_ETC)
-
-import gdb_lookup
-gdb.printing.register_pretty_printer(gdb.current_objfile(), gdb_lookup.printer)
+import re
 
 STATES = {0: "Ready", 1: "Running", 2: "Sleeping", 3: "Parked", 4: "Waking", 5: "Dying"}
 
-# Mirror of kernel/src/syscalls/mod.rs SYS_* constants. NO_SYSCALL = u32::MAX
-# is the sentinel for "thread has not entered a syscall yet" (kthreads).
+# Syscall names come from the tree's one list, not a copy of it: the numbers
+# are the `SYS_*` consts in kernel/src/syscalls/mod.rs and the names are the
+# rows of `syscall_table!` in kernel/src/syscalls/table.rs. The kernel's own
+# `SYSCALLS` static is optimised out of the image, so gdb cannot read it.
+# NO_SYSCALL = u32::MAX is the sentinel for "has not entered a syscall yet".
 NO_SYSCALL = 0xFFFFFFFF
-SYSCALLS = {
-    0: "READ", 1: "WRITE", 2: "OPEN", 3: "CLOSE", 4: "LIST_DIR",
-    5: "GETCWD", 6: "CHDIR", 7: "POLL", 8: "FSTAT", 9: "MMAP",
-    10: "STAT", 11: "MUNMAP", 12: "LSEEK", 13: "FTRUNCATE", 14: "FSYNC",
-    15: "ISATTY", 16: "IOCTL", 22: "PIPE", 32: "DUP", 33: "DUP2",
-    34: "MSYNC", 39: "GETPID", 40: "WAIT_PID", 57: "SPAWN", 60: "EXIT",
-    82: "RENAME", 162: "SYNC", 202: "MOUNT", 203: "LIST_PARTITIONS",
-    204: "MKDIR", 205: "RMDIR", 206: "RMDIR_ALL", 207: "UNLINK",
-    208: "LIST_MOUNTS", 209: "SLEEP_MS", 210: "MONOTONIC_TIME",
-    211: "CLONE", 212: "FUTEX_WAIT", 213: "FUTEX_WAKE", 214: "GETRANDOM",
-    215: "SHM_CREATE", 216: "SHM_MAP", 217: "SHM_UNMAP", 218: "SHM_DESTROY",
-    219: "WINDOW_CREATE", 220: "WINDOW_DESTROY", 221: "WINDOW_SET",
-    222: "WINDOW_GET", 223: "WINDOW_POLL", 224: "WINDOW_LIST",
-    225: "WINDOW_SEND_EVENT", 226: "CLOCK_GETTIME", 227: "OPENPTY",
-    228: "SPAWN2", 229: "KILL", 230: "SIGACTION", 231: "SHM_SIZE",
-    232: "WINDOW_DAMAGE", 240: "SOCKET", 241: "BIND", 242: "CONNECT",
-    243: "LISTEN", 244: "ACCEPT", 245: "SENDTO", 246: "RECVFROM",
-    247: "SHUTDOWN", 248: "SETSOCKOPT", 249: "PING", 250: "NETINFO",
-    251: "GETSOCKOPT", 252: "GETPEERNAME", 253: "GETSOCKNAME",
-    254: "STATFS", 255: "FORK",
-}
+
+def load_syscalls():
+    with open("kernel/src/syscalls/mod.rs") as f:
+        numbers = dict(re.findall(r"const (SYS_[A-Z0-9_]+): u64 = (\d+);", f.read()))
+    with open("kernel/src/syscalls/table.rs") as f:
+        rows = re.findall(r"(SYS_[A-Z0-9_]+), \"([a-z0-9_]+)\"", f.read())
+    return {int(numbers[c]): name for c, name in rows if c in numbers}
+
+SYSCALLS = load_syscalls()
 
 def syscall_name(n):
     if n == NO_SYSCALL:
@@ -77,40 +65,71 @@ def arc_inner(arc):
     return arc["ptr"]["pointer"].dereference()["data"]
 
 def arc_string(arc):
-    """Arc<String> -> str via pretty-printer."""
+    """Arc<String> -> str, read from the Vec's buffer and length directly."""
     try:
-        inner = arc_inner(arc)
-        pp = gdb.default_visualizer(inner)
-        if pp is not None:
-            return str(pp.to_string()).strip('"')
-        return str(inner).strip('"')
+        vec = arc_inner(arc)["vec"]
+        ptr = vec["buf"]["inner"]["ptr"]["pointer"]["pointer"]
+        n = int(vec["len"])
+        data = gdb.selected_inferior().read_memory(int(ptr), n)
+        return bytes(data).decode("utf-8", "replace")
     except Exception as e:
         return f"<err:{e}>"
+
+def is_some_arc(opt):
+    """Option<Arc<T>> -> bool. Arc's pointer is non-null, so None is the
+    all-zero niche and the first word says which variant is live."""
+    word = gdb.lookup_type("u64").pointer()
+    return int(opt.address.cast(word).dereference()) != 0
+
+def maybe_uninit(v):
+    """MaybeUninit<T> -> T, through `value: ManuallyDrop<T>` and, on toolchains
+    whose ManuallyDrop holds a `MaybeDangling<T>`, that wrapper's `__0`."""
+    v = v["value"]["value"]
+    if "MaybeDangling<" in str(v.type.strip_typedefs()):
+        v = v["__0"]
+    return v
+
+def btree_items(map_value):
+    """Yield (key, value) from a BTreeMap in order, without the toolchain's
+    BTreeMap provider, which cannot unwrap this nightly's child edges."""
+    # An empty map is the only one whose root is None.
+    if int(map_value["length"]) == 0:
+        return
+    node_ref = map_value["root"]["Some"]["__0"]
+    height = int(node_ref["height"])
+    leaf_ptr = node_ref["node"]["pointer"]
+    leaf_type = leaf_ptr.type.target()
+    internal_type = gdb.lookup_type(str(leaf_type).replace("LeafNode<", "InternalNode<", 1))
+
+    def walk(ptr, h):
+        leaf = ptr.dereference()
+        n = int(leaf["len"])
+        edges = ptr.cast(internal_type.pointer()).dereference()["edges"] if h > 0 else None
+        for i in range(n):
+            if h > 0:
+                yield from walk(maybe_uninit(edges[i])["pointer"], h - 1)
+            yield maybe_uninit(leaf["keys"][i]), maybe_uninit(leaf["vals"][i])
+        if h > 0:
+            yield from walk(maybe_uninit(edges[n])["pointer"], h - 1)
+
+    yield from walk(leaf_ptr, height)
 
 def main():
     try:
         registry = gdb.parse_and_eval(
-            "edos_kernel::thread::thread::THREADS.map.data.value"
+            "edos_kernel::thread::thread::THREADS.map.inner.data.value"
         )
     except gdb.error as e:
         print(f"could not read THREADS: {e}")
         return
 
-    pp = gdb.default_visualizer(registry)
-    if pp is None:
-        print("no BTreeMap visualizer - did rust-gdb load gdb_providers?")
-        return
-
-    entries = list(pp.children())
-    print(f"\nTHREADS BTreeMap size={len(entries)//2}\n")
+    entries = list(btree_items(registry))
+    print(f"\nTHREADS size={len(entries)}\n")
     print(f"{'TID':>4}  {'STATE':<9}  {'CPU':>3}  {'KIND':<6}  {'WP':>2}  {'SYSCALL':<14}  NAME")
     print("-" * 80)
 
-    i = 0
-    while i < len(entries):
-        tid = int(str(entries[i][1]).split("(")[-1].rstrip(")"))
-        arc = entries[i + 1][1]
-        i += 2
+    for key, arc in entries:
+        tid = int(key["__0"])
         try:
             t = arc_inner(arc)
             state = STATES.get(atom(t["state"]), "?")
@@ -119,14 +138,7 @@ def main():
             wp_str = "1" if wp else "0"
             sysno = atom(t["last_syscall"]) & 0xFFFFFFFF
             sys_str = syscall_name(sysno)
-            # user: Option<Arc<RwLock<UserThread>>>  -> kind
-            try:
-                is_user = t["user"]
-                # Probe: tagged-enum representation differs by niche; just check
-                # whether the discriminant / inner is Some.
-                kind = "user" if "None" not in str(is_user)[:30] else "kernel"
-            except Exception:
-                kind = "?"
+            kind = "user" if is_some_arc(t["user"]) else "kernel"
             name = arc_string(t["name"])
             print(f"{tid:>4}  {state:<9}  {cpu:>3}  {kind:<6}  {wp_str:>2}  {sys_str:<14}  {name[:30]}")
         except Exception as e:
