@@ -602,6 +602,11 @@ filesystem/.manifest: filesystem programs
 # image, so the kernel discovers it exactly like a real disk. Sized from the
 # populated tree rather than hard-coded, because it is resident in RAM for the
 # whole boot.
+# Its partition GUID is the one $(IMAGE_NAME).iso's root= names, $(NVME_UUID).
+# That is what makes the shipped ISO boot with no disk attached: an installed or
+# attached disk carrying the GUID wins root selection, and with none the live
+# image is the only match. Any other GUID leaves the default entry matching
+# nothing, and it falls back to memfs.
 # `kernel` is order-only so cargo always gets a chance to run, while the real
 # prerequisite is the binary it produces. Depending on the phony target
 # directly rebuilt this image -- objcopy, a du of the whole tree and an
@@ -622,7 +627,7 @@ live-root.img: kernel/kernel limine/limine filesystem/.manifest tools/efs-mkfs/s
 	echo "live-root.img: filesystem/ is $$(( used / 1048576 )) MiB, image $$(( size / 1048576 )) MiB"; \
 	rm -f live-root.img; \
 	qemu-img create -f raw live-root.img $$size >/dev/null
-	sgdisk live-root.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
+	sgdisk live-root.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(NVME_UUID)
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
 	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --populate filesystem/ --label EDOS live-root.img
 
