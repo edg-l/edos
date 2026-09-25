@@ -140,19 +140,56 @@ fn capture_command_output(cmd: &str) -> String {
 /// - `$@` expands to all positional parameters space-joined (excluding `$0`)
 /// - Characters inside single-quoted regions are left unexpanded
 /// - Characters inside double-quoted regions are expanded
+/// - A backslash-escaped character is left unexpanded, and the backslash is
+///   kept for `parse_command` to interpret
 pub fn expand_variables(input: &str) -> String {
+    expand(input, false)
+}
+
+/// Expand the body of an unquoted here-document (POSIX 2.7.4).
+///
+/// Quotes are ordinary characters there, and a backslash escapes only `$`,
+/// `` ` `` and `\`, and is removed when it does. Nothing parses the result
+/// afterwards, so the backslash is consumed here rather than passed on.
+pub fn expand_heredoc(input: &str) -> String {
+    expand(input, true)
+}
+
+fn expand(input: &str, heredoc: bool) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut in_single_quote = false;
+    let mut in_double_quote = false;
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\'' => {
+            '\\' if heredoc => match chars.peek() {
+                Some(&c @ ('$' | '`' | '\\')) => {
+                    chars.next();
+                    out.push(c);
+                }
+                _ => out.push(ch),
+            },
+            // The quote characters stay in the output: parse_command strips
+            // them at token boundaries. A quote of the other kind is literal
+            // (POSIX 2.2.2, 2.2.3), so `"it's $x"` still expands.
+            '\'' if !heredoc && !in_double_quote => {
                 in_single_quote = !in_single_quote;
-                // Don't include the quote character itself in expanded output;
-                // the caller (parse_command) handles quoting around token boundaries.
-                // We push it so parse_command's quote-stripping still works correctly.
                 out.push(ch);
+            }
+            '"' if !heredoc && !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                out.push(ch);
+            }
+            // An escaped character passes through untouched, backslash and
+            // all, so `\$x` reaches parse_command as a literal `$x` rather than
+            // as whatever `x` held. parse_command decides what the backslash
+            // escapes in each quoting context.
+            '\\' if !in_single_quote => {
+                out.push(ch);
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
             }
             '$' if !in_single_quote => {
                 match chars.peek() {

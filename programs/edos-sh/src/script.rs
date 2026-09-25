@@ -454,7 +454,7 @@ fn execute_block(block: &Block) -> FlowControl {
             let expanded_content = if *raw {
                 content.clone()
             } else {
-                command::expand_variables(content)
+                command::expand_heredoc(content)
             };
 
             // Fed from a thread while the command runs: see `heredoc_pipe`.

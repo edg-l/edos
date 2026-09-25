@@ -1171,7 +1171,7 @@ fn main() {
             let expanded = if raw {
                 content
             } else {
-                command::expand_variables(&content)
+                command::expand_heredoc(&content)
             };
 
             if let Some(read_fd) = heredoc_pipe(&expanded) {

@@ -1268,7 +1268,11 @@ behaviour with the launcher's arguments before adding a row.
   word, so `a"b"*` is entirely literal, unlike POSIX.
 - Quoting follows POSIX 2.2.2/2.2.3 in `parse_command`: inside single quotes a
   backslash is literal; inside double quotes it escapes only `$`, backtick, `"` and
-  `\`. The one open deviation, `"\$x"`, is under "Open items" above.
+  `\`. Expansion runs first, over the raw line, so `expand_variables` tracks both
+  quote kinds and passes an escaped character through with its backslash for
+  `parse_command` to interpret. A here-document body is never parsed, so it goes
+  through `expand_heredoc` instead, which treats quotes as literal and consumes the
+  backslash before `$`, backtick and `\` (POSIX 2.7.4).
 - `prepare_segment` expands a segment and opens its redirections exactly once, because
   expansion runs `$(...)`. A background external job is spawned directly so `fg` can
   hand it the terminal; a background builtin forks and calls `setpgid(0, 0)`. Test job
