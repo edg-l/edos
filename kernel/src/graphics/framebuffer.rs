@@ -25,9 +25,13 @@ pub const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
 /// [`Display::flip_wait`]: crate::graphics::Display::flip_wait
 pub const FB_IOCTL_FLIP_WAIT: u64 = 0x4642_000A;
 
-/// How many times [`FB_IOCTL_FLIP_WAIT`] parks before giving up on the display,
-/// and how long each park lasts. Sized so the total is far longer than any
-/// frame and far shorter than a user waiting on a wedged desktop.
+/// Publish several disjoint regions as one frame.
+///
+/// `arg` points at a `FramebufferFlipRects`: up to `graphics::MAX_FLIP_RECTS`
+/// rectangles plus a `bounds` rectangle covering them all. See
+/// [`Display::flip_rects`].
+///
+/// [`Display::flip_rects`]: crate::graphics::Display::flip_rects
 pub const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
 
 /// Ask the display to keep its cursor plane on the pointer by itself.
@@ -45,6 +49,9 @@ pub const FB_IOCTL_FLIP_RECTS: u64 = 0x4642_000B;
 /// `cursor_stale_moves` in `/proc/gpu_stats` counts that happening.
 pub const FB_IOCTL_TRACK_POINTER: u64 = 0x4642_000C;
 
+/// How many times [`FB_IOCTL_FLIP_WAIT`] parks before giving up on the display,
+/// and how long each park lasts. Sized so the total is far longer than any
+/// frame and far shorter than a user waiting on a wedged desktop.
 const FLIP_WAIT_ROUNDS: u32 = 8;
 const FLIP_WAIT_SLICE: core::time::Duration = core::time::Duration::from_millis(4);
 

@@ -94,7 +94,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    eoi();
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         // A user copy takes the same fixup as in the page fault handler: a
         // non-canonical address raises #GP rather than #PF, so without this the
@@ -135,8 +134,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    eoi();
-
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
         log!("Invalid opcode, forcing exit, {stack_frame:#?}");
         thread_exit(135);
@@ -148,8 +145,6 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
-    eoi();
-
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
         log!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
         thread_exit(135);
