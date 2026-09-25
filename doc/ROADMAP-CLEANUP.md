@@ -648,6 +648,11 @@ unused, and restores the tree from a copy taken before the first edit -- on a
 signal too, and without running git, so a dirty tree is safe. It reports the ten
 survivors E1 annotated and nothing else.
 
+Since retired with the script: every kernel suppression became an
+`#[expect(dead_code, reason = ...)]`, which the compiler itself rejects once the
+item is used, and `make check` builds each feature set. `grep -rn
+'expect(dead_code' kernel/src` lists the survivors with their reasons.
+
 ### ~~I5. Document the kernel's unsafe, both halves~~ (S2, E3) -- done
 
 `unsafe` is documented twice, for two different readers, and this entry used to

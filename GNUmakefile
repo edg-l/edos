@@ -140,7 +140,7 @@ run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 
 .PHONY: run-big
 run-big: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
-	$(call run_qemu_uefi,iso,16,)
+	$(call run_qemu_uefi,iso,16,-accel kvm)
 
 .PHONY: run-gdb
 run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
@@ -402,13 +402,6 @@ check: programs
 .PHONY: host-tests
 host-tests:
 	scripts/host-tests
-
-# What the kernel would call dead if the `dead_code` allows were gone. Takes
-# every allow away, builds each feature set, prints the warnings and restores
-# the tree. Judgement, not a gate: run it before a release.
-.PHONY: dead-code
-dead-code:
-	scripts/dead-code-sweep
 
 # $(1) = output ISO, $(2) = staging directory, $(3) = partition GUID the
 # cmdline's root= names. Only the GUID differs between the two ISOs this tree

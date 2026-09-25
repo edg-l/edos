@@ -5,7 +5,6 @@ edition = "2024"
 
 [features]
 default = []
-test = []
 trace = []
 sched-test = []
 ## Times each step of the voluntary context switch into `/proc/sched_prof`.
