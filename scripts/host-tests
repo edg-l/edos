@@ -40,8 +40,9 @@ echo "== cargo test --target $HOST_TARGET (edos_http, grab, sshd)"
 # The `libs/` crates are shared with the kernel and are not in any workspace, so
 # nothing else builds them for the host. The intrusive list is what the
 # scheduler's runqueues are made of; efs-common is the on-disk format both
-# `efs-mkfs` and the kernel read.
-for lib in intrusive_list efs-common window-abi; do
+# `efs-mkfs` and the kernel read; grab-index is the package catalogue format
+# `grab` and `grab-repo` both parse.
+for lib in intrusive_list efs-common window-abi grab-index; do
 	echo "== cargo test libs/$lib"
 	cargo +nightly test --manifest-path "libs/$lib/Cargo.toml"
 done
