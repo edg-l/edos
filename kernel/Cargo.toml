@@ -28,8 +28,9 @@ window-lock-debug = []
 ## debugging build rather than something to leave on.
 heap-poison = []
 ## Prints every thread and the stack it is blocked on when the machine runs
-## nothing for eight seconds. Costs one relaxed increment per context switch,
-## so it is a debugging build pointed at a workload that should never be idle.
+## nothing for four seconds (`STALL_MS` in `debug/stall.rs`). Costs one
+## relaxed increment per context switch, so it is a debugging build pointed at
+## a workload that should never be idle.
 stall-dump = []
 ## Exposes `/dev/journal-ctl`, which pauses journal checkpointing on demand so
 ## an unclean cut has committed transactions left to replay. Recovery is

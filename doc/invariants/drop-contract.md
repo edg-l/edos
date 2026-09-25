@@ -74,8 +74,8 @@ Types with no `Drop` at all, freed explicitly in `Thread::free`: `MemoryManager`
 
 ## Enforcement
 
-Debug builds assert that a blocking `Drop` never fires on a thread that must not
-block. Two helpers, both `#[inline]` and allocation-free, and both `false` before
+A blocking `Drop` must never run its blocking work on a thread that must not
+block, and `post_evict` enforces that in every build. Two helpers, both `#[inline]` and allocation-free, and both `false` before
 their kthread starts:
 
 | Helper | Location |

@@ -2421,9 +2421,8 @@ pub static REAPER_TID: AtomicU64 = AtomicU64::new(0);
 
 /// Returns true if the calling thread is the reaper kthread.
 ///
-/// Used by debug_assert guards in blocking `Drop` implementations to catch
-/// regressions where blocking work is inadvertently re-introduced on the
-/// reaper path. Compiled out in release builds.
+/// `post_evict`'s queue-full fallback asks this before issuing disk I/O: the
+/// reaper must not block, so it parks the request on `EVICT_OVERFLOW` instead.
 #[inline]
 pub fn current_thread_is_reaper() -> bool {
     let current = current_thread_id().map(|t| t.0).unwrap_or(0);

@@ -50,6 +50,7 @@ sections, and wrapping them would recurse into the preemption counter.
 |-----:|------|------|----------|
 |  10 | `VFS` mount registry | `PreemptRwLock<BTreeMap>` | `fs/vfs.rs` |
 |  30 | `inode.lock` (per-inode) | `BlockingRwLock<()>` | `fs/inode.rs` |
+|  31 | `EfsDriver.inode_rmw` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
 |  32 | `EfsDriver.bitmap_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
 |  33 | `EfsDriver.orphan_prev` | `BlockingMutex<BTreeMap<u64,u64>>` | `fs/efs/mod.rs` |
 |  35 | `dentry_cache.inner` | `BlockingMutex<DentryCacheInner>` | `fs/dentry.rs` |

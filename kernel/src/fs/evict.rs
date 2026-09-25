@@ -102,9 +102,9 @@ pub static EVICT_SYNC_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Returns true if the calling thread is the evict-inode kthread.
 ///
-/// Used by debug_assert guards in blocking `Drop` implementations to catch
-/// regressions where blocking work fires on the evict kthread (which would
-/// cause recursive enqueue or deadlock). Compiled out in release builds.
+/// `post_evict`'s queue-full fallback asks this before issuing disk I/O: on
+/// the evict kthread that fallback would recurse into its own queue, so it
+/// panics instead.
 #[inline]
 pub fn current_thread_is_evict_kthread() -> bool {
     let current = current_thread_id().map(|t| t.0).unwrap_or(0);
