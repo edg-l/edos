@@ -11,11 +11,18 @@
 - **Shape A is FIXED, and its description here was wrong.** `reset_state`
   cleared the command slots in a second pass that dropped whatever the first
   pass had not seen, so a command was destroyed without being retired and its
-  submitter parked on a handle nobody held. The machine is **not** deadlocked
-  with nothing runnable: read out of a wedged guest, its context-switch
-  counter advances by about a thousand a second. Writeup:
+  submitter parked on a handle nobody held. Writeup:
   `2026-08-26-the-reset-dropped-a-command-instead-of-failing-it.md`. Skip the
   shape-A and heap-corruption sections below, which are superseded.
+- **A third wedge is open, about 1 in 10 hostile boots, and it is not a
+  live-lock.** An earlier reading here said a wedged guest's context-switch
+  counter advanced about a thousand a second. That counter
+  (`debug::stall::SWITCHES`) is compiled only under `--features stall-dump`,
+  which `edos-nvme-hostile.iso` does not carry, so the reading came from a
+  different build. Read on the hostile ISO, a wedged boot has all four CPUs
+  halted in `Scheduler::take_idle` with one NVMe command in flight: a lost
+  wakeup. The reproducer and the next step are in `doc/WORKING-NOTES.md`,
+  "Current state".
 
 The instruments are `scripts/wedge-probe`, `scripts/wedge-resolve` and
 `edos-vm --on-reset pause --qemu-log`. Two corrections to them, both of which

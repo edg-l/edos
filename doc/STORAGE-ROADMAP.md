@@ -645,8 +645,7 @@ line.
   after the direct data write had already landed on it — 289 of one file's 4096
   blocks were nowhere in the image. The write path no longer stages a zeroed
   copy of a block it is about to overwrite whole (`041b98f`,
-  `doc/WORKING-NOTES.md` "Interleaved appends drop whole blocks on the write
-  path").
+  `doc/bugs/2026-08-12-a-zeroed-new-block-overwrote-its-own-data.md`).
 - **Readahead declined any window that spanned more than one extent.** A
   prefetch window is now a set of contiguous runs, so a fragmented file goes
   from 5 asynchronous windows and 243 synchronous fallbacks to 248 and 0

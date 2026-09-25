@@ -297,10 +297,11 @@ test-headless:
 # `iotest`'s 23 syscall cases and `socktest`'s 16 ran whenever somebody
 # remembered them and never otherwise. Each suite is judged by its exit code.
 #
-# Every gate that drives a real guest boots `sata-disk.img` and runs the
-# userspace inside it, not the one in `filesystem/`. `make all` does not
-# rebuild that image, so without the prerequisite a userspace fix is invisible
-# to the gate and the run silently judges whenever the image was last made.
+# Every gate that drives a real guest runs the userspace inside its disk
+# images (root is `nvme-disk.img`), not the one in `filesystem/`. `make all`
+# does not rebuild those images, so without the prerequisites a userspace fix
+# is invisible to the gate and the run silently judges whenever an image was
+# last made.
 .PHONY: guest-check
 guest-check: $(IMAGE_NAME).iso sata-disk.img nvme-disk.img
 	scripts/guest-check
@@ -548,15 +549,13 @@ fmt-check:
 	done
 
 # Clippy over the kernel's every feature combination and the whole userspace
-# workspace, warnings denied. `clippy::too_many_arguments` is allowed globally
-# (kernel/src/main.rs, programs/.cargo/config.toml); everything else is meant
-# to stay at zero.
+# workspace, warnings denied.
 .PHONY: clippy
 clippy: programs
 	$(MAKE) -C kernel clippy
 	# Run from inside programs/: cargo discovers .cargo/config.toml relative to
-	# the working directory, not to --manifest-path, so the workspace-wide
-	# `too_many_arguments` allow (and the default target) are only picked up here.
+	# the working directory, not to --manifest-path, so its default target and
+	# rustflags are only picked up here.
 	cd programs && cargo +edos clippy --all-targets -- -D warnings
 
 .PHONY: programs

@@ -1,1213 +1,493 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-28
+# EDOS working notes
 
-State of the tree, what changed, and what is still open. Written for whoever
-picks this up next, which will usually be an agent with no memory of the
-session.
+What a session acts on: the current state, how to work, and the traps and facts that
+decide choices. Open work lives in engram (`engram-cli todo list`), post-mortems in
+`doc/bugs/`, and history in git. Anything already in `CLAUDE.md` is not repeated here.
 
----
+## Current state
 
-## I5a is finished: the lint is in the manifest and the 43 ratchets are gone
+### The NVMe hostile-boot wedge is all four CPUs halted, not a live-lock
 
-`usb/` was the last module: 97 blocks, 77 of them in `xhci/mod.rs`, plus
-`drivers/mod.rs`'s own 10. With those documented every module in `kernel/src` was
-covered, so `undocumented_unsafe_blocks = "deny"` moved into
-`kernel/Cargo.toml`'s `[lints.clippy]` and the 43 per-module
-`#[deny(clippy::undocumented_unsafe_blocks)]` attributes came out with it. The
-ratchet was scaffolding for the migration, not the end state; leaving it in
-place beside a crate-level deny would have been 43 lines saying nothing.
+The one live bug. Engram tracks it ("NVMe hostile boot wedges about 1 in 10"); this is
+the reproduction detail.
 
-`xhci/` is almost one argument repeated. Every register pointer in the driver
-comes from `XhciRegisters`, which is built once from the 64 KB BAR0 mapping
-`init` establishes, so no individual access has to re-argue that the pointer is
-mapped -- what each comment says instead is which register it is and why the
-access is volatile (the *controller* changes the value, so the compiler must not
-fold or reorder the access). Three other shapes cover the rest:
+`edos-nvme-hostile.iso` boots with `nvme_timeout_ms=0`, so the NVMe watchdog fires on
+every command and a healthy boot spends minutes resetting the controller. Its serial
+output arrives in bursts with quiet stretches; a normal run wrote 317 KB with 1314
+watchdog firings. `scripts/wedge-probe` therefore calls a boot wedged after
+`SILENCE = 60` s of no serial growth and caps a run at `RUN_CAP = 600` s. Twelve
+seconds of quiet is inside the healthy range.
 
-- **Input-context writes.** The bound is arithmetic, not a check: a DCI is at
-  most 31, the allocation holds 33 contexts of `ctx_size` bytes each, so context
-  index `dci + 1` is always inside it. Saying "the pointer is valid" here would
-  be the comment that says nothing; saying where 33 comes from is the argument.
-- **`read_unaligned` of a `packed` descriptor out of the configuration blob.**
-  The `bytes.len() >= 9` / `>= 7` guard the caller already had is the bound, and
-  the read is unaligned because the source is a `[u8]` at an arbitrary offset.
-- **The DMA-buffer copies in the HID report path.** The source is one slot of a
-  `HID_QUEUE_DEPTH`-slot buffer and the destination a fixed array, so the comment
-  names both bounds. The interesting half is already in the code: how much of the
-  slot the controller wrote is the transfer event's to say, not the slot's size.
-
-`drivers/mod.rs`'s own ten are the 8042, and their comment is about exclusion
-rather than validity: 0x60 and 0x64 are fixed by the platform, so what matters is
-who else is driving them. In `ps2_drain_buffer` that is `PS2_LOCK`, which the two
-IRQ handlers share; in `init_ps2_controller` it is that `init_drivers` calls it
-once, on one CPU, before the keyboard and mouse kthreads are spawned.
-
-Counts after this pass, remeasured with `doc/rust-style.md`'s commands: 729
-`unsafe {` blocks, 770 `// SAFETY:` comments (more than blocks, because a comment
-also sits above each of the 41 `unsafe impl`), 65 `unsafe fn` against 75
-`# Safety` sections. I5b -- the contract half, which no lint can find -- closed
-after this; the section at the end of this file, "I5b, the `unsafe fn`
-contracts", is what that took.
-
----
-
-## `fs/` under `undocumented_unsafe_blocks`, and the two shapes its blocks come in
-
-`kernel/src/fs/` is the last of I5a's three big modules to take its own
-`#[deny(clippy::undocumented_unsafe_blocks)]`: 45 blocks across `efs/mod.rs`,
-`block_page_cache.rs`, `vfs.rs`, `page_fill.rs`, `page_cache.rs` and
-`journal/mod.rs`, plus `main.rs`'s own eight. 344 blocks are left and they are
-in exactly two modules, `drivers/` (295) and `thread/` (49).
-
-Half of `fs/`'s blocks are one of two shapes, and both have a *wrong* comment
-that is easy to write:
-
-- **`read_unaligned` of a `repr(C)` on-disk struct out of a block buffer.**
-  The wrong comment says "the struct is `repr(C)`". That is not the claim: the
-  claim is (a) the loop condition or the modulo arithmetic bounds
-  `offset + size_of::<T>()` by the buffer's length, (b) `read_unaligned` needs
-  no alignment so the cast is fine, and (c) `efs-common` asserts the type's
-  size, which is what says it has no padding and therefore that
-  `from_raw_parts` over it reads only initialised bytes. All three, or the
-  comment says nothing a reviewer can check.
-- **A page-cache frame reached through `as_slice`/`as_slice_mut`.** The wrong
-  comment claims exclusion the page cache does not give. `CachedPage` and
-  `CachedBlockPage` are shared interior-mutable storage behind an `Arc`, and
-  `as_slice_mut` takes `&self` precisely because the borrow checker cannot
-  supply exclusion. What a call site can honestly claim is the *pin*: the
-  frame stays allocated and mapped, and the borrow does not outlive it. Say
-  that, and say who supplies exclusion when someone does (`write_lock` for
-  `block_page_cache`, the inode write lock for `zero_tail`).
-
-Three other things came out of the pass and are worth knowing:
-
-- `journal::write_struct` was a **safe** fn carrying a `# Safety` section.
-  `doc/rust-style.md` rules that shape out and clippy's `unnecessary_safety_doc`
-  does not catch it, because the lint only looks at public items and this one is
-  private. It is an `unsafe fn` now. Grep for the same shape elsewhere with
-  `grep -B8 '# Safety' | grep -v 'unsafe fn'`.
-- `if !unsafe { .. }` has **nowhere to put the comment.** The lint wants it
-  adjacent to the block, and the text before the block on that line is `if !`.
-  A comment above the `if` gives the identical error as no comment at all. The
-  fix is a `let copied = unsafe { .. };` binding and `if !copied`, which reads
-  better anyway; three of `vfs.rs`'s user-copy sites were converted this way.
-- `main.rs`'s eight blocks are documented but **not ratcheted**, because a
-  crate-level `#[deny]` would reach `drivers/` and `thread/` too. They ratchet
-  when the last module does and the lint collapses into
-  `kernel/Cargo.toml`'s `[lints.clippy]`. The panic-path frame-pointer walk at
-  `main.rs:616` is the one to read: unlike `profile::walk_kernel` it checks only
-  `rbp >= KERNEL_BASE`, not that `rbp` is inside the current kernel stack, so a
-  wild frame pointer into an unmapped kernel page faults. Its comment says so
-  rather than pretending otherwise. Bounding it to the stack the way the
-  profiler does is a real improvement and nobody has made it.
-
----
-
-## The browser became one, and what the site was actually missing
-
-`edos-web` could fetch and render a page and nothing else: no way to type an
-address, no forward, no reload, a fragment link that refetched the page and
-landed at its top, and a window that went dead for the length of a load. The
-site it exists to read came out wrong in ways that were worth measuring rather
-than guessing at, so the counts below are occurrences in the CSS the guest
-actually downloads (`/usr/src/edos-web/dist/_astro/*.css`).
-
-**What was wrong, in the order it mattered:**
-
-1. **Every picture was missing.** All 17 images on the site are WebP and the
-   decoder read BMP and SVG, so each one fell back to its alt text. `png`,
-   `image-webp` and `zune-jpeg` are pure Rust and build for
-   `x86_64-unknown-edos` unpatched; they sit behind `edos_render`'s `raster`
-   feature, and `imgview` and the file manager's thumbnails take the same path.
-2. **`calc()` was refused: 141 lengths**, over `font-size` (13), `margin-top`
-   (12), `height` (11), `width` (8), `padding` (7) and `gap` (5). Every one of
-   them left the property at whatever was inherited.
-3. **`hsl()` was refused: 45 colours**, which is the whole aside and badge
-   palette, because a generated sheet declares one hue as a custom property and
-   writes each shade as `hsl(var(--hue) 60% 40%)`. `color-mix()` was six more.
-4. **`position` is unimplemented (59 declarations)**, so Starlight's sidebar
-   landed in the flow and a documentation page opened on a screen and a half of
-   navigation links. Measured: `edos.edgl.dev/introduction/` is 72 blocks whole
-   and 42 from its `<main>`.
-5. **Tables ran together.** `<tr>` opened a block and `<td>` opened nothing, so
-   a row rendered as its cells' text on one line.
-6. **Rounded corners: 66 radii**, none of them drawn.
-
-**The two traps in it, both worth keeping:**
-
-- **A page's `sr-only` text was being rendered at full size.** The
-  visually-hidden idiom is a box sized 1x1 with `overflow: hidden`, and nothing
-  here clips, so every heading on the site read "What runs today" followed by
-  "Section titled What runs today". The answer is in the cascade rather than in
-  layout: a box that small can show nothing whatever its overflow says. The
-  test that keeps it honest also asserts the opposite — a *child* of a 1px-wide
-  box is not hidden, because `measure` inherits and reading it as "this element
-  asked for 1px" would drop the page.
-- **`resolve()` dropped every `href` starting with `#`.** That was right when a
-  fragment did nothing and wrong the moment one scrolled, and the symptom was a
-  table of contents whose links were not links. Found by dumping the page with
-  `-d -l`, which lists every link target: the fragment ones were simply absent.
-
-**Loading is a thread now.** `net.rs` runs the whole load -- fetch, parse,
-style -- on a thread and posts progress back, which is what the `Arc`s in
-`doc.rs` and the `Mutex` around its subresource cache are for: a whole
-`Document` crosses the channel. One load at a time, and a second abandons the
-first by ticket rather than by stopping the thread, because a thread inside a
-TLS handshake cannot be interrupted. **The page gives way to the loading view
-the moment the load starts** -- Edgar's call, and the right one: the old page
-left up through a slow fetch reads as a click that was ignored.
-
-**Three measurements worth keeping.** The site sends about 100 KB of CSS per
-page and this machine's TLS is software, so `Accept-Encoding: gzip` is worth
-more than the inflate costs; the subresource cache now belongs to the window
-rather than to the document, because every page of a site links the same
-sheets; and connections are pooled, which took the homepage from seven TCP and
-TLS handshakes to one.
-
-**The pool has to be per process, not per thread**, and that is the one thing
-about it that is not obvious. `edos-web` loads each page on a thread of its
-own, so a thread-local pool is empty on every navigation and holds a connection
-only for the subresources of the page that opened it. Two navigations opened
-two connections thread-local and one shared.
-
-**Testing the stale case needs a server that closes on demand.** A pooled
-connection the far end has closed cannot be told from a live one -- the write
-succeeds and the failure arrives on the way back -- so the client retries once
-when, and only when, the request went out on a reused connection. Cloudflare
-holds a connection far too long to wait for in a test; a 40-line Python server
-that keeps a connection for N seconds and then drops it makes the case happen
-on command, and the guest log tells the whole story either way: watch for
-`Established -> CloseWait` between the two requests in `run_log.txt`.
-
-**Driving this in the guest**: `edos-web URL > /dev/klog 2>&1` is what makes a
-headless run readable -- the window's stdout is otherwise in the terminal it
-was launched from, where a screenshot is the only way to read it. And
-`scripts/edos-vm focus <title>` rather than clicking a taskbar button, which
-minimises the window and leaves every keystroke on the wallpaper.
-
-## Every `File` leaked its descriptor, and `strace` said so in one line — FIXED
-
-**Nothing closed a file descriptor on this system unless the process exited.**
-`std::sys::fd::edos::FileDesc` wraps `edos_rt::fd::FileDesc`, and neither had a
-`Drop` impl. `edos_rt` offered `pub fn close(self)` and nothing in `std` called
-it, so a `File` that went out of scope left its kernel descriptor allocated for
-the life of the process.
-
-Fixed 2026-08-17 in `edos_rt` 0.0.52 plus the fork's `IntoRawFd`; the mechanism
-and the four traps below are kept because they are what a second descriptor-
-owning type would have to get right.
-
-Found 2026-08-15 while chasing why `evicttest` never finishes. Two independent
-confirmations:
+The boot wedges about 1 in 10 on a quiet host (10 runs: 9 pass, 1 wedge). The wedged
+state, read over QMP:
 
 ```
-/ $ strace -e openat,close,read wc -l /share/web/welcome.html
-openat(AT_FDCWD, "/share/web/welcome.html", 23, 0x0) = 4
-read(4, "<!doctype html>\n<html>\n  <head>\n"..., 18779) = 18779
-read(4, 0x6ffffffffc10, 32) = 0
+IDLE_CPU_MASK          0x000000000000000f   (all four CPUs)   stable across 2 s
+NVME_INFLIGHT          0x0000000000000001                     stable
+WATCHDOG_RESETS        0x0000000000000a24                     stable
+query-status           running
+CPU#0..3               HLT=1, RIP in Scheduler::take_idle
 ```
 
-No `close`. And with a program that opens in a loop, the returned numbers say
-it outright — `evicttest` calling `read_to_string("/proc/evict_stats")` reached
+All four vCPUs are halted in the scheduler's idle path, every idle bit is published,
+and nothing runs. One NVMe command is in flight and `WATCHDOG_RESETS` is frozen, so
+the watchdog thread stopped being scheduled; it did not decide there was nothing to
+do. The shape is a lost wakeup. The RIP is build-specific; resolve it with
+`scripts/wedge-resolve` or `addr2line` against the ISO's kernel.
+
+Two readings are wrong and must not be reused:
+
+- "A live-lock with `SWITCHES` advancing." `SWITCHES` is `debug::stall::SWITCHES`,
+  compiled only under `--features stall-dump`, which the hostile ISO does not carry.
+  That reading came from a different build.
+- "The NVMe completion path lost a wakeup" is narrower than the evidence. In the
+  wedged run's serial, `nvme_watchdog` fires and resets about 250 times a second
+  (2596 resets) and then stops, and every other timer-driven kthread (`tcp-retransmit`
+  200 ms, `ahci_watchdog` 1 s, `block_writeback` and `journal_committer` about 5 s)
+  also fails to run for 60 s. The watchdog sleeps on a 1 ms timer, not a waitqueue.
+  Read the bug as "a thread sleeping on a timer stopped waking" before reading the
+  NVMe completion dispatcher.
+
+Reproducer, about 10 minutes:
 
 ```
-openat(AT_FDCWD, "/proc/evict_stats", 17, 0x0) = 31801
-openat(AT_FDCWD, "/proc/evict_stats", 17, 0x0) = 31802
+make edos-nvme-hostile.iso
+WEDGE_OUT=logs/<date>-wedge scripts/wedge-probe 10
 ```
 
-one higher every call, 31,854 opens in twenty seconds, not one close among
-them. That is also most of why that test looks hung: the fd table is a
-`BTreeMap`, so every read and write in the process pays a lookup against a map
-that only grows.
-
-**Who this actually costs.** A short-lived program does not care; the reaper
-frees the table. It is the long-lived ones: `edos-taskbar` reads `/proc/net`
-each time its network popup opens, and `edos_lib::procinfo` reads
-`/proc/processes` and `/proc/meminfo`, which is what `top` and `edos-procview`
-refresh through — one or two descriptors per refresh, for as long as the
-session lasts.
-
-**The fix was one `Drop`, and it was not a drive-by.** It lives in `edos_rt`
-plus the Rust fork, so it needed the whole publish loop, and it changed lifetime
-semantics everywhere at once. It was tested against a `[patch.crates-io]` path
-override before anything was published — a published version cannot be
-withdrawn. Four things it had to get right, and the reason to keep them written
-down is that any second type owning a descriptor faces the same four:
-
-- **`into_raw_fd` must `mem::forget`.** It returns `self.inner.raw_fd()` and
-  drops `self` on the way out, which would hand the caller a descriptor that
-  was closed a line earlier. Same for `IntoInner<OwnedFd>` and
-  `From<FileDesc> for OwnedFd`.
-- **`edos_rt::fd::FileDesc::close(self)` becomes a double close.** Either drop
-  the method or have it forget after closing.
-- **Pipes and spawned children change behaviour, and that is the risky part.**
-  `sys/pipe/edos.rs` has `pub type Pipe = FileDesc`, and `sys/process/edos.rs`
-  wraps both ends of every spawn's pipes in one. Today the parent never closes
-  the end it handed to the child, so that pipe never reports EOF; with `Drop`
-  it will. That is correct, and it is a system-wide change to when a read
-  returns zero — `edos-sh` pipelines, `sshd` sessions and `edos-init` all sit
-  on it.
-- **Stdio is safe.** `sys/stdio/edos.rs` writes to fd 0/1/2 by number and holds
-  no `FileDesc`, so nothing here can close the terminal out from under a
-  program.
-
-Verified with the same instrument that found it. The strace above now ends in
-`close(3) = 0`, and the descriptor is 3 rather than 4 because nothing earlier in
-the process is stranded. `guest-check`, `ssh-check` and
-`storage-check` all pass; `stdtest` is the only program in the tree that uses
-`std::process::Command`, and its `Command::new("/bin/echo").output()` is exactly
-the pipe-EOF path this could have broken.
-
-**It really was most of why `evicttest` looked hung.** That test used to spin
-past fifteen minutes without reaching its own 200,000-iteration bound, because
-it reads `/proc/evict_stats` every iteration and each read stranded a
-descriptor in a `BTreeMap` that only grew. It now finishes in about a second —
-and then failed honestly, `drain_count` advancing 0 against an expected 32 on
-`/var`. That second failure was the test's own impatience, not an eviction
-defect; the section below has the measurement.
-
-**The fork could not be checked at all, and now can.** `./x check library/std
---target x86_64-unknown-edos` failed on a *pristine* `~/dev/rust` with 266
-errors, every one `E0514: found crate core compiled by an incompatible version
-of rustc`: the `core`, `alloc` and `libc` rmeta under
-`build/x86_64-unknown-linux-gnu/stage1-std/x86_64-unknown-edos/dist/` were
-built by `6e2a77099` and the stage1 compiler had moved to `bba29813d`. Nothing
-invalidated them, so every later check read them and refused.
-
-The cure is to remove that one target directory, `stage1-std/x86_64-unknown-edos`,
-which is 205 MB and rebuilds itself. **Not `./x clean`**, which would also throw
-away the 29 GB tree including the downloaded CI LLVM. The first check afterwards
-takes 30 seconds because it rebuilds `core`, `alloc`, `libc` and the rest of the
-edos std; every one after that is 2 seconds, which is the cheap check CLAUDE.md
-advertises.
-
-Two things confirmed while fixing it, both of which the fd-leak work needs. A
-`[patch.crates-io]` path override onto `~/dev/edos_rt` now resolves and compiles,
-so the change can be tested before anything is published; a crates.io version
-cannot be withdrawn, so that order is not optional. And the installed toolchain
-is untouched by the deletion: it lives under the `install.prefix` in
-`bootstrap.toml`, not in `build/`, so `cargo +edos build` keeps working across it.
-
----
-
-## `min-width` verified in the guest, and how to check a box's width from a screenshot
-
-The overnight run shipped `min-width` on gates alone and left a todo saying so.
-Closed now: the `.widened` paragraph in `welcome.html` sets `min-width: 500px`
-against `max-width: 200px`, and css-sizing-3 §5.1 makes the floor win, so the
-used width is `max(500, min(200, available))` and should be exactly 500.
-
-It is. Measured off the framebuffer rather than judged by eye, which is worth
-recording because the obvious version of the check is wrong: `.floored` on the
-same page uses the *same* `#434c5e` background and spans the full 532px column,
-so scanning for the widest run of that colour finds the wrong box and reports a
-pass. Collecting every run of the colour separately shows both, `x=195 w=532`
-for `.floored` and `x=211 w=500` for `.widened`.
-
-The general trick: `scripts/edos-vm shot`, then walk the rows of the PNG
-collecting contiguous runs of the box's background colour and group them by
-`(start_x, width)`. A box's width is then a fact rather than an impression, and
-two boxes sharing a colour stay distinguishable.
-
-
-## `bInterval` does not mean the same thing at every speed
-
-`configure_interrupt_endpoint` wrote `bInterval - 1` into the endpoint context's
-Interval field for every device, with a comment saying "for FS/HS interrupt
-endpoints". That formula is high-speed only.
-
-The controller's period is always `2^Interval * 125us`. What varies is the
-descriptor (USB 2.0 §9.6.6):
-
-- High and super speed: `bInterval` is already an exponent, period
-  `2^(bInterval-1) * 125us`, so the field is `bInterval - 1`.
-- Full and low speed: `bInterval` counts **milliseconds**, so the field is
-  `3 + log2(bInterval)`, since `2^3 * 125us` is 1 ms.
-
-A full-speed mouse asking for 10 ms was therefore programmed as `Interval = 9`,
-which is `2^9 * 125us` = 64 ms. Six times slower than it asked, and silently:
-nothing fails, the pointer just steps.
-
-`UsbSpeed::interrupt_interval` does the conversion and `UsbDevice` carries the
-speed to reach it. xHCI 6.2.3.6 bounds the field to 3..=10 at full and low
-speed, so it is clamped there.
-
-**This is not what the Windows reporter is hitting.** QEMU's `usb-mouse` on
-`qemu-xhci` enumerates as *high* speed with `bInterval = 4`, which the old
-formula got right: `2^3 * 125us` = 1 ms. The boot log names it now
-(`xhci: ep 0x81 High bInterval=4 -> interval 3 (1000 us)`). It matters for real
-hardware, where a physical HID device is often full speed.
-
-Their `moves` count of about 29 per second against a 76 Hz compositor is still
-unexplained, and the ceiling on how smooth a drag can look. `/proc/gpu_stats`
-carries `mouse_reports` to split the two cases: if it climbs at roughly the rate
-`moves` reports, the guest is seeing every report the host sends and the rate is
-the host's; if it climbs much faster, the reports arrive and something above
-drops them. Do not guess between those without the number.
-
-
-## The cursor resource was recreated on every shape change, and leaked its buffer
-
-Reported from a Windows guest: `RESOURCE_CREATE_2D resource 100 failed: 0x0`,
-twice, mid-session. Two separate bugs, and the reported code belongs to the
-newer one.
-
-**`0x0` is not a virtio-gpu response code.** Every real answer is `0x11xx` or
-`0x12xx`, so a zero means the response area was read before the device wrote
-it. With the flip pipelined, the control ring can hold completions that belong
-to a *frame*; `execute_scratch` took the first completion it saw, and if that
-was the frame's it reclaimed it and then read its own response area, still
-zeroed. `push` returns the descriptor head it used, so the command waits for
-**its own** head now and reclaims anything else on the frame's behalf. That is
-immune to whatever else is in flight, which a `pending` counter is not.
-
-**Underneath it, a real error the zero was hiding.** The same run on the v0.5.0
-ISO reports `0x1203` -- `ERR_INVALID_RESOURCE_ID` -- because `setup_cursor`
-creates resource 100 every time it is called and the resource already exists.
-It is called on every *shape* change, which is every hover over a window's
-resize edge, and each call also allocated a fresh 16 KiB DMA buffer and
-`core::mem::forget`-ed it. That worked exactly once; every later change leaked.
-
-A shape change is a new picture in the same box. The buffer lives on the driver
-now and the resource is created on the first upload only, so later calls re-fill
-the pixels and re-issue `UPDATE_CURSOR`. Zero failures across five shape changes
-where there were six before, and one `hardware cursor set up` line rather than
-one per hover.
-
-**What this says about `blob=off` on a real host.** The reporter's `wmfps` line
-after the asynchronous flip landed reads `flip_p50=0` with `flip_p95` between 27
-and 278 us, against `int_p50=13041` -- a 13 ms frame. The flip is no longer
-where a frame's time goes. What is left is `moves`: 29 or so out of ~76 frames
-per second, meaning the pointer position changes on well under half of them. A
-window can only advance as often as the guest is told the pointer moved, so that
-number is now the ceiling on how smooth a drag can look, and it is the thing to
-chase next. It is USB HID through xHCI, so the endpoint's interval and the
-driver's re-arm are where to look; nothing measured yet.
-
-
-## The flip parks instead of spinning, and sends the regions rather than their box
-
-Two follow-ons to the asynchronous flip, and the first one corrects a claim made
-when it landed.
-
-**"You cannot park under a preempt spinlock, so the drain must spin" was only
-half true.** The lock is needed for the *look*, not for the *wait*. The ioctl
-takes `DISPLAY`, polls, and drops it; only then does it park. The condition it
-parks on is the interrupt count rather than the queue's own state, because a
-parked thread holds no lock and so cannot read the queue -- a changed count
-means a completion landed and the poll is worth repeating.
-`WaitQueue::wake_all_irq` is the handler's half, reaching the scheduler through
-`wake_thread_irq`, whose wake protocol is documented safe from any context.
-
-A display with no vector bound still spins, because there is nothing to park on:
-no interrupt is coming. And the park is bounded, eight rounds of 4 ms, after
-which the frame is let through. A torn frame is better than a compositor that
-never returns.
-
-**One flush, several transfers.** `edos-wm` was computing disjoint regions with
-`coalesced()` -- which deliberately refuses to merge a pair whose union costs
-more than the two apart -- and then unioning them anyway and transferring the
-bounding box. That was free under `blob=on`, where nothing is copied, and is a
-real per-frame copy of the gap between the regions under `blob=off`.
-
-`FB_IOCTL_FLIP_RECTS` takes the list. Only `RESOURCE_FLUSH` makes the host
-present, so one flush over the bounding box after N transfers keeps the frame
-arriving whole -- which is the property the union was protecting -- while the
-copy is charged for the pixels that actually changed.
-
-Two things worth knowing if this is revisited:
-
-- **`publish` still copies the bounding box** into VRAM, not the regions. That
-  is deliberate: it is a guest-local memcpy of pixels that are already correct,
-  and splitting it would save nothing the host cares about.
-- **A page-flipping display takes the bounding box anyway.** The pages
-  alternate, so the region the *other* page is missing has to go out with this
-  frame; splitting it would leave that page stale. Only the single-buffered
-  virtio path takes the region list.
-
-Verified by dragging a window away and back and diffing the framebuffer against
-its starting state: the only difference was 159 pixels of the terminal's
-blinking cursor, caught mid-blink.
-
-
-## The display flip waited on the host, and the wait was in the wrong place
-
-`transfer_and_flush` submitted its commands and then **spun until the host had
-finished them**, holding the `DISPLAY` lock throughout. The cursor does not: it
-goes out on the cursor queue fire-and-forget. That asymmetry is the drag
-symptom -- the pointer is drawn by the host at the host's rate while the window
-waits for a round trip, so the window trails the hand.
-
-`blob=off` makes the round trip much more expensive, and it is not a choice:
-the zero-copy path needs host `CONFIG_UDMABUF` plus a memfd backend, which is
-Linux-only, so a Windows or macOS host runs `TRANSFER_TO_HOST_2D` -- a real copy
-of the damaged rectangle, per frame -- before the flush. The guest detects the
-failure and sets `use_blob = false` itself, so nothing announces that the
-expensive path is the one in use.
-
-**Two changes, and the second one is where the mistake was.**
-
-The flip is asynchronous now: it pushes its descriptors, notifies, and returns,
-recording what is outstanding. The obvious place to reclaim those descriptors is
-at the start of the next flip -- and that is wrong, and would have shipped a
-tear. `Screen::publish` copies the new frame from the shadow into the very
-buffer the host is still reading, and it runs *before* the next flip ioctl. So
-the wait has to be in `publish`, not in the flip: `FB_IOCTL_FLIP_WAIT` is its
-own call for exactly that reason. By then a whole compositing pass has happened,
-so in the ordinary case there is nothing left to wait for.
-
-**virtio-gpu had no interrupt at all.** Not for want of the primitives:
-`BlockingMutex` landed 2025-09-27 and the driver 2026-04-08, six months later.
-`InterruptIndex` simply had no virtio entry, and nothing in `drivers/virtio/`
-mentioned MSI. The two offsets it needs (`COMMON_MSIX_CONFIG`,
-`COMMON_QUEUE_MSIX`) were already defined and carried `#[expect(unused)]`.
-
-The part that is easy to miss: **binding the queue is a second step.** Enabling
-MSI-X on the PCI device is not enough -- virtio starts every queue at
-`VIRTIO_MSI_NO_VECTOR` and stays silent until the vector is written into the
-queue's own config, which reads exactly like a device that cannot interrupt.
-`set_queue_msix_vector` reads the value back, because a device out of vectors
-answers `NO_VECTOR` rather than failing the write. `/proc/gpu_stats` carries the
-count: it moved 58 to 156 across one window drag, so the vector is live.
-
-The handler cannot drain the ring itself. The queue is behind `DISPLAY`, a
-preempt-disabling spinlock a flip holds, so an interrupt on that CPU would
-deadlock against it. It publishes a count and the flip path does the draining --
-which is also why the drain is still a bounded spin rather than a park: parking
-under a preempt spinlock is forbidden. The bound is shorter when the queue is
-bound to a vector, because a completion that has not arrived by then is a host
-still working rather than one that never said.
-
-
-## A deep page crashed `edos-web`, and the walk bound was only half of it — FIXED
-
-`doc.rs::walk` recursed once per element with no bound, over a tree built from
-whatever the network returned. That is the obvious half and `MAX_DEPTH` (512)
-closes it: past that the subtree is dropped and the page renders as much as it
-has.
-
-The half that only a guest run finds is that **the walk bound never gets a
-chance on a really deep page, because `html5ever` has to build the tree before
-the walk sees it and it builds it by recursion.** Measured in the guest, one
-`<div>` per level:
-
-| nesting | before | after |
-|---|---|---|
-| 400 | renders whole | renders whole |
-| 2000 | renders whole | top renders, past 512 dropped |
-| 4096 | renders | renders |
-| 16384 | renders | renders |
-| 32768 | **SIGSEGV** | refused, exit 0 |
-| 100000 | **SIGSEGV** | refused, exit 0 |
-
-Note what the crash looked like: `edos-web` printed *nothing at all*, not even
-the paragraph before the nesting, and the shell reported `EXIT:11`. That is the
-tell that it died in the parser rather than in the walk — anything in the walk
-would have emitted the earlier blocks first.
-
-So there are two bounds now and they are not redundant. `MAX_DEPTH` bounds the
-walk and lets a moderately deep page render partially. `MAX_SOURCE_NESTING`
-(8192) is checked against a byte scan of the source *before* the parser is
-handed anything, and refuses the document outright with a page saying why. It
-sits a factor of two under 16384, the deepest nesting measured to survive.
-
-The scan is deliberately approximate — a `<` inside an attribute value counts
-as a tag — because it over-estimates, and over-estimating is the safe direction
-for a valve whose limit is three orders of magnitude above any real document.
-
-
-## The `BlockingMutex` loan could cancel a live loan on another lock — FIXED
-
-Priority inheritance published two pieces of state that could disagree: the
-loan on the holder thread (`Thread::lent_priority`) and a flag on the lock
-saying a loan existed (`BlockingMutex::lent`). A waiter set the flag *after*
-raising the holder, so a holder that released in between saw no flag, skipped
-ending the loan, and left the flag set on a lock nobody held. The next holder
-of that lock then read the stale flag on ITS release and called
-`drop_lent_priority`, which ends every loan the thread carries at once — so a
-loan it was genuinely owed on some *other* mutex was silently cancelled. No
-thread had to die for this; the ordinary interleave was enough.
-
-Two changes close it:
-
-- **The record names the holder** (`lent_to: AtomicU64`) rather than merely
-  recording that a loan exists, and `release` swaps it and compares against the
-  owner it just cleared. A record naming anybody else belongs to an owner that
-  has already gone and is discarded without touching this thread's loans.
-- **The loan is published before the owner is re-read**, not after. Ordered the
-  other way there is a window where the releasing holder has not yet seen the
-  loan and the waiter has not yet seen the release, and neither side ends it.
-
-Separately, `try_acquire` cannot publish the owner atomically with its
-compare-exchange, so a waiter arriving in that two-instruction gap read zero,
-lent to nobody, and parked — forfeiting inheritance for the whole section,
-because the next chance to lend is a wake that only a release sends.
-`BlockingMutex::holder` now spins that gap out (`OWNER_PUBLISH_SPINS`, 64).
-
-What is still true and is by design: the loan is a priority and not a stack, so
-a thread holding two of these gives up an outer loan when it releases the inner
-lock. It forfeits inheritance it was owed and never grants any it was not.
-
-
-## `edos_http::Url` is the `url` crate now, and two bugs fell out of the port
-
-The hand-rolled parser was 278 lines and correct against the spec it named: all
-34 RFC 3986 §5.4 examples passed, IPv6 literals were handled, and userinfo was
-rejected rather than mangled. It was replaced anyway, because RFC 3986 is not
-the specification a browser implements and it was missing two capabilities
-`edos-web` needs and cannot reach from where it stood.
-
-**Percent-encoding did not exist anywhere in the tree.** Any `href` carrying a
-space or a non-ASCII character produced a request line the server could not
-parse. **IDNA did not either**, and that has a precise failure point:
-`tls.rs::server_name` hands the host to `rustls::ServerName::try_from`, which
-does no IDNA of its own, so a non-ASCII hostname failed there as "not a valid
-server name" — with HTTPS otherwise working fine.
-
-Measured before deciding, on `x86_64-unknown-edos`, as bytes added to a linked
-release binary:
-
-| | over base |
+Next step, not yet taken. The question is which thread is blocked on what, and
+registers only ever say "halted". Build the hostile ISO with the stall detector, which
+prints every thread with its state and a backtrace after `STALL_MS` (4000 ms) of no
+switches, well inside the 60 s silence threshold:
+
+```
+make edos-nvme-hostile.iso CARGO_FLAGS="--features stall-dump"
+WEDGE_OUT=logs/<date>-wedge scripts/wedge-probe 10
+```
+
+A slow but healthy hostile boot may also dump; the dump prints and the boot continues.
+
+Run nothing beside the probe: no build, no other VM, no gate. Host load alone moves
+the rate (a 20-run batch read 2 wedges in its first 10 and 5 in the next 6 with builds
+running beside the second half). Each run leaves a `.qmp` file in the output directory
+with the counters and registers, and a `.log` with that boot's serial.
+`WEDGE_ISOS=a.iso,b.iso` alternates two builds within one batch, which is the only
+fair A/B.
+
+The two earlier hostile-boot defects are closed and written up in
+`doc/bugs/2026-08-26-the-hostile-nvme-boot-is-two-bugs-and-neither-is-the-log.md` and
+its two siblings.
+
+## How to work
+
+### The gate set, and which of them build the disk they judge
+
+Warm wall time is on a warm build tree on one host. A cold clone also pays the kernel
+build, the whole `programs/` workspace, the ISOs and both disk images.
+
+| gate | what it judges | needs | warm wall |
+|---|---|---|---|
+| `make -C kernel check` | every feature combination, warning-free | nothing | 16 s |
+| `make fmt-check` | rustfmt over kernel, `programs/`, `tools/`, `libs/` | nothing | seconds |
+| `make clippy` | kernel and `programs/` at `-D warnings` | `+edos` toolchain | 3-5 s per tree |
+| `make host-tests` | host unit tests | nothing | 4 s |
+| `make test AUDIODEV=none` | in-kernel `sched-test` suite, 4-CPU KVM | `/dev/kvm` | 10-12 s |
+| `make guest-check` | the suites in `scripts/guest-check`'s `SUITES`, one boot, judged by exit code | `/dev/kvm` | 71-84 s |
+| `make nvme-check` | five boots (see `CLAUDE.md`) | `/dev/kvm`; builds `edos-nvme.iso`, `edos-nvme-hostile.iso`, `edos-sata.iso`, `fresh-nvme-blank` | 88 s, measured at four boots |
+| `make recovery-check` | pause checkpointing, cut power, remount, assert replay | fault-inject ISO, fresh `journal-test.img` | 93 s |
+| `make orphan-check` | unlinked-but-open files across a power cut | fresh `journal-test.img`, `efs-fsck` | 82 s |
+| `make storage-check` | `fs-regression` over EFS and FAT32, then `fsbench-run` | `/dev/kvm` | 4 min 27 s |
+| `make ssh-check` | host OpenSSH client against guest `sshd` | `/dev/kvm`, host `ssh` | 44 s |
+| `make profile-check` | sampling profiler end to end | `/dev/kvm` | not measured |
+| `make stall-check` | stall detector fires on `edos-stall.iso` | `/dev/kvm` | not measured |
+
+Only `check`, `fmt`, `clippy`, `make test` and `guest-check` run in CI; `doc/ci.md`
+§ "What is not covered" has the rest.
+
+Run `make test` before `make guest-check`. `make test` builds `$(IMAGE_NAME).iso` with
+`--features sched-test`, and `guest-check` depends on the same ISO path with default
+features, so whichever runs second relinks the kernel and ISO; the `guest-check` time
+above includes that. Every guest gate also depends on both disk images, so a touched
+`filesystem/` adds an `efs-mkfs` of each.
+
+The guest gates hold the single QEMU slot for their whole run (`edos_vm.claim_slot`,
+through `scripts/vmdrive.py`). `fs-regression` and `nvme-check` reboot between phases,
+so a guest that looks abandoned is usually a live gate's. `pgrep -af
+'fs-regression|fsbench-run|guest-check|nvme-check|ssh-check|orphan-check|recovery-check|profile-check'`
+names the gate, and `ls -l /proc/<make-pid>/fd/1` names its log.
+
+Gate scripts use `#!/usr/bin/env -S python3 -u`, so progress reaches a redirected log
+as it happens. `guest-check`, `nvme-check`, `orphan-check`, `recovery-check` and
+`profile-check` take no arguments and print no usage: `--help` boots a guest and runs
+the whole gate. `fs-regression` (`--fat32`, `--keep`) and `fsbench-run` (`path`,
+`--mode`, `--quick`) take options.
+
+Do not edit `scripts/edos-vm` while a gate runs. `make storage-check` shells out to it
+many times, and an edit landing between two calls runs a half-edited script. It fails
+as a `CalledProcessError` on `edos-vm start`, which looks like a guest problem.
+
+### A gate that runs nothing still exits 0
+
+`make -C kernel check --features sched-test` does not pass the flag to cargo. make
+parses `--features` as its own unknown option, prints its usage, and exits 0, so every
+`&&` after it runs with nothing verified. Plain `make -C kernel check` already runs
+`cargo check --features <f>` for every feature through `check-features`. A one-off
+feature build goes through `CARGO_FLAGS="--features x"` on the ISO target.
+
+A gate chain is evidence only if each command's own output says it ran. Grep the
+saved log for the line that proves the work (`Checking edos-kernel`, `ALL <N> TESTS
+PASSED`) rather than reading the chain's exit status. An exit code shared with the
+harness's own failures (QEMU's startup failure and an `isa-debug-exit` pass are both
+1) needs a positive signal from inside the guest.
+
+A new gate, or a new case in one, is trusted only after it has been watched going red:
+break the code on purpose (for `wc`, a `+ 1` on the line count), confirm the gate fails
+with the expected `FAIL` line in `run_log.txt`, revert.
+
+### `make test` and `scripts/edos-vm` cannot run at the same time
+
+Both attach `sata-disk.img` and `nvme-disk.img` and both point the serial chardev at
+`run_log.txt`. Two QEMUs on one image is a corruption hazard, and the second serial
+open truncates the first one's log. Run them in sequence. If they ever overlapped,
+rebuild the images and discard any measurement taken during the overlap. After a test
+target, the ISO on disk is the sched-test one (`doc/vm-control.md`); `make all` before
+`edos-vm start`.
+
+### Driving the guest: traps not in `doc/vm-control.md`
+
+- A cursor or damage change tested only on the default boot has not been tested on
+  the software-cursor path; boot `edos-vm start --vga std` for that (VBE has no
+  cursor plane).
+- To resize a window with `edos-vm drag`, aim at its right border: a window listed
+  at `X W` by `edos-vm windows` has it at `X + W`, about 2 px wide.
+- Per-operation kernel logging (mmap, munmap, spawn, ELF load, thread exit) goes
+  through `log_debug!` (`kernel/src/logs.rs`) and is silent unless the command line
+  carries `loglevel=debug`. A grep of `run_log.txt` for per-thread exits returns
+  nothing by default.
+- A program's output reaches `run_log.txt` only through `/dev/klog`: `prog > /dev/klog
+  2>&1`. Test programs report failures through `eprintln!`, so `> /dev/klog` alone
+  shows only the exit code. stderr arrives unbuffered, one write per fragment,
+  interleaved with other logging; reassemble the line, or print failure lines with
+  `println!`.
+- To debug input, log each key event with `edos_lib::io::klog_dump` and read
+  `run_log.txt` rather than inferring from screenshots. A repeated action that sets
+  the same status text as before proves nothing by the status not changing.
+- `edos-vm start` truncates `run_log.txt`, and `run_log.txt` holds only the latest
+  boot. In a loop of boots, or across an install-then-reboot, copy it aside per boot.
+- A hung guest that still has a compositor: open a second terminal from the taskbar
+  launcher and run `cat /proc/<file> > /dev/klog`. `/proc/<tid>/status` (`Parked`,
+  `Sleep Deadline: 0`, unchanging `CPU Time`) separates an indefinite park from a
+  spin or a timed sleep; `/proc/nvme_stats`, `/proc/ahci_stats` and
+  `/proc/inflight_stats` showing zero in flight rule out a lost completion. When a
+  hang is inside a loop over data, log each datum to `/dev/klog` before touching it;
+  that names the datum in one boot.
+- A `SIGKILL` escalation in `edos-vm stop` was tried and refuted. Every harness calls
+  `vm("stop")` under `check=True`, so turning a slow exit into a raised `SystemExit`
+  failed `fs-regression --fat32` outright where plain `SIGTERM` printed "stopped" and
+  carried on. Do not add it without first showing a guest that survives `SIGTERM`.
+- To measure a box's rendered width, take `edos-vm shot`, walk the PNG's rows
+  collecting contiguous runs of the box's background colour, and group runs by
+  `(start_x, width)`. The single widest run is wrong when two boxes share a colour.
+- Attach a disk with no partition table to exercise the partition-scan failure path
+  (every image the tree builds carries a GPT):
+  ```
+  dd if=/dev/zero of=~/.cache/edos/blank.img bs=1M count=8
+  scripts/edos-vm start --extra-disk ~/.cache/edos/blank.img
+  ```
+  The scan logs `GPT parsing failed on device 2: GPT header carries no signature,
+  trying MBR` and the boot continues.
+
+### Remeasure every count before quoting it
+
+| count | how |
 |---|---|
-| `percent-encoding` | +4.5 KB |
-| `+ form_urlencoded` | +6.7 KB |
-| `+ punycode` (RFC 3492 only) | +10 KB |
-| `+ idna` (UTS-46) | +185 KB |
-| the whole `url` crate | +258 KB |
-
-So 93% of the weight is UTS-46, the Unicode mapping and normalisation layer
-above punycode — which is what rejects a confusable hostname rather than merely
-connecting to it. Against `wget` at 2.3 MB and `edos-web` at 5.5 MB, and
-against `rustls` already being in this crate's dependency list, that is not a
-number worth optimising.
-
-Two bugs the port surfaced, both pre-existing and both caught by writing the
-tests the new behaviour deserved:
-
-- **`filename()` never returned `index.html` for a directory**, which is the
-  one case its doc comment promised. It trimmed the trailing slash *before*
-  taking the last segment, so `/a/` and `/a` were indistinguishable and `wget
-  http://h/a/` saved to a file called `a`. The slash is tested first now.
-- **`authority()` produced an unparseable address for an IPv6 literal.** The
-  old parser stripped the brackets at parse time, so `[::1]:8080` came back out
-  as `::1:8080` and `TcpStream::connect` could not split the port off. Brackets
-  are kept where they are the syntax (`authority()`, the `Host` header per RFC
-  7230 §5.4) and dropped where the consumer wants a bare address (`host()`, for
-  the resolver and for SNI).
-
-One deliberate behaviour change: **a fragment is kept on the `Url` and dropped
-from the request target.** The old `join` stripped fragments entirely, which
-silently discarded every anchor link; the RFC's own §5.4.1 expected values
-include the fragment, so the old tests were encoding the implementation rather
-than the spec. `path()` is what goes on the wire and it stops at the query.
-
-The `Url` fields are methods now (`scheme()`, `host()`, `port()`, `path()`)
-because they are derived from the inner URL and a stale public field would be a
-silent liar. Three call sites in `lib.rs` moved; nothing else outside this
-module read them.
-
-
-## Two ways a scheduler measurement lies, both found in one session
-
-Closing the four things EEVDF left open (`doc/SCHED-ROADMAP.md`) needed a
-latency instrument, and building `programs/latbench` produced two readings that
-were confidently wrong in opposite directions. Both are general.
-
-**A fixed number of rounds is not a fixed amount of time.** The sweep counted
-150 sleep-and-measure rounds per slice value and reported the hogs' work over
-that reading. A late sleep stretches the round it is in, so the readings with the
-worst latency ran for nearly twice as long and their hogs got nearly twice the
-real time to work in — and the throughput column climbed 79% across the sweep,
-in exact proportion to the latency it was supposed to be traded against. It
-reads as "a longer slice is faster", which is the answer everybody expects, and
-that is what makes it dangerous. Measured over a wall-clock window instead,
-throughput is **flat to within 3% across a 40x range of slice**. Any benchmark
-whose own subject can lengthen its window has this bug.
-
-**A test that spins for a slice of wall clock does not get a slice of CPU.**
-`burst-share` charges its sleeper's burst in the thread's own CPU time —
-`cpu_time_ns` plus the stretch since `run_start_ns`, since the first is only
-settled at a switch — rather than spinning for `BASE_SLICE` of wall clock. On a
-contended CPU, wall clock is not a proxy for service, and the numbers move by a
-factor when you swap one for the other.
-
-What that change was *believed* to buy is a separate matter and was wrong: it
-was recorded as putting the sleeper "exactly one slice ahead" at the moment it
-sleeps, and instrumenting `RunQueue::record_lag` shows the opposite. The
-sleeper leaves **under**-served, by roughly its own sleep, so the arms separate
-at 1.00x-1.01x with the lag carried and 0.73x-0.91x with it discarded — the
-low side, not the high one. See "`burst-share` was gating the wrong direction"
-in `doc/SCHED-ROADMAP.md`.
-
-The third lesson is the cheapest: **rule out your own scaffolding first.** The
-new `burst-share` threads pinned to a third CPU, which took it out of the pool
-that the rest of the suite is placed across, which piled the suite onto the CPU
-`load-parked-is-not-load` compares against — and that gate started failing one
-run in three. Two kernel changes were reverted chasing it before the test
-itself was suspected.
-
----
-
-## `rwlock-writer` was a flake, and the rendezvous budget was why — FIXED
-
-Seen once in two consecutive `make test AUDIODEV=none` runs at `733fdec`: the
-suite reported `TIMEOUT: 55/56` with a panic from `test_rwlock_writer`,
-`rwlock: readers never overlapped (max 1), so the lock is serialising them like
-a mutex`. The immediate next run was `ALL 56 TESTS PASSED`. Nothing in the
-`BlockingRwLock` is wrong; the test's own synchronisation is.
-
-`test_rwlock_reader` (`kernel/src/thread/sched_test.rs`) takes its read guard,
-bumps `rwlock_concurrent`, then waits for the other readers by spinning
-`thread_yield()` **at most 2000 times**. That bound is deliberate — an rwlock
-that really did serialise readers must fail the assert rather than deadlock the
-suite — but it makes the rendezvous a budget, not a barrier. On the 4-CPU boot
-`make test` uses, the other 55 tests are competing for the same CPUs, so a
-reader can exhaust 2000 yields before its peers are ever scheduled inside the
-lock. It then drops its guard and completes, `rwlock_max_concurrent` never rises
-above 1, and the writer's `observed > 1` assert panics a thread that was
-otherwise correct.
-
-So the failure is a statement about scheduler placement under load, not about
-the lock. Do not chase it into `thread/rwlock.rs`.
-
-**The escape is a wall-clock deadline now** (`RWLOCK_RENDEZVOUS`, 500 ms), so a
-loaded CPU buys more waiting rather than a false negative, while a lock that
-really does serialise readers still fails the assert rather than hanging the
-suite.
-
-One thing was suspected and is *not* settled, so do not record it as cause: the
-charter for the run that saw this predicted that a NEW pinned test stealing a
-CPU would be the trigger, and that run added `prio-inversion`, which queues a
-400 ms mid-priority hog and a priority-15 waiter onto the shared `contend_mask`
-CPU inside a suite that finishes in about 350 ms. The unpinned rwlock readers
-can be placed on that CPU. That is a plausible mechanism for why the budget
-started being exhausted when it had not been before, but it was never tested by
-bisecting `make test` across `8846115`. The deadline makes the test robust
-either way, which is why it was fixed rather than bisected.
-
----
-
-## `fork` under memory pressure panicked the kernel, and the unwind is the work
-
-`clone_user_page_tables_cow` (`kernel/src/memory/cow.rs`) allocated four levels
-of child page tables with `expect`, so a `fork` that ran the allocator dry took
-the machine down instead of failing the syscall. It returns `Option<PhysFrame>`
-now and `sys_fork` answers `ENOMEM`.
-
-The grep pass is the small half. What makes it a real change is that a failed
-walk has already taken frames and already edited the *parent*: intermediate
-tables allocated, and one refcount bump plus a `WRITABLE`-to-`COW_BIT` rewrite
-per leaf PTE. So the walk is split in two — `clone_user_half` builds and
-`free_child_user_half` gives back — and three things make the unwind correct:
-
-- A child entry is only written after the table it points at is allocated and
-  zeroed, so a partial tree is walkable by exactly the same descent, with the
-  unbuilt entries reading as not present.
-- Leaf frames get `dec_refcount`, not `deallocate_frame`. The parent still holds
-  every one of them; the decrement is the exact inverse of the walk's
-  `inc_refcount`, and it is also what keeps an MMIO frame (refcount 0 until the
-  walk touched it) from being freed out from under a mapping.
-- The parent's PTEs keep the COW flags the partial walk gave them, deliberately.
-  With the child's reference gone the frame is solely owned again, so the
-  parent's next write takes one fault and `handle_cow_fault`'s `rc <= 1` branch
-  makes it writable in place. Reverting the flags by hand would be a second walk
-  that can also be interrupted.
-
-The TLB shootdown runs on the failure path too: a partial walk made just as many
-parent PTEs read-only, and a CPU holding a stale writable entry is the same
-hazard either way.
-
-`sys_fork` now clones the page tables *before* deep-cloning the VmaSet. The
-order is load-bearing: the VmaSet clone bumps an SHM refcount per shared VMA,
-and doing it second means a failed clone has nothing but its own tree to give
-back.
-
-`handle_cow_fault`'s allocation failure is the other half. A fault that cannot
-copy a shared page now logs and returns `false`, which routes to the page-fault
-handler's KILL path — the faulting process dies, not the kernel. It is a
-user-mode fault by construction: `idt.rs` only calls it when the error code
-carries `USER_MODE`.
-
-Exercised in the guest with `forktest`, which forks, writes through the COW
-mapping in the child, spawns a grandchild and checks the parent's copy is
-untouched. The out-of-frames path itself is reasoned, not observed: nothing in
-the tree can exhaust the allocator on demand.
-
----
-
-## `/bin/fsck` is the host checker, not a second one
-
-`tools/efs-fsck` is a library plus a six-line binary, and `programs/fsck` links
-that library for the guest. The shape is the one `efs-mkfs` already uses
-(`tools/efs-mkfs` is `efs-mkfs-core`, and `programs/efs-mkfs/src/main.rs` is
-nine lines over it), and it is the reason a verdict cannot drift: the guest's
-`fsck -v` on an image prints the host's output byte for byte, including the
-group census and the dir-tree line.
-
-Three things worth knowing before touching either half:
-
-- The checker uses `std::fs`, `std::io::stdin`, `HashMap` and `std::process`,
-  all of which the forked std already provides, so nothing had to be made
-  `no_std` for this. Only `libs/efs-common` under it ever needed that.
-- `exit_code` and `report` are `pub mod` on the library because the wrapper
-  exits with `FsckExitCode::OperationalError`, and `FsckExitCode` implements
-  `From<&Report>`.
-- The guest binary is `fsck`, so `usage()` takes the program name from
-  `argv[0]`'s file name rather than printing `efs-fsck` at a `/bin/fsck` prompt.
-
-**The trap when verifying it in a guest**: the USB mass-storage disk is
-`/dev/sdc`, not `/dev/sdb`. `sda` is the SATA root and `sdb` is the boot ISO,
-which answers `superblock read failed: bad magic`.
-
-There used to be a second node, `/dev/usb0`, which answered `other error` to
-every read and write and read like a bug in whatever tool touched it. See "One
-device, two nodes" below.
-
-A mounted device is refused through `BLOCK_IOCTL_IS_MOUNTED` rather than
-checked. That is not caution about the root specifically: any mounted device has
-a kernel writing under the checker, and a report read from underneath one says
-nothing.
-
----
-
-## One device, two nodes, and the older one answered every call with an error
-
-A USB stick appeared in `/dev` twice. `/dev/sdc` is the real one: the xHCI
-driver registers a `UsbBlockDevice` in the block-io registry
-(`drivers/usb/block_dev.rs`), which reaches the driver thread over
-`USB_BLOCK_MAILBOX`, and `devfs::block::register_all` gives it a node with byte
-addressing, flush, sector-count, rescan and is-mounted ioctls, plus a partition
-scan. `dd` on it reads and writes.
-
-`/dev/usb0` was a `UsbStorageDevFsNode` whose `read` and `write` were both
-`Err(DevFsError::Unsupported)`, so `dd` reported `other error` on a node that
-advertised a size and a name. Its comment gave the reason — BOT transfers need
-mutable access to the controller and rings owned by the driver thread — and that
-reason stopped being true when the mailbox landed and made `block_dev.rs`
-possible. Nothing removed the stub, so the tree carried a device node whose only
-behaviour was to fail.
-
-The node is gone. A second node that cannot serve the device is worse than no
-second node: every tool pointed at it reports a fault in itself.
-
-The stub also outlived its own scope in a quieter way. `register_usb_storage`
-ran per enumerated device and would have made `/dev/usb1`, while
-`block_dev::register` runs only for the first (`if mass_storage_device.is_none()`).
-A second stick therefore got a node that failed and no node that worked; now it
-gets nothing, which is the honest report of a driver that handles one.
-
----
-
-## A close with no FIN to send has to abort, or the stack talks to nobody
-
-`build_fin` returns `None` from every state that has no graceful shutdown
-available, and an outstanding handshake is the reachable one: a non-blocking
-`connect` that gets `EINPROGRESS` and is then closed. `sys_close` used to drop
-that on the floor, so the connection stayed `SYN_SENT` and the stack went on
-retransmitting a SYN for a descriptor that no longer existed. `netstat` showed
-the entry for as long as the retransmit budget lasted — five retries, about half
-a minute — because the cleanup sweep only reaps `Closed` and expired `TimeWait`.
-
-`TcpConnection::abort` is the RFC 793 §3.5 "delete the TCB" half: clear the
-retransmit queue, go to `Closed`, wake anything parked on the state. `sys_close`
-calls it exactly when `build_fin` declines, so the sweep collects the entry on
-its next pass instead of the timeout doing it.
-
-The measurement is `socktest` followed immediately by `netstat`: the suite
-deliberately connects to an address nothing answers, so a `SYN_SENT` row
-surviving that pair is the defect and an empty table is the fix.
-
----
-
-## A claimed chord is matched exactly, so the shell must match it exactly too
-
-`grab::intercept` compares the modifier mask for equality — `Alt+Tab` and
-`Ctrl+Alt+Tab` are different chords, and claiming one leaves the other with the
-focused window. `edos-wm` was testing `alt_held` as a *subset*, so `Shift+Alt+Tab`
-cycled windows while the kernel, seeing `SHIFT|ALT` against a claim of `ALT`,
-delivered the Tab to the focused program as well. That is the double-delivery the
-grab exists to remove, reachable by a common reflex, and the only thing hiding it
-was the application-side Alt guard — the workaround the grab was meant to
-replace.
-
-The window manager derives one mask from the same modifier table the kernel uses
-and compares it against `CLAIMED_CHORDS` for equality, so the two agree by
-construction: whatever it acts on is exactly what it claimed. Adding a chord
-means adding one row, and reverse cycling on `Shift+Alt+Tab` would be a claim of
-its own rather than a looser test. It also picks up the right-hand Control key,
-which the kernel counted and the shell did not, so `RCtrl+Alt+W` used to be
-withheld from the focused window by a shell that then ignored it.
-
-The check is `scripts/edos-vm windows` before and after: `alt+tab` moves the
-focused row, `shift+alt+tab` must not, and the focused program must see neither.
-
----
-
-## TCP over loopback had never once worked, and non-blocking connect found it
-
-`sys_connect` honours `O_NONBLOCK` now: it returns `EINPROGRESS` as soon as the
-SYN is out, `poll` reports the socket writable exactly when the handshake
-resolves either way, and `getsockopt(SOL_SOCKET, SO_ERROR)` carries the outcome
-once. A second `connect` on the same socket answers for the handshake already
-under way -- `EALREADY` while it is outstanding, `EISCONN` once it succeeded,
-the failure once it failed -- rather than starting another. `Socket::poll_state`
-had reported *every* socket writable unconditionally; the one case that is not
-is a connection in `SynSent`, and that is what makes the poll half work.
-
-**The defect underneath.** `127.0.0.1` was routed correctly -- the stack queues a
-loopback frame and drains it at the outermost `send_ip` -- but both ends built
-their `TcpConnection` with `stack.local_ip`, the interface address, while the
-loopback path rewrites the packet's source to `127.0.0.1`. So the SYN carried a
-checksum computed over `10.0.2.15` inside a header saying `127.0.0.1`, and the
-receiver's `tcp::parse` dropped it. Even had it landed, the reply would have
-missed: `tcp_connections` is keyed by `(local, remote)` and the active side had
-registered itself under the interface address the reply would never name. The
-active side now uses the destination when it is on the loopback net, and the
-passive side uses `ip_hdr.dst_addr` rather than `self.local_ip` -- which is the
-same value for every non-loopback packet, since `handle_ipv4` has already
-dropped anything addressed elsewhere.
-
-Nothing had ever connected to `127.0.0.1` in this system, which is why a
-loopback path that could not complete a handshake sat there looking implemented.
-UDP carried the same defect and is dealt with in the next section.
-
-**The errno list is ABI, so a new code goes on the end.** `SYS_ERRNO` returns the
-`Errno` discriminant, and `edos_rt`'s copy of the enum maps anything past its own
-last variant to `UNKNOWN`. Inserting `EINPROGRESS` beside its relatives would
-have renumbered `UNKNOWN` and every code after it for every program built against
-the published crate, which this repo must not rebuild. New codes therefore append
-after `UNKNOWN`, however odd that reads. A program that must recognise one the
-runtime predates compares raw numbers from `edos_lib::io::last_errno_raw()`
-against `/proc/syscalls`, which publishes the kernel's own name-to-number table;
-`socktest` does exactly that rather than hardcoding 27.
-
-`programs/socktest` covers the whole contract over loopback -- 16 checks, all
-green in a headless guest -- plus one case against an address nothing answers,
-which is the only way to observe `EINPROGRESS` itself: loopback delivers inside
-the sending syscall, so a connect there has already succeeded or been refused by
-the time it returns, and reporting that is correct.
-
----
-
-## UDP carried the same loopback defect, and nothing could see it
-
-`send_udp` checksummed its datagram from `stack.local_ip` while `send_ip_inner`
-rewrote a loopback packet's source to `127.0.0.1`, exactly as TCP had. The reason
-this was invisible where TCP's was fatal: `tcp::parse` takes the two addresses
-and verifies the pseudo-header checksum, and `udp::parse` **took neither and
-verified nothing**. Every UDP datagram this system ever sent to `127.0.0.1` went
-out with a checksum over an address that never appeared on it, and was accepted
-anyway, on this stack and nowhere else.
-
-Three things changed, and the middle one is what makes the other two provable:
-
-- **One rule for the source address.** `NetStack::source_ip_for(dst)` is now the
-  only place that decides it, called by `send_ip_inner`, `send_udp` and
-  `sys_connect`. The rule was previously written out three times and had already
-  drifted twice; a fourth transport must not copy it again.
-- **`udp::parse` verifies.** It takes the source and destination the IP layer
-  carried the datagram under and checks the pseudo-header checksum, mirroring
-  `tcp::parse`. RFC 768 makes the checksum optional over IPv4 and reserves a
-  transmitted zero for "sender computed none", so only a non-zero field is
-  checked. It checksums `data[..length]` rather than the whole payload, because a
-  frame padded to the Ethernet minimum carries trailing bytes the sender never
-  covered.
-- **`udp::build` sends a computed zero as `0xFFFF`**, per RFC 768, since a
-  transmitted zero has that other meaning. Rare, and it would have read as "no
-  checksum" to any conformant peer.
-
-Verified in a headless guest both ways: 16/16 with the fix, and reverting only
-the `source_ip_for` call in `send_udp` puts the new case red
-(`sent Ok(17), received Err(())`) while the other 14 stay green. The DNS half of
-`socktest` answers from 10.0.2.3 across both runs, which is the check that
-matters for the new verification -- a receive-side checksum test that is wrong
-drops real traffic, and this one does not.
-
----
-
-## Where the tree stands at the end of 2026-08-12
-
-**Released as v0.4.0** at `57cc13d`, tagged and pushed, with `edos-x86_64.iso`
-and `SHA256SUMS` attached; `sshd` is what it is named for. v0.3.0 before it is
-annotated as data-losing, as is v0.2.0, which loses file data on fragmented
-writes -- anything on either ISO should be replaced. The site was rebuilt and
-deployed for v0.4.0; the counts it carries are the ones in the "Counts,
-remeasured" section below, which have since moved again and are marked there.
-
-The version is set in exactly one place now, `kernel/Cargo.toml`. Four strings
-carried it before and none matched the released tag, so a running system
-misreported itself by two releases. `/proc/version` renders `EDOS <release>
-<machine>` from `CARGO_PKG_VERSION`, and `uname` and the shell banner read it.
-Do not reintroduce a literal.
-
-The images ship stripped binaries, dev builds included, and the ISO is 74.5 MB
-where it was 193 MB. The trap is that `--artifact-dir` **hardlinks** into
-`filesystem/bin`, so the installed copy and the one under
-`programs/target/x86_64-unknown-edos/` are the same inode: stripping in place
-takes the debug info `addr2line` needs with it. `programs/Makefile` runs
-`objcopy --strip-debug` into a new file and moves it over, which breaks the link
-and leaves `target/`'s copy whole. Do not replace that with a plain `strip`.
-
-`--strip-debug` rather than `--strip-all`, since keeping `.symtab` costs about
-13% (edos-wm 644K against 557K). Debug builds are stripped because nothing reads
-a guest binary's debug info: `addr2line` is pointed at `target/`, `strace` names
-calls from the kernel's own table, and there is no debugger in the guest.
-
-What is left is mostly the live root, and the lever on it has changed. The
-`live-root.img` recipe in `GNUmakefile` takes 1.4x the tree and then raises that
-to a 64 MiB floor, and stripping put the tree at 25 MiB, so 1.4x is 35 MiB and
-**the floor is now what sets the size**, not the multiplier. Lowering it is the
-next lever, bounded by how much a live session needs to be able to write, since
-the live root is the whole writable filesystem until someone installs.
-
-Every gate is green and re-run at this commit: `make -C kernel check` and
-`cargo check --features sched-test` are warning-free, both `cargo fmt --check`
-and `cargo +edos fmt --check` exit 0, `make test AUDIODEV=none` is **ALL 51
-TESTS PASSED** (run twice, because `ping-pong` is a known flake), the desktop
-boots to a shell prompt under `make run-headless`, `iotest /var` is 20/20 in
-the guest, and `scripts/fs-regression` passes across a reboot on both EFS and
-FAT32.
-
-The write-path data loss that dominated the last third of the session is
-**fixed**: EFS zeroed a newly allocated block through the journal, and that
-copy could land on the home block after the direct data write. A host scan of a
-`fsbench fragprep` disk is now 8192/8192 blocks byte-perfect (it was 467
-missing). The mechanism, and the four diagnoses that were refuted on the way to
-it, are further down this file — read those before re-opening anything about
-fragmented-file reads.
-
----
-
-## Journal replay never worked, and the suite could not have told you
-
-`read_ring_block` in `fs/journal/replay.rs` built its LBA without
-`partition_start_lba`, while the home-block write in the same function added it.
-EFS block numbers are partition-relative, so the ring was read 2048 sectors
-before the partition on a GPT disk: nothing parsed, and every unclean mount
-logged `no committed transactions to replay` and discarded the metadata the
-journal was holding. Recovery has never applied a transaction.
-
-A second bug surfaced the moment the first was fixed: pass 1 stopped when a
-header failed to parse and never consulted `head_block`. Past the head on a
-wrapped ring sits an *older* transaction that parses perfectly, so replay applied
-it and rolled metadata backwards. Both are fixed, and the home-block writes are
-queued now rather than one round trip each. Full writeup in
-`doc/bugs/2026-08-12-journal-replay-read-the-wrong-lba.md`.
-
-**The part worth keeping is how to test recovery at all.** `fs-regression`
-passing across a reboot proves nothing here, because a clean unmount has nothing
-to replay.
-
-Every power cut mid-workload used to give `clean, no replay needed`, which was
-read as writeback checkpointing promptly enough that nothing was left to
-replay. That reading was wrong, and it hid a data-loss bug: the journal
-superblock was only written from `advance_tail`, so it reported clean whenever
-the system was quiescent, and every transaction committed after that point was
-invisible to recovery. `clean, no replay needed` was an assertion about the
-superblock, not about the ring. Post-mortem in
-`doc/bugs/2026-08-12-journal-recovery-never-saw-committed-work.md`; replay now
-bounds its scan by sequence continuity instead of by the persisted head, and
-`make recovery-check` is the regression.
-
-Both halves of that are now arranged deliberately rather than waited for:
-`/dev/journal-ctl` (kernel feature `fault-inject`) pauses checkpointing so
-committed transactions stay in the ring, and `make journal-test.img` builds a
-scratch EFS with a 256-block ring that a metadata workload wraps in seconds
-instead of the 4095 blocks a default journal takes. `make run-recovery` boots
-both together. The procedure, and the host-side superblock rewind that predates
-it with its two off-by-one traps, are in `doc/journal-recovery-test.md`.
-
-### Orphan inodes after a power cut were the missing orphan list, not an ordering bug
-
-The suspicion was that `EfsDriver::write_block` breaks write-ahead ordering: it
-calls `write_page` to put the block at its home location and *then* enrols it in
-the transaction. It does not. `write_page` leaves the page dirty in the cache, and
-`flush_dirty_once` skips any page whose `checkpoint_tracker` entry names a
-sequence above `committed_seq`, so enrolled implies held-until-commit.
-
-There is a hole, and it is cache pressure rather than logic: a shard with no
-evictable victim hands back a *detached* page, which is invisible to writeback and
-therefore written straight to the device ahead of the commit.
-`read_page_for_write` already drains and retries to avoid that, and the hole
-**measured zero**: a full `fsbench all /var` reports `detached_fallbacks: 0`, with
-1.3M hits, 52 misses and no evictions at all, because 64 shards of 256 pages never
-fill against that working set. Reachable in code, unreached in practice.
-
-The actual answer was in the same counter dump, one line down:
-`efs_stats.orphans_marked +503`. `vfs::remove_file` implements Linux unlink
-semantics — detach the dentry, free the inode only when the last `Arc<VfsInode>`
-drops — so between those two points the disk *deliberately* holds an allocated
-inode that nothing names, and the only record of that intent was the in-memory
-orphan mark. **EFS had no on-disk orphan list**, so every unclean shutdown inside
-the window stranded inodes that only `efs-fsck --repair` could reclaim.
-
-The width of that window was already measured and written down, in
-`doc/STORAGE-ROADMAP.md`'s note on reading `/proc/efs_stats`: fsbench prints its
-counter deltas *before* closing its descriptors, so `orphans_dropped` reads **0
-mid-run and 513 afterwards**. Those 513 inodes are unlinked-and-still-open for the
-length of the run, which is to say a power cut anywhere in it stranded all of them.
-~52 after an iotest crash is the same thing on a smaller workload.
-
-### The orphan chain closes it
-
-ext3/4's `s_last_orphan`, adapted: `superblock.last_orphan` heads a chain threaded
-through a new `EfsInode::orphan_next`, both `u32`, both taken from reserved space
-so an older image reads as a chain of length zero. `COMPAT_ORPHAN_LIST` announces
-it; compatible rather than incompatible because a driver that ignores the chain
-still reads and writes correctly, it just strands what the chain names — which is
-precisely what every driver did before. Format spec in `doc/efs.md` §14.
-
-Three rules make it airtight, and each one is a transaction boundary:
-
-- `remove_file` links the inode in **in the transaction that removes its directory
-  entry**. Anything looser is a window of its own.
-- `evict_inode` unlinks it **in the transaction that frees its storage**. Those two
-  together are what "this deletion finished" means on disk.
-- Mount walks the chain and completes every deletion on it, **after replay** —
-  replay is what restores the chain the committed transactions describe.
-
-`orphan_add` also zeroes `link_count`, since the inode has no names left and a
-checker reads a non-zero count as a name it cannot find, and it takes `inode_rmw`
-before rewriting the inode: an unlinked file can still be written through an open
-descriptor, and a concurrent `update_size` that read the inode first would
-otherwise put its copy back and take the chain link with it, truncating the chain
-and stranding everything below that inode.
-
-The cost is one extra journalled block per unlink — the superblock, carrying the
-new head — because the head has to be durable in the transaction that removes the
-directory entry. There is no cheaper place to put it. Two things fell out of
-writing it: `write_superblock` now stamps the checksum on every write, which it
-never did before (`free_blocks` moves on every allocation, and that is why a live
-image so reliably had `efs-fsck` reporting a repairable superblock CRC mismatch),
-and `efs-fsck` re-reads the superblock and BGDs after a replay, which it also never
-did — replay writes block 1, so every phase below it was reading pre-crash values.
-
-`make orphan-check` is the regression, and it is the shape the old note asked for:
-`programs/orphantest` holds N unlinked-but-open files, the harness cuts power,
-and the run fails unless the remount reclaims exactly those N and `efs-fsck` then
-finds nothing unnamed. First green run: `efs: freed 8 orphaned inode(s) left by an
-unclean shutdown`.
-
-`efs-fsck` tells the two cases apart now. An inode on the chain is a deletion the
-filesystem committed to, so `--repair` finishes it with no prompt; an unnamed inode
-*not* on the chain is a leak of unknown provenance and still gets the destructive
-prompt. Both directions are pinned by tests that were watched to fail when the
-chain is ignored and when everything is treated as chained.
-
-Two real defects turned up on the way and are fixed:
-
-- **`write_page` was the only write path that bypassed `read_page_for_write`.**
-  `write_partial_page` and the byte-range writer both acquire through it and so
-  inherit the drain-and-retry; `write_page` — the one path carrying journalled
-  metadata — did its own inline get-or-create and would take a detached page on
-  the first try. It now acquires through `read_page_for_write` with
-  `Fill::Overwrite`, which also skips a pointless fill of a page about to be
-  overwritten entirely.
-- **`write_block` enrolled a page it had not written.** It wrote through
-  `write_page` and then called `read_page` for the *same key* to get something to
-  enrol. Those are not always the same page: on the detached path the lookup reads
-  the block back off the platter and enrols that, so the journal records the bytes
-  on disk rather than the bytes being written. `write_page` returns its guard now
-  and `write_block` enrols exactly the page it filled.
-
-`/proc/block_cache` gained `journalled_write_through`: detached pages written to a
-home location on a device that has a journal, i.e. actual ordering violations,
-counted rather than assumed rare. Read it before blaming ordering for anything.
-
-### efs-fsck had all three bugs too, because replay was written twice
-
-The kernel's fixes did not reach the checker: `tools/efs-fsck/src/replay.rs` was
-a hand-port of the same algorithm, so every kernel fix needed porting by hand and
-none had been. It bounded dirtiness by `tail_seq != head_seq`, walked past
-sequence breaks into the stale far side of a wrapped ring, and added the
-partition offset to home blocks that already carried it — the last being 4d41393
-verbatim, in the tool that is supposed to be the canonical recovery path, where
-`--repair` would have scattered replayed metadata `--partition-offset` bytes up
-the disk. It also retired the ring to the persisted head, so a checked image
-still asked the kernel to replay what fsck had just applied.
-
-The fix is structural: the ring walk is `libs/efs-common/src/journal_scan.rs`
-now, called by both, with only block I/O left on either side. The ring *writers*
-moved with it (`journal_build.rs`), which is what lets the fsck tests plant a
-real committed transaction using the same code the kernel writes one with.
-
-Two rules fell out of this and are in `doc/efs.md` §14:
-
-- **The head cursors are advisory.** `head_seq` names the open transaction, so a
-  healthy journal sits a sequence ahead of its tail; a crash between a commit and
-  the superblock write leaves them equal with committed work in the ring. Nothing
-  may decide dirtiness from them or bound a scan by them.
-- **`DescriptorEntry::fs_block` is device-absolute.** Ring blocks are
-  partition-relative and need the offset added; home blocks already carry it.
-  Three bugs have now come from those two domains both being `u64`.
-
-Each of the four is covered by a test in `tools/efs-fsck/tests/integration.rs`
-that was **watched to fail** with the defect reintroduced. The old journal tests
-asserted the wrong rule — they used a JSB with an advanced head over an empty
-ring and expected "journal is dirty" — so they were replaced rather than kept.
-
----
-
-## The newest committed transaction was never retired, so `sync` never converged
-
-`sys_sync` loops commit, flush, `advance_tail` to a fixed point, up to
-`SYNC_MAX_ROUNDS` (8), and warned `journal still pending after 8 rounds` when it
-gave up. It gave up on **every call**, and the reason was an off-by-one in what
-`advance_tail` is allowed to retire.
-
-`min_journaled_seq` is the oldest sequence that still has a block waiting to
-reach its home location, taken as the minimum of `checkpoint_tracker`. The retire
-loop pops while `seq < min_journaled_seq`. When the tracker is *empty*, nothing
-is waiting and every committed transaction is retirable, but the fallback was
-`unwrap_or(committed)`, which makes the bound the newest committed sequence
-itself. That transaction therefore never popped: `committed_pending` kept one
-entry forever, `needs_checkpoint()` stayed true, and `sync` burned all eight
-rounds. The fallback is `committed.saturating_add(1)`.
-
-Two costs, both paid on every `sync`: eight flush passes where one would do, and
-a mount that replays a transaction whose blocks are already at home.
-
-`/proc/journal_stats` gained `sealed`, `pending` and `tracked` so this is readable
-rather than inferred. It is the shape to look for: `pending` stuck non-zero while
-`tracked` is 0 means transactions are committed and fully checkpointed but not
-retired. After a plain `sync`, before and after the fix:
-
-```
-sealed: 0   pending: 1   tracked: 0      <- pinned
-sealed: 0   pending: 0   tracked: 0      <- fixed
+| syscalls | rows in `kernel/src/syscalls/table.rs`; `/proc/syscalls` publishes the same list |
+| userspace programs | `members` in `programs/Cargo.toml` that carry a binary; `edos_lib`, `edos_render` and `edos_http` are libraries |
+| binaries in `filesystem/bin` | `ls filesystem/bin \| wc -l`. It differs from the program count: `edos-edit` is packaged, not imaged; `gunzip` is a second `[[bin]]` of `gzip`; `ctest` comes from `libs/libgloss-edos` |
+| Rust lines | `tokei -t=Rust` at the repo root (honours `.gitignore`); read the `Rust` row, not `(Total)` |
+| kernel Rust | `tokei -t=Rust kernel/src` |
+| commits | `git rev-list --count <rev>`, stating the rev |
+| in-kernel tests | `make test AUDIODEV=none` and `make test-single AUDIODEV=none` |
+| host unit tests | `make host-tests`, then sum the `test result: ok. N passed` lines; there is no single total |
+| guest suites | `SUITES` in `scripts/guest-check` |
+| `nvme-check` cases | the `case_*` functions in `scripts/nvme-check` |
+| `unwrap()`/`expect()` | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l`; the leading dot excludes `#[expect(...)]` |
+
+A matching count is not a matching inventory. Diff sets, not totals:
+
+```bash
+sed -n '/members = \[/,/\]/p' programs/Cargo.toml | grep -oE '"[^"]+"' | tr -d '"' | sort > members.txt
+sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | tr -d '`' | sort -u > tabled.txt
+comm -3 members.txt tabled.txt   # only `gunzip` is expected
 ```
 
-Verified with `make storage-check`: `fs-regression` OK on EFS and FAT32 across a
-reboot, `fsbench-run /var` OK, and zero occurrences of the warning in a run that
-produced it reliably before.
+`SYS_ERRNO` is written `0x400`, so a decimal-only regex over syscall numbers misses it.
+The site at `/usr/src/edos-web` carries the same counts (`src/pages/index.astro`
+`TREE`, `src/content/docs/architecture.md`, `userspace.md`, `introduction.md`) and the
+whole syscall table in `src/data/syscalls.ts`. Deleting dead code moves line figures
+without touching any inventory, so reread them whenever the repo's counts move.
 
-### The 275-second `fsbench all /var` hang, and why it is probably gone
+### `make host-tests` is the userspace suite
 
-That warning was the suspect behind the recorded hang, and the two turn out to be
-different bugs. The hang did not reproduce here (`fsbench all /var` completed in
-16.2 s), and the mechanism that fits it is the missing barrier described in the
-next section: `force_commit_and_wait` waits on `commit_wq`, whose producer stores
-`committed_seq_pub` with a plain `Release` store and then wakes. That is a third
-instance of the barrier-free has-waiters pattern, and because the wait carries a
-30 s timeout a lost wake costs 30 s rather than hanging outright. Eight rounds of
-that is 240 s, against the 275 s of silence in the report.
+`scripts/host-tests`' header states the three mechanisms and the stale-binary trap.
+Nothing discovers test modules: adding one means adding its crate to the `-p` list,
+its lib to the `libs/` loop, or its file to `STANDALONE`. Crates under `libs/` are in
+no cargo workspace, because they are shared with a kernel built for
+`x86_64-unknown-none`, so nothing builds or tests them for the host unless that loop
+names them; adding them to a workspace is not an option.
 
-Treat it as explained but not proven: the report predates the has-waiters check
-entirely, so a lost wake cannot be the *original* cause. Something with the same
-shape and the same 30 s timeout is the place to look if it returns.
+Coreutils that depend on `edos_lib` build only for `x86_64-unknown-edos`. The fast loop
+for them is `cd programs && cargo +edos check --target x86_64-unknown-edos -p wc -p
+sed ...` (about a second warm, no image rebuild); expected output must then be checked
+in the guest. A tool with no `edos_lib` dependency compiles natively (`rustc +nightly
+-O --edition 2024 -o /tmp/wc programs/wc/src/main.rs`) and runs on the host exactly as
+the guest would; check its `Cargo.toml` first.
 
----
+### `sccache` serves stale artifacts after the std fork is rebuilt
 
-## A `SeqCst` load is not a barrier, and that is where a has-waiters check goes wrong
+`CLAUDE.md` "Toolchain caveat" has the mechanism and the `rm -rf programs/target` plus
+`SCCACHE_RECACHE=1 make programs` pair. `SCCACHE_RECACHE=1` alone leaves the poisoned
+`target/` looking fresh. Three more toolchain traps:
 
-`WaitQueue::wake_one`/`wake_all` skip the wake path when the enrolled-waiter count
-reads zero. The count itself is exact, written to `inner.len()` under `inner`. The
-problem is what the producer published just before reading it.
+- Before a full `./x install`, run `./x check library/std --target
+  x86_64-unknown-edos` in `~/dev/rust`. It takes seconds and catches compile errors;
+  only behavioural failures need the install loop.
+- After bumping the `edos_rt` pin, `./x install` can rebuild nothing: bootstrap does
+  not notice the lockfile change and reports success in seconds, and userspace keeps
+  linking the old std. `touch library/std/src/lib.rs` first. A build that finishes far
+  too quickly after a dependency bump has not done what was asked.
+- `./x check library/std` can fail with hundreds of `E0514: found crate core compiled
+  by an incompatible version of rustc` when stale rmeta sit under
+  `build/x86_64-unknown-linux-gnu/stage1-std/x86_64-unknown-edos/`. Delete that one
+  directory; it rebuilds in about 30 s. Do not run `./x clean`, which discards the
+  whole build tree including the downloaded CI LLVM. The installed `+edos` toolchain
+  lives under `install.prefix` in `bootstrap.toml`, outside `build/`.
 
-The check replaced an `inner.lock()`, and that lock was doing invisible work: its
-`lock cmpxchg` is a full barrier on x86, so a producer's publication could never
-sit in the store buffer while the queue was inspected. A bare atomic read has no
-such barrier, and **`Ordering::SeqCst` does not supply one on a load**; the
-barrier rides on `SeqCst` stores. Checked against real codegen:
+### `edos_rt` and the std fork
+
+The publish loop is in `CLAUDE.md` and `doc/rust-fork-rebase.md`; the allocator design
+is `doc/design/allocators.md`.
+
+- The `~/dev/edos_rt` clone can lag crates.io: releases have been published from a
+  tree that never reached `github.com/edg-l/edos_rt`, and patching the clone then
+  reverts them silently. Diff it against the published crate before editing:
+  ```
+  curl -sL -o rt.crate https://static.crates.io/crates/edos_rt/edos_rt-<version>.crate
+  mkdir -p rt && tar xzf rt.crate -C rt --strip-components=1
+  diff -ru rt/src ~/dev/edos_rt/src
+  ```
+  Use `static.crates.io`. The `crates.io/api/v1/.../download` form answers with a
+  refusal as a 200 with a JSON body, which surfaces two commands later as `gzip:
+  stdin: not in gzip format`.
+- Test an `edos_rt` change through a `[patch.crates-io]` path override onto
+  `~/dev/edos_rt` before publishing; a crates.io version cannot be withdrawn.
+- Run `bench/allocstress` in the `edos_rt` repo before publishing. It builds the
+  allocator against a shimmed `mmap` on the host and fails if the pool does not
+  plateau, freeing everything does not return memory, an over-aligned large request
+  comes back misaligned, the heap's tags and bins disagree, or cost tracks the live
+  population. It has stopped compiling unnoticed before; check it builds.
+- The inline syscall wrappers declare argument registers `inout(...) => _`, not
+  `in(...)`: a syscall that parks resumes through the scheduler, so registers are not
+  preserved.
+- A type owning a kernel descriptor has four rules. `into_raw_fd`,
+  `IntoInner<OwnedFd>` and `From<FileDesc> for OwnedFd` must `mem::forget(self)`. An
+  explicit `close(self)` must not also close in `Drop` (`FileDesc::close` is a no-op
+  that lets `Drop` do it). Dropping a pipe end changes when a read returns zero, and
+  `edos-sh` pipelines, `sshd` and `edos-init` all depend on the parent closing the end
+  it handed to the child (`stdtest`'s `Command::new("/bin/echo").output()` exercises
+  it). Stdio holds no `FileDesc`, so nothing closes the terminal under a program.
+- `strace -e openat,close,read <prog>` finds a descriptor leak: `openat` numbers that
+  climb by one per call with no `close` between.
+
+### Build traps
+
+- make runs recipes under `/bin/sh`, which is dash on Debian: no brace expansion.
+  `mkdir -p filesystem/{bin,dev}` creates one directory named `{bin,dev}` and succeeds.
+  The `filesystem` rule uses `$(addprefix filesystem/,$(FILESYSTEM_DIRS))`.
+- A file generated into `filesystem/` must depend on its generator and nothing else,
+  as `$(WALLPAPERS): scripts/mkwallpaper.py` does. `filesystem/.manifest` records
+  mtimes, so regenerating an unchanged file every build rebuilds both disk images
+  every build.
+- `make edos-x86_64.iso` re-invokes the kernel build without any `CARGO_FLAGS` given
+  to an earlier kernel build, replacing an instrumented kernel with a plain one. Pass
+  `CARGO_FLAGS` to the ISO target itself.
+- `cargo check` or `cargo clippy --manifest-path kernel/Cargo.toml` from the repo root
+  uses the root `rust-toolchain.toml` (plain `nightly`), not `kernel/rust-toolchain.toml`
+  (a pinned nightly), and fails with `x86_64-0.15.4` not implementing
+  `Step::forward_overflowing`, which does not look like a toolchain mismatch. Use
+  `make -C kernel check` / `make -C kernel clippy`.
+- Cargo finds `.cargo/config.toml` relative to the working directory, not to
+  `--manifest-path`. `cargo +edos clippy --manifest-path programs/Cargo.toml` from the
+  root loses `programs/.cargo/config.toml` (default target, rustflags). `cd programs`
+  first, as `make clippy` and CI do.
+- The version lives only in `kernel/Cargo.toml`. `/proc/version` renders it from
+  `CARGO_PKG_VERSION`, and `uname` and the shell banner read that. No version literal
+  anywhere else.
+- `cargo --artifact-dir` hardlinks binaries into `filesystem/bin`, sharing an inode
+  with `programs/target/x86_64-unknown-edos/`. `programs/Makefile` runs `objcopy
+  --strip-debug` into a new file and moves it over, which breaks the link and keeps
+  `target/`'s copy symbolised for `addr2line`. An in-place `strip` would destroy it;
+  `--strip-all` would drop `.symtab`.
+- `live-root.img` is sized at 1.4x `filesystem/` with a 64 MiB floor (`GNUmakefile`).
+  With stripped binaries the floor tends to set the size, so the floor is the lever,
+  bounded by what a live session must write.
+- A `shipped = false` program (`pkg.toml`; currently `edos-edit`) is moved from
+  `filesystem/bin` to `pkgstage/bin` by `programs/Makefile` after every build, and
+  every image target depends on `programs` through `filesystem/.manifest`. Copying it
+  back and running `make nvme-disk.img` undoes the copy. To stage one into the guest,
+  copy it after the last program build and run the image recipe's `sgdisk` and
+  `efs-mkfs --populate` by hand.
+- `cargo test` in `tools/efs-fsck` runs `tools/efs-fsck/target/release/efs-fsck`
+  (`tests/common/mod.rs::fsck_bin`), which only `make efs-fsck` rebuilds. Without it, a
+  revert-and-watch-it-fail check passes both ways.
+- `scripts/edos-vm start` rebuilds an image only when it is older than
+  `filesystem/.manifest`, which a change to `tools/efs-mkfs` or `libs/efs-common` does
+  not touch. The image make rules list those sources, so gates rebuild; a bare `start`
+  does not. Run `make nvme-disk.img sata-disk.img` after changing either.
+- `alloctest` never exits by design. Anything running the test binaries in sequence
+  hangs on it.
+- `sg` is also the ast-grep binary. Scripts wanting the group tool use `/usr/bin/sg`,
+  as `scripts/edos-vm` does.
+
+### Lints, warnings and dead code
+
+- A file-level inner attribute (`#![expect(unused)]`, `#![allow(dead_code)]`)
+  silences that lint for the module and every child, while errors still surface, so
+  the file looks checked. Before trusting a clean gate on a file, add `let
+  gate_probe_unused = 5;` to a function in it and confirm the build names it. Audit
+  with `grep -rl '^#!\[expect\|^#!\[allow' kernel/src`. Only whole-spec register
+  transcriptions (`hda/regs.rs`, `e1000e/regs.rs`, `ahci/fis.rs`) carry one.
+- Kernel dead-code suppressions are `#[expect(dead_code, reason = ...)]` plus three
+  `cfg_attr(not(feature = ...), allow(dead_code, ...))` for feature-only items
+  (`util/ring.rs`, `thread/sched_prof.rs`, `thread/thread.rs`). Check every feature
+  set before deleting: default, `sched-test`, `trace`, `sched-prof`.
+- A suppression on a whole `impl` block covers every method in it, present and
+  future. Put suppressions on items.
+- A trait default method with no callers hides its overrides: deleting the trait
+  method surfaces them, and only then do the fields they read show as unused.
+- An item read only through a derived `Debug` counts as dead; so does a DMA buffer
+  the hardware reaches by physical address (`UsbDevice::output_ctx`, whose address sits
+  in the DCBAA). The uaccess fault-resume label is armed from `do_user_copy`'s inline
+  assembly via `setup_fault_resume`, which no Rust caller names. A constant that looks
+  dead is often a magic number open-coded elsewhere: grep for its value first.
+- `pub` items in a library crate are invisible to the dead-code lint. So an
+  `#[expect(dead_code)]` there is unfulfilled (delete it), and unused toolkit API is
+  found by grepping for callers.
+- Clippy and rustc replay cached diagnostics. `touch src/main.rs` between feature-set
+  checks, before `cargo clippy --fix`, and before measuring a lint with `-W` or
+  `--force-warn`; otherwise a warm tree answers 0 or "no change".
+- `cargo clippy --fix` reverts the whole batch if any suggestion fails to build.
+  `useless_format` rewrites `format!("literal")` to `"literal".to_string()` without the
+  `alloc::string` import a `no_std` crate needs. Drive it one lint at a time: `-- -A
+  clippy::all -W clippy::<lint>`.
+- Suggestions that do not compile: `manual_memcpy` on a `#[repr(packed)]` field
+  (`LfnEntry`) proposes `copy_from_slice`, which is E0793; assign the whole array. A
+  `///` block separated from the next item by a blank line still documents that item;
+  a module-level table belongs in `//!`.
+- Measure a lint across the kernel before adopting it:
+  ```
+  cd kernel && touch src/main.rs
+  cargo clippy --target x86_64-unknown-none -- -W clippy::<lint> 2>&1 | grep -cE '^\s+--> '
+  ```
+  `--message-format short` drops the lint name, so count the `-->` lines. The count is
+  default-feature only; blocks inside macros that expand to nothing without a feature
+  (`trace_event!` under `--features trace`) are seen only by `make -C kernel clippy`,
+  which loops over every feature set.
+- Count clippy findings by exit code under `-D warnings`, not by grepping
+  `^warning:`: some messages start with a backtick, and a deny-level lint aborts before
+  the rest are reported.
+- `allow_attributes_without_reason` fires on `#[expect]` as well as `#[allow]`. Count
+  reasonless suppressions with clippy, not grep: a multi-line `#[expect(\n dead_code,\n
+  reason = "..."\n)]` defeats `grep -v reason`.
+- `clippy::too_many_arguments` is on in both trees, with per-site `#[expect]` where it
+  fires. `git grep -c too_many_arguments -- '*.rs'` is the reproducible count.
+- `programs/` is a workspace; `libs/` and `tools/` are not. `[workspace.lints.clippy]`
+  in `programs/Cargo.toml` reaches only members with `[lints] workspace = true`; a new
+  program without that line is silently unlinted. `libs/` and `tools/` packages carry
+  their own `[lints.clippy]`. `cargo clippy --all-targets` in `tools/efs-fsck` has
+  findings no gate reads.
+- Moving a program to edition 2024 stabilises let chains, and `collapsible_if` then
+  flags `if cond { if let ... }` pairs.
+- A sweep for plan vocabulary in comments ("Phase N") also hits real machine state:
+  `thread/interrupt.rs` (the switch's two halves on different stacks),
+  `drivers/usb/xhci/mod.rs` (config descriptor header then full fetch), and the NVMe
+  completion-queue phase bit in `drivers/nvme/queue.rs` and `debug/lock_order.rs`.
+  Leave those.
+
+### Writing `// SAFETY:` comments
+
+`doc/rust-style.md` has the rule and the lint. What each kind of code has to argue:
+
+- MMIO `read_volatile`/`write_volatile`: the mapping that produced the pointer (for
+  example BAR0, mapped in `NvmeController::new`), natural alignment inside it, and that
+  `volatile` is there because the device changes the value.
+- Port I/O: who else drives the port. `pci/config.rs` is the only user of 0xCF8/0xCFC,
+  and `PCI_CONFIG_LOCK` keeps the address write and data access together, so the lock
+  is load-bearing to soundness.
+- Per-CPU state (`util/per_cpu.rs`, `sched()`, control-register writes in `fpu.rs`):
+  argue migration, not validity. The pointee is `'static`; the risk is touching the CPU
+  the thread left.
+- DMA buffers: the load-bearing half is why the device is not touching the buffer now.
+  Submit side, the command is not yet issued; completion side, the slot's `SACT` bit
+  cleared or `wait_for_completion` returned; `e1000e`, the NIC owns only `[RDH, RDT)`.
+  If that clause cannot be written, the code is wrong.
+- Bring-up (`gdt::init_current_cpu`, `smp::ap_start`, `boot::kmain`): "nothing else
+  exists yet", which stops being true if the function is ever called twice.
+- `restore_fpu_state`: `FXRSTOR` raises #GP on a reserved `MXCSR` bit, so the image
+  must come from `save_fpu_state` or `init_fpu_state`; that is why
+  `FpuState::default` writes `MXCSR_DEFAULT`.
+- uaccess call sites: the helpers null-check, `access_ok` and fault-trap the user
+  side, so the comment argues the kernel side and names the bound: the source slice's
+  own length, a clamp (`data.len().min(count)`), a `written + needed <= size` check,
+  or a `T: Copy` of plain integer data.
+- `read_unaligned` of a `repr(C)` on-disk struct: the loop or modulo bounds `offset +
+  size_of::<T>()` by the buffer; `read_unaligned` needs no alignment; `efs-common`
+  asserts the type's size, which rules out padding.
+- A page-cache frame through `CachedPage::as_slice_mut` (takes `&self`): the page
+  cache supplies no exclusion. Claim the pin, and name who supplies exclusion
+  (`write_lock` for `block_page_cache`, the inode write lock for `zero_tail`).
+- A trait impl method's `# Safety` says which part of the trait's contract this impl
+  leans on (`GlobalAlloc::dealloc` may free on another CPU, since
+  `try_percpu_dealloc` derives the size class from `layout` alone). An `extern "C"`
+  entry point's contract is who enters it and how many times.
+
+Placement and shape:
+
+- The `// SAFETY:` goes on the line directly before the `unsafe` block's expression,
+  not before the enclosing statement. A misplaced comment gets the same diagnostic as
+  a missing one. For `match unsafe` after a `let`, it goes between `let x =` and
+  `match` (as in `memory/fault.rs`). Converting `a && unsafe { .. }` to a `let` keeps
+  short-circuiting; the same rewrite on `||` or an operand with a side effect needs
+  checking.
+- Each `unsafe impl` needs its own comment; one above a `Send`/`Sync` pair leaves the
+  second flagged.
+- Do not write the literal `SAFETY:` above a `mod` item: `unnecessary_safety_comment`
+  reads it as a safety comment on a module and the build fails.
+- Say a shared argument once: one comment above a group, then `// SAFETY: see the
+  note above this group.` on each block. `cargo fmt` re-indents those one-liners, so
+  grep them by text.
+- Split a wide `unsafe` block down to the operations that are unsafe; a wide block
+  hides which one the reader should check.
+- Check whether the operation needs `unsafe` at all. `core::mem::zeroed()` on a
+  `#[repr(C)]` integer struct is `#[derive(Default)]`.
+- A helper that checks its bound is worth writing; one that only moves the block is
+  not. `drivers/virtio/gpu.rs` has safe `write_at`, `zero_at` and `read_at` over
+  `DmaBuffer`, each asserting the range, with `read_at`'s `T` bounded by the private
+  `unsafe trait DeviceResponse`.
+- Any index or length from a device or userspace that forms a pointer needs a bound in
+  between. `Virtqueue::poll_used` (`drivers/virtio/queue.rs`) refuses a used-ring `id`
+  at or above the queue size before `reclaim` walks the table with it. QEMU never sends
+  one, so no test catches its absence.
+- A safe fn carrying a `# Safety` section is ruled out, and clippy's
+  `unnecessary_safety_doc` misses it on private items. Find it with `grep -B8 '#
+  Safety' | grep -v 'unsafe fn'`.
+
+## Scheduler, threads and synchronisation
+
+### A `SeqCst` load is not a barrier, and that is where a has-waiters check goes wrong
+
+`WaitQueue::has_waiters` opens with `fence(Ordering::SeqCst)`. A `SeqCst` load alone
+lowers to a bare `mov` on x86; the barrier rides on `SeqCst` stores:
 
 ```asm
 producer:                       waiter_publish:
@@ -1215,10695 +495,913 @@ producer:                       waiter_publish:
   movq  (%rsi), %rax ; load       movzbl (%rdx), %eax  ; predicate
 ```
 
-One side fenced and the other not is the store-buffer litmus, and it lets both
-read stale: the producer sees no waiters and skips the wake, the waiter sees no
-data and parks forever.
-
-Most producers were safe by accident. A pipe holds the same mutex the waiter's
-predicate re-takes, and `BlockIoHandle::complete` publishes with a
-`compare_exchange`, which is `lock`-prefixed. Two were not:
-
-- `PageFillHandle::finish_success`/`finish_failed` (`fs/page_fill.rs`) store the
-  terminal state `Release` and then wake. A lost wake parks a reader forever on a
-  fill that already completed.
-- The writeback kthread stores `flush_completed` `Release` and then wakes
-  `sync_done_wq` (`fs/writeback.rs`). Its waiter, `wait_for_flush`, is a single
-  un-looped `wait_until`, so a lost wake hangs `sync()`/`fsync()`.
-
-The fence belongs in `has_waiters`, not at those two. Taking the lock used to
-supply it for free, so every caller in the tree was written without one, and a
-rule that each new producer must remember a barrier will be missed. Linux draws
-the same line: `wq_has_sleeper()` is `smp_mb()` plus `waitqueue_active()`, and its
-documentation exists because this keeps recurring. LLVM lowers the `SeqCst` fence
-to `lock orl $0, (%rsp)` rather than `mfence`, so it costs less than the
-`cli`/`sti` plus `lock cmpxchg` plus `Arc` churn it replaces, and the pipe-echo
-and blocking-round-trip wins survive it.
-
-The tell, if this recurs elsewhere: a producer whose publication is a plain or
-`Release` store with no read-modify-write and no lock between it and a wake.
-
----
-
-## A process parked in `accept` could not be killed, not even by `SIGKILL`
-
-FIXED. `kill` marks the target and wakes it, but the death itself happens at
-the syscall return boundary, where the thread provably holds nothing. A wait
-loop of the shape
-
-```rust
-loop { if ready() { break } wq.wait_until(ready) }
-```
-
-never reaches that boundary when `ready` is something only a peer supplies: the
-wake fires, the predicate is still false, and the thread parks again. A server
-listening on a port nobody connects to was therefore unkillable, and the
-terminal that started it was stuck for good.
-
-`WaitQueue::wait_until_killable` ends the park on the killed flag as well as
-the predicate and reports `WaitOutcome::Killed`; the caller returns `EINTR` and
-dies on the way out. It is opt-in, because abandoning a wait is only safe where
-the caller can abandon what it was waiting for — a page fill or a journal
-commit cannot, and those keep parking. In use at `accept`, socket read (TCP and
-UDP), pipe read and pty-slave read; the last of those had an open-coded version
-of the same check that this replaced.
-
-A pending *stop* is deliberately not handled: `SIGTSTP` on a blocked call
-should suspend and then resume the call, which needs restart semantics this
-kernel does not have. So Ctrl+Z on a blocked `accept` still does nothing until
-the call returns.
-
-Two syscalls needed it, and the second was found by a program rather than by
-reading: `sys_waitpid` parks on `thread_park_while` directly rather than on a
-`WaitQueue`, so it got the same check inline. A shell waiting on a job is the
-ordinary case — `sshd` hanging up on a session could not kill `sh -c 'sleep
-3600'` until this was fixed, because the shell was parked in `waitpid`.
-
-The tell, if this recurs: a syscall that parks on a peer's action and a process
-that survives `kill -9`.
-
----
-
-## The PTY never translated a newline, and only its own terminal hid it
-
-FIXED. A terminal moves the cursor *down* on a line feed and leaves the column
-alone; the carriage return is what sends it back to the left. POSIX has the
-driver add it, `OPOST` with `ONLCR`, and this one did not. Every program here
-writes `\n` alone, so output drew a staircase:
-
-```
-/ $ ls
-      .manifest  bin/       boot/      dev/
-                                           home/      lib/
-```
-
-It was invisible for as long as the only consumer was `edos_render`'s terminal
-widget, whose `'\n'` handler sets the column to zero as well as advancing the
-row -- so a bare newline behaved like CRLF there and nowhere else. The first
-time output left the machine, over SSH, it was obvious.
-
-`LineDiscipline` now carries `opost`, on in canonical mode and off in raw,
-because a program drawing with escape sequences writes its own line endings.
-`slave_write` expands through it, and so does the echo of a newline.
-
-**The shell was half the fix, again.** `edos-sh` called `pty_set_raw` once at
-startup and stayed raw, switching to canonical only around an external command,
-so its banner and every builtin's `println!` bypassed the new translation.
-Raw mode now belongs to `read_line` and is released when it returns, via a
-`RawMode` guard, so only the line editor -- which echoes and positions the
-cursor itself -- runs raw. The one place the editor ended a line with a bare
-newline emits CRLF, since nothing is translating for it.
-
-Verified by counting bytes rather than by eye: an interactive session over SSH
-that runs `ls /`, two `echo`s and a `free` contains **0 bare line feeds**, and
-the local terminal renders identically to before.
-
----
-
-## A pipe holds 64 KiB now, and the shell had to change in the same commit
-
-FIXED. `Pipe::write` never blocked and the `ByteRing` just grew, so a writer
-that outran its reader bought its speed with kernel heap and the reader had no
-way to slow it down. Not theoretical: it is what made `sshd` lose 6 MB of a
-10 MB transfer. `cat` pushed all ten megabytes into the kernel and exited long
-before the server had forwarded a tenth of them, so the server reached its
-teardown with most of the file still buffered.
-
-`PIPE_CAPACITY` is 64 KiB, Linux's default. A write that does not fit parks on
-a new `writer_wq` until a read frees room or the last reader leaves, and the
-wait is killable — a full pipe whose reader never reads is a condition only the
-peer can end, which is the same class as `accept`. Two POSIX details: a write
-of at most `PIPE_BUF` (4096) waits for room for all of it, so two writers never
-interleave one small message; and a reader disappearing mid-write returns what
-was already transferred rather than `EPIPE`.
-
-**The shell half is not optional, and that was verified rather than assumed.**
-`edos-sh` fed a heredoc into a pipe *before* starting the command that reads it,
-in both `main.rs` and `script.rs`. Bounded, that is a deadlock against itself as
-soon as the heredoc exceeds the capacity: nothing is draining the pipe, and the
-shell is the thing that would. Both sites now feed from a thread that owns the
-write end and closes it when done. Reverting only that half and re-running a
-110 KB heredoc hangs the shell forever, which is what makes the coupling a fact
-rather than an argument.
-
-Checked in the guest: `yes | head -3` still terminates (the `SIGPIPE` path is
-unchanged), `seq 1 200000 | wc -l` moves ~1.3 MB across a 64 KiB pipe and
-reports 200000, and a 20000-line heredoc runs to completion.
-
----
-
-## A terminal holds 64 KiB now, which is the same defect one layer over
-
-FIXED. `Pty::slave_write` pushed into a `ByteRing` that just grew, exactly as
-the pipe did before the change above; the two share the ring, and only the pipe
-half had been bounded. A program writing to a terminal faster than the terminal
-drained grew the kernel heap without limit. `yes` against a wedged
-`edos-terminal`, or an `sshd` whose client stopped reading, is the shape.
-
-`PTY_OUTPUT_CAPACITY` is 64 KiB, matching `PIPE_CAPACITY` because the two carry
-the same traffic. Same four pieces as the pipe: a capacity, a `slave_write_wq`,
-a killable wait in `sys_write`, and poll's writable bit following the space.
-
-**The bound is on what is stored, not on what was accepted**, and that is the
-one thing the pipe fix did not have to think about. `ONLCR` turns one newline
-into two stored bytes, so a caller handing over one newline is asking for two
-bytes of room; `write_output` now takes a `room` argument, walks the input
-counting what each byte costs, and stops at the last one that fits whole.
-Splitting a translated newline would put a carriage return on the wire with its
-line feed still to come.
-
-Two asymmetries with the pipe, both deliberate:
-
-- **The input side is bounded by discarding, not by waiting.** `PTY_INPUT_CAPACITY`
-  is 4096, POSIX `MAX_INPUT` and Linux's `N_TTY` figure. There is nothing to
-  push back on -- the bytes come from a keyboard or a network peer -- so a
-  terminal that cannot take them drops them. Ctrl-C, Ctrl-Z and Ctrl-D are
-  exempt, or a queue filled by a runaway program's own input would be
-  unrecoverable. Echo is dropped rather than queued for the same reason.
-- **A write to a slave whose last master closed is `EIO`, not `SIGPIPE`.** That
-  is POSIX, and it is also what stops the wait being unbounded: a writer parked
-  on a terminal nobody will ever read from would never wake.
-
-Verified rather than argued: `iotest` test 21 fills a pty whose master nobody
-reads and asserts it stops at a bound, that `poll` stops reporting it writable,
-and that a single master read makes it writable again. Setting
-`PTY_OUTPUT_CAPACITY` to `usize::MAX` and rerunning gives `FAIL test 21: the
-terminal took 1048576 bytes with nobody reading` -- the gate has been watched
-go red against the defect it exists for.
-
----
-
-## Named pipes, and the rename bug that finding a use for them exposed
-
-FIXED, and the second half is the more interesting one.
-
-`mkfifo` exists (`SYS_MKFIFOAT`, 283). A FIFO is the `Pipe` that already existed
-plus a name: EFS and memfs store the name and a type, and `kernel/src/fs/fifo.rs`
-holds the buffer, keyed by `(mount_id, ino)` so the two ends meet through the
-name rather than through the path each of them spelled. EFS needed no format
-change beyond two constants — the `mode` field already had room for `S_IFIFO`,
-and dirents for `FT_FIFO` (5, as in ext2). The rendezvous in `open` is the part
-with real semantics and is documented at the top of that module.
-
-`O_RDWR` on a FIFO returns a new `FileDescriptor::PipeReadWrite`. That is not a
-convenience: it is what lets `edos-init` hold its control channel open across
-writers coming and going, since its own write end means the pipe never reaches
-end of file and its read never spins on a hangup nothing will clear.
-
-**`rename` over an existing name did nothing, permanently, on both filesystems.**
-Found by using it: init writes its status file whole to `.new` and renames it
-over, and the status file never changed after the first write. `rename_inner`
-called `add_dir_entry` without removing an entry of that name, so the directory
-ended up with two, and every later lookup found whichever was written first.
-memfs had the identical bug in its `childs` list. Both now unlink the
-destination first — reporting `EISDIR` when it is a directory, since replacing
-one has its own emptiness rules — and `vfs::rename` marks the replaced inode
-orphan, which is the same rule `remove_file` already followed.
-
-The lesson is the ordinary one and worth restating: the bug had been there the
-whole time and no test caught it, because nothing in the tree renamed onto a
-name that was already taken.
-
----
-
-## `make recovery-check` passed exactly once per scratch image
-
-FIXED. The check reported "nothing committed-but-uncheckpointed after sync; the
-test's own setup failed" on every run after the first, on unchanged code. It was
-the harness, not the kernel: `journal-test.img` was an ordinary make
-prerequisite, so it was rebuilt only when `efs-mkfs` or `efs-common` changed —
-never during a run — while the check itself creates `/mnt/rec_a`, `rec_b` and
-`rec_c` in it and then cuts power. On the second run those files already exist,
-`touch` only restamps them, nothing is left uncheckpointed, and the precondition
-the whole test rests on cannot hold.
-
-`recovery-check` and `orphan-check` now both depend on a phony
-`fresh-journal-test-img` that reformats it first. Verified by running
-`recovery-check` twice in a row, which is the case that never held before.
-
-Worth keeping in mind generally: a test that mutates a fixture it does not
-recreate is green once and then reports on the fixture rather than on the code.
-The bisect that found it was cheap and worth doing rather than reasoning about —
-`git stash -u`, run the check on untouched trunk, watch it fail identically.
-
----
-
-## A spawned child does not inherit its process group, and `fork` does
-
-OPEN. `Thread::pgid` starts at 0, which `Thread::pgid()` reads as "leads its
-own group". `fork` copies the parent's (`syscalls/mod.rs`, both fork paths),
-but `do_spawn` leaves the 0, so every spawned process leads a group of one.
-
-Measured in the guest: `sh -c "sleep 300"` runs as pid 38 pgid 38, and its
-`sleep` as pid 39 pgid **39** rather than 38. Columns are tid, parent, pgid in
-`/proc/processes`.
-
-The consequence is that a signal aimed at a process group reaches only what was
-placed there by hand. `sshd` hangs up on a disconnected session by signalling
-its group, and the shell dies while the command it started does not.
-
-The obvious fix — have `do_spawn` store the spawner's `pgid()` the way fork
-does — was written, built and tested here, and **did not move the observable**,
-so it was reverted rather than shipped on the strength of the argument. One
-case is explained and is deliberate: a child whose stdin is a pty slave is
-overridden to lead a new group a few lines later, since that is what makes it
-the terminal's foreground job. The pipe case is not explained, and finding what
-else sets the group is where this picks up.
-
-Worth fixing beyond the orphan: job control depends on it. `edos-sh` gets
-correct behaviour today only because it calls `setpgid` on each pipeline stage
-after spawning it, which is a race a shell should not have to run.
-
----
-
-## A prefetch window is a set of runs, not one extent
-
-A readahead window whose pages spanned more than one extent used to be declined
-by `EfsDriver::submit_prefetch_pages` and filled synchronously instead, so a
-fragmented file got 5 async windows against 243 sync fallbacks where a
-contiguous one got 245 against 3. The single-extent restriction was the whole
-reason: it existed because a `PageFillHandle` carried exactly one
-`BlockIoHandle` and one buffer.
-
-`PrefetchData` now holds a `Vec<PrefetchRun>`, one per physically contiguous
-span, each with its own handle, buffer and the window-relative page it starts
-at. The driver plans the window the way `read_via_extents` plans a read
-(`ExtentMap::run_at`, runs capped at `MAX_RUN_BLOCKS`) and queues them all
-through `submit_read_batch`. `finalize_prefetch` waits on every run's handle
-before finalizing — on failure too, so no run is still DMA-ing into its buffer
-when the handle goes terminal — and copies each page from whichever run covers
-it.
-
-Two consequences worth knowing:
-
-- **A hole inside the window costs no command.** No run covers those pages and
-  finalization leaves the frame zeroed, which is what a hole reads as anyway.
-  A window that maps *nothing* still declines to `Ok(None)`, so an async window
-  always means real I/O is pending for a joiner to wait on.
-- **A window may be prefetched only in part.** `MAX_PREFETCH_RUNS` (16, half the
-  port's NCQ slots) bounds what one speculative window may queue ahead of reads
-  a thread is actually waiting on, so `PrefetchPlan::pages` can be short of what
-  the caller asked for. The uncovered tail is left uncached rather than pulled
-  in synchronously — it is readahead, and nobody is waiting for it.
-
-Verified in the guest on a fresh disk, `fsbench fragprep /var` then a reboot then
-`fsbench ra /var`: 248 async windows, **0 declined and 0 failed** (was 5 async /
-243 sync), 4 extent reads planning 4 runs in 4 submits, and `verify: edges match
-the pattern`.
-
----
-
-## A batch of same-class guards is bounded by the rank stack, not by the device
-
-Block-page-cache writeback (`flush_dirty_once`) wrote one dirty page per device
-round trip. It now collects the pages that pass its filters and hands them to
-`write_batch`, which submits them together and reaps afterwards.
-
-Two things the lock discipline forces, both of which cost a boot to learn:
-
-- **The batch cap is `LOCK_RANK_DEPTH / 2`, not a device queue depth.** Each
-  outstanding write holds that page's `write_lock` until its DMA is done, and
-  the lock-order tracker records at most `LOCK_RANK_DEPTH` (16) live guards per
-  thread — a 16-deep batch fills the stack exactly and the next `ranked_lock!`
-  panics with `lock_order stack overflow`.
-- **Per-page bookkeeping cannot interleave with the reaping.** The first
-  attempt dropped each page's guard right after its own `wait()` and then took
-  `BPC.journals` (120) to report the checkpoint. That panics on the first boot:
-  the *other* guards of the batch are still live, so the rank stack still has a
-  140 entry. The bookkeeping runs in a second pass, after the last guard of the
-  batch is gone.
-
-`page.write_lock` is one lock class, so a batch holding several is a same-class
-multi-acquire: `write_batch` sorts by `(device_id, page_block_idx)` and takes
-them through `ranked_lock_same!` in that order.
-
-Verified in the guest: desktop boots with no panic, `fsbench write -n 32 /var`
-completes in 1.3 s reporting `ncq_max_inflight +7`, and `iotest /var` is 20/20.
-The depth figure is not attributable to this change alone — EFS bulk flush and
-the journal committer also queue — so treat it as "no regression, batching
-still reached", not as a measurement of writeback depth on its own.
-
----
-
-## Writeback queues now, so the drive is no longer asked one command at a time
-
-`doc/STORAGE-ROADMAP.md` section 1 says every I/O path but `read_pages` is
-submit-then-wait, and that `fsbench` reported `ahci_stats.ncq_max_inflight +1`
-for a whole suite: the system never had two commands outstanding, so a 4 KiB
-access cost a full dependent round trip.
-
-`EfsDriver::flush_pages_bulk` (`fs/efs/mod.rs`) already coalesced a chunk's
-pages into runs of physically contiguous blocks, but it called `block_write`
-per run, which submits and parks. It now issues every run through
-`submit_block_write` and reaps the handles afterwards, so the runs of one chunk
-are queued together.
-
-Measured in the guest, `fsbench write -n 32 /var` on a freshly formatted disk:
-`ncq_max_inflight` +1 before, **+3 and +9 across two runs** after, with
-`verify: all patterns match` on both. The per-row throughput is inside the
-noise the roadmap warns about for the `/var` suite, which is expected — one
-chunk of a sequential file is a couple of long runs, so depth is what moved,
-not the bandwidth of a run.
-
-Three things the shape of this had to respect:
-
-- **A staging buffer is the DMA source on the direct path**, so it is held in
-  the in-flight record and only dropped once its own handle completes. Returning
-  early from a failed run without draining the rest would free buffers the
-  drive is still reading.
-- **Depth is capped at 16, below `OWNED_OPS_CAP` (32)**. Past that,
-  `install_ncq_op`'s `owned_ops_push` fails and the command silently loses its
-  cancellation hookup. `allocate_slot_blocking` parks when the hardware slots
-  are gone, so the cap is about the registry, not the drive.
-- **The block-cache invalidation stays after the wait**, and now happens on
-  failure too: a command that reported an error may still have landed in part,
-  so a cached page for that range cannot be trusted either way.
-
-Still submit-then-wait, and the next place to take this: `block_read` /
-`block_write` / `block_write_fua` themselves, `read_frame` / `write_frame` /
-`write_frames` in `fs/block_page_cache.rs`, and the FAT32, GPT and MBR paths,
-plus `replay.rs`, which writes home blocks one command at a time on the mount
-path.
-
----
-
-## The journal committer queues a transaction instead of writing it in three trips
-
-`seal_and_commit` (`fs/journal/mod.rs`) wrote the descriptor block, then the
-payload, then the revoke block, parking on each. The format does not ask for
-that ordering: what it requires is that all three are on the platter *before*
-the commit block, which the `block_flush` barrier and the FUA commit already
-give. So the three are now queued through a `RingWrites` helper and drained at
-that same barrier — one wait for the batch instead of three dependent round
-trips per commit. Depth is capped at 16 for the same `OWNED_OPS_CAP` reason as
-writeback.
-
-Two shapes this had to respect, both the same class of bug as the writeback
-work:
-
-- **The revoke block's buffer is the DMA source**, so it is bound outside the
-  `if` that builds it. Left inside the branch it would drop while its command
-  was still outstanding.
-- **`RingWrites::drain` waits for every command even after one has failed**, and
-  only then reports. Returning early on the first error would free the payload
-  buffer under the drive.
-
-What was verified: `scripts/fs-regression` passes across a reboot (the durability
-gate that matters for a journal change), and `fsbench write -n 32 /var` on a
-freshly formatted disk reports `verify: all patterns match`, `ncq_max_inflight
-+6`, `write 4KiB + fsync each` 52.0 ops/s at 2.6 ms p50.
-
-`ncq_max_inflight` could not settle whether commit latency fell — it is a global
-maximum and writeback alone drives it to +3..+9, so it cannot attribute depth to
-the journal. `/proc/journal_stats` was added for that, and it says a commit costs
-4.6 ms: ring batch 1.2 ms, flush barrier 2.3 ms, FUA commit block 1.1 ms, with
-330 ring blocks per commit in 3.3 commands. The batching worked; the barrier is
-now the largest third.
-
-### Sharing that barrier between commits: measured and refuted
-
-Coalescing whole transactions behind one barrier looked like the obvious next
-step and does not pay: the sealed queue almost never holds more than one
-transaction, because `kick_committer` wakes the committer as soon as one is
-sealed. A build that prepared up to eight of them behind a single `block_flush`
-reported **97 commits sharing 84 barriers** on `fsbench write -n 32 /var`. Full
-numbers and the two useful findings that fell out of it (FUA commit blocks are
-worth queueing; `t_ring` must start after the reservation loop, or a checkpoint's
-flush is charged to `ring_us`) are in `doc/STORAGE-ROADMAP.md` section 1. The
-barrier can only be shared by delaying a commit that is ready, which trades
-fsync latency for barrier count.
-
----
-
-## FIXED: one `ioctl` wedged a CPU, because a match scrutinee held its guard
-
-`syscallfuzz` found this on its first run. It was userspace-reachable, it was
-deterministic, and it took the whole machine down:
-
-```
-syscallfuzz -n 8 -v -u 0 -o ioctl
-  ioctl  fxpnx
-    case  0 [ffffffffffffff9c, 80000000, 436a41, 1001, ffffffff] ->
-```
-
-That is `ioctl(fd = -100, request = 0x80000000, arg = <a valid page + 1>,
-arg_len = 4097, flags = 0xffffffff)`, and it never returns. Reproduced twice,
-same case index both times, since the generator is seeded `seed ^ nr`.
-
-What it does to the system, from `run_log.txt` of the first run:
-
-```
-[21.579] <cpu-0:/bin/syscallfuzz:u:27> Unmap partial error (kernel-managed VMAs in range)
-[21.793] <cpu-2:/bin/edos-wm:u:25> tlb_shootdown: re-sending IPI to CPUs 0x1
-[22.154] KERNEL PANIC: tlb_shootdown: CPUs 0x1 never acknowledged a flush of
-         50 page(s) at VirtAddr(0x283f000) across 3 attempts
-```
-
-CPU 0 stops taking interrupts entirely, so the next unrelated `munmap` anywhere
-in the system panics at `memory/tlb.rs:133`. The watchdog is doing its job; the
-bug is whatever holds CPU 0.
-
-The mechanism was one line, and it is a Rust rule rather than anything about
-ioctl:
-
-```rust
-let descriptor = match info.lock().fd_table.lock().get_fd(fd).cloned() {
-    Some(desc) => desc,
-    None => {
-        info.lock().errno = Errno::EBADF;   // <-- deadlock
-        return -1;
-    }
-};
-```
-
-**Temporaries created in a `match` scrutinee live until the end of the whole
-`match`**, so both guards are still held while an arm runs. `info` is an
-`Arc<IrqSpinlock<UserThreadInfo>>`, so the `None` arm re-locks a spin lock this
-CPU already holds, with interrupts disabled, and never leaves. The fd only has
-to be one that is not open — `-100` was incidental. Any process could take the
-machine down with `ioctl(-1, ...)`.
-
-That also explains the shape of the panic: an `IrqSpinlock` spin never re-enables
-interrupts, so CPU 0 stopped acknowledging IPIs, and the next unrelated `munmap`
-on any other CPU tripped the TLB shootdown watchdog. The watchdog was the
-messenger.
-
-The fix binds the lookup to a `let` first, which drops both guards at the end of
-that statement. `if let` is not affected: edition 2024 (which this kernel uses)
-drops `if let` scrutinee temporaries before the body, and only `match` still
-extends them.
-
-Ruled out on the way, and worth not re-checking:
-
-- **`FdTable::get_fd` has no special case for `-100`/`AT_FDCWD`**
-  (`thread/fd.rs:65` is a plain map lookup), which is exactly why the deadlock
-  is in the failure arm rather than in any device path.
-- **Not the two `interrupts::enable()` calls in the `FsFile` branch**
-  (`syscalls/ioctl/mod.rs`). They are redundant — `syscall_handler` already
-  enables interrupts at `syscalls/mod.rs:1813` — but unreachable for a bad fd.
-
-Left standing, and not a deadlock today: every other fd-table syscall
-(`net.rs`, `memory.rs:326`, `mod.rs:1721`, `fs.rs:120`) clones the fd-table
-`Arc` first and then sets `errno` from a match arm, so it holds `fd_table` while
-taking `info`. That is the opposite order from the statement-level
-`info.lock().fd_table.lock()` uses in `io.rs`, `fs.rs:611` and `thread.rs:1180`.
-Nothing co-holds them the other way now that ioctl is fixed, but two threads
-sharing an fd table is what would make it matter.
-
----
-
-## FIXED: a user pointer was never bounds-checked, only fault-fixed up
-
-`syscallfuzz -n 4 -u 0` panicked the kernel a second way: a General Protection
-Fault in ring 0 inside `do_user_copy` (`util/uaccess.rs`), reached from
-`sys_pipe`. The pointer was `0x0000_8000_0000_0000`, one of the fuzzer's poison
-values.
-
-The whole of `try_copy_from_user`/`try_copy_to_user`'s validation was a null
-check. Everything else was left to the fault fixup, and the fixup is only wired
-into the page fault handler, so two classes of address walked straight through:
-
-- **Non-canonical** (`0x0000_8000_0000_0000`). Dereferencing one raises #GP, not
-  #PF. `general_protection_fault_handler` had no `fault_resume` check, so the
-  ring-0 arm panicked the machine on a pointer any program can pass.
-- **The kernel half** (`0xffff_ffff_8000_0000`). That address is canonical and
-  mapped, so the copy *succeeded*: `read(fd, kernel_addr, n)` overwrote kernel
-  memory and `write(fd, kernel_addr, n)` handed kernel memory to userspace. No
-  fault, no error, no trace of it.
-
-Fixed at the source with an `access_ok(addr, len)` in `util/uaccess.rs` that
-requires `addr + len <= USER_VA_END` with a checked add, applied to the user
-side of both copy directions — `src` for `from_user`, `dst` for `to_user`. Every
-other entry point (`try_read_user`, `try_write_user`,
-`try_copy_string_from_user`) funnels through those two, and every call site in
-the tree passes a pointer that came from a syscall argument, so there is no
-in-kernel caller that legitimately needs the kernel half.
-
-The #GP handler got the page fault handler's fixup as well. With `access_ok` in
-place nothing should reach it, which is the point: a uaccess copy that faults
-for a reason the checks did not anticipate now reports failure instead of
-taking the machine down.
-
-Left standing, deliberately: every exception handler in `interrupts/idt.rs`
-sends `end_of_interrupt()` on entry, which is wrong for a fault (no interrupt is
-in service) and would clear an unrelated ISR bit if a fault ever landed inside
-an interrupt handler. Not reachable from the uaccess path, which never runs in
-interrupt context, so it was left alone rather than churned.
-
----
-
-## FIXED: `shm_create` reserved for a size before checking it was possible
-
-The same fuzz run then panicked in the allocator:
-
-```
-failed to map heap expansion: FrameAllocationFailed   (allocator.rs:334)
-  <- RawVecInner::try_allocate_in
-  <- sys_shm_create (syscalls/shm.rs:44)
-```
-
-`SharedMemory::new` (`memory/shared.rs`) turned the caller's `size` into a frame
-count and then `Vec::with_capacity(frame_count)`. The batched allocation loop
-below it was careful — it releases the frame-allocator lock every 64 frames so
-interrupts are not starved — but the reservation happens first, so a size that
-no machine could satisfy grew the kernel heap until the frame allocator had
-nothing left to expand it with. That path panics; it does not return a null.
-
-Two fixes at the source: `size + 0xFFF` is a `checked_add` now (a size near
-`usize::MAX` wrapped to an aligned size of 0 and a frame count of 0, so the
-worst case was a zero-frame region reported as a success), and the frame count
-is compared against `frame_allocator().stats().free_frames` before anything is
-reserved. Over budget is `AllocationFailed`, which `sys_shm_create` already maps
-to `ENOMEM`.
-
-`stats()` walks the whole bitmap, which is ~128 KiB of `count_ones` on a 4 GiB
-guest. `shm_create` is not a hot path — the compositor calls it per surface —
-so the honest bound was preferred over a cheaper comparison against
-`total_frames`.
-
----
-
-## Readahead now submits before it fills, and "device idle" stopped meaning idle
-
-`page_cache_read_core` (`fs/vfs.rs`) filled the reader's own pages first and
-submitted the readahead window afterwards, so the queue was empty for the whole
-of the reader's park and the window started only once the overlap was no longer
-wanted. Submitting every window first, then filling the request portions, then
-running the windows that fell back to a synchronous fill, took the cold 16 MiB
-`fsbench ra` pass from 260 to 292 MiB/s and its stall count from 1 to 0. The
-sync fallback is deliberately last: it is billed to the reader, and the reader's
-16 pages must not queue behind 128 pages of readahead.
-
-**The trap is in the instrument, not the code.** `fsbench ra` reports whether
-`ncq_inflight` was non-zero *between* calls, and `doc/STORAGE-ROADMAP.md`
-section 1b originally set "non-zero across most samples" as the target for a
-pipelined version. That target cannot be met on this host and its absence is not
-evidence of anything: the window is one 64 KiB command against a qcow2 the host
-holds in RAM, and the reader's park is ~200 us, so the prefetch completes inside
-the call that issued it and the between-calls sample always reads zero.
-`ncq_max_inflight` stuck at 1 says it from the other side — the reader joins the
-window's handle rather than issuing a command, so there is never a second one to
-overlap. Judge this path by the stall count, p50, and the discarded/trimmed page
-counters instead.
-
----
-
-## Readahead submitted I/O it was about to refuse, and the host hid the cost
-
-`page_cache_read_core` (`fs/vfs.rs`) built its readahead window from the inode
-page map alone. A page an earlier window is still filling is in neither the map
-nor the reader's way, so it looked uncached and went into the new window — and
-since a 64 KiB call advances the reader 16 pages while the window reaches 128
-past it, consecutive windows overlapped by ~112 of 128 pages. The submit ran
-first and `issue_prefetch_bulk` refused the colliding range second, so the AHCI
-read completed into a buffer nobody kept: 185 of 245 windows on a 16 MiB pass,
-23680 pages, ~92 MiB read from the device and thrown away, with the same range
-re-submitted on the next call.
-
-The fix is `page_fill::narrow_prefetch_window`: take `in_flight` once, trim the
-window to the tail past its last busy page, skip it when nothing is left, and
-only then submit. The lock cannot be held across the submit (`RANK_IN_FLIGHT`,
-and submitting takes driver locks above it), so the install re-checks — that
-check stays as the race backstop, and `async_dropped_windows` stays as its
-alarm. `/proc/readahead_stats` gained `skipped_*` and `trimmed_*`.
-
-**The trap worth keeping: this made the benchmark 15% slower, and that is not a
-verdict on the fix.** Discarded is 0 and 26480 pages are no longer re-read, but
-p50 per call went 174 us → 307 us and the pass 72.1 → 84.7 ms, because a window
-that now survives is a window the triggering `read` waits for in full — ~112
-pages instead of its own 16. `sata-disk.img` is a qcow2 file sitting in the
-host's page cache, so the 92 MiB of waste was served from host RAM at almost no
-cost while the longer single wait was paid in full. Any storage measurement here
-that trades read *volume* for read *latency* will read backwards for the same
-reason. The full before/after table is in `doc/STORAGE-ROADMAP.md` section 1b.
-
-The 15% turned out not to be the trailing prefetch after all — see the next
-section. It was a second defect the waste had been hiding.
-
----
-
-## A bulk fill that joined an in-flight range then read it again anyway
-
-`get_or_fill_bulk_async_sync` (`fs/page_fill.rs`) installs one handle over the
-whole range and, if **any** page in it is already in flight, aborts the install,
-parks on the conflicting handle and `continue`s the outer loop. The retry went
-straight back to the install phase. Nothing re-read the page map — so a join that
-had just finalized the prefetch and published every page in the range still went
-on to install a fresh handle, allocate the frames again, and issue a device read
-for pages that were sitting in the cache.
-
-The single-page `get_or_fill_async_sync` has had that re-check since it was
-written (both after the park and as an entry fast path); the bulk twin never got
-one, and its doc comment argued the retry was safe — which it was, only not free.
-
-It stayed invisible while readahead was discarding its windows: with no surviving
-handle there was no conflict, no join, and no retry. Narrowing made the handles
-survive, every 64 KiB call started colliding with the prefetch that had been
-issued for exactly its range, and the pass paid a second full read of the file.
-That, not "the reader waits for the whole window", is where iteration 16's 15%
-went. `inflight_stats.retries` is the tell: 240 retries on a 256-call pass, one
-per join.
-
-Fix: re-check the page map at the top of the `'outer` loop and return when the
-whole range is present. Cold 16 MiB pass, `fsbench ra /var`:
-
-| | before narrowing | narrowed | + this fix |
-|---|---|---|---|
-| read path | 222 MiB/s, 72.1 ms | 189 MiB/s, 84.7 ms | **260 MiB/s, 61.6 ms** |
-| per call p50 | 174 us | 307 us | **210 us** |
-| stalls | 11 of 256 | 2 of 256 | **1 of 256** |
-| device pages read | 30480 (110 MiB) | 4624 (18 MiB) | 4624 (18 MiB) |
-
-So the file is still read exactly once and the pass is now faster than it ever
-was with the waste in it. `ncq_inflight` is still non-zero on 0 of 256 samples:
-the prefetch is not pipelined, and that item is still open.
-
----
-
-## `make test` used to pass without running
-
-If a guest was already up — `make run-headless`, or anything else holding
-`sata-disk.img` — `make test` exited **0 having run no tests at all**. The
-suite reports through `isa-debug-exit`, which the host reads as
-`(code << 1) | 1`, so a pass is exit 1; qemu's own startup failures are also
-exit 1, and the `Failed to get "write" lock` on the disk is one of those. The
-exit code alone cannot tell the two apart, so the only visible sign was that a
-7-second gate came back in a fraction of a second.
-
-The verdict now comes from the serial log: exit 1 must also carry
-`TESTS PASSED` in `run_log.txt`, and the test targets `rm -f run_log.txt`
-first so a previous run's verdict cannot stand in for this one. Both branches
-were exercised — a normal run still passes, and a run with a guest holding the
-disk now fails with `qemu exited before the suite reported a verdict`.
-
-Worth generalising: **a gate that cannot fail is not a gate.** Any check whose
-success is inferred from an exit code shared with the harness's own failures
-needs a positive signal from inside the guest.
-
-## The ISO `make test` leaves behind boots to a black screen
-
-Directly after a test target, `edos-x86_64.iso` is a `--features sched-test`
-build, and that kernel runs the suite and stops rather than continuing to the
-desktop. `make run-headless` and `make storage-check` both take the ISO as
-already built, so they boot it and the guest looks hung: the serial log ends at
-`ALL 51 TESTS PASSED` and every screenshot is black. `make all` restores the
-normal ISO in about three seconds, because cargo still has the non-feature
-artifact and only the image is rebuilt. This is now in `doc/vm-control.md`
-next to the test targets, which is where it will actually be read.
-
-## `make test` and `scripts/edos-vm` cannot run at the same time
-
-They share two files: both attach `sata-disk.img`, and both point a serial
-chardev at `run_log.txt`. Two QEMUs on one qcow2 is a corruption hazard, and the
-second serial open truncates the first one's log, so a guest measurement taken
-alongside a test run is worthless and the disk under it is suspect. Run them in
-sequence, and rebuild `sata-disk.img` if they ever overlapped. The follow-on trap
-is the one above: a `make test` run also leaves the sched-test ISO in place, so
-the next `edos-vm start` boots to a black screen with a log that ends at
-`ALL 51 TESTS PASSED` — `make all` before booting the guest again.
-
-## Pipelined readahead's 500 ms figure is stale
-
-`mmaptest` test 10 on `/var`, the number that justified pipelined readahead, is
-**12 ms on a cold boot** as of 2026-08-12, not the ~500 ms on record: `fs::copy`
-of `/bin/echo` 11 ms and `spawn+wait` 356 us, with `mmaptest /var` 11/11 in
-37 ms. Whole-file prefetch covers anything under 2 MiB and `/bin/echo` is
-329240 bytes, so the test never exercises the ramping window it was cited for.
-The idea keeps its entry for the large-file case, and it now has an instrument:
-`fsbench raprep /var`, reboot, `fsbench ra /var`. `doc/STORAGE-ROADMAP.md`
-section 1b carries its baseline and states which readings decide whether a
-change pipelined anything; `doc/fsbench.md` documents the mode.
-
-## The guest boots `sata-disk.img`, and `make all` does not rebuild it
-
-An hour of this went into believing a new `fsbench` mode did not exist: the
-guest printed the *old* usage text for a binary that had just been built and
-`make all` had reported success.
-
-`make all` builds `programs`, the kernel and the ISO. It does **not** build
-`sata-disk.img`, and that image — not the ISO's live root — is what the run
-targets mount as `/`, because root selection prefers a real disk. Only the
-`make run*` targets list it as a prerequisite, and `scripts/edos-vm start` does
-not go through them, so a `make all` plus `scripts/edos-vm start` boots fresh
-kernel against stale userspace. Nothing in the guest distinguishes that from the
-change not working.
-
-Leaving the image alone is deliberate: it is the persistent development root, a
-rebuild is 5 GB and discards whatever the guest has written, and the manifest
-guard exists precisely so a kernel edit does not trigger one (see the comment
-above `update-manifest` in `GNUmakefile`). So the fix is not to rebuild it
-automatically. `scripts/edos-vm start` now compares its mtime against
-`filesystem/.manifest` and warns, naming `make sata-disk.img`.
-
-## `edos-grab`, and what a GUI over a network library costs
-
-`programs/edos-grab` is the package manager's window: search field, list with
-rendered SVG icons, detail pane, Install/Remove/Update, progress strip. It links
-the `grab` lib, so a failure arrives as an `Error` rather than as parsed CLI
-output. Verified in a headless guest: it lists the repository, installs
-`edos-edit` from `https://edos.edgl.dev/pkg`, and the row, the detail pane and
-the buttons all follow the install without a refresh.
-
-Three things worth knowing before touching it.
-
-**Every network call runs on a worker thread and reports over an `mpsc`
-channel.** `grab`'s API is blocking by construction, so anything on the GUI
-thread freezes the window for the length of a download -- and an unreachable
-repository freezes it for the handshake wait, since `edos_http` connects
-blocking even though the kernel now offers the non-blocking path. One operation at a time: two installs at once would race over
-`/var/lib/grab/db`. The `Progress` trait is implemented by a struct holding the
-`Sender`, which is the whole of the plumbing.
-
-**A widget's text cannot be read back out of `WidgetContainer`.** `get`/`get_mut`
-hand back `&dyn Widget`, which has no downcast, so `TextInput::text()` is
-unreachable once the field is in a container. The filter therefore keeps its own
-copy of the query, updated from the field's own `TextChanged`. The same applies
-to `set_text`: a program that must clear a field has to own the `TextInput`
-directly and map keycodes itself.
-
-**`Weight` has no `Bold`.** The interface face runs Regular/Medium/Semibold;
-`Weight::Semibold` is what a heading uses.
-
-The icon path is `<repo>/<Package::icon>`, fetched with a 256 KiB cap and
-rasterized to 32x32 on the worker, so listing 100 packages downloads no
-packages. An empty catalogue -- which is what a failed fetch reports --
-deliberately does not clear the icons already rendered.
-
-## The website's catalogue reads the same index the guest does
-
-`/software/` on `edos.edgl.dev` is `src/content/docs/software.mdx` rendering
-`src/components/SoftwareCatalogue.astro`, in the separate `/usr/src/edos-web`
-checkout. The component fetches `https://edos.edgl.dev/pkg/index` at build time
-and parses the same RFC822 stanzas `grab` parses, so there is one artifact
-rather than a machine format and a human format that can disagree. It cannot
-live at `/pkg/`: that path is an nginx alias to `/srv/edos-pkg` and cannot also
-be an Astro route.
-
-Two properties are deliberate and neither is obvious from the rendered page.
-The fetch happens on the *build* machine, so a page built where the repository
-is unreachable would otherwise render a correct-looking empty catalogue, which
-reads as "the repository has nothing in it" rather than "this was not read" --
-so a failed fetch renders the reason and a link to the index instead of an empty
-list. And the icons are `<img src="/pkg/icons/...">` served straight by nginx,
-not build-time assets, so publishing a package updates the page's icon without
-rebuilding the site.
-
-## A chord the window manager acts on no longer reaches the focused window
-
-`/dev/kbd` is a broadcast and window events are a separate delivery, so
-`edos-wm` and the focused window both saw every key. The application half was
-patched first -- programs ignore what they did not bind -- but that is a
-convention, not a mechanism: Alt+Tab still arrived at whatever had focus as a
-plain Tab, and a program that merely echoes its input had no way to know
-something else had already consumed it.
-
-`SYS_WINDOW_GRAB_KEY` (288) is the mechanism. A claim is a key code plus a
-modifier mask; `handle_keyboard_event` asks `window::grab::intercept` before it
-looks up the focused window and returns without delivering when the chord is
-claimed. The broadcast is untouched, so the claimant reads the key exactly as
-before and needs no new delivery path. `edos-wm` claims Alt+F4, Alt+Tab and
-Ctrl+Alt+W in `InputState::new` and logs what it got.
-
-Four decisions that are not obvious from the code:
-
-**The mask is matched exactly**, so Alt+Tab and Ctrl+Alt+Tab are separate
-claims. A subset match would mean claiming Alt+Tab silently swallowed every
-chord built on top of it.
-
-**A withheld press withholds its release too.** `Grabs::swallowed` records the
-code, and the release clears it. A window that saw a release with no matching
-press would hold the key down forever in whatever state it keeps -- and this is
-reachable on the first chord after focus, not in some corner.
-
-**Modifiers are always delivered.** A window tracks its own modifier state from
-the same events, so withholding the Alt press that a chord is built from would
-desync it. Only the non-modifier key of a chord is withheld. AltGr is not Alt
-here for the same reason it is not in `edos_lib::keymap`: it selects a
-character rather than qualifying one.
-
-**Claims are restricted to the window shell and die with the process**, the
-same as the shell privilege itself (`window/shell.rs`) and for the same reason:
-a chord claimable by any process at all is a way to read another program's keys
-by taking them away from it. `cleanup_process_windows` calls
-`grab::release_pid`, so there is no reclaim path and none is needed.
-
-`KEY_GRABS` is rank 276, between `SHELL_PIDS` and `WINDOW_REGISTRY`. Routing
-asks about the grab before it touches the registry, so the two are never
-co-held; the grab syscall settles authority through the shell table first and
-drops that guard before taking this one.
-
-The application-side Alt guard from `cb7cb31` stays. It is not redundant: it
-covers chords nothing has claimed, and a program should not depend on the shell
-having claimed the right things.
-
-Verified in the guest with `cat` running in the terminal: a plain Tab produces
-`a<TAB>b`, and Alt+Tab immediately after produces `c` on its own line with no
-tab character, while Alt+F4 still closes the window -- so the claimed chord
-reaches the window manager and not the application, and an unclaimed one still
-reaches the application.
-
-## A display with no cursor plane accepted the cursor anyway, so it had none
-
-`FB_IOCTL_SET_CURSOR` returned `Ok(0)` on the VBE path, where `Display::set_cursor`
-was an empty match arm with a comment saying VBE has no hardware cursor. The
-userspace wrapper reports success as `is_ok()`, so `edos-wm` set `hw_cursor =
-true`, and `composite()` draws the software cursor only when that is false. A
-Bochs VBE guest therefore ran with **no pointer drawn at all** -- not a stale
-one, none -- and every `move_cursor` after it was a syscall into an empty arm.
-
-The fix is at the layer that knows: `Display::set_cursor` and `move_cursor`
-return whether the display took it, and the ioctl reports `Unsupported` when it
-did not. `has_hardware_cursor()` was deleted rather than kept, since the return
-value now answers the same question at the only place that asks.
-
-That path had no way to be booted, which is why it went unnoticed:
-`scripts/edos-vm` always passed `-device virtio-vga`. It takes `--vga std` now,
-which is the Bochs adapter and the only way to exercise the software cursor.
-
-The compositor-owned damage rule this uncovered is in `doc/design/wm-damage.md`;
-the two instances fixed in the same commit are the cursor's own shape and the
-desktop menu's rectangle on the frame it closes.
-
-## The process ABI is the thing blocking both a dynamic linker and a libc
-
-`doc/design/dynamic-linking-and-libc.md` is the assessment: what `PT_INTERP`
-support would cost, whether musl, picolibc, newlib or a hand-written shim can be
-brought up, and which to attempt first. Three facts from it are worth knowing
-before touching the loader or reading anything about porting C software here,
-because each is easy to assume the other way round:
-
-- **There is no auxiliary vector, and the entry point is called as an ordinary
-  SysV function**, `argc` in `rdi` (`kernel/src/thread/thread.rs:999`), not with
-  the SysV process stack. A dynamic linker learns where the main image is from
-  `AT_PHDR`/`AT_BASE` and has no other channel; every libc's `_start` reads
-  `argc` off the stack. Adding the stack can be additive — keep the registers —
-  which is why it is the cheapest of the blocking changes.
-- **Relocations are read from `SHT_RELA` section headers**
-  (`kernel/src/loader/mod.rs:509`), not from `PT_DYNAMIC`'s `DT_RELA`. Shared
-  objects are routinely shipped with section headers stripped, so this parser
-  cannot read a normal `.so` at all.
-- **TLS is owned by the kernel** (`allocate_tls_region`,
-  `kernel/src/thread/thread.rs:661`, FS restored by the scheduler), and there is
-  no `arch_prctl`-equivalent, so userspace cannot set its own FS base. Static TLS
-  only: no DTV, no `__tls_get_addr`. A static libc wants exactly what is already
-  here; a dynamic linker needs this ownership handed over, which is the largest
-  single change in that direction.
-
-Also absent and load-bearing: `mprotect`, `brk`, `set_tid_address`,
-`sigaltstack`, termios, and a `clockid` on `clock_gettime`. Errors are worse than
-they look: a failed syscall returns `u64::MAX` and the caller makes a **second**
-call, `SYS_ERRNO`, so a signal handler firing in between can overwrite the value,
-and `Errno` is a dense EDOS-private enum of 26 values where POSIX has ~130 —
-`ENOSYS`, `ERANGE` and `EDOM` have nothing to map to.
-
-The recommendation, in short: neither project first. Land the SysV stack with an
-auxv, negative-errno returns, and `mprotect`; then a **static** newlib port,
-which needs no dynamic linker at all; `PT_INTERP` last, because it buys image
-size and `dlopen` and nothing in the tree wants either.
-
-## A gate that runs nothing still exits 0
-
-The `sched-test` build is checked with cargo, not with make, and there is no
-`make` target that takes a feature. `make -C kernel check --features sched-test`
-does **not** pass the flag through: make rejects `--features` as its own unknown
-option, prints its usage to stdout and exits **0**, so the check never runs and a
-`&&`-chained gate run carries straight past it — including past everything
-chained after it, which also silently never runs. Invoke it the way the kernel
-makefile invokes the plain check:
-
-```bash
-cd kernel && RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" \
-  cargo check --target x86_64-unknown-none --features sched-test
-```
-
-The general shape: a gate chain is only evidence if each command's *own* output
-says it ran. Grep the saved log for the thing that proves the work happened
-(`Checking edos-kernel`, `ALL 51 TESTS PASSED`) rather than reading the exit
-status of the chain.
-
-## What the blanket warning-suppression attributes were hiding
-
-`make check` being warning-free is the tree's standing claim, and a blanket inner
-attribute at the top of a file quietly exempts it. No file under `kernel/src`
-carries one now; this is what finding them cost and bought. The sweep:
-
-```bash
-for f in $(grep -rl '^#!\[expect\|^#!\[allow' kernel/src); do
-  printf '%s: ' "$f"; head -3 "$f" | grep '^#!\['; done
-```
-
-`#![expect(unused)]` on line 1 silences the whole `unused` group — unused
-imports, unused variables, never-read fields, never-constructed variants — for
-that module **and every child module**, which is how one line on
-`drivers/usb/xhci/mod.rs` covered `device.rs`, `registers.rs` and `rings.rs` too.
-Errors still surface, so the file looks compiled and checked; only the warnings
-are gone. Removing that one line exposed six, of which one was a real waste: the
-`buffer` field of `UsbBlockRequest::Read` had every caller allocate and send a
-zeroed `Vec` the size of the read, which the driver thread destructured away with
-`..` and never touched.
-
-The probe that establishes whether a gate reports warnings at all, which is worth
-running before trusting a clean run: append `let gate_probe_unused = 5;` to a
-function in the file being changed and check that the build names it. If it does
-not, look for an inner attribute at the top of that file before looking anywhere
-else.
-
-Fourteen of them lost the attribute in one sweep, which exposed 100 warnings.
-What that bought, beyond the imports and the `let mut` that make up the bulk:
-
-- **A whole dead driver.** `drivers/vga/` spawned a kthread on every boot that
-  logged the display's PCI BARs, built a `VgaController` holding nothing but the
-  `PciDevice` it was handed, and parked forever. The live half was three port
-  helpers — `dispi_read`/`dispi_write` and the DISPI index constants, which
-  `graphics/mod.rs` uses to size video memory and to page-flip. `vga/mod.rs` is
-  now just those, and `controller.rs`, `error.rs` and an empty `structures.rs`
-  are gone along with `vga::init()`.
-- **A duplicate PCI capability walk.** `PciManager::capabilities` and
-  `CapabilityIter` re-implemented what `pci::find_capability` does for MSI and
-  MSI-X; the dead VGA kthread was its only caller, so it fell out with it. One
-  capability walker, not two.
-- **A superseded thread teardown.** `scheduler::exit_thread(tid)` did the
-  reaper's job — `THREADS.remove`, `record_thread_exit`, `adopt_orphans_of` — but
-  removed the thread from the registry *before* `t.free()`, where the reaper
-  frees first. Nothing called it.
-- **`acpi::processor_info`, `number_of_cores` and the `PROCESSOR_INFO` static.**
-  The MADT's view of the APs, parsed and stored at boot and never read: the
-  processors this kernel starts come from Limine's MP response
-  (`smp.rs`, `MP_REQUEST`). Discarding it also removed an `unwrap`.
-- **`UsbDevice::output_ctx` is not dead**, it is a DMA ownership anchor — its
-  physical address is written into the DCBAA and nothing reads the field back.
-  It keeps an `#[allow(dead_code)]` saying so. The mass-storage node's `vendor`
-  and `product` were the opposite case: parsed out of the INQUIRY response and
-  stored for nobody, so they became the registration log line instead.
-
-The register-definition files (`hda/regs.rs`, `e1000e/regs.rs`, `ahci/fis.rs`)
-have a real reason — a hardware register block is transcribed whole and most of
-it is unused by design — so each carries a narrow `#![expect(dead_code)]` with a
-`reason` naming the spec, not the `unused` group. `expect` rather than `allow`
-so it warns if the file ever stops needing it. Two spec-table entries in
-`xhci/rings.rs` carry the same thing per item.
-
-`debug/lock_order.rs` needed none at all — removing its `#![allow(dead_code)]`
-produced nothing under the default build, `sched-test` or
-`lock-order-self-test`.
-
-The last three files were 38 warnings between them, and only one of the three
-categories was the register-map case the attribute is legitimate for:
-
-- **`fs/block_page_cache.rs`** hid exactly one unused `journal_for_device`.
-  `register_device` and `all_journals` are the pair the committer kthread uses;
-  the per-device lookup never acquired a caller.
-- **`util/uaccess.rs`** hid `UAccessGuard`, its `new`, and
-  `UAccessState::set_resume`, which was the guard's only caller. The
-  fault-resume mechanism itself is live and is *not* what was dead: `do_user_copy`
-  arms `fault_resume` from inside its own inline assembly, via
-  `setup_fault_resume`, because the resume address is a label in that asm block
-  and no Rust caller can name it. The RAII guard was a second, unusable way in.
-  Read that before concluding the whole module is vestigial.
-- **`drivers/ahci/structures.rs`** hid three different things. The `print_*`
-  register dumpers on `HbaMemory` and `HbaPort`, `ScsiTestUnitReady` with the two
-  SCSI opcodes the driver never issues, and `DeviceIdentifyInfo::raw_features`
-  (parsed, stored, never read — the two flags derived from it are the useful
-  part) were all vestigial and are gone. The four `SSTS_*` constants were the
-  interesting case: they read as dead while `controller.rs` open-coded
-  `ssts & 0xF` and `(ssts >> 8) & 0xF` with `!= 3 || != 1` at three sites, so the
-  fix was to use them — `ssts_det`, `ssts_ipm` and `ssts_device_ready` in
-  `structures.rs` are now the one decode. Only the remaining 24 register bits
-  (`PORT_IS_*` beyond `TFES`, the unused `CMD_HEADER_*`, `PORT_CMD_CLO`, two SATA
-  signatures) are genuinely the transcribe-the-spec case, and each carries its
-  own `#[expect(dead_code, reason = ...)]` rather than one attribute over the
-  file — per item, so using one warns that its attribute is now unfulfilled.
-
-The general lesson across all seventeen files: a constant that looks dead is
-often a magic number somewhere else.
-
-## An xHCI controller is built once, not probed then initialised
-
-`XhciController` was two phases: `find_and_init` mapped BAR0 and returned a value
-whose `dcbaa`, `command_ring` and `event_ring` were all `None`, and `init` filled
-them, so every later use of a ring went through `as_mut().unwrap()`. The DCBAA
-cannot be sized before the reset — its length comes from `HCSPARAMS1.MaxSlots`,
-which is only trustworthy after `HCRST` — so the fields genuinely could not be
-set by the old `find_and_init`. Folding the whole bring-up into it is what makes
-them final: `bring_up` owns the reset, the capability read and every allocation
-as locals, and constructs `Self` only on the path that saw HCHalted clear.
-
-Same shape as the AHCI port fix, and the same lesson: an `unwrap` on an `Option`
-field is usually reporting a constructor split across two calls rather than a
-value that might be missing. A controller that fails to start is now skipped and
-the probe moves to the next PCI candidate, instead of being returned in a
-half-built state for the caller to notice.
-
-## Counts, remeasured 2026-08-29 (at `a33c6196`, after `texttest`, `fbtest` and
-`filetest` joined `guest-check`, `edos_lib::args` landed and the last four
-hand-rolled flag loops adopted it, and I5 closed both halves)
-
-Every number a doc states about the size of the tree, taken rather than carried
-forward. Remeasure before quoting one; the commands are here so the next reader
-does not have to invent them.
-
-| | value | how |
-|---|---|---|
-| syscalls | 124 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 124 — a mismatch is the bug |
-| userspace programs | 132 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 133 | `ls filesystem/bin \| wc -l`. One more than the program count, and none of the three reasons is the same: `edos-edit` is packaged rather than imaged and is absent, `gunzip` is a second binary of the `gzip` crate, and `ctest` is built by `libs/libgloss-edos` rather than by the workspace |
-| Rust | 115,794 code lines across 479 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 53,634 code lines | `tokei -t=Rust kernel/src` |
-| NVMe driver | 2,268 code lines across 10 files | `tokei -t=Rust kernel/src/drivers/nvme` |
-| commits | 1,659 at `a33c6196` | `git rev-list --count <rev>`; state the rev, because the count moves under a row that names only `HEAD` and the row itself is a commit |
-| in-kernel test suite | 58 | `make test AUDIODEV=none`, and `make test-single AUDIODEV=none` passes too — both targets name `-accel kvm` since 2026-08-19, so no `QEMUFLAGS` is needed |
-| host unit tests | 164 | `make host-tests`, then sum the `test result: ok. N passed` lines — there are eight test binaries and no single total is printed |
-| `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| guest suites | 21 | `make guest-check`; the list is `SUITES` in `scripts/guest-check` |
-| `nvme-check` cases | 5 | `make nvme-check`; the cases are the `case_*` functions in `scripts/nvme-check` — NVMe root, coexistence with SATA, the 4Kn refusal, install-and-reboot, and the watchdog under `nvme_timeout_ms=0` |
-| `unwrap()`/`expect()` in `kernel/src` | 169, of which 18 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
-
-The leading dot in that last grep is the whole measurement. Dropping it counts
-every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
-a file with no `unwrap()` in it at all — which is why a bare
-`unwrap()|expect(` sweep reports half again as many. Open a file near the top of
-a per-file tally before believing its position.
-
-A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
-exists" table drifted six programs behind the workspace (`nproc`, `pollbench`,
-`socktest`, `stdtest`, `switchbench`, `syscallfuzz`) while its header count was
-also wrong in the other direction, so the two errors hid each other. It drifted
-again by three — `allocbench`, `pitest` and `screenshot`, with the header
-reading 123 against a workspace of 128 — which is what this check is for: it
-costs a second and it is the only thing that catches a program added without a
-row. Diff the two sets rather than comparing totals:
-
-```bash
-cd /home/edgar/dev/edos-v2
-sed -n '/members = \[/,/\]/p' programs/Cargo.toml | grep -oE '"[^"]+"' | tr -d '"' | sort > /tmp/members.txt
-sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | tr -d '`' | sort -u > /tmp/tabled.txt
-comm -3 /tmp/members.txt /tmp/tabled.txt   # only `gunzip` is correct
-```
-
-`gunzip` is the one expected difference: it is a second `[[bin]]` of the `gzip`
-crate, so it is a program the table must list and not a workspace member. A crate
-count and a `filesystem/bin` count therefore differ by more than `edos-edit`
-leaving the image.
-
-The project site at `/usr/src/edos-web` is a separate repo carrying the same
-numbers, and it drifts on its own. Its headline counts, its program list and its
-syscall inventory all agree with the table above, the last of those only since
-`src/data/syscalls.ts` gained 289 `mprotect`, 314 `sched_setattr` and 315
-`sched_getattr`. It had transcribed 115 distinct numbers while `index.astro` said
-119 and the kernel dispatched 119: the headline was refreshed each time and the
-table behind it was not, which is precisely why the check below is a set-diff and
-not a count:
-
-```bash
-cd /usr/src/edos-web
-grep -oE 'num:\s*[0-9]+' src/data/syscalls.ts | awk -F': *' '{print $2}' | sort -n | uniq > /tmp/site_sys.txt
-grep -oE 'const SYS_[A-Z0-9_]+: u64 = [0-9]+' \
-  /home/edgar/dev/edos-v2/kernel/src/syscalls/mod.rs | awk -F'= ' '{print $2}' | sort -n | uniq > /tmp/kern_sys.txt
-comm -3 /tmp/kern_sys.txt /tmp/site_sys.txt   # must be empty
-```
-
-That kernel-side grep reports 118, not 119: `SYS_ERRNO` is written `0x400` and
-its decimal form does not match, so it is the one constant `grep -c 'const SYS_'`
-counts and this diff does not. Expect the difference and do not chase it.
-
-Its line counts drift faster than its inventories, and for a reason worth
-knowing: deleting dead code moves the LOC figure on every commit while adding
-neither a program nor a syscall, so a session that touches no interface at all
-still leaves the site's tree table wrong. Clearing the warning-gate opt-outs cost
-430 lines and four files across four commits with both inventories flat. Reread
-the four line figures whenever the repo's own table moves, even when nothing
-user-visible changed. The
-three names the site carries that `/bin` does not are explained on the page
-itself: `edos-sh` and `edos-vi` install as `sh` and `vi`, and `edos-edit` is
-published to the package repository rather than installed to the image.
-
-The places to check, because a count lives in more than one of them:
-
-- `src/pages/index.astro`, the `TREE` array: Rust lines and files, kernel lines,
-  program count, syscall count, commit count. The line figures are tokei CODE
-  lines, not totals.
-- `src/content/docs/architecture.md` ("There are N syscalls"),
-  `src/content/docs/userspace.md` (frontmatter description, body, and the
-  `syscallfuzz` sentence), `src/content/docs/introduction.md` (the table row and
-  the source link's line count).
-- `src/data/syscalls.ts`, which transcribes the whole table. Diff its `num:`
-  values against the kernel's rather than counting them: it was briefly at 111
-  entries while missing `mkfifoat` and still carrying `open`, which the kernel
-  had removed in favour of `openat` with `AT_FDCWD`, so the total was right and
-  the inventory was not.
-
-`npm run build` in that checkout IS the deploy -- nginx serves `dist/` directly,
-so the build publishes before any commit does. Commit and push the source too.
-
-**As of 2026-08-28 the site has not been updated against the table above and is
-stale in every one of those places**: 122 syscalls against 124, 128 programs
-against 131, 116,323 Rust lines against 115,532, 53,979 kernel lines against
-53,618, and 1,537 commits against 1,653. The Rust total went *down* while the
-tree grew, which is the I5 pass: `virtio/` alone deleted 29 `unsafe` blocks that
-did not need to exist, and comment lines are not code lines.
-
-The `unwrap` figure includes 26 in test code that is not worth converting: 18 in
-`thread/sched_test.rs` and all 8 in `drivers/usb/hid/report.rs`, whose unwraps
-are in its own descriptor-parsing tests and not on any driver path.
-`drivers/usb/xhci/mod.rs` came off this list at 19 → 5 by folding `init()` into
-`find_and_init()`, not by rewriting call sites, and `acpi/mod.rs` came off it at
-7 → 3 the same way (below). What is left is spread thin: no file holds more than
-six, and the largest — `thread/scheduler.rs`, `thread/preempt.rs`,
-`syscalls/mod.rs`, `serial.rs`, `memory/frame_allocator.rs`,
-`drivers/virtio/gpu.rs` at five or six each — are boot-time or structurally
-impossible and want a comment rather than a conversion.
-
-### A `Once` accessor can initialise itself
-
-`acpi_tables()` and `apic_info()` were `Once::get().unwrap()`, and the unwrap was
-the whole ordering invariant: every caller was asserting that `init_acpi()` had
-already run, with nothing enforcing it. Having each accessor be its own
-`call_once` deletes the invariant instead of documenting it — a caller that
-arrives first initialises, the rest get the same reference, and `init_acpi()`
-becomes an eager warm-up that keeps the boot ordering and the log line it
-already had.
-
-The three that remain are the honest ones: the RSDP parse, the interrupt model
-and the MADT lookup all describe a machine this kernel cannot run on, and an
-`expect` naming what the firmware failed to provide is more useful than an error
-the single caller could only panic on. Same lesson as AHCI and xHCI, one layer
-up: ask what the unwrap is asserting before converting it, because it is often
-asserting a phase that need not exist.
-
-### An `expect` can be a two-phase constructor wearing a disguise
-
-`drivers/ahci/port.rs` was on that list with eight, five of them on `weak_self`.
-Reading them as "a `OnceCell` filled at construction and read from a `&self` that
-cannot precede it" was accurate and led to the wrong conclusion, that converting
-them buys the caller an error it can only panic on. The `expect` was not the
-defect; it was the report of one. `AhciPort` was built in three phases —
-`AhciPort::new`, then `set_weak_self` from `ahci/mod.rs`, then `set_device_type`
-from `controller.rs` after the signature read — and every phase left a field the
-type system said was there and the value said was not.
-
-`Arc::new_cyclic` removes the first: `AhciPort::new` returns `Arc<Self>` and
-`weak_self` is a plain `Weak<AhciPort>` set inside the closure, so there is no
-window in which it is unset and nothing to call. All fallible work (`stop_port`,
-the three `dma().allocate()`) happens before the struct literal, which is what
-lets a `Result` wrap a `new_cyclic` whose closure cannot fail.
-
-`set_device_type` existed because the port's signature register only reads back
-once FRE/ST are set, so the caller learned the device type after `new` returned.
-That read now lives at the end of `new`, where the port has just been started,
-and a signature naming neither ATA nor ATAPI is `AhciError::InvalidDevice`
-instead of a port that is silently dropped by the caller. `AhciController.ports`
-is `Vec<Option<Arc<AhciPort>>>` and the direct layer takes them as they are.
-
-Left behind and correctly so: `command_tables` and `slot_pools` really are
-two-phase, because the slot count is only known after IDENTIFY, and `self_arc()`
-keeps one `expect` for an upgrade that cannot fail while the caller holds the
-`&self` it was reached through.
-
-`fs/efs/mod.rs` came off that list by deduplication rather than by conversion:
-eight of its nine were the same
-`path.parent().unwrap_or_else(|| Path::parse("/").unwrap())` line, which is now
-`Path::parent_or_root()` beside `Path::root()` in `fs/path.rs`. The ninth was
-`chunks_exact(8)` plus `try_into().unwrap()`, which `slice::as_chunks::<8>()`
-does with no fallible step at all.
-
-## Naming a uid without a passwd database
-
-`id` and `whoami` were listed as blocked on "users and file permissions", and
-only half of that was true. `SYS_GETUID`/`SYS_GETGID` (102/104) already answer
-from `UserThreadInfo.user_id`/`group_id`, which every process inherits from
-`edos-init` and which nothing can change — there is no `setuid` and, per the
-charter, deliberately will not be one until something can enforce it. So the ids
-are real; what is missing is only a way to spell them.
-
-That spelling is `edos_lib::process::id_name`, a table of the one identity the
-kernel hands out (`0` → `root`), and it is the single place to replace when an
-`/etc/passwd` exists. There is no `/etc` in `FILESYSTEM_DIRS` (`GNUmakefile`),
-so nothing reads a database today. An id with no entry prints bare — `whoami`
-prints the number, `id` omits the `(name)` suffix — rather than inventing one.
-
-`chmod`/`chown` stay blocked, and on the other half: attributes are readable
-(`FstatEntry::attrs`) but no `FileSystem::set_attrs` exists to write them back.
-
-## The connection reaper unbound the listener, and a half-open lived forever
-
-Two defects in the same 40 lines of `tcp_retransmit_main`
-(`kernel/src/net/stack.rs`) and the passive-open path above it.
-
-**The listener was unbound by its own connections closing.** The reaper collected
-`c.local_port` from every connection it reaped and did `pt.remove(&(6, port))`.
-A connection born of `accept` carries its *listener's* port, so the first
-`TIME_WAIT` to expire took `(6, 23)` out of the port table with it and every
-later SYN was answered with RST. `socket::unbind_port` had already been written
-for exactly this — it removes only when the table's entry is the socket being
-closed — but the reaper predated it and released by port number alone. It now
-collects the owning socket alongside the port and applies the same `Arc::ptr_eq`
-test. A dead `Weak` owner means the socket was closed and unbound on the syscall
-path, so there is nothing to release.
-
-Worth knowing how this hid: a single request per boot passes, and so do several
-in a row, because the reaper only strikes once the connection leaves `TIME_WAIT`
-five seconds later. It takes **two connections more than five seconds apart** to
-see it. Iteration 7's httpd test was one `curl`, which is why item 7 looked
-closed with this underneath it.
-
-**A half-open connection was immortal.** The SYN-ACK was built inline with
-`tcp::build` and sent once, so it was on no retransmit queue: a lost SYN-ACK was
-never resent, and a peer that vanished after its SYN held a backlog slot until
-the listener closed. `TcpConnection::build_syn_ack` now mirrors `build_syn` and
-queues the segment, which buys both halves from machinery that already existed —
-resend with RFC 6298 backoff, and death by `check_retransmit`'s `retries >= 5`
-arm at about 63 s, which RSTs and marks the connection `Closed`. The reaper then
-drops it and prunes the listener's `accept_queue` of any queued socket whose
-connection went `Closed` without ever reaching `Connected`.
-
-**A `SynReceived` half-open cannot be produced through slirp**, so do not spend
-an iteration trying. QEMU's `hostfwd` terminates the host TCP connection itself
-and then opens its own to the guest, which it always completes; the guest never
-sees a handshake that stalls after its SYN-ACK. Exercising the deadline for real
-needs a tap backend with a packet filter that drops the final ACK, or an in-guest
-raw-socket test. What was verified in the guest is the listener surviving five
-connections spread across 20 s with `netstat -a` showing one `TIME_WAIT`, the
-`LISTEN` row intact, and no stranded `SYN_RECV`.
-
----
-
-## The first inbound connection after boot was lost in the ARP cache
-
-`send_ip` used to build the frame only when `arp_cache.lookup` hit, and return
-`Err("arp pending")` otherwise. The packet was gone: the ARP request went out,
-the reply arrived, and nothing remembered what the request had been for. Every
-caller that could not block (the SYN-ACK path in `handle_ipv4`, the FIN paths in
-`pipe.rs`, `io.rs` and `syscalls/mod.rs`, retransmits) simply dropped its
-segment, which is why the first `curl` after boot failed and `netstat -a` showed
-a stranded `SYN_RECV` with Send-Q 1.
-
-`ArpCache` now holds one packet per unresolved target (`queue_pending_tx` /
-`take_pending_tx`, RFC 1122 §2.3.2.2), flushed from `handle_arp` when the reply
-lands. Newest wins per target and the map is capped at 16 targets, so a peer
-that never replies costs one packet, not a growing queue.
-
-Consequences worth knowing:
-
-- `send_ip` returns `Ok(())` for a packet that has not reached the wire. That is
-  the honest contract for a best-effort layer, and it made three ARP-retry
-  loops dead: `syscall_ping`, `sys_connect` and `sys_sendto` each used to wait on
-  an ARP waiter and re-send. All three are gone, and with them
-  `ArpCache::get_or_create_waiter` and the `pending` waiter map.
-- A cold-cache ping now measures ARP resolution inside its RTT, since the echo
-  request leaves when the reply lands. Linux reports a first ping the same way.
-
-Verified in the guest with `httpd -p 23 &` and one `curl` from the host through
-`hostfwd tcp:127.0.0.1:2323`: 200 in 10 ms on the *first* connection after boot,
-and the pcap shows the order — inbound SYN, `who-has 10.0.2.2`, the reply, then
-the SYN-ACK 39 µs later.
-
-`scripts/edos-vm start --pcap FILE` was added for that, since `make run-capture`
-wants a local display and cannot run over SSH.
-
-### The IPv4 id was always zero
-
-`ipv4::build` hardcoded `identification = 0` while `next_ip_id()` was called and
-discarded in `send_ping`. Fragment reassembly keys on that field, so two
-concurrent fragmented flows to the same peer would have aliased. `build` now
-takes the id and `send_ip_inner` supplies it. Still zero in one place: DHCP hand
--rolls its own IPv4 header (`net/dhcp.rs:176`) rather than calling `ipv4::build`,
-which is harmless for a never-fragmented broadcast but is the last id=0 sender.
-
----
-
-## A stop signal did not cut short a sleep, and `thread_sleep` was not why
-
-Ctrl+Z on `sleep 30` took effect only when the 30 s were up. The mechanism on
-record blamed `thread_sleep` for not returning early on a signal, and that is
-wrong: `thread_sleep` already aborts on a wake, `transition_sleep` consumes the
-wake token exactly as park does, and `kill_process_with_signal` wakes its target
-before setting anything.
-
-The loop is one layer up. `sys_nanosleep` (`kernel/src/syscalls/mod.rs`) sleeps
-against an absolute deadline and re-enters `thread_sleep` with the time
-remaining, so the early return did happen and the loop immediately undid it. It
-checked `exit_if_killed`, which is why a kill got through and a stop did not.
-
-The fix calls `stop_if_signalled` alongside `exit_if_killed` inside that loop.
-The thread holds nothing there, which is the condition that doc comment names
-for suspending a thread, so the suspension is safe in the middle of the call.
-On `SIGCONT` the loop recomputes the remaining time and sleeps the balance. The
-deadline is absolute, so time spent suspended counts against it: a `sleep 30`
-suspended for a minute returns as soon as it is continued.
-
-`sys_sleep_ms` needs no equivalent change; it does not loop, so its single early
-return already reaches the syscall boundary where the stop is taken.
-
-### The second half: `stop_if_signalled` parked once and the wake token ate it
-
-With only that change the guest still waited the full 30 s. Instrumenting the
-signal path settled it in one boot. Serial log, `sleep 30` interrupted at t = 2 s:
-
-```
-[25.599102] signal_process_group pgid=27 signum=20 members=[27]
-[25.599104] kill pid=27 signum=20 state=Ready woke=true
-[25.607726] nanosleep tid=27 woke, stop_requested=true
-[25.607730] nanosleep tid=27 sleeping 27940 ms
-```
-
-Every layer worked: the line discipline signalled the right process group, the
-default action set `stop_requested`, the wake claimed the sleeper, and the
-nanosleep loop ran `stop_if_signalled` 8 ms later with the flag set. Four
-microseconds later it was sleeping again — so the park inside
-`stop_if_signalled` returned without ever parking.
-
-`thread_park_while` documents exactly this: it **may return spuriously**, because
-`transition_park_while` consumes the wake-pending token and bails when it finds
-one, and it deliberately does not loop internally (looping would re-park without
-re-enrolling on a wait queue, which breaks the wait-queue protocols). The token
-here is the one `do_wake` published to deliver the signal: `try_wake` claims a
-`Sleeping` thread through the state machine and never clears it, so it survives
-into the *next* park the thread attempts. `stop_if_signalled` called
-`thread_park_while` exactly once, so that stale token turned the suspension into
-a no-op and the syscall resumed.
-
-The fix loops on the condition around the park, which is what every other
-`thread_park_while` caller in the tree already does (they are all bodies of
-kthread `loop`s). `stop_if_signalled` enrolls on no wait queue, so re-parking is
-safe there.
-
-Verified in the guest: Ctrl+Z on `sleep 30` returns the prompt at once and the
-next command runs, while an unsignalled `sleep 5` still takes its five seconds.
-
-Ruled out along the way, so do not re-derive them: a stale ISO, the wrong
-syscall, the loop lacking a `stop_if_signalled` call, `signal_process_group`
-failing to match, and the wake failing to reach the sleeper.
-
-**Generalisation worth carrying:** a stale wake token is left behind by every
-wake that ends a sleep or a park, so any *single* `thread_park_while` call is a
-latent no-op. Treat the one-shot call as the bug, not the token.
-
----
-
-## Fixed: the shell read one byte and called it a character
-
-Typing the Spanish ISO `ç` and redirecting it wrote `c3 83 c2 a7` instead of
-`c3 a7`. Nothing was encoding twice; the shell's readline decoded once, wrongly.
-
-`read_line` in `programs/edos-sh/src/main.rs` reads stdin one byte at a time and
-did `let ch = ch as char`. That cast is a Latin-1 decode, not a UTF-8 one: it
-takes the byte as a code point. `0xC3` becomes `U+00C3` and re-encodes as
-`c3 83`, `0xA7` becomes `U+00A7` and re-encodes as `c2 a7`, and the two together
-are exactly the sequence observed. Every layer below was already correct — the
-terminal widget collects `Vec<char>` and writes real UTF-8, and the PTY line
-discipline passes bytes through untouched — so the bug was entirely in the
-one-byte-at-a-time reader treating each byte as a whole character.
-
-The fix reads the rest of the sequence when a byte at or above `0x80` arrives,
-using `utf8_seq_len` for the expected length, and decodes with
-`str::from_utf8`. A stray continuation byte or a lead byte RFC 3629 no longer
-permits is dropped rather than inserted, so a malformed sequence cannot corrupt
-the line buffer.
-
-Verified in the guest: `echo ç > /var/k.txt` then `hexdump /var/k.txt` gives
-`c3 a7 0a`, with `ç` echoed correctly on screen. Use `/var`, not `/tmp`: memfs
-reads past EOF and pads the last page with zeros, so a hexdump there shows
-trailing garbage that has nothing to do with the write. `hexdump` here takes no
-`-C`.
-
-Sending the key: `scripts/edos-vm key backslash`. `ç` is `OEM7` in
-`programs/edos_lib/src/keymap.rs`, which is the ISO key beside Enter.
-
----
-
-## The floor, measured with the host quiet
-
-Every number in this file older than this section was taken while the host was
-doing something else, and the previous session concluded from a 4x spread that
-nothing under 30% could be attributed. That spread was the host. This is a VM:
-when the host has a build or a test suite to run it deschedules the whole vCPU,
-which the guest cannot see and which looks exactly like slow code.
-
-Five consecutive `switchbench` runs, single-CPU boot, nothing building on the
-host (a resident Ethereum devnet was still running, about 2.5 of 12 hardware
-threads -- this machine has no truly idle state). Median, with the spread
-across the five runs:
-
-| | ns | spread |
-|---|---|---|
-| `sched_yield`, nothing else Ready | 285 | 283-288 |
-| `sched_yield`, handover to a sibling thread | 340 | 328-350 |
-| `sched_yield`, handover to another process | 505 | 499-533 |
-| `getpid` | 94 | 92-95 |
-| `read` of a descriptor that does not exist | 128 | 128 |
-| a pipe write + read, nothing blocking | 387 | 384-537 |
-| a blocking pipe round trip | 2016 | 2009-2036 |
-| the same round trip, one address space | 1808 | 1800-1812 |
-
-The last three rows were re-taken on 2026-08-12 after the wait-queue work below
-(402 / 2203 / 1988 before it); the rest have not moved since they were first
-measured.
-
-**The same binary now repeats to within 2%**, which is what makes a 25 ns
-change measurable. The rule that follows is simple: do not measure while
-anything is building, and read the median of five runs.
-
-These decompose cleanly, which the old noisy numbers never did:
-
-- the syscall boundary is **94 ns**, and the fd table another **34** on top;
-- a switch and its trampoline are **~190** (`sched_yield` 285 minus a `getpid`);
-- the pipe's own work is **~73 ns per call**.
-
-`/proc/sched_prof` says 220 for the switch alone, which is *more* than the whole
-285 minus 94. Its probes are two `rdtsc` reads per stage boundary, so its stages
-rank the parts of a call and do not add up to one. That is a caveat this file
-did not have before, and it matters: see the memset trap below.
-
-## There was no 3-microsecond gap: it was the benchmark
-
-A blocking pipe round trip read **2203 ns**, not the ~4900 this file and
-`SCHED-ROADMAP.md` reported for months, and the 3.7 us that "nothing could
-account for" was never the kernel. Every figure below is that 2203 ns baseline;
-the round trip reads 2016 ns today, for the reason the end of this section gives.
-
-`switchbench`'s `pipe_round_trip` timed one batch of 2000 trips with no warmup,
-while every other figure it prints is the best of six batches after 64 warmup
-iterations. A `fork`ed child starts with every page copy-on-write, so that single
-unwarmed batch charged the round trip for the faults of its own child starting
-up. Measured the same way as everything else:
-
-| | ns/round trip | spread |
-|---|---|---|
-| cross-process | 2203 | 2196-2206 |
-| one address space (a thread at the far end) | 1988 | 1983-1992 |
-| **the address space, per switch** | **~108** | |
-
-**That ~108 ns agrees with the yield path**, where a cross-process handover costs
-129 ns more than a same-process one. Two independent measurements of the same
-quantity that now agree, where they used to differ elevenfold. That is the reason
-to believe these and not the old ones.
-
-**How it fooled a whole round of analysis.** The thread-vs-process comparison was
-added to find where the missing microseconds went, and it *did* isolate them --
-onto the address space, which is where the difference in method happened to sit.
-The conclusion (a `CR3` reload costs ~1470 ns in TLB refills, amplified by nested
-paging) was wrong, and the next piece of work chosen on the strength of it, huge
-pages for user mappings, would have bought nothing measurable.
-
-What killed it is now a permanent part of `switchbench`: both round trips can
-touch a 32-page working set per side per trip, and doing so costs the same
-whether or not an address space was switched in between.
-
-| | 0 pages | 32 pages | delta |
-|---|---|---|---|
-| one address space | 1988 | 2280 | +292 |
-| cross-process | 2203 | 2590 | +387 |
-
-**~1.3 ns per page refilled after a `CR3` reload**, not the ~100 a nested walk
-was assumed to cost. Refills are not where the time is, so nothing that reduces
-them -- huge pages, and PCID if this host had it -- is worth building.
-
-**Two rules out of this, both about measurement:**
-
-- **Never compare a best-of-N-with-warmup figure against a single unwarmed
-  batch.** Every case in one benchmark has to be timed the same way, or the
-  difference between two cases is a difference in method.
-- **A stable artifact is still an artifact.** The bad number reproduced to within
-  8% across runs and across four builds, and that is exactly why it was trusted.
-  What caught it was two ways of measuring one quantity disagreeing by 11x.
-
-### What is left: ~620 ns per round trip
-
-| | ns |
-|---|---|
-| 4 pipe syscalls, at 94 boundary + 34 fd table + ~73 pipe work | 804 |
-| 2 switches, at ~230 plus ~108 when the address space changes | 676 |
-| 2 wakes (`do_wake`) | 102 |
-| **accounted** | **~1580** |
-| **measured** | **2203** |
-
-~310 ns per park/wake pair, and the suspect was the predicate: the blocking read
-performs a **whole** read attempt before it blocks, and `wait_internal` then
-evaluated its predicate up to three more times, with a queue push and a `retain`
-around them. Unlike everything this section retracts, that is a cost bare metal
-pays too.
-
-**Two of those three evaluations are gone (2026-08-12): 2203 -> 2016 ns.**
-`WaitQueue::wait_until_unready` drops the entry check for a caller that has just
-established the condition is false under the real lock, and the tail check was
-dead for every untimed waiter because both of its branches returned `Parked`.
-The same commit gave `WaitQueue` an exact `waiters` count so `wake_one` and
-`wake_all` cost nothing when nobody is enrolled. The ordering argument that
-makes the count safe is in `doc/SCHED-ROADMAP.md` section 1 — it is the one part
-of this worth reading before touching the queue, since a relaxed read there is
-precisely the missed wakeup in `doc/bugs/2026-04-13-sched-park-wake-missed-wakeup.md`.
-What is left of the ~620 is the third evaluation, inside `transition_park_while`,
-which is what makes the park safe and cannot be removed.
-
-### What survived: the kernel half was only global for what existed at boot
-
-The one measured win against the address-space switch, and it stands:
-a cross-process `sched_yield` handover **506 -> 456 ns**, of which the
-address-space part went **177 -> 128**.
-
-`mark_kernel_mappings_global` sweeps the kernel half once, at boot. Everything
-mapped there afterwards was non-global, including a thread's kernel stack and the
-per-CPU scheduler stack the voluntary switch pivots onto -- the two regions every
-syscall and every switch touch. `map_memory` now sets `GLOBAL` on any kernel-half
-mapping itself, so the next site cannot forget. The controls did not move (thread
-handover 328 ns, same-address-space round trip unchanged), which is what a fix to
-post-`CR3` work should look like. Freed kernel stacks keep their mapping, so no
-global entry outlives what it maps; where a kernel mapping is torn down, `invlpg`
-and the `CR4.PGE` toggle both ignore the `G` bit.
-
-## The pipe and the PTY share one ring now, 480 ns to 402
-
-`Pipe::read` allocated a `Vec` for the bytes it drained and then memmoved the
-remainder with `drain(..n)`; `sys_write` allocated another to stage the user's
-bytes before taking the pipe lock; `sys_read` took that lock three times, once
-to clone `reader_wq`, once to drain, and once inside every `wait_until`
-predicate. Both directions of the PTY did the same thing to every keystroke and
-every character a program printed.
-
-All of it is one `ByteRing` now (`kernel/src/util/ring.rs`), behind the pipe and
-both PTY directions. It grows to fit, keeps its allocation, and restarts at zero
-whenever it drains, so two processes passing single bytes settle on one buffer
-and never allocate again. Reads fill a caller-provided buffer, so no device
-allocates on a read; the non-blocking path takes the lock once, and `reader_wq`
-is only fetched when a read really has to park.
-
-A pipe write plus read went **480 -> 402 ns**. Verified by hashing 1.1 MB
-through a pipe (`cat /bin/switchbench | sha256sum` matches `sha256sum
-/bin/switchbench` byte for byte), `wc -c` reporting the exact size, `$(ls /bin)`
-capturing a multi-kilobyte substitution, heredocs, and 51/51 in-kernel tests --
-`byte-ring` in `sched_test.rs` is the new one, and it exercises wrapping and a
-growth that has to linearise a wrapped ring.
-
-### The trap: a stack buffer costs its declared size, every call
-
-The staging buffer that replaced the per-call `Vec` is a stack array, and **Rust
-zeroes a stack array**. So the first version swapped an allocation for a memset
-of the array's full size on every call, whatever the transfer, and at 2048 bytes
-the two cancelled exactly:
-
-| staging buffer | one-byte pipe echo |
-|---|---|
-| a `Vec` per call, as before | 480 ns |
-| 2048 B | 480 ns |
-| 512 B | 455 ns |
-| 128 B | 404 ns |
-
-128 B shipped: enough for a byte of IPC or a keystroke, with anything larger
-taking the heap where one allocation is amortised over a copy worth making.
-
-Two things worth keeping from how this was found. The end-to-end number said
-"no change" while `/proc/sched_prof` said `pipe_copy_out` had gone from 9 ns to
-135 -- **the compiler had moved the memset across a probe boundary**, because
-the boundary is an `rdtsc` and nothing stops code crossing it. And the honest
-reading of "no change at all, to the nanosecond" was that something new had been
-added of exactly the size of what was removed, which is what it was.
-
-### Fixed on the way: a wait predicate that could panic the kernel
-
-`WaitQueue::wait_until` evaluates its predicate inside `without_interrupts`, and
-its doc says so: a predicate that takes a contended `BlockingMutex` there trips
-that primitive's interrupts-enabled assertion. The pipe's read predicate took
-the pipe lock, and the PTY slave's took the PTY lock. Both now probe with
-`try_lock` and treat a contended device as ready, which is safe because the loop
-around the wait re-checks under the real lock either way. It only fired under
-contention, which is why it survived this long.
-
----
-
-## The context switch round: 1917 ns to 433
-
-Both columns here were taken while the host was busy. The floor section above
-re-measures the "after" column on a quiet host and gets 285 ns for the idle
-yield rather than 433; the *ratio* is what this section is about, and it
-survives.
-
-| | before | after |
-|---|---|---|
-| `sched_yield`, nothing else Ready | 1917 ns | 433 ns |
-| `sched_yield`, handover to a sibling thread | 1832 ns | 490 ns |
-| `sched_yield`, handover to another process | 2215 ns | 751 ns |
-| pipe round trip between two processes | 9429 ns | 4552 ns |
-| the switch itself, `/proc/sched_prof` | 1270 ns | 220 ns |
-
-Three changes, in the order they matter.
-
-**The APIC timer is armed only when what is already armed will not do.**
-`context_switch_to` re-armed the one-shot on every switch to push the incoming
-thread's slice out, and that write — one x2APIC store to `IA32_TSC_TMICT`,
-trapped by the hypervisor — was 1024 ns of a 1270 ns switch. A timer already
-set to fire *earlier* than the new deadline satisfies it; only one that would
-fire late forces the write. `expire_timeslice` already compared each thread
-against its own deadline and let an early tick pass, and `tick_finish` re-arms
-for what is left of the slice, so a thread still gets all of it and just takes
-one extra tick to notice. Yielding in a loop now costs one interrupt per
-timeslice instead of one trap per switch.
-
-This is what a tickless kernel's clock-event layer does, and why Linux ships
-`HRTICK` — an hrtimer armed at the exact slice end — turned off by default.
-
-**`FS.base` moved to `rdfsbase`/`wrfsbase`**, following the `HAS_FSGSBASE`
-gate `per_cpu.rs` already had for GS. 104 ns to 34.
-
-**Kernel mappings are `GLOBAL` now, and `CR4.PGE` is on.** Neither had ever
-been set, so a `CR3` write discarded the kernel's own translations along with
-the outgoing process's and the next syscall re-walked them. The kernel half is
-the same page tables in every address space, so the bit is exactly true of
-them. 2805 leaves marked at boot; it is worth nothing to a same-address-space
-switch and a fifth of a cross-process one.
-
-### Two things that were tried and are not worth doing
-
-- **`XSAVEOPT` instead of `FXSAVE`.** Measured: save 32 → 36 ns, restore
-  59 → 83 ns. It can only win by *skipping* components, and with `XCR0`
-  holding x87 and SSE there are none to skip — it saves the same registers
-  `FXSAVE` does and adds a 64-byte header plus per-component work. Its
-  modified optimisation needs consecutive `XSAVEOPT`/`XRSTOR` on the same
-  area, which two threads handing off to each other never do. It becomes the
-  right answer only if `XCR0` grows something large and optional (AVX and
-  wider) that most threads leave alone. The note lives above `save_fpu_state`.
-- **PCID.** Not possible on this machine: the host is a Ryzen 5 5600, and Zen
-  3 has no PCID, so `qemu` refuses `+pcid` with "host doesn't support requested
-  feature: CPUID.01H:ECX.pcid". It cannot be exposed to the guest or tested
-  here. Global kernel pages above are the part of the same win that is
-  reachable; what remains — a process's own translations dying on every switch
-  — needs the hardware.
-
-### What is left, with numbers
-
-The switch is 220 ns and the whole `sched_yield` is 433, so roughly 210 ns is
-now the syscall boundary, the trampoline and `iretq`. Inside the switch:
-`page` 66-77 (an `RwLock` read and a `CR3` read even when the address space
-does not change), `fxrstor` + `fxsave` 91, `CpuContext` copies 36, publish 19,
-transition 27, `wake_sleepers` 18, pick 12, timer 10.
-
-`switch_to_page` is the next cheap one: it takes `user.read()` and reads `CR3`
-before deciding it has nothing to do. Mirroring the thread's `CR3` in an
-atomic would remove the lock; there are only three sites that set it
-(`thread.rs` thread creation, `execve`, `fork`).
-
-But the bigger number is elsewhere. **A pipe round trip is 4552 ns and each
-park/wake is 2276, against 490 ns for a yield handover** — so the wake
-machinery costs about four times the switch it performs, and it is what every
-real workload here pays: a shell pipeline, the compositor, the terminal.
-Nothing has profiled it.
-
-**`doc/SCHED-ROADMAP.md` is where the next round is written down**, in priority
-order with the evidence and the outside references: a minimal voluntary switch
-in the shape of Linux's `__switch_to_asm`, an L4-style direct handoff to the
-receiver on a blocking IPC, spin-then-park, and the two small items above.
-
-**PCID is not coming to this machine.** It is not an old feature — Intel has
-had it since Westmere in 2010 — but AMD did not ship it for a decade, and this
-host, a Ryzen 5 5600 (Zen 3, Vermeer), does not expose it: no `pcid` in
-`/proc/cpuinfo` (it does have `invpcid`), and `qemu -cpu qemu64,enforce,+pcid`
-refuses with "host doesn't support requested feature: CPUID.01H:ECX.pcid".
-Reporting at the time had Zen 3 adding it on the **EPYC** parts. Do not plan
-around PCID here without checking the CPU first.
-
-## A context switch is one MSR write and a rounding error
-
-Measured on a single-CPU boot with `switchbench` (userspace, end to end) and
-`/proc/sched_prof` (kernel, stage by stage; `--features sched-prof`):
-
-| | ns |
-|---|---|
-| `sched_yield`, nothing else Ready | 1917 |
-| `sched_yield`, handover to a sibling thread | 1832 |
-| `sched_yield`, handover to another process | 2215 |
-| pipe round trip between two processes | 9429 |
-
-**The first two numbers settle a question the last round left open.** A
-`sched_yield` on an idle CPU returns to the *same* thread, so it was recorded
-as a floor that might be hiding the real cost of a handover. It was not: a
-genuine two-thread handover costs the same, within noise. An address-space
-switch on top adds ~380 ns.
-
-Inside the kernel, one switch is 1270 ns and this is where it goes:
-
-| stage | ns |
-|---|---|
-| `set_apic_timer` | **1024** |
-| `switch_to_page` (`CR3`) | 67 |
-| `fxrstor` + `fxsave` | 93 |
-| `FS.base` read + write | 104 |
-| `CpuContext` copies, both sides | 40 |
-| publish, transition, pick, wake_sleepers | 76 |
-
-`set_apic_timer` is **81% of a context switch.** It is one x2APIC write to
-`IA32_TSC_TMICT`, which KVM traps and answers by re-arming a host timer, and
-`context_switch_to` does it unconditionally on every switch to push the new
-thread's timeslice deadline out.
-
-Everything the previous round nominated as a lever is real but small: no PCID
-is 67 ns of directly visible cost (the refill misses it also causes are not in
-this figure), the unconditional 512-byte `fxsave`/`fxrstor` pair is 93 ns, and
-the `CpuContext` copies under a spin `Mutex` are 40 ns. `FS.base` goes through
-`RDMSR`/`WRMSR` for 104 ns while `CR4.FSGSBASE` has been on since boot and
-`rdfsbase`/`wrfsbase` cost a cycle or two.
-
-### How to take these numbers again
-
-`programs/switchbench` is the end-to-end side and **must be run on a
-single-CPU boot** — give the scheduler a second CPU and it puts the two
-threads on both, where neither ever waits for the other and every yield case
-collapses back into the idle one. It prints the CPU count it saw for exactly
-that reason.
-
-`/proc/sched_prof` is the breakdown, and reports cumulative work rather than a
-rate, so a measurement is: read the file, run the workload, read it again,
-subtract. The probes only exist under `--features sched-prof`, which must be
-passed to the **ISO** target rather than the kernel target.
-
-```bash
-make edos-x86_64.iso CARGO_FLAGS="--features sched-prof"
-scripts/edos-vm start --smp 1
-scripts/edos-vm type 'cat /proc/sched_prof > /tmp/b.txt; switchbench 20000 -l; \
-    cat /proc/sched_prof > /dev/klog; cat /tmp/b.txt > /dev/klog' --enter
-```
-
-## Fixed: a single-CPU boot never flushed its own TLB
-
-`make run-single` could not reach a desktop: `edos-taskbar` and
-`edos-terminal` both took a #GP inside `edos_rt`'s allocator within 50 ms of
-starting, and `edos-init` gave up on them. Four CPUs were fine, which is the
-wrong way round for a race.
-
-`munmap` unmaps each page with `flush.ignore()` and flushes the range once at
-the end — and that final flush was guarded on `shootdown_needed()`, which was
-`cpu_count() > 1`. With one CPU online the range was never invalidated at all,
-so freed frames went back to the allocator while the faulting CPU still held
-live translations to them. `tlb_shootdown` already skips the IPI round when it
-is alone, so the guard never saved anything and cost the local flush.
-
-`shootdown_needed` is deleted; every unmap path calls `tlb_shootdown`
-unconditionally. Full writeup in
-`doc/bugs/2026-08-11-single-cpu-skipped-its-own-tlb-flush.md`.
-
-## The clock was the most expensive thing in the kernel
-
-`Instant::now()` was an MMIO read of the HPET main counter. QEMU emulates the
-HPET in its own userspace, so every read was a full exit to the hypervisor:
-**6361 ns measured**, against **16 ns** for `rdtsc`. There were 72 call sites,
-including one on each side of every context switch and one per AHCI command.
-
-`Instant` now holds **nanoseconds, not counter ticks**, so a value stays
-comparable across a change of source; `tick()`/`from_tick` are `as_nanos()`/
-`from_nanos()` and every `*_tick` field was renamed. The TSC is only used when
-`CPUID.80000007H:EDX[8]` reports an invariant TSC, each AP re-checks itself
-against the HPET at bring-up and demotes everyone on disagreement, and
-`clocksource=hpet` on the kernel command line forces the old behaviour. QEMU
-does not advertise invariant TSC unless asked, so the run targets pass
-`+invtsc`; under TCG the bit is absent and the HPET is kept automatically,
-which is the right answer since TCG's TSC is counted instructions.
-
-| | before | after |
-|---|---|---|
-| clock read | 6361 ns | 16 ns |
-| `sched_yield` | 20818 ns | 1357 ns |
-| `poll`, 1 idle fd, timeout 0 | 13877 ns | 330 ns |
-| 512B raw device reads | 13.6 MiB/s | 35.3 MiB/s |
-
-Two defects only a fine-grained clock exposes, both fixed here:
-
-- **`set_apic_timer` clamped the initial count to 1 tick, not the duration.**
-  Writing 0 stops the one-shot timer permanently, so a floor existed — but one
-  tick at Div1 fires before the handler that armed it returns. A deadline that
-  has just arrived now asks for a nearly-zero timer routinely. Floored at 10 us
-  and saturated instead of truncated at the top.
-- **A slow clock was an accidental rate limiter.** Anything that read it in a
-  loop got a free backoff. Nothing depended on that in the end, but it is the
-  first thing to suspect if a spin loop starts misbehaving.
-
-**`poll` never consults the clock for a zero timeout now**, and reads it once
-rather than twice for a timed wait. That, not the allocations, was the cost the
-whole time: the two clock reads a timed call made were **12.7 us** against
-**158 ns** for the entire per-descriptor path.
-
-### …which promoted the per-descriptor allocations, and they are gone now
-
-With the clock reads gone, the 158 ns marginal cost of a descriptor was worth
-attacking. A poll call used to allocate **2 + 2N** times; it now allocates 2 or
-3 regardless of how many descriptors it watches:
-
-- **One `PollSet` for the whole call** replaces `Arc<PollWaiter>` plus an
-  `Arc<PollEntry>` per descriptor. A device holds a `PollRef`, which is a
-  refcount on the set plus an index, so registering costs no allocation. Its
-  slots live inside the set for eight descriptors or fewer.
-- **No `Box<dyn Pollable>`.** The pollable is built on the stack to register
-  through; only descriptors the device actually kept a registration for are
-  named again, as a `PollTarget` enum holding the `Arc` the descriptor table
-  already gave us. Only the filesystem path still boxes.
-- **A descriptor that registers nothing gets no context at all.** Its readiness
-  is frozen at registration, so it is written into the caller's array once and
-  counted there.
-- `Vec<SelectFd>` is a stack array for eight descriptors or fewer.
-
-Medians of three runs, before and after:
-
-| n | ready before | after | idle before | after |
-|---|---|---|---|---|
-| 1 | 636 | 347 | 329 | 318 |
-| 4 | 796 | 696 | 663 | 568 |
-| 16 | 2569 | 1841 | 2374 | 2005 |
-| 64 | 10175 | 6408 | 10213 | 7696 |
-
-**Marginal cost per descriptor: 158 → 99 ns.** Fixed cost is unchanged at
-~162 ns, and the descriptor snapshot stays on the heap: `FileDescriptor` is
-about a hundred bytes, so an inline array of them costs more to initialise and
-drop than the allocation it saves.
-
-**Two measurement traps this produced, both of which I acted on before catching:**
-
-- `pollbench` used to price the allocations as the gap between an invalid
-  descriptor and `stdout`. That is wrong: in a terminal, fd 1 is a **PTY
-  slave**, not `StandardStream::Stdout`, so it takes the PTY lock and registers
-  like any other device, and the terminal is redrawing during the measurement.
-  The "82 ns for two allocations" that figure produced was never real.
-- Single readings of the fixed-cost line swing between 150 and 256 ns. A
-  three-run median says the fixed cost did not move; one run said it had
-  regressed by 75 ns. The `n >= 2` rows are stable to a few percent and are the
-  ones to trust.
-
----
-
-## lstat is real now, so `is_symlink()` finally answers
-
-`std::fs::symlink_metadata` used to follow links: `lstat` in the fork's
-`library/std/src/sys/fs/edos.rs` was literally `stat(p)`, so
-`Metadata::is_symlink()` was always false and every path-based link test through
-std was dead code. Programs worked around it by calling `readlink` and treating
-success as proof of a link.
-
-The whole chain now exists:
-
-- `fs::api::file_info_nofollow` resolves with `LinkMode::NoFollow`, so only the
-  final component is left unresolved — leading components are still followed,
-  which is what POSIX.1-2024 specifies for `fstatat`.
-- `sys_fstatat` accepts `AT_SYMLINK_NOFOLLOW` (0x100) instead of refusing every
-  non-zero flag. The `FstatEntry` wire format already had `kind == 2` for a
-  symlink and EFS already reported it; nothing but the resolution was missing.
-- `edos_rt::fd::lstat_path` (0.0.43) goes through `SYS_FSTATAT` with `AT_FDCWD`,
-  because `SYS_STAT` has no argument for the flag.
-- The fork's `lstat` calls it.
-
-The `readlink` workarounds in `ls` and `stat` still work and were left alone;
-new code should use `symlink_metadata` instead.
-
-## Warnings are a gate now, and one of them was load-bearing
-
-Both builds are warning-free. Getting there turned up something worth knowing
-before the next cleanup: **`cargo check` on the default features reports items
-as dead that the `sched-test` feature uses.** `Thread::set_affinity_mask` is
-the example — its only caller is `queue_spawn_kthread_affine`, which is behind
-`#[cfg(feature = "sched-test")]`. Deleting it on the strength of the default
-build's warning would have broken `make test`. It carries
-`#[cfg_attr(not(feature = "sched-test"), allow(dead_code))]` now. Run
-`cargo check --features sched-test` before deleting anything the lint calls
-dead.
-
-Two warnings were vestigial code whose doc comments claimed consumers that
-never existed: `Transaction::ring_blocks` said it was "set by seal_and_commit"
-and nothing ever set it, and `ReplayResult::ring_blocks_consumed` said the
-caller used it to initialise `head_block` when the caller takes that from the
-on-disk journal superblock. Both are gone. The rest are `#[allow(dead_code)]`
-with a reason: `FaultReject`'s payload fields are read only through the derived
-`Debug` in the `KILL: PF ... reject={reject:?}` line, which the lint does not
-count, and `MAP_FIXED`/`MS_INVALIDATE` are unimplemented flags that still
-document the ABI's flag space.
-
-### The gate only ever built one of nine feature sets
-
-The same reasoning as above, one level up: `make check` builds the **default**
-features, so every one of the eight optional features was uncompiled by any gate.
-`trace` had been broken for as long as `serial.rs` has used uart_16550 0.6 —
-`util/trace.rs` still called `uart_16550::SerialPort::new`, which that release
-removed, so the feature CLAUDE.md documents as "per-CPU trace buffers dumped on
-panic" could not be turned on at all, and nothing said so.
-
-The fix is not the new API. `dump_all_cpus` was building its own UART only to
-avoid the `SERIAL_DBG` lock during a panic, and `serial::emergency_println!`
-already is that path — it polls LSR and writes 0x3F8 with no lock and no
-re-initialisation of a UART the panicking kernel is in the middle of using.
-The duplicate is gone.
-
-`make -C kernel check` now depends on `check-features`, which checks each
-feature on its own. It reads the names out of `Cargo.toml`'s `[features]`, so a
-feature added later is covered without touching the rule. About a second once
-cargo has each feature set cached, since they are separate build fingerprints.
-Watched go red against the pre-fix `trace.rs` and green after, rather than
-trusted on the strength of one green run.
-
-The two runtime-hostile features are still only compile-checked, which is all
-this gate claims: `lock-order-self-test-inversion` panics by design, and
-`sched-test` has `make test-headless` for the runtime half.
-
-`trace` itself was then watched work, which is worth recording because the dump
-only ever runs from the panic handler and there is no obvious way to reach it on
-purpose. Combining the two features is the way: the inversion self-test panics
-by design, so its panic dumps the ring.
-
-```
-make edos-x86_64.iso CARGO_FLAGS="--features trace,lock-order-self-test-inversion"
-scripts/edos-vm start --smp 1     # NOT --no-cdrom: Limine is on the ISO,
-                                  # and sata-disk.img alone is not bootable
-```
-
-`run_log.txt` then carries `=== TRACE DUMP ===`, one `--- CPU n ---` block per
-CPU that recorded anything, and `=== END TRACE ===` ahead of the backtrace.
-
-## Three defects the overnight run's own code review missed
-
-Found reviewing the 2026-08-11 run, all fixed in the same commit:
-
-- **`sys_listen` could leak a port for the rest of the boot.** The socket lock
-  is dropped before the port-table insert (correct — the receive path takes them
-  the other way round), then re-taken to set `listening`. A close landing in
-  that window ran its own `unbind_port` before the entry existed, so nothing
-  ever removed it: `sys_bind` refuses the port from then on, and an arriving SYN
-  finds a listener that is not listening. The `EBADF` path unbinds now.
-- **`/proc/<tid>/fd` reported a live thread as missing.** It reads the
-  descriptor table through `try_lock` — which it must, because a thread reading
-  its own `fd` file can already hold that lock further up the syscall path — but
-  folded the contention case into the same `None` that means "the thread
-  exited", which the read path turns into `FileNotFound`. `PROCESS_FILES` now
-  returns `Result<String, Error>`, contention is a bounded spin and then `Busy`.
-- **`destroy_windows_for_pid` could name a destroyed window as the focus heir.**
-  It accumulated the last non-`None` heir, so a process whose window W1 handed
-  focus to its own W2 before W2 was destroyed with nothing left to inherit
-  returned W2. It reads `focused_window` once at the end instead.
-
-## `waitpid(WUNTRACED)` is level-triggered here, and that is deliberate
-
-Worth knowing before someone else "fixes" it. POSIX.1-2024 reports a stopped
-child "whose status has not yet been reported", once; this kernel answers for as
-long as the child is down, so the same suspension is reported on every call.
-
-That reads like a bug and is not. Two callers depend on it as a state query:
-`programs/sigtest` stops a child, sees the stop, waits, and asks a *second* time
-to prove the child did not resume on its own; and `edos-sh` polls the same way.
-A latch that consumed the first report was written and reverted after sigtest
-hung on it — the second query blocked forever instead of answering. The comment
-in `sys_waitpid` says so now.
-
----
-
-## Start here for anything about storage performance
-
-`programs/fsbench` measures the filesystem across idioms and depths: a memory
-filesystem, a raw block device, and EFS. **Do not benchmark storage by hand or
-write a one-off test — run it.** It also verifies what it wrote, and prints the
-delta of every relevant `/proc` counter, which is what turns a number into a
-diagnosis.
-
-```bash
-fsbench -l /var              # EFS: writes, reads, metadata, verify
-fsbench -l raw /dev/sda      # the block layer and AHCI ceiling
-fsbench -l rawwrite /dev/sdX # destructive; refused on a mounted device
-fsbench -l /tmp              # memfs: the syscall and copy ceiling
-```
-
-`-l` mirrors the report to `/dev/klog`, which lands in `run_log.txt` on the
-host — the guest terminal is far too short to hold a full run.
-
-- [`fsbench.md`](fsbench.md) — how to run it, what each number means, and the
-  record of what the 2026-08-09 round found and fixed.
-- [`STORAGE-ROADMAP.md`](STORAGE-ROADMAP.md) — what is worth doing next, in
-  order, with the evidence for each, **and a list of five experiments that
-  measurement refuted.** Read that list before optimising: two of them sounded
-  obviously right and made the system slower.
-
-Three traps that round produced, all of which made a number mean the opposite
-of what it said:
-
-- A throughput figure is meaningless unless you know whether the work was
-  deferred. A buffered `write` returns at page-cache speed; only the `fsync`
-  rows and `sync()` measure the disk.
-- Reading back in the same boot reads the page cache. Cold numbers need
-  `fsbench write`, a reboot, then `fsbench read`, which is also what
-  `scripts/fs-regression` does for durability.
-- **Comparing two builds under the default time budget measures the wrong
-  thing.** The faster build does more work per test, so it meets every later
-  test with a fuller, more fragmented filesystem. Two sides of the clocksource
-  comparison allocated 176927 and 221918 blocks and reported 483 against 1.8
-  MiB/s for `mmap store 4MiB + msync` — while at a fixed `-n 32` operations
-  both had a **1.0 ms median** and differed only in their worst single
-  operation. Use `-n` for any A/B, and rebuild `sata-disk.img` between runs.
-
----
-
-## The big change: the OS is now driven by an agent, not by hand
-
-`make run` needs a local display, which is useless over SSH. `scripts/edos-vm`
-boots the same ISO headless and exposes two channels: VNC for a human, and QMP
-for scripts. QMP gives screenshots as PNG, synthetic keystrokes, and pointer
-events, so the whole desktop can be driven and observed from outside the guest.
-
-Read [`vm-control.md`](vm-control.md) before touching it. Three guest properties
-will otherwise waste an hour: the keymap is Spanish ISO, the mouse is HID boot
-protocol so absolute pointing is silently ignored, and the window manager
-focuses on click so keystrokes go nowhere until you click into a window.
-
-This immediately paid for itself: ten minutes of scripted input found a
-whole-GUI deadlock that manual use had never hit, because nobody clicks that
-fast for that long.
-
----
-
-## Fixed and verified on hardware
-
-- **User virtual address space is reused.** `find_free_address` was a monotonic
-  bump allocator that never reclaimed anything, burning ~940 MB of address space
-  per 9.2s on an idle desktop against 2.4 MiB of live mappings. Now a first fit
-  over the VMA tree. Stride fell to 8-10 MB and successive mmap/munmap cycles
-  return the same address.
-- **`sys_window_list` no longer holds a spin guard across a user copy.** A user
-  copy can demand-fault and park, and parking with a spin guard live stops every
-  other CPU. It now snapshots under the guard and copies outside it.
-- **Filesystem errors keep their errno.** `sys_list_dir` and `sys_open`
-  flattened everything to EINVAL despite a correct `From<FsError> for Errno`
-  existing. Missing paths report ENOENT now.
-- **`make filesystem` creates the directories it claims to.** It used brace
-  expansion, and make runs recipes under dash, so it silently created one
-  directory literally named `{bin,dev,home,...}` and `/var` never existed.
-- **`OpenOptions` opens files for writing.** `read`, `write`, `truncate` and
-  `create_new` were no-op stubs in the std fork, so every file was read-only as
-  far as the kernel was concerned. This is why `mmap(MAP_SHARED, PROT_WRITE)`
-  failed. Fixed in the fork as commit `88d827604b3`, on `origin/edos_std_v3`.
-- `sha256sum` and `file`, two Phase 3 userspace programs.
-
-`mmaptest` went from failing at test 1 to all 10 passing on both `/var` and
-`/tmp`.
-
-**`VfsInode::drop` no longer panics the kernel on the reaper.** The drop-contract
-guard asserted that the drop never *runs* on the reaper or evict kthread, but the
-contract is that it never *blocks*, and the whole point of posting to the evict
-kthread is to make the reaper path safe. The reaper frees a dead thread's FDs and
-VMAs, so it routinely releases the last reference to an orphaned inode:
-`mmaptest`'s unlink-while-mapped test panicked the kernel on trunk. The guard now
-sits on the one blocking path, the queue-full fallback in `post_evict`, where the
-reaper gives the eviction up (counted as `dropped_count` in `/proc/evict_stats`,
-reclaimed by `efs-fsck`) instead of stalling teardown behind disk I/O. `mmaptest`
-now passes 10/10 on both `/var` and `/tmp` with no panic.
-
-**`make test` is green for the first time, and covers more**, 47/47 (was 30).
-Added: the preemption counter's nesting and balance, `BlockingMutex` mutual
-exclusion under contention, `BlockingRwLock` reader sharing plus writer
-exclusion, and `WaitQueue::wake_all` releasing every waiter. Each was checked
-against a deliberately broken build first — the mutex test reports 500 of 2000
-increments when the guard is dropped across the read-modify-write, and the
-waitqueue test strands three waiters when `wake_all` is swapped for `wake_one`.
-Both handshakes are counter-based rather than timed: an earlier version waited
-only for the queue to become non-empty and flaked about once in twenty. It was red on trunk: the
-`abort-race` test called `thread_park_while` bare and treated any return as a
-completed round, which is the exact contract violation
-`bugs/2026-04-13-sched-park-wake-missed-wakeup.md` warns about. It now loops on
-its condition, and the waker counts a round before releasing the parker so the
-final count is not a race. Run it as `make test AUDIODEV=none` from a bare SSH
-login: the default `pipewire` backend has no session bus to talk to there, and
-QEMU refuses to start rather than falling back.
-
----
-
-## The GUI deadlock was a scheduler bug, and is fixed
-
-**A window-registry reader wedged the whole GUI**, with all four CPUs spinning
-on `WINDOW_REGISTRY.write()`. Full writeup in
-[`bugs/2026-08-08-window-registry-stuck-reader.md`](bugs/2026-08-08-window-registry-stuck-reader.md).
-
-The holder was never parked. It was **`Ready` and starved**: the register dump
-only proves it was not *running*, and the scheduler could pass over a runnable
-thread forever. Two defects made the wait unbounded, both now fixed:
-
-- **The timeslice was armed but never enforced.** `context_switch_to` set
-  `slice_deadline` and armed the timer to it, but `maybe_preempt` bails unless
-  `NEED_RESCHED` is set and nothing set it on expiry; `slice_deadline` was read
-  only by procfs. A thread was preempted only when another became runnable on
-  its CPU. `Scheduler::expire_timeslice` now marks it.
-- **Anti-starvation only covered wake-boosted threads.** `pop_next` reached
-  `pop_lower_than` only when `rq_boosted` was set, which happens for
-  `WakePriority::Interrupt` wakes alone, so a high *base* priority thread
-  starved everything below it. It now counts every pick and services the highest
-  non-empty lower level every `STARVE_STREAK_LIMIT`. **That mechanism is gone as
-  of 2026-08-15**: EEVDF replaced the buckets, and the escape turned out to have
-  a hole of its own — see "Three occupied priority levels" below.
-
-The window-input kthread runs at priority 10 and user threads at 7, so a
-preempted guard holder behind that kthread was never picked again. The same
-hazard applied to every spin lock shared across priorities, including `VFS`.
-
-`starvation-victim` in `thread/sched_test.rs` is the regression test: one
-CPU-bound spinner per CPU above `DEFAULT_PRIORITY` plus a default-priority
-thread whose progress the spinners sample across the saturated window. With
-either fix disabled the victim advances by exactly 0; with both it advances by
-~800k.
-
-The reader instrumentation is still there and still useful, since it names the
-holder rather than its state:
-
-```bash
-make edos-x86_64.iso CARGO_FLAGS="--features window-lock-debug"
-scripts/edos-vm start
-scripts/window-lock-soak 3000
-```
-
-Slots decode as `(tid << 8) | site`. `WINDOW_REGISTRY_READER_ACQUIRES` is the
-positive control: live slots last microseconds, so an empty table only means
-something if that counter is moving. It reads about 259/sec on an idle desktop.
-Having named a holder, read its `State`: `Ready` and `Parked` have completely
-different causes.
-
-On top of the scheduler fix, spin locks shared between threads now suppress
-preemption for the guard's lifetime (`thread/preempt.rs`): a per-CPU counter
-that `maybe_preempt` honours, plus `PreemptSpinlock`/`PreemptRwLock`. Converted:
-`WINDOW_REGISTRY` (280), `WINDOW_EVENTS` (290), `VFS` (10), `UserThread.vmas`
-(70), `memory_manager` (80), `SHARED_MEMORY_REGISTRY` (90), the input
-`Broadcaster` (310), and the thread registries.
-
-Suppressing preemption rather than interrupts is deliberate: `memory_manager`
-walks page tables and `vmas` walks the VMA tree, so disabling interrupts across
-them would trade a scheduling problem for a much worse interrupt-latency one.
-`thread_park*`, `thread_sleep` and `thread_yield` debug-assert that preemption
-is enabled, which doubles as an automated audit for "spin lock held across a
-park" — it stayed silent through boot, the stress tests and the FS paths.
-
-Still bare, deliberately: the scheduler's own `rq`/`sleepers`/`SCHEDULERS` and
-`WaitQueue.inner` (wrapping them would recurse into the counter), and the
-IRQ-reachable locks that correctly use `IrqSpinlock`.
-
----
-
-## Cross-repo state
-
-The userspace allocator and the std fork both live outside this repo, and both
-are now current. Two traps to know before you touch either again.
-
-**The `edos_rt` clone can be behind crates.io.** 0.0.34 and 0.0.35 were
-published from a tree that never landed in `github.com/edg-l/edos_rt`, so the
-repo was two releases behind and a patch on top of it would have silently
-reverted file-backed `mmap`, `msync` and the `OpenFlags` access-mode constants.
-Diff the clone against the published crate before editing:
-
-```bash
-curl -sL -o /tmp/rt.crate https://static.crates.io/crates/edos_rt/edos_rt-<version>.crate
-mkdir -p /tmp/rt && tar xzf /tmp/rt.crate -C /tmp/rt --strip-components=1
-diff -ru /tmp/rt/src ~/dev/edos_rt/src
-```
-
-The `crates.io/api/v1/.../download` form this used to give is answered with a
-data-access-policy refusal rather than a crate, and the refusal is a 200 with a
-JSON body, so the failure surfaces as `gzip: stdin: not in gzip format` two
-commands later. `static.crates.io` is the CDN and serves it plainly.
-
-**The std fork's pin is the version that actually runs.** `library/std/Cargo.toml`
-sat at `edos_rt = "0.0.26"` for ten releases while the crate moved on, and a
-`0.0.z` requirement is exact, so none of that work reached any program. It is now
-0.0.51. The full loop for an allocator or syscall-wrapper change is: patch
-`edos_rt`, bump, `cargo publish`, bump the pin, `cargo +nightly update
---manifest-path library/Cargo.toml -p edos_rt`, `./x install` in `~/dev/rust`
-(prefix `~/dev/edos-toolchain`, linked as the `edos` toolchain), then
-`rm -rf programs/target && SCCACHE_RECACHE=1 make programs`.
-
-`PoolAllocator` is a segregated-fit heap over boundary tags as of 0.0.51, and
-`doc/design/allocators.md` is the account of why and what it measures. The
-short version: it used to be one address-ordered free list, which made both
-allocating and freeing linear in what the program already held, and freeing was
-the worse of the two because keeping the list in address order was how blocks
-got coalesced. An allocation cost 4978 ns against 8000 live blocks and costs
-100 now, and boot-to-panel went from about 2.7 s to 150 ms.
-
-`bench/allocstress` in the `edos_rt` repo is the regression check; it compiles
-the allocator against a shimmed `mmap` on the host and fails if the pool does
-not plateau, if freeing everything does not hand the memory back, if an
-over-aligned large request comes back misaligned, if the heap's own tags and
-bins stop agreeing, or if allocation cost starts tracking the live population
-again. **Run it before publishing.** It had stopped compiling at all -- its
-`sys` shim never grew `PROT_READ` when the allocator started asking for it --
-and nothing noticed, so a check that is never run is what let the free-list
-walk stand for as long as it did.
-
-0.0.37 also carries the runtime fixes that came out of reading the rest of the
-crate: the syscall wrappers are inlinable Rust-ABI functions instead of
-`no_mangle extern "C"`, `thread_join` blocks in the kernel rather than polling
-at 1 kHz, `getrandom` fills the whole buffer instead of returning a count std
-discarded, `IoError` is the `Errno` itself so a caller can tell a missing path
-from a full disk, and `Mutex` only enters the kernel when a waiter is actually
-parked. `decode_error_kind` in the fork covers every `Errno` now, which was only
-possible once the errno stopped being folded away below it.
-
-0.0.38 followed, for two reasons that are worth separating from the bug below.
-The allocator's own locks went back to a spin lock: its critical sections are a
-few list operations long, so parking under them bought nothing and put a syscall
-in the middle of a list walk, and the preempted-holder hazard that motivated the
-change is bounded now that the kernel enforces the timeslice. The inline syscall
-wrappers also stopped declaring the argument registers as merely read; a syscall
-that parks resumes its caller through the scheduler rather than straight back out
-of the entry stub, and `in(...)` promises the compiler those registers survive
-that path too. They are `inout(...) => _`, which is what the out-of-line
-`extern "C"` call implied before inlining.
-
-Neither of those was the corruption. **Do not repeat the mistake of reading a
-timing change as a fix**: the spin-lock build looked clean for several runs and
-the futex build lost threads, which is what the difference in scheduling looks
-like when the real fault is a narrow race elsewhere. The next section is the
-actual cause.
-
----
-
-## Fixed: concurrent mmap handed the same address to several threads
-
-Corrupted memory in any multi-threaded program. Fixed by making the claim atomic;
-kept here because the symptom sent two separate investigations into the allocator.
-
-`bin/threadtest hammer` runs eight threads allocating hard. The serial log shows
-three of them receiving the *same* mapping:
-
-```
-thread-75: mmap: lazy mapped at 0x143b000
-thread-76: mmap: lazy mapped at 0x143b000
-thread-73: mmap: lazy mapped at 0x144b000
-thread-72: mmap: lazy mapped at 0x143b000
-```
-
-`sys_mmap` picks the address under one acquisition of the VMA lock
-(`syscalls/memory.rs:115`, `vmas.find_free_address`) and inserts the `Vma` under a
-separate, later one (`syscalls/memory.rs:212`). Two threads can therefore both run
-the first fit, both see the range free, and both take it. The window is small; it
-needs several threads calling `mmap` at once to hit.
-
-The consequence is exactly the corruption that looked like an allocator bug: two
-threads' `PoolAllocator` chunks alias the same pages, so one thread's free-list
-links land in the other's blocks, and `alloc` then faults reading a link from an
-address like `0x28`. Chasing it through the allocator wasted a lot of time, twice.
-
-Worth knowing: `find_free_address` became a first fit over the VMA tree in the
-same session that fixed the VA leak, and first fit **reuses** freed ranges, so a
-stale pointer now lands in live memory instead of an unmapped hole. That makes
-any aliasing far more damaging than it would have been under the old bump
-allocator.
-
-`VmaSet::reserve` now runs the first fit and inserts the VMA under the one
-acquisition the caller holds, and `find_free_address` is private, because an
-address it returns is only free while the lock is held. `syscalls::memory::
-claim_range` is the single entry point; there were **four** call sites, not one:
-
-- anonymous `mmap`
-- file-backed `mmap`
-- `MAP_PHYSICAL` `mmap`
-- `sys_shm_map`
-- the 2 MiB thread stack in `sys_clone` — the worst of them, since every
-  `std::thread::spawn` goes through it, so two concurrent spawns could share a
-  stack
-
-The two paths that can fail after claiming (physical `mmap`, `shm_map`) release
-the range on the way out. Widening the guard instead was the alternative, and was
-rejected: `vmas` is a `PreemptSpinlock`, so holding it across the page-table work
-would turn every mapping into one non-preemptible span, and anything added to
-that span that can park would then be a bug rather than merely slow.
-
-Verified over ten `threadtest hammer` runs (eight threads each) across two
-builds: no address appears twice within one address space, no faults, no panics.
-`mmaptest` (10/10), `threadtest` and `forktest` pass, and the in-kernel suite is
-47/47.
-
-Mind how you check for this. Duplicates have to be counted **per address space**,
-which means segmenting the log by process and keeping only that process's own
-threads. Two naive versions of the check both cried wolf on me: separate runs of
-a program are separate address spaces, and `mmaptest` execs two copies of `echo`
-that legitimately map at the same address.
-
-## Fixed: a syscall could run with a kthread as the per-CPU current thread
-
-`bin/threadtest` panicked the kernel once in roughly eight runs with
-
-```
-KERNEL PANIC: current_thread_info: no UserThreadInfo for tid 3
-  src/thread/scheduler.rs:1162
-```
-
-on `cpu-2`, while a kernel thread was current. `tid 3` is a kthread, and kthreads
-have no `UserThreadInfo`, so the lookup failed. Every caller of
-`current_thread_info()` lives in `kernel/src/syscalls/`, so a syscall handler was
-running while that CPU's current thread was a kthread.
-
-The receiver was the bug. `current_thread_info` was a method on `Scheduler`, and
-it answered from `self.current` — the field of **one CPU's** scheduler. Callers
-wrote
-
-```rust
-let sched = sched();                     // the CPU we are on *now*
-let info = sched.current_thread_info();  // ...answered by that same CPU, later
-```
-
-and a syscall runs with interrupts enabled (the entry stub does `sti`), so the
-caller can be preempted between those two lines and resume elsewhere. The
-`&'static Scheduler` then names the CPU it has left, whose `current` has moved on
-to another thread — a kthread, in the panic above.
-
-Which thread is current is a property of the CPU executing right now, so it is no
-longer reachable through a `&Scheduler` at all. `current_thread`,
-`current_thread_id`, `current_thread_weak` and `current_thread_info` are free
-functions that read the per-CPU slot with interrupts off, which makes the read
-atomic against migration; the `Arc` they return stays valid however the thread
-moves afterwards. `Scheduler::current` survives as the private `running_tid`, for
-the scheduler internals that legitimately ask "what is *this* CPU running" from a
-context that cannot migrate.
-
-**The rule to keep: `&Scheduler` never means "me".** It means one specific CPU's
-run queue. Anything phrased as "the current thread" belongs to the free functions.
-
-`thread_exit` had the same defect with worse consequences: it cleared
-`self.current` and decremented `self.thread_count`, so a migration mid-call left
-the *departed* CPU believing it was idle while it ran someone else. It is a free
-function now and resolves its scheduler inside the interrupt-off window.
-`thread_yield`, `thread_park`, `thread_park_while` and `thread_sleep` moved too;
-they never touched `self`, and leaving them as methods invited the same mistake.
-
-Two latent bugs fell out with it. `lock_order::enter` compared a per-CPU
-`current_thread()` against a scheduler-derived `current_thread_id()` and would
-have fired its single-owner assert on any migration between the two; both sides
-now read the same source. The `window-lock-debug` reader table recorded the tid
-of whichever CPU the guard was taken on, which is exactly the wrong tid for the
-instrumentation whose job is naming a stuck reader.
-
-Why it surfaced when it did: no program used `std::thread` before, so userspace
-never had several runnable threads competing across four CPUs. `threadtest`
-exists to keep exercising that.
-
----
-
-## Fixed: a CPU stopped answering TLB shootdown IPIs, then double faulted
-
-Reproducible in about a minute, which the `current_thread_info` panic never was.
-Drive `threadtest`, `threadtest hammer` and `threadtest nojoin` in a loop through
-`scripts/edos-vm` on a 4-core boot. Around t=52s the log turns into nothing but
-
-```
-<cpu-2:bin/edos-wm:u:21> tlb_shootdown: timeout waiting for CPUs (mask=0x1), forcing clear
-```
-
-repeating (314 times in the observed run), and the desktop stops responding to
-input while the taskbar clock keeps redrawing. `mask=0x1` is CPU0, and CPU0 never
-acknowledges again. Register dump at that point:
-
-| CPU | RIP | state |
-|---|---|---|
-| 0 | `interrupts::idt::double_fault_handler` | halted |
-| 1-3 | `Scheduler::run_idle` | halted |
-
-So CPU0 wedged first, kept missing shootdown IPIs until it double faulted, and
-the rest of the machine went idle behind it.
-
-A second run wedged with a different tail, and that one named the cause: three
-CPUs spinning in `IrqSpinlock::lock` on the serial port with interrupts off, and
-the fourth spinning in `tlb_shootdown` waiting for their acknowledgement.
-
-This is **not** related to the identity fix above: it reproduces identically on
-the commit before it (`26928b1`), and slightly sooner (t=52s vs t=76s, 6 vs 10
-completed `threadtest` runs).
-
-### Fixed: `IrqSpinlock` waited with interrupts disabled
-
-`IrqSpinlock::lock` disabled interrupts and *then* spun for the lock, so a CPU
-waiting on a contended one answered no IPIs for the whole wait — including TLB
-shootdowns. Interrupts only need to be off while the lock is *held*, which is
-what keeps an IRQ handler from deadlocking against the holder; taking an IRQ
-while still waiting is harmless, because the waiter does not hold it yet. It now
-disables, tries, and re-enables around a read-only spin on the contended line.
-
-The serial lock is what made this bite. Every thread exit logs a line, every
-UART byte is a VM exit under KVM, and `threadtest` spawns some forty threads a
-run, so under the loop above the serial lock is saturated and CPUs sit in that
-IF-off wait for far longer than the shootdown's 10M-iteration timeout.
-
-Effect on the reproducer: **916 shootdown timeouts became 0**, and the machine
-survives the full loop where it previously stopped logging entirely at t=52s.
-
-### Root cause: an idle CPU squats on a thread's kernel stack
-
-`run_idle` holds `context` — a pointer to the interrupt frame — in a local
-across `enable()` and `enable_and_hlt()`. On the timer-preemption path that
-local and that frame both live on the **outgoing thread's kernel stack**,
-because `timer_interrupt_handler` never pivots RSP. The voluntary path does the
-opposite, and the comment on the scheduler-stack allocation in `init` says why:
-it pivots "so the outgoing thread's kernel stack is completely free before any
-waker can resume it".
-
-By the time `pick_and_run` reaches `run_idle`, `maybe_preempt` has already run
-`save_current_thread` (setting `context_saved = true`) and enqueued the thread,
-so any other CPU may steal it and resume it *on that same kernel stack* while
-this CPU is still idling on it. Two CPUs then write one stack, and the squatting
-lasts as long as the CPU stays idle.
-
-Caught with `--features trace` on a 10-core boot, first iteration of the loop:
-
-```
-cpu 0:  [36] Save   cpu=0 tid=46 rip=0x412cd9
-        [37] Switch cpu=0 46->50
-cpu 9:  [13] Steal  0->9 tid=46
-        [14] Switch cpu=9 0->46 rip=0x412cd9     <- from_tid 0: CPU 9 was idle
-```
-
-CPU 9 panicked in that switch with `cw: Low context address 0x1` — its
-`context` local had been overwritten while it idled. The same mechanism explains
-the double faults and the impossible interrupt frames seen earlier, where
-`instruction_pointer` held a plausible RFLAGS value (`0x286`) and `code_segment`
-an index of 6400 against a seven-entry GDT.
-
-### Fixed: leave the thread's stack before publishing the thread
-
-Two paths kept using a kernel stack after handing the thread to somebody else.
-Both now pivot to the per-CPU scheduler stack first, which is the discipline
-`save_transition_switch` already followed and documented.
-
-**`thread_exit` is the one this workload hammered.** It called
-`reaper_enqueue(t)` and *then* `switch_away()`, which does `sub rsp, 160` and
-calls into Rust — on the dying thread's kernel stack, the stack `Thread::free`
-unmaps. The reaper runs on another CPU, so it may pull that stack out from under
-the exiting thread at any point after the enqueue. `threadtest` exits roughly
-forty threads per run, which is why it reproduced there and nowhere else.
-`thread_exit` now only marks the thread `Dying`; `switch_away` pivots, and
-`reap_and_schedule` posts to the reaper and picks the next thread from the
-scheduler stack.
-
-**The timer tick had the same shape.** `context_switch_to` writes the incoming
-thread's frame into a frame sitting on the *outgoing* thread's stack, after that
-thread has been enqueued and can already be running elsewhere. `on_tick` is
-split into `tick_prepare` (thread stack; saves the outgoing context, returns the
-stack to pivot to) and `tick_finish` (scheduler stack; enqueues and picks), with
-the naked handler copying the 160-byte frame between them. `CpuContext` gained a
-const assert on that 160, since three trampolines hard-code it.
-
-Verified on a **10-core** boot, the configuration that previously died on the
-first iteration: 25 iterations of the `threadtest` / `threadtest hammer` loop, 50
-clean completions, 697 threads spawned and reaped, no panic, no double fault, no
-shootdown timeout, no garbage in the log, every CPU idle afterwards. 47/47
-in-kernel tests.
-
-**A warning about reading the evidence here.** An intermediate build had only the
-tick pivot, and it failed with the log prefix itself garbled
-(`<cpu-633166472:kernel>`, uptime near `u64::MAX`). That looked like the pivot
-had broken the GS-based per-CPU pointer. It had not: `_serial_print` formats on a
-thread's kernel stack, so the still-unfixed exit path was corrupting the logging
-path's own locals. Corrupted output names where corruption *landed*, not what
-caused it — the same trap as the serial log ending mid-line in the wedges above.
-
-### Fixed: the shootdown timeout acknowledged flushes that never happened
-
-Separate from the stack bug, and wrong regardless of how often it fired.
-`tlb_shootdown`'s timeout force-cleared `pending_mask` and returned, on the
-reasoning that "the lagging CPUs will flush redundantly when they eventually
-process the IPI, which is safe". It is not safe. Returning tells the caller that
-no CPU holds the old translation, and the caller is entitled to free or reuse
-the page on the strength of that; a CPU that never acknowledged is still reading
-through the stale entry. The escape hatch traded a stall for silent corruption,
-and the 314-timeout run above was doing exactly that, 314 times.
-
-Three things were wrong and all three are fixed:
-
-- **Giving up at all.** The wait now re-sends the IPI to the CPUs still
-  outstanding and, if `ACK_ATTEMPTS` rounds pass with no acknowledgement,
-  panics naming the mask and range. A wedged CPU is a bug worth stopping for;
-  continuing is not a recovery, it is corruption with the evidence discarded.
-- **Acknowledgements that credit the wrong round.** `pending_mask` was reused
-  across rounds with nothing distinguishing them, so a late handler from a
-  timed-out round could clear a bit for the round in flight — reporting a flush
-  it never performed. A `generation` counter is bumped per round; the handler
-  captures it before flushing and only acknowledges if it still matches.
-  Skipping is safe: a round still waiting on that CPU has an IPI latched for it.
-- **The initiator could be descheduled holding `active`.** Every other CPU
-  wanting a shootdown spins on that flag, so the round now runs with preemption
-  suppressed, per the rule in `thread/preempt.rs`.
-
-Re-sending is cheap insurance rather than the main point: an IPI to a CPU with
-interrupts off is latched and will fire, so a re-send only helps if one was
-genuinely lost.
-
-### Fixed: `pick_sched` sampled `thread_count` twice
-
-Not part of the stack or shootdown bugs; found by soaking for them. `pick_sched`
-made one pass to find the minimum `thread_count` and a second to find a
-scheduler matching it. Other CPUs spawn and exit throughout, so every count can
-rise above the sampled minimum in between, the second pass matches nothing, and
-it reaches `unreachable!()`. It now takes one pass keeping the best sample,
-starting at the rotation offset so the round-robin tie-break is unchanged.
-
-Worth noting how it turned up: a soak that mixed `mmaptest` into the
-`threadtest` loop, because `mmaptest` spawns a child of its own and roughly
-doubled the spawn rate. Varying the workload found a bug that repeating the same
-one never would.
-
----
-
-## Audit, and the logging that came out of it
-
-`doc/AUDIT.md` is a read-only pass over the whole tree: correctness, perf,
-missing syscalls, smells, plus a list of things that looked like findings and
-were checked and discarded. `ideas.txt` carries the prioritised follow-up.
-
-One item is already fixed, because it was on every hot path. The kernel logged a
-line per mmap, munmap, spawn, ELF load and thread exit. Each costs a `String`
-allocation on the calling thread, and the drain side writes to the UART a byte
-at a time under a global lock — one VM exit per byte under KVM. That is the same
-serial lock whose saturation starved TLB shootdowns before `IrqSpinlock` stopped
-waiting with interrupts off, so this was not a cosmetic cost.
-
-`log_debug!` reads a relaxed atomic before formatting, so a disabled site costs
-one load and no allocation. It is off unless the kernel command line carries
-`loglevel=debug`, which makes it a dial rather than a rebuild. Failure paths
-stayed on `log!`. Six `threadtest`+`hammer` iterations went from dozens of lines
-each to **zero**; one `threadtest` with `loglevel=debug` still emits 37.
-
-Two traps worth knowing if you touch this:
-
-- **`ParsedCmdline::parse_str` allocates**, so reading the log level has to
-  happen *after* `init()` brings the frame allocator up. Putting it before
-  panics at `frame_allocator.rs:24` before serial is useful.
-- **The serial log is no longer a way to count work.** Greps like
-  `bin/threadtest:u:.* exit: code=` return nothing by default now. Use the
-  terminal output, or boot with `loglevel=debug`.
-
----
-
-## Fixed: an unvalidated address reached a VMA insert
-
-Audit item 1.1 was that the ELF loader builds a mapping out of
-`base_addr + p_vaddr` without ever bounding it, and that `VmaSet` applies
-`USER_VA_END` only to addresses it picks itself. The audit could not say how bad
-that was without building a crafted ELF.
-
-No crafted ELF was needed. `sys_mmap` reaches the same insert with a raw user
-address, and validated nothing beyond `length != 0`:
-
-```
-mmap(addr=0x0000_9000_0000_0000, len=0x1000)   # non-canonical, from any program
-  -> claim_range -> VirtAddr::new
-  -> KERNEL PANIC: virtual address must be sign extended in bits 48 to 64
-```
-
-Reproduced on a pre-fix kernel and resolved through the backtrace to
-`syscalls/memory.rs:234`. Every VMA a process holds becomes a `USER_ACCESSIBLE`
-mapping, so the canonical-but-kernel-half case (`0xffff_8000_…`) was the worse
-half of the same hole: it does not panic, it inserts.
-
-The check belongs in `VmaSet::insert`, which now returns `Result` and rejects a
-range that wraps or ends past `USER_VA_END`. Callers that hand back a range the
-set already held — unmap rollback, fork's deep copy, the TLS region the kernel
-derives from `USER_STACK_TOP` — call `insert_validated`, which debug-asserts
-instead; they have no error to report and no untrusted input. The loader bounds
-the segment with `checked_add` before constructing a single `VirtAddr`, and
-rejects `p_filesz > p_memsz`, which would otherwise push the file-backed VMA
-past the end that was checked.
-
-Two neighbours fell out of the same read:
-
-- **`find_free_address` had the same bug in its align-up.** `(length + 0xfff)`
-  wraps for a length within a page of `u64::MAX`, so it returned a gap far
-  shorter than requested. Now `checked_add`.
-- **Address-space exhaustion was an `expect`.** It reports `VmaError::NoSpace`
-  (ENOMEM) instead of panicking.
-
-`mmaptest` test 11 is the regression test: five cases (non-canonical, kernel
-half, straddling the top, wrapping length, unsatisfiable length), each of which
-must come back as a failed `mmap`. 11/11 on both `/var` (EFS) and `/tmp`
-(memfs), 47/47 in-kernel tests, forktest and threadtest clean.
-
----
-
-## Fixed: CPU affinity was a field, not a rule
-
-`cpu_affinity` had a setter and one enforcement point. `thread_can_run_here` was
-stubbed to `true` with the real check commented out beneath it, and
-`complete_wake` enqueued on the waker's CPU without consulting it, so a pin held
-only until something woke the thread.
-
-Affinity is a **placement** property in this kernel: `spawn_thread`,
-`complete_wake` and work-stealing pick the CPU, and `pick_and_run` runs whatever
-it pops without re-checking. That is the cheaper design and it is now the
-documented one — `set_affinity_mask` says a mask set on a running thread applies
-at its next placement, not immediately.
-
-The trap worth knowing: **un-stubbing `thread_can_run_here` alone would have
-lost threads.** `spawn_thread`'s `else` arm was a bare comment claiming the
-thread "will be queued on its target cpu by that cpu's scheduler", and nothing
-did. The stub returning `true` is the only reason that arm never ran. It routes
-through `pick_sched_for` now, and a mask naming no registered CPU runs the
-thread here rather than dropping it.
-
-Two notes on the test, because the first version of it was worthless:
-
-- **Yields do not test affinity.** They re-enqueue on the CPU the thread is
-  already on, so a thread that reached the right CPU by luck stays there. The
-  first `affinity-pinned` passed with `allows_cpu` hardcoded to `true`.
-- **Wakes do.** `complete_wake` prefers the waker's CPU, and the waker is
-  elsewhere most rounds, so the pin only survives a wake if the check is real.
-  With `allows_cpu` reverted the test dies on round 0: "pinned to cpu 3, ran on
-  cpu 2 after wake 0". Any future change here should be checked the same way —
-  revert the predicate, confirm the test fails.
-
-A third thing fell out of the same read: `pick_sched` called
-`schedulers.iter().nth(idx)` per candidate (audit 2.4), now one `cycle().skip()`
-pass.
-
-47 → 49 in-kernel tests, all passing, desktop and mmaptest/threadtest clean
-afterwards.
-
----
-
-## The rest of the audit, and two things it got wrong
-
-Shipped: `clock_gettime` off the RTC (sampled once at boot, pinned to the HPET,
-nanoseconds since the epoch); path syscalls on a stack buffer via
-`copy_user_path`; `pread`/`pwrite` and `getuid`/`getgid`; the five bare
-`spin::Mutex` sites on `PreemptSpinlock`; an RFC 6298 retransmit timeout for
-TCP; `fs/api.rs` returning `ProtocolMismatch` instead of panicking.
-
-Two audit recommendations were **checked and rejected**, which is the part worth
-remembering:
-
-- **CLOEXEC has nothing to govern.** There is no `exec` in this kernel. `spawn`
-  builds a fresh process and gives it exactly three descriptors; `fork` copies
-  the table, which is what fork does. No `O_NONBLOCK` exists either, so
-  `F_SETFL` would set nothing. The flag becomes real the day `exec` lands.
-  Both halves have since landed: `execve` gave `FD_CLOEXEC` something to
-  govern, and `O_NONBLOCK` is recorded on the descriptor and honoured by
-  `read`, `write`, `recvfrom` and `accept`, so `F_GETFL`/`F_SETFL` are real.
-- **`setuid` without a permission model** is a privilege change that enforces
-  nothing. `getuid`/`getgid` are in; the setter is not.
-
-Two bugs fell out of writing the tests rather than out of the audit:
-
-- **`sys_read` held the fd-table `BlockingMutex` with interrupts disabled.**
-  `sys_write` and `sys_close` clone the Arc, enable interrupts, then lock;
-  `sys_read` locked inside the `UserThreadInfo` `IrqSpinlock` scope. Eight
-  threads doing positional reads through one shared descriptor tripped the
-  contended-with-interrupts-off assert, and the spinning then starved a TLB
-  shootdown into its timeout. The same shape as the `IrqSpinlock` bug from
-  earlier in the session: *the assert fires on contention, so a rarely-contended
-  wrong lock looks fine for months.*
-- **TCP cannot connect at all**, and never could — a pre-session build fails
-  identically. `doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` has the
-  packet capture and the instrumentation results. It stayed hidden because
-  `http`/`wget` use `std::net::TcpStream`, which the std fork does not
-  implement, so nothing had ever completed a connection.
-
-The RFC 6298 work is therefore correct by inspection but **unverified end to
-end**; it cannot be exercised until a connection can reach Established.
-
----
-
-## execve exists now
-
-`execve` (59) replaces a process image in place, with `fcntl` (72) and
-`FD_CLOEXEC` alongside it. The shape that matters, because it is what makes the
-operation safe:
-
-1. **Copy argv/envp/path out of user memory first.** The address space holding
-   those strings is about to be unmapped.
-2. **Build the new image in a fresh address space while the old one is live.**
-   A load failure then returns an error with the process untouched, which is
-   what POSIX requires of a failed exec. Only after the load succeeds is
-   anything destroyed.
-3. **Quiesce the siblings.** `address_space_refs` reaching 1 is the proof that
-   no other CPU can touch the space, because a thread only decrements it in
-   `Thread::free`, after it has stopped running.
-4. **Detach the old space and attach the new one in a single step, then tear
-   the old one down.** `context_switch_to` reloads CR3 from `user.cr3` on every
-   switch, so freeing a page table that is still published there hands a
-   preemption a dangling CR3. Detaching first also means the blocking part of
-   teardown (a `MAP_SHARED` writeback reaches the disk) happens with nothing
-   half-swapped.
-
-Three things underneath had to change, and are worth knowing independently:
-
-- **`Thread::new_user` is split.** `load_process_image` builds an address space
-  and an image; `new_user` attaches a new thread to it; `execve` attaches an
-  existing process to it. The loader/process seam used to be welded shut.
-- **`Thread::free`'s teardown is now `release_mappings`**, over a detached
-  `MemoryManager` and `VmaSet`, and its descriptor shutdown is
-  `pipe::close_descriptor`, shared with exec closing its close-on-exec fds.
-- **A killed thread now dies at the syscall boundary.** `killed` was previously
-  read on exactly one path — a PTY slave read — so a thread doing anything else
-  ignored it. Kill was, in effect, "kill a shell foreground job blocked on
-  input". A thread that makes no syscalls at all is caught by the timer tick
-  instead (see below); one spinning inside the kernel is still nobody's to kill,
-  which is why exec bounds its wait and refuses rather than assuming.
-
-**Two traps if you touch this:**
-
-- **Sibling threads are not keyed by `UserThread`.** `sys_clone` gives each
-  thread its *own* `Arc<RwLock<UserThread>>` sharing the inner Arcs, so
-  `Arc::ptr_eq` on the `UserThread` matches nothing. Address-space identity is
-  the `address_space_refs` Arc. Keying on the wrong one made the quiesce find
-  no siblings and time out, and `exectest`'s multithreaded case is what caught
-  it.
-- **`exectest`'s wake cases are the load-bearing ones.** Cases 1-3 pass with a
-  broken quiesce; only case 4 exercises it. Reverting the cloexec close alone
-  fails case 2, which was checked.
-
----
-
-## There is an init process now
-
-`bin/edos-init` is the only thing the kernel starts. It supervises `edos-wm`,
-`edos-taskbar`, `edos-terminal` and `sshd` with a thread each — spawn,
-`waitpid`, restart with backoff, give up after five rapid failures — so which
-programs make up a session is userspace policy rather than something compiled
-into `main.rs`.
-
-`sshd` carries an `enabled_by` path and is skipped outright when
-`/etc/sshd.conf` is absent. That is distinct from `requires`, which waits for a
-device and then starts the service anyway: a server with no credentials
-configured would only exit and be restarted until its failure budget ran out,
-on every boot of a system whose owner never asked for it.
-
-Two consequences worth knowing:
-
-- **A binary that fails to load no longer panics the kernel.** `boot_load_thread`
-  used to `unwrap_or_else(|e| panic!(...))`, so a broken `/bin` took the machine
-  down. It logs and leaves the kernel up; if *init itself* will not load, that is
-  logged loudly and the serial console still works.
-- **Killing the window manager is survivable.** `kill <wm pid>` and init restarts
-  it; the desktop stays usable and input keeps routing, because windows live in
-  the kernel registry and the new WM adopts them. This was the outcome I was
-  least sure of and it works — verified twice, with a shell command typed into a
-  pre-existing terminal window afterwards.
-
-### Parentage, and the exit-status leak
-
-Threads now carry the id of whoever created them, and so do exit statuses.
-Before this, every exit inserted a status into `EXITED_THREADS` and only
-`waitpid` removed one, so any process nobody waited on leaked a record forever.
-When a creator dies, its children's statuses are dropped (nothing can name them
-any more) and its surviving children are handed to init. `/proc/processes` has a
-PPID column and prints the pending-status count, which stays at 2 across dozens
-of spawns.
-
-**The trap, and it cost a debug cycle:** this bookkeeping must not run on the
-exit path. A registry walk plus two `Vec` allocations there hung the scheduler
-suite at 48/49 — the exit path can run with interrupts disabled, which is
-exactly what `reaper_enqueue`'s "must not allocate" comment warns about. It runs
-in the reaper now, and `record_thread_exit` takes the parent from the dying
-thread the caller already holds, so it neither allocates nor takes a lock. If
-you add anything to thread exit, assume no allocation and no locks until proven
-otherwise, and run `make test` — the failure was a timeout, not a panic.
-
----
-
-## TCP works now, and the bug was in the waitqueue
-
-`WaitQueue::wait_until_timeout` slept once and returned on any wake, without
-re-checking the predicate or the deadline. Since a wake token left by an earlier
-wait aborts the next sleep, `sys_connect` — which waits for ARP and then for
-Established, back to back — had its second wait return in microseconds, decided
-it had timed out, removed the connection and returned ECONNREFUSED. The SYN-ACK
-landed 0.2 ms later, matched nothing, and got an RST. **No TCP connection had
-ever been established in this kernel.**
-
-`sys_read`'s socket paths had the same bug at the call site: one `wait_until`,
-then treat an empty buffer as EOF, so every read returned 0 bytes.
-
-Both fixed; `doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` has the
-detail. Verified with `tcptest` against a host HTTP server: a 270367-byte
-response arrives intact, which finally exercises the RFC 6298 retransmit work.
-`ping` also stopped losing its first packet to the same spurious ARP timeout.
-
-**Two things to carry forward:**
-
-- **Do not make the untimed arm of `wait_internal` loop.** It looks like the
-  obvious symmetry and it stalls the boot: a caller whose predicate only becomes
-  true through work that same thread has yet to do never returns. Two of three
-  services failed to start. This has now looked correct twice.
-- **When a container appears to lose an entry, instrument every mutation before
-  theorising about the memory model.** The first investigation produced a
-  genuinely alarming table — same address, coherent neighbouring atomic,
-  `len=1` in one thread and `len=0` in another — and every observation in it was
-  accurate. What was missing was a trace on connect's own `remove`. A reader
-  that disagrees with a writer is far more likely to be a third writer you have
-  not looked at.
-
----
-
-## Fixed: two mappings shared a page, and one zeroed the other
-
-Any `Vec` grown past 64 KiB came back full of zeros with its length intact.
-It surfaced as a networking bug — `wget` saved 0 bytes of a 300 KB file —
-and was not one: `read_to_end` collected all 300204 bytes correctly, and the
-search for the `\r\n\r\n` terminator then found nothing, because the buffer
-had been zeroed underneath it.
-
-`VmaSet::reserve` searched for a gap of `length` rounded up to a page and
-then recorded the VMA with the raw `length`. `first_fit` starts its next
-search at a VMA's `end`, so a mapping that ended mid-page put the next one
-*inside that same page*, and either could then destroy the other: a
-zero-fill fault installs a fresh frame, and `munmap` of one unmaps a page
-the other still uses.
-
-The allocator hits it on the first chunk that is not exactly `CHUNK_SIZE`.
-Growing to 128 KiB maps a ~131136-byte chunk starting 65600 bytes into the
-previous chunk's last page; the copy lands there, the old chunk is freed,
-and `release_chunk` unmaps the shared page along with it.
-
-This was newly *reachable*, not newly written: the old bump allocator
-returned page-aligned addresses by construction, and first fit made the
-cursor follow VMA ends instead. `reserve` and `first_fit` work in whole
-pages now, `sys_mmap`/`sys_munmap` reject an unaligned address rather than
-rounding one silently, and `vectest` grows a `Vec` to 2 MiB verifying every
-byte after each step. Full writeup in
-[`bugs/2026-08-08-mappings-sharing-a-page.md`](bugs/2026-08-08-mappings-sharing-a-page.md).
-
-**Two things worth carrying forward.** A correct length says nothing about
-correct contents: every layer here reported the right byte count. And when a
-buffer is zero *from offset 0*, suspect its backing pages rather than its
-writer — a writer that skipped work leaves a hole, an unmapped-and-refaulted
-page leaves a zeroed prefix.
-
-## Fixed: the cwd mutex was taken with interrupts disabled
-
-`info.lock().cwd.lock()` reads as two locks taken in sequence and is not:
-the `UserThreadInfo` `IrqSpinlock` guard is a temporary that lives to the end
-of the statement, so the cwd `BlockingMutex` was acquired with interrupts
-off. Eighteen call sites did this. It panicked the kernel during boot, and
-the CPU that died then stopped answering TLB shootdown IPIs, so a second CPU
-panicked behind it with "never acknowledged a flush".
-
-The same shape as the `sys_read` fd-table bug earlier in the session, and the
-same lesson: *the assert fires only on contention, so a rarely-contended
-wrong lock looks fine for months*. `current_cwd` / `set_current_cwd` clone
-the `Arc` out of the guard first, and every call site goes through them.
-
-## std::net is implemented, and that is where sockets belong now
-
-`http` and `wget` were ported onto `edos_lib` first, which worked but was a
-workaround: `std::net::TcpStream` returning "unsupported" was the actual
-defect. Every wrapper std needed already existed in `edos_rt`, and every
-syscall behind them already existed in the kernel (socket, bind, connect,
-listen, accept, sendto, recvfrom, shutdown, get/setsockopt, getpeername,
-getsockname) — nothing was wired to std, so the target fell through
-`cfg_select!` in `sys/net/connection/mod.rs` to the unsupported stubs.
-
-`library/std/src/sys/net/connection/edos.rs` in the fork implements
-`TcpStream`, `TcpListener`, `UdpSocket` and `lookup_host`. Options the
-kernel really has are real (timeouts, linger, nodelay, ttl, `SO_ERROR`);
-the rest report unsupported rather than lying, and IPv6 is rejected rather
-than truncated. `http`, `wget` and `dns` are plain std programs again, and
-`edos_lib::http` is gone.
-
-Verified: a 300000-byte file over `std::net` hashes identically to the
-host's copy, and `http edgl.dev` fetches a real page off the internet by
-name.
-
-**The toolchain loop has a trap.** Bumping the `edos_rt` pin and running
-`./x install` rebuilt nothing — bootstrap did not notice the lockfile
-change, reported success in 24 seconds, and userspace kept linking the old
-std. `touch library/std/src/lib.rs` forces it. A build that finishes far
-too quickly after a dependency bump has not done what you asked.
-
-## Resolution, and the query that still fails
-
-DNS lives in `edos_rt::net::lookup_a` now, behind `ToSocketAddrs`. The
-parser it replaced existed in two copies and desynchronised on a name that
-ends in a compression pointer after its labels (RFC 1035 4.1.4), reading
-the pointer's first byte as a length; that is why `dns edgl.dev` failed
-while `example.com` worked. It also reports *why* a lookup failed instead
-of answering every failure with "no A record", and the kernel now keeps the
-resolver address DHCP offered (`SYS_GETDNS`) rather than parsing it into a
-field nothing read.
-
-**The first DNS query after boot used to get no reply, and the cause was
-not the ARP drop it looked like.** `sys_recvfrom` did a single
-`wait_until` and returned zero bytes if the queue was still empty. That
-call returns on *any* wake, so a token left by an earlier wait aborted the
-park and the receive reported an empty datagram immediately. The `sendto`
-that triggers ARP is indeed dropped, but a correct receive would simply
-have waited for the retry's answer.
-
-It also explains why the resolver's retry did not rescue it: every attempt
-returned just as fast, so the third read the *second* attempt's reply and
-rejected it on the transaction id — which is why the error was "malformed"
-rather than "no A record", and why chasing the parser was a dead end.
-
-This is the contract the TCP read path was fixed for earlier in the
-session; `recvfrom` and `accept` were the two places that kept the old
-shape. Both loop on the real condition now, and `recvfrom` honours
-`SO_RCVTIMEO`, which `setsockopt` had been storing with nothing reading it.
-Verified on four cold boots. `programs/dnsprobe` dumps a raw response if
-this area needs poking again.
-
-## Checking a downloaded file from inside the guest
-
-**Watch out.** memfs reads
-past EOF and returns zeros to the end of the last page, so `sha256sum` of a
-file on `/tmp` hashes the padding too and never matches the host, while
-`stat` and `cat` both look right. The same file on `/var` hashes correctly.
-Tracked in engram (`engram-cli todo list`); verify downloads on EFS until it is fixed.
-
-## Fixed: a port restart stranded the op it meant to fail
-
-The AHCI watchdog entry in `ideas.txt` proposed gating `enter_ncq_mode` on
-`AhciPort.restarting`. That gate is not the fix. It keeps *new* submitters
-out of a port being reset, and the op that strands is already past it.
-
-`fail_all_ncq_slots` skips a slot whose `issued` is still false, on the
-grounds that the submitter's own post-issue path will notice the generation
-change. But `reset_generation` was bumped at the *end* of `restart_port`,
-after that pass. A submitter that stored `issued` between the pass and the
-bump, and sampled `SACT` before the reset cleared it, saw an unchanged
-generation and its bit still set — so it returned and waited for a
-completion nobody would deliver. A watchdog sweep found it up to 30s later.
-
-The generation is published in `begin_restart`, before the fail-all pass,
-and the submitter re-reads it after storing `issued`. The orderings are
-complementary: either the submitter observes the bump and completes its own
-slot, or its store precedes the pass, which fails the op. The gate went in
-too, as a throughput measure.
-
-**How it was validated, which matters more than the patch.** A real NCQ
-command against a qcow2 backing file completes in well under a millisecond,
-so no sane watchdog timeout is ever reached and the race never occurs
-naturally — a 30 ms timeout produced zero firings under load.
-`ahci_ncq_timeout_ms=0` on the kernel command line instead makes a sweep
-treat *every* in-flight op as hung, so restarts land inside submits at
-whatever rate I/O is running. `/proc/ahci_stats` gained `stranded`, which
-counts ops a sweep finds still pending from an earlier generation — the
-bug's exact fingerprint, and zero by construction once the ordering holds.
-
-Under forced restarts with mixed read/write load: **1 stranded in 33
-restarts before the fix, 0 in 106 after**. The pre-fix rate would have
-predicted about three. Keep the injection in mind for any future work on
-this path; the default timeout is untouched at 30s and the knob is inert
-unless the command line sets it.
-
-## A kill now reaches a thread that never enters the kernel
-
-`killed` was observed at the syscall return boundary, which covers every real
-program and misses the one case that mattered: a thread spinning in user code
-makes no syscalls, so nothing ever asked it to die. `execve` had to bound its
-sibling quiesce and refuse with EAGAIN for exactly that reason.
-
-The timer tick checks the same flag now, and the condition that makes it safe is
-**ring 3 in the interrupted frame**. There is no unwinding here, so a thread that
-dies holding a lock guard leaks it permanently — that is the reader leak in
-`bugs/2026-08-08-window-registry-stuck-reader.md`. A frame from ring 3 proves the
-thread held nothing; a tick that caught it inside the kernel is left to the
-syscall boundary, where the same `exit_if_killed` runs. Both callers share that
-one function, so there is no second copy of the rule to keep in step.
-
-Placement is in `tick_prepare`, before the tick touches the runqueue: the thread
-is still Running, nothing has been published, and `thread_exit` pivots off its
-kernel stack the way it does from a syscall. EOI has already been sent by then,
-which matters — checking earlier would leave the ISR bit set on a CPU that is
-about to run somebody else.
-
-Two tests, and both were checked against the previous kernel:
-
-- **`programs/killtest`** signals a child in each mode. Test 1 spins in user
-  code, test 2 blocks in a syscall. It hands off through a pipe rather than a
-  sleep, because killing a child still inside its runtime's startup would
-  exercise the syscall boundary whichever mode was asked for, and it polls
-  `waitpid_nonblocking` with a bound, because the failure is a process that never
-  dies and a blocking `waitpid` would report that as this program hanging.
-- **`exectest` test 5** execs from a process whose four siblings spin without
-  syscalls.
-
-Without the check, killtest test 1 reports the child alive 1000 ms after the
-signal and exectest test 5 exits `EXEC_RETURNED`; exectest 1-4 still pass, so
-test 5 is the only one that depends on it. With it: killtest 2/2, exectest 5/5,
-threadtest + hammer + forktest clean, mmaptest 11/11 on both `/var` and `/tmp`,
-49/49 in-kernel.
-
-Still not covered, deliberately: a thread spinning **inside** the kernel. Nothing
-can kill that safely, so `execve` keeps its bounded wait and its EAGAIN.
-
-## Fixed: five more guards live across a user copy
-
-`sys_window_list` was one instance of a class, and the sweep for the rest of it
-found five more. The rule the class breaks: **a lock guard must not be live
-across a user copy.**
-
-Why the copy is a park point, which is the part that is not obvious: in the
-ring-0 branch of `page_fault_handler`, `handle_demand_fault` runs *before* the
-uaccess fixup, deliberately, so that a `try_copy_*` touching a lazily-mapped
-page gets it mapped instead of failing. That handler blocks — NCQ I/O,
-block-page-cache shard contention, vma waitqueues — with interrupts re-enabled.
-EDOS has no unwinding, so a thread killed while parked there never runs the
-guard's `Drop` and the lock is held for the life of the machine.
-
-| Site | Guard | Consequence of a kill there |
-|---|---|---|
-| `Pipe::{write_from_user,read_to_user}` | `BlockingMutex<Pipe>` | that pipe wedges; every reader and writer parks forever |
-| `Pty::{master,slave}_{write_from_user,read_to_user}` | `BlockingMutex<Pty>` | the terminal wedges |
-| `tty::write_from_user` | `TTY_BUFFER` | stdout dies for every process |
-| `vfs::read_to_user` (non-page-cache path) | `inode.lock` read | that procfs/devfs inode is unreadable |
-| `vfs::write_from_user` (non-page-cache path) | `inode.lock` write | that inode is unreadable *and* unwritable |
-
-The fix is one shape everywhere: **buffer first, lock second.** Writes copy out
-of user space before taking the lock; reads drain into an owned `Vec` under the
-lock and copy out after dropping it. `copy_in`/`copy_out` in `syscalls/io.rs`
-are the helpers. The pipe and pty types lost their `*_from_user` / `*_to_user`
-methods entirely, which is what stops the pattern coming back: the types no
-longer know what a user pointer is.
-
-Two deliberate trade-offs, both narrower than the leak they replace:
-
-- **A read that faults on the copy loses the drained bytes.** It used to copy
-  first and drain only on success. A fault here means the caller passed a bad
-  buffer, and the alternative (peek, copy, then drain under a second
-  acquisition) lets two concurrent readers see the same bytes.
-- **TTY writes longer than 256 bytes may interleave with another writer's**,
-  since the buffer lock is now taken per chunk instead of for the whole write.
-  A TTY makes no atomicity guarantee above that.
-
-Checked and already correct, because they snapshot into owned memory first:
-`sys_ioctl`, `sys_window_poll`, `sys_list_mounts`.
-
-Verified on a headless boot: `echo hello | wc -c` → 6, `ls /bin | wc -l` → 70,
-`cat /proc/meminfo | head -3` (the exact vfs fallback path that was fixed),
-`dmesg | wc -c` → 7328 bytes through the rewritten pipe path, killtest 2/2,
-exectest 5/5, mmaptest 11/11 on `/var`, 49/49 in-kernel, no panic and no
-shootdown timeout in the log.
-
-### The regression guard, and exactly what it covers
-
-`lock_order::assert_no_guards_held` is called at the top of `thread_exit`.
-Every path that ends a thread funnels through there, so it is the one place the
-rule can be checked, and it costs an `is_empty()` on a debug build.
-
-**It covers ranked locks only**, because that is what the per-thread stack
-records. The three locks the sweep touched that were unranked are now ranked, so
-all six sites are covered: `TTY_BUFFER` 210, `Pipe` 220, `Pty` 230.
-
-Those ranks are pinned by two constraints, and the reasoning is in
-`invariants/lock-order.md`. Above 30, because `/dev/tty0` is a devfs device and
-devfs has no `PageCacheOps`, so writing to it runs `TtyDevice::write` under
-`inode.lock`. Below 900, because appending to any of these buffers allocates and
-a heap expansion reaches the frame allocator. Nothing ranked is acquired while
-one of them is held, which is the property to re-check before adding anything to
-those critical sections.
-
-Proven in both directions, since an assert never seen to fire is decoration:
-
-- **Negative:** 49/49 in-kernel, then killtest, exectest, threadtest, forktest,
-  iotest, mmaptest 11/11 and `lockordertest: PASS (inversions=0, max_depth=4)`
-  on a booted desktop, plus `echo x > /dev/tty0` and `cat /dev/tty0` to force
-  the `inode.lock` → `TTY_BUFFER` ordering. `/proc/lock_order_stats` reported
-  `inversions: 0` throughout.
-- **Positive, twice.** Pushing a fake rank in the `SYS_EXIT` arm panics on the
-  first program exit: `thread 27 died at thread_exit holding 1 ranked guard(s),
-  innermost 'positive-control' (rank 10)`. Then, after ranking, holding a real
-  `TTY_BUFFER` guard across the exit panics with `innermost
-  'tty::positive-control' (rank 210)` — which is the proof the widened coverage
-  is real and not just a bigger table. Both reverted.
-
-Worth knowing when reading this class: **the hang that opened the entry in
-`ideas.txt` was re-diagnosed as starvation**, not a leaked guard, by
-`bugs/2026-08-08-window-registry-stuck-reader.md`. The class has never been
-caught in the act. It was swept because the mechanism is provable by
-inspection, not because that deadlock was an instance of it.
-
-Where the rule can be broken at all is narrower than "anywhere a thread dies".
-Every ring-3 kill point (GPF, invalid opcode, alignment check, page fault, the
-timer tick) interrupts user code, where the thread provably holds nothing;
-`exit_if_killed` runs after the syscall body returned and dropped its guards; a
-ring-0 uaccess fault takes the fixup and returns EFAULT rather than killing.
-That leaves explicit `thread_exit()` inside a syscall body, of which there are
-two, both currently safe.
-
-## Lock-order ranks now cover IPC, networking and the window system
-
-Three subsystems ranked on top of the FS/MM ladder that Foundation #4 shipped:
-TTY/pipe/pty 210-230, networking 240-270, window system 280-300. The rank table
-in [`invariants/lock-order.md`](invariants/lock-order.md) is authoritative and
-has the per-lock reasoning; this is the summary of what it bought.
-
-**Networking was the payoff: two pre-existing AB/BA inversions**, both shaped as
-"take the port table while holding something that belongs inside it".
-
-- `tcp_retransmit_main`'s cleanup freed the ephemeral port inside the `retain`
-  closure with the connection guard live, closing the cycle
-  `PORT_TABLE -> SOCKET -> TCP_CONN -> PORT_TABLE`. It never deadlocked only
-  because the socket held under the port table in `handle_tcp` is always a
-  *listening* one, whose `poll_state` reads the accept queue instead of locking a
-  connection. Nothing enforced that.
-- `close_descriptor`'s socket arm took the port table under the socket guard,
-  against the receive path's opposite order. This one needs no invariant to
-  break: closing a listening socket while a segment arrives for it wedges two
-  CPUs on preempt spinlocks — a syscall against the e1000e rx kthread.
-
-Both now collect what they need under the guard and release it after. **Neither
-is visible by reading either function alone**; the rank system found them
-because no total order existed over the observed nestings. That is the argument
-for doing this to a subsystem at all.
-
-**The window system was already consistent** — no inversions. Worth recording so
-nobody re-derives it: `handle_mouse_event` already drops its read guard before
-upgrading to a write lock, `cleanup_process_windows` already scopes its guard,
-and the event-queue side never reaches back into the registry.
-
-**Ranking is also what makes a lock visible to `assert_no_guards_held`.** That
-assert only sees ranked locks, so the pipe/pty/TTY ranks exist as much for the
-dying-thread check as for ordering. If you add a lock that a syscall can hold
-across a park, rank it even if it is a leaf.
-
-Validation was the tracker itself, which panics on a wrong rank rather than
-passing quietly: 49/49 in-kernel, a booted desktop with DHCP/ARP/ping/DNS and
-repeated `http` fetches over the real internet, a synthetic click-and-type soak,
-and `lockordertest: PASS`. `/proc/lock_order_stats` read `inversions: 0`
-throughout. Note what that does *not* show: it proves the new order is
-self-consistent under load, not that the old code would have deadlocked. The
-case for both bugs is structural, from the code, not from a reproduction.
-
-## USB, shared memory and the input path are ranked too
-
-The follow-up sweep (2026-08-10) added ranks 204/206 (`Mailbox.queue`,
-`ResponseInner.value`), 90 (`SHARED_MEMORY_REGISTRY`) and 310/320
-(`Broadcaster.subs`, the `/dev/kbd` + `/dev/mouse` poller lists). No inversions
-appeared; `/proc/lock_order_stats` read `inversions: 0, max_depth: 3` on a
-booted desktop after mmaptest 11/11, forktest, lockordertest, and a window
-opened and closed to drive the shm teardown path.
-
-**USB has no locks of its own, and that is the result rather than a gap.**
-`XhciController` is only ever `&mut self` inside its driver thread; the MSI-X
-handler just wakes that thread. Every other thread reaches it through a channel,
-so what the sweep actually ranked was the channels — a mailbox shared with the
-FS mount path, and broadcasters shared with PS/2 input.
-
-**The shm registry's old rationale was wrong, and that is why it stayed
-unranked.** `invariants/lock-order.md` said it was never co-held with vmas (70)
-or mm (80). That was an audit of `syscalls/shm.rs` alone: `sys_fork`'s deep copy
-resolves each SHM VMA's region under the vmas guard, and `release_mappings` does
-the same under the page-table guard, which `Thread::free` holds across the whole
-call. Rank 90 sits inside both. The first attempt at 75 (inside vmas, outside
-mm) is wrong for exactly that second reason.
-
-**Two real defects came out of the USB half**, neither of them an ordering bug:
-
-- `Broadcaster.subs` was a bare `spin::RwLock` shared between driver kthreads,
-  the window input thread and syscall context — a descheduled holder stalls
-  every other CPU, the shape of the window-registry hang. Now `PreemptRwLock`,
-  and `subscribe` builds its 256-slot `ArrayQueue` before taking the guard
-  instead of under it.
-- The USB HID paths broadcast to subscribers but never notified pollers, while
-  the PS/2 paths did. Since `USB_*_ACTIVE` suppresses the PS/2 producer, `poll()`
-  on `/dev/kbd` or `/dev/mouse` never reported readable with a USB device
-  attached — which is the default machine. Both halves now sit behind
-  `dispatch_key_events` / `dispatch_mouse_event`.
-
-**Audio and devfs finished the list (same day).** `HdaPlaybackState` is rank
-330 and devfs's `DevFs.shared` is 340. Both were bare spin locks over
-thread-shared state, the same primitive error as `Broadcaster.subs`: HDA's was
-held across a memcpy loop into the DMA ring, between `/dev/dsp` writers and the
-audio kthread. `TTY_POLLERS` also joined the device-poller class at 320.
-
-**Ranking devfs paid for itself on the first `ls /dev`:**
-
-```
-lock order violation: tried to acquire 'tty::device_size' (rank 210)
-while holding 'devfs::list_files' (rank 340);
-full stack: [inode.lock(30), devfs::list_files(340)]
-```
-
-`read_bytes`, `write_bytes`, `ioctl`, `poll` and `mmap` all release the registry
-guard before calling into a device. `list_files` and `file_info` did not,
-because their call into the driver does not *look* like a dispatch:
-`DeviceNode::file_entry` reads `DevFsDevice::size`, which for `/dev/tty0` takes
-the rank-210 `BlockingMutex`. That is a spin lock held across a lock that can
-park. Both snapshot the nodes under the guard and build their `File` entries
-after it now. Ranking the registry *above* the device locks is what makes the
-mistake loud; ranking it below would have been legal and silent.
-
-**`scripts/edos-vm` had no audio device at all**, so `hda: no device found` and
-the driver never initialized — the primary way this OS gets exercised could not
-test audio. It now passes `-audiodev none,id=snd0 -device intel-hda -device
-hda-output,audiodev=snd0`. `none` rather than `pipewire`: the guest DMA engine
-and interrupts run either way, and pipewire refuses to start without a session
-bus, which is the exact case that script exists for.
-
-Still bare `spin::Mutex`/`RwLock` over thread-shared state, worth the same
-treatment and not yet audited: the `log` ring buffer in `logs.rs` (careful, it
-must stay reachable from paths that cannot take locks), `random.rs`'s RNG state,
-`PCI_MANAGER`, and `ALLOWED_PHYS_RANGES`. The scheduler's own locks,
-`PCI_CONFIG_LOCK` and the AHCI slot/mmio locks stay bare on purpose.
-
-**A trap worth naming: rewriting lock calls mechanically can drop a `!`.**
-Wrapping `wait_until(|| !self.queue.lock().is_empty())` in `ranked_lock!` lost
-the negation, and the kernel hung at boot right after the root mount with the
-serial log simply stopping — the FS mailbox thread waiting on an inverted
-predicate. The symptom looks like a deadlock in whatever ran last, not like a
-typo. Re-read predicates after a macro rewrite.
-
-## Ctrl+C kills the foreground job, and always did
-
-Verified in the VM on 2026-08-10: `sleep 30` and a stdin-blocked `cat` both die
-on Ctrl+C with the prompt returning, and Ctrl+C at an idle prompt leaves the
-shell alive. `ideas.txt` claimed the kill delivery behind `LineAction::Interrupt`
-was the one missing piece; it was already there (`PtyNotifications::kill_pid` ->
-`flush()` -> `kill_process`) and the entry had gone stale.
-
-**What keeps the shell alive is not the foreground bookkeeping.** `sys_spawn`
-registers any child whose fd 0 is a PTY slave as `foreground_pid`, including the
-session shell the terminal spawns, so at an idle prompt Ctrl+C really is
-delivered to the shell. `edos-sh` sets SIGINT to SIG_IGN at startup and
-`kill_process_with_signal` returns early on SIG_IGN. A negative-control kernel
-that registers the shell unconditionally still leaves it alive, which is how
-that was established — a plausible-looking "the shell would be killed" fix was
-built, refuted by the control, and reverted.
-
-## Ctrl-D ends a stdin read now
-
-`Pty::slave_read` returned an empty `Vec` for two different things — Ctrl-D
-(`eof_pending` consumed) and "no data yet" — so the caller could not tell them
-apart and parked in both cases. A program reading stdin (`wc`, `sort`, `cat`
-with no args) therefore hung with no way out unless the master closed. It
-returns `PtySlaveRead::{Data,Eof,WouldBlock}` now, and `sys_read` breaks with 0
-on `Eof`, which is how POSIX spells EOF.
-
-Verified against a negative control, because the first end-to-end test was wrong
-in a way worth recording: with `Eof` folded back into no-data, `wc -l` hangs and
-the next command is swallowed as stdin; with the fix it prints the count and
-returns to the prompt.
-
-**The userspace chain was never broken, and a too-narrow grep said otherwise.**
-`grep ctrl programs/edos-terminal/src/` finds nothing, which looks like "the
-terminal has no ctrl handling". The handling is one layer down:
-`edos_lib::keymap::map_keycode` maps ctrl+a..z to 0x01..0x1a and the terminal
-*widget* in `edos_render` tracks the modifier. Grep the widget and the keymap,
-not just the program.
-
-**And `scripts/edos-vm key` splits combos on `+`, not `-`.** `key ctrl-d` sends
-one bogus qcode and silently does nothing, which reads exactly like a missing
-feature. `key ctrl+d` is correct, as the script's own help says.
-
-## The syscall table is closed, and closing it found five data-loss bugs
-
-`doc/AUDIT.md` §3 listed eight missing interfaces; all eight now exist and the
-table is down to `setuid`, which is rejected there. 111 syscalls at the time
-(110 now that the redundant NUL-terminated `open` was retired in favor of
-`openat`), each with an `edos_lib` wrapper and a case in `programs/iotest` —
-**`iotest /var` is the regression suite for the whole set, and it runs 20/20.**
-
-The syscalls are not the interesting part. Writing them found five bugs that
-predate them, every one a silent data corruption:
-
-- **`VfsInode` identity was keyed by the dentry cache**, so any invalidation
-  (truncate, rename, create, or the LRU at 256 entries) forked one file into two
-  inodes with independent page caches. A dirty page stayed on the first and read
-  back as zeros through the second, then landed on disk over newer data. Inodes
-  are keyed `(mount_id, ino)` through `fs/icache.rs` now.
-- **Every EFS timestamp was 93 days late** — the shared days-from-civil helper
-  used `(153*m+8)/5` instead of `(153*(m-3)+2)/5`.
-- **memfs kept two sizes**, so every short `/tmp` file reported and read back
-  padded to its last 4 KiB page.
-- **An EFS hole read as `Corrupted`** rather than zeros, and growing an inline
-  inode past the 176-byte inline area panicked the kernel.
-- **No filesystem checked whether a name was free**, so `mkdir`/`create`/
-  `symlink` over an existing entry added a *second* directory entry with the
-  same name.
-
-The lesson worth carrying: each was found by writing the syscall that exercised
-the layer, not by reading the layer.
-
-## One defect class, found in three drivers
-
-**A pooled DMA buffer is not zeroed on reuse, and every parser read a fixed size
-without asking how many bytes arrived.** A short transfer therefore returned the
-previous owner's bytes as device identity or as sector data. Fixed in xHCI
-descriptors (`d8ff718`) and USB mass storage (`bbd47f0`, where `block_size == 0`
-also faulted the CPU and an oversized one made `read_sectors` loop forever).
-
-**AHCI ATAPI has the same defect and is still open.** `execute_atapi_command`
-drops the count the command header's `prdbc` already carries. It is verifiable
-today with no new QEMU option: `-cdrom` on q35 lands on the ICH9 AHCI
-controller, so the guest logs `Found ATAPI device on port 2` /
-`Model: QEMU QEMU DVD-ROM` on every boot.
-
-If you add a driver that reads out of `DmaPool`, this is the first thing to
-check. `allocate_sized` does not zero, and documents why: it serves AHCI
-per-command buffers up to 2 MiB, so a memset per pop is a storage regression.
-
-## The shell was rebuilt, and the kernel gave two things back to userspace
-
-The GUI now has proportional type (Lato for chrome, JetBrains Mono for the
-grid, from `/share/fonts` via `fontdue`), a panel with launcher/tasks/status
-regions and icons, an applications menu with working power controls, minimize
-and maximize, and a desktop right-click menu. `programs/wintest` is the
-reference for the widget toolkit and now models a disabled state and aligned
-columns.
-
-Two moves that matter beyond the pixels:
-
-- **The kernel no longer knows what a title bar is.** It routes pointer events
-  into client space, so it needs the offset -- but each window now carries the
-  frame *its manager gave it*, through `property::FRAME`. There is no global
-  decoration constant in the kernel, and different windows can be framed
-  differently, which is what a menu needs.
-- **`FLAG_DOCK` split into `FLAG_UNDECORATED` and `FLAG_NO_FOCUS`.** They were
-  one flag, and a menu needs the first without the second: it has no title bar,
-  and it must take focus because losing focus is how it closes.
-
-- **Managing another process's window needs a privilege now.** It was ungated:
-  any process could move, resize, minimize or post a close event to any window.
-  Init holds the privilege by being the process the kernel starts, and grants it
-  per spawn to the compositor and the panel (`kernel/src/window/shell.rs`,
-  `SYS_WINDOW_GRANT_SHELL` 234). Two things fell out of writing it: the
-  privilege has to follow a process's *threads*, because `pid` here is a
-  thread's own id and there is no thread-group id, so a grant is propagated at
-  `sys_clone`; and the shell table must be ranked *outside* the window registry
-  and settled before it is taken, which the lock-order tracker caught on the
-  first boot.
-
-Traps this round produced, both of which cost a build cycle:
-
-- **`WidgetContainer` wraps every widget to assign it an id and forwards each
-  trait method by hand.** A method added to `Widget` with a default body is
-  inherited by the wrapper and never reaches the real widget. It compiles, it
-  looks right, and it silently does nothing.
-- **A window created this frame is not in the window list the caller already
-  fetched.** The panel's menu closed itself instantly because its absence from
-  a stale list read as "destroyed".
-
-## The shell's loose ends, closed
-
-Four things the rebuild left open, and what each turned out to need.
-
-**Windows are addressable by name.** `/proc/windows` publishes the kernel
-registry, and the compositor copies that file into the kernel log on
-`Ctrl+Alt+W`; the serial console is the only channel out of a headless guest, so
-that keystroke is how the geometry reaches the host. `scripts/edos-vm windows`
-and `focus <title>` are the host side.
-
-Two details that are the whole difference between this working and looking like
-it works:
-
-- **The reported origin is the *outer* one and the reported size is the
-  *client* one**, with the frame as a separate column, because that is what the
-  kernel routes pointer events by. Clicking `x + w/2, y + h/2` lands in the
-  title bar of a tall window and on the desktop below a short one.
-- **Clicking a window's centre focuses whatever is on top of it.** `focus`
-  subtracts every higher-z window's rect from the target's client area and
-  clicks a point that survives, which is what raises a partly covered window;
-  the first version clicked the centre and confidently focused the wrong window
-  while reporting the right name. A fully covered window is reported, not
-  guessed at.
-
-**Wallpapers.** `edos_render::image` decodes 24- and 32-bit uncompressed BMP and
-scales to cover; the compositor cycles the three generated lit grounds and every
-readable `.bmp` in `/share/wallpapers` through the one desktop-menu entry. The
-shipped image is generated by `scripts/mkwallpaper.py` at build time, since this
-repo holds no binaries, and the make rule depends on the script so an unchanged
-wallpaper keeps its timestamp — the disk-image manifest is timestamp-based, so
-regenerating it every build would rebuild both images every build.
-
-**The status area does something.** Volume drives the HDA output amps through
-two new `/dev/dsp` ioctls; the gain scale comes from the codec's own Output
-Amplifier Capabilities rather than a hardcoded `0x7F` (QEMU's reports 74 steps),
-and zero mutes rather than attenuating to the quietest step. Network reports
-link, address, gateway, resolver and MAC from a new `/proc/net`. That file
-exists because `SYS_NETINFO` renders the same state *for a terminal*, ANSI
-colour codes and all, and a UI parsing that would be reading a display format.
-
-**`std` reaches the whole syscall table** (`edos_rt` 0.0.42, fork pin bumped):
-symlinks, file times, `is_symlink`, vectored I/O, `nanosleep`, a `ReadDir` that
-streams through `getdents` a chunk at a time instead of demanding a buffer for
-the whole directory, `access` behind `try_exists`, and `openat` so an open no
-longer allocates a `CString`.
-
-One of the nineteen was not a wrapper. `File::set_times` needs to stamp a file
-the caller holds *open*, and `SYS_UTIMENSAT` took a path; a `File` has only a
-descriptor. The kernel grew the POSIX form — a null path means the file `dirfd`
-names — which is `futimens`, covered by `iotest` test 9.
-
-## Fixed: a new window was black until its client painted
-
-Reported from a VNC session, and invisible to a screenshot taken a moment
-later. A window was created **mapped** (`WindowInfo::new` set `visible: true`)
-and `Window::new` immediately pointed the compositor at buffer 0 — a buffer
-nobody had drawn into. Everything between `window_create` and the client's
-first frame — allocating the second buffer, the title, the flags, the client's
-own pre-render — was therefore composited as a black rectangle inside real
-decorations.
-
-Both halves had to go: a window is created unmapped and its client maps it with
-`show()`, and no buffer is published until the first `swap_buffers`, which is
-the only call that means "this is what I look like". A window with no buffer
-composites as its own themed ground, so a client that maps before painting
-costs a frame of empty window rather than a black hole.
-
-`Window::resize` still publishes an unpainted buffer, deliberately: the old
-pair is freed immediately after, so the alternative is leaving the compositor
-holding a freed shm id.
-
-## The USB HID driver reads report descriptors now
-
-It bound a device on `bInterfaceClass == HID && bInterfaceProtocol == 1|2` and
-then decoded one fixed layout, so it understood exactly two devices: a boot
-keyboard and a boot mouse. Those protocol codes only mean anything on an
-interface that declares the *boot* subclass, so `usb-tablet` — which declares
-none — enumerated and was dropped, and the guest had no absolute pointer. Under
-VNC that shows up as the host pointer drifting away from the guest cursor and
-walking out of the window, which is a symptom two layers above the cause.
-
-`drivers/usb/hid/report.rs` parses the item stream into a field map: bit
-offset, width, signedness, usage, and whether the value is a position or a
-displacement. That last flag is the whole difference between a mouse and a
-tablet and it is stated by the Input item; nothing about a byte layout implies
-it. A pointer is now bound because its descriptor says it has X and Y.
-
-Things worth knowing if you touch it:
-
-- **The boot decoder is still there, as the fallback** for a descriptor that
-  will not parse. A device the driver used to handle must not be lost to a
-  parser bug.
-- **`SET_PROTOCOL` is only sent when the fixed layout is what will be decoded**,
-  and only to an interface that declares the boot subclass. Asking a tablet for
-  boot protocol stalls, and asking a mouse for it after reading its report
-  descriptor would replace the layout that was just parsed.
-- **The report length comes from the endpoint descriptor**, not from the four
-  bytes the boot layout happens to use: a tablet reports six.
-- `parse_pointer` only reads inside the collection that declares itself a
-  pointer or a mouse. A keyboard descriptor can carry an X/Y pair in a vendor
-  collection, and taking it would make the keyboard the pointer.
-- The sched-test suite parses both descriptors QEMU emits and checks the
-  decoded offsets, values, scaling and the absolute flag, plus that a keyboard
-  and a truncated descriptor are both refused. 49 → 50 tests.
-
-**A trap that cost a debug cycle, and it was in the host script.** QMP serves
-one client at a time. `pointer_is_absolute()` opened its own connection while
-the caller already held one, so it timed out, reported "not absolute", and the
-script silently fell back to relative motion — which QEMU *does* apply to a
-tablet, so the pointer still moved and only the clicks went missing. It takes
-the caller's connection now.
-
-## The cursor moved to its own plane
-
-Reading report descriptors gave the guest an absolute pointer, which is what
-the hardware cursor had been waiting for: `hw_cursor` in the window manager was
-hard-coded `false` with a comment saying so. With it on, the compositor stops
-painting the pointer into the framebuffer, so moving the mouse damages nothing
-and costs one small message; a remote viewer is handed the image and draws it
-at its own pointer speed. That is most of what "the mouse is not smooth" over
-VNC was.
-
-The cursor texture already had zero alpha where it is transparent, which is
-what both the software blit and the cursor plane want, so there is one cursor
-image rather than two. A shape change is an upload rather than a different
-texture at composite time, and the flag falls back to the software cursor if
-the display has no cursor plane to take it.
-
-**`screendump` does not capture the cursor plane**, so screenshots no longer
-contain a pointer. That is worth knowing before it is read as a pointer that
-failed to move; it also means a screenshot is no longer a way to check where
-the pointer is.
-
-## What a frame costs, measured
-
-Asked whether dragging a window was slow, and whether the hardware cursor was
-covering for a slow compositor. It is not. `FrameStats` in the window manager
-times the composite and the transfer and reports only when frames miss their
-budget, so it is silent on a healthy machine.
-
-Dragging a 640x480 window across a 1920x1080 screen for five seconds, KVM,
-four cores:
-
-| | |
-|---|---|
-| frames per second | 77, against a 74Hz target |
-| composite | 1.56 ms average, 2.4-4.9 ms worst |
-| transfer (`flip_rect`) | 0.4 ms average |
-| frames over the 13 ms budget | **0** |
-
-So the guest composites a drag in about 2 ms of a 13 ms budget and misses
-nothing. What a VNC viewer shows is the remote-framebuffer limit: a moving
-640x480 window damages its old and new rectangles, some 2.4 MB of pixels per
-frame, and that has to be encoded and shipped. The cursor became smooth
-because on its own plane it ships *no pixels at all*.
-
-Then the same counter was asked what the *display* is being handed, because a
-guest that hits its frame rate can still be producing more than a remote
-viewer can carry. Dragging that window:
-
-**~250 MB/s of raw pixels**, about 3 MB per frame at 77 frames a second.
-
-That is the whole story of "dragging is not smooth over VNC/SPICE". A moving
-window's old and new rectangles both change, so the damage is roughly the
-window's area every frame, and a remote protocol has to compress and ship all
-of it. Gigabit ethernet carries 125 MB/s. The viewer is oversubscribed two to
-five times over, so it applies updates partially -- which is what reads as
-tearing, and it shows up first on a title bar because that is the crispest
-edge on screen. The guest is presenting whole frames: `transfer_and_flush`
-polls both commands to completion before returning, so nothing is being drawn
-into while the host reads it.
-
-This is also what SPICE's `streaming-video=filter` is for: it re-encodes a
-fast-changing rectangle as lossy video so it *fits*. Turning it off buys
-sharpness and spends smoothness. There is no setting that buys both, and no
-change inside the guest that makes a moving window stop being megabytes.
-
-Two things the numbers say that are worth keeping:
-
-- **The first frames are enormous** — one report at boot averages 240 ms with a
-  2.16 s worst case, while fonts load and the shm buffers fault in. It is the
-  slow first paint at boot, not a steady-state problem.
-- **Cost scales with the screen, not with what changed.** The compositor
-  rewrites all 1920x1080 pixels every frame and only limits the *transfer* to
-  the dirty rectangle. 1.5 ms says that is affordable today; it is where to
-  look first if it stops being.
-
-## A filesystem cannot resolve a symbolic link, and now does not try
-
-`iotest /tmp` stopped at test 10 with "read through link: entity not found"
-while the identical `iotest /var` passed. The VFS hands each filesystem a
-*mount-relative* path and each filesystem resolved link targets from its own
-root, so a link at `/tmp/link` naming `/tmp/target` made memfs look for
-`tmp/target` under the memfs root, which has no `tmp`. EFS only worked because
-it is mounted at `/`, where mount-relative and absolute coincide.
-
-Chasing the fix turned up two more of the same shape, which is why the answer
-is broader than the symptom. A relative target can walk *out* of its mount
-(`/tmp/l -> ../var/x`), and the filesystem clamps the `..` at its own root
-instead. And a target that stays put can still cross into something mounted
-*deeper*, which the filesystem also cannot see. There is no rule by which a
-filesystem gets any of these right, because the mount table is not its to
-read.
-
-So a filesystem no longer resolves a link target at all. Its walk stops at the
-first link it is asked to follow and reports `Error::LinkEscape`; the VFS asks
-where the link pointed (`FileSystem::link_escape`, answering in the only terms
-a filesystem has: an absolute target, or a relative one plus how many levels
-above the mount point it started), turns that into an absolute path, and
-restarts resolution from the VFS root. The hop cap lives in the VFS now, so it
-counts hops across mounts rather than per filesystem.
-
-Two consequences worth knowing:
-
-- **Escalation is error-driven, not a pre-pass.** `fs::api::with_links` runs
-  the operation and only redirects when it comes back `LinkEscape`, so a path
-  with no symbolic links costs exactly one walk, as before. Probing each prefix
-  with `read_link` would have been the obvious shape and is O(N) walks per
-  lookup.
-- **The follow/nofollow distinction had to move up.** It used to live inside
-  each filesystem's walk. `LinkMode` now carries it from the API layer, because
-  the redirect has to be computed the same way the operation walks: `unlink`,
-  `readlink`, `symlink` and `rename` leave the final component alone, and
-  everything else follows it. `rename` is the one operation holding two paths,
-  so a retry could not say which side raised the error; it settles both with
-  `resolve_links` before calling.
-
-`open` caches the path on the descriptor, so it takes the resolved one:
-`file_info_resolved` hands back the path it landed on, which differs from the
-one asked for exactly when a link crossed a mount.
-
-## The panel publishes where its own buttons are
-
-`scripts/edos-vm launch` used to mirror `programs/edos-taskbar/src/{main,panel,
-menu}.rs` by hand, because the panel's buttons are not windows and nothing in
-`/proc/windows` accounts for them. Moving the layout silently misaimed every
-scripted click: no compile error, no failing test.
-
-The panel writes them out itself now, the same way the window manager copies
-`/proc/windows` into the kernel log: `panel|` lines whenever the layout moves
-(a window opening or closing, or the clock growing a digit), and `menu|` lines
-as the applications menu opens. `klog_dump` in `edos_lib::io` is the shared
-writer. `scripts/edos-vm` grows `panel` and `press <name>`, `launch` resolves
-rows by label, and every layout constant is gone from the script.
-
-The panel needs no request channel because it republishes on change, so the
-last block in the log is current. The menu does: it exists only while open, so
-`launch` notes where the log ends before clicking the launcher and only reads
-what lands after that.
-
-## What the symlink rework broke, and what that says about the test suite
-
-A review of the finished diff found four regressions, all of the same shape and
-none caught by `iotest` passing on both filesystems. Worth writing down, because
-the shape is the lesson: **making a filesystem report an escape instead of
-resolving it turns every caller that did not expect an error into a caller that
-now fails.** The retry loop covers `fs::api`. Anything reaching the VFS by
-another door does not.
-
-- **Executing through a symbolic link stopped working.** `fs::api::resolve_inode`
-  is how the ELF loader reaches a binary — `do_spawn`, `execve`, and the boot
-  load of `bin/edos-init` — and it called `vfs::resolve` directly, outside the
-  loop. `ln -s /bin/ls /bin/ll; ll` failed with ENOEXEC while `cat /bin/ll`
-  worked, because the shebang probe goes through `read_bytes`, which retries.
-  A wrong errno on a path that demonstrably exists is the tell.
-- **`rename` and `rmdir` on EFS returned ELOOP and EIO.** Both resolved their
-  target with the *follow* variant while `fs::api` asked for nofollow. Two
-  pre-existing bugs fell out of fixing that: `mv link newname` used to make
-  `newname` a second name for the link's *target*, and `rmdir symlink-to-dir`
-  used to free the target directory. memfs had it right all along.
-- **`open(O_CREAT)` through a symlinked directory left a permanently broken
-  fd.** `create_file` retries and creates the file at the resolved path;
-  `open` then cached the *unresolved* one, so every later read and write on
-  that descriptor failed.
-
-The general hazard the design carries: `link_escape` is asked with the *API's*
-link mode, not the mode the filesystem operation actually walked with, and the
-two agree only by convention. Every op-follows / api-nofollow pair produces
-`Unsupported`, which surfaces as EIO. `rmdir` was the only live instance; a
-filesystem operation added later that follows a final component the API says to
-leave alone will do it again.
-
-`iotest` now covers all four: exec through a link, create-write-read through a
-linked directory, rename of a link, and `rmdir` refusing one. Plus a two-link
-cycle, which is the case that proves the new loop terminates rather than hangs.
-
-## procfs answers for per-process memory
-
-Writing a graphical process viewer turned up the gap: nothing anywhere said how
-much memory a process was using. The closest was the VMA *count*, which says
-how many mappings exist and nothing about their size.
-
-`/proc/processes` has an RSS column now and `/proc/<tid>/status` a `VM Size` and
-a `Resident` line. Virtual size is the sum of the VMA lengths and is free.
-Resident is counted from the page tables when read, and that is the decision
-worth recording: a page enters a user address space from demand paging,
-copy-on-write, `mmap`, shared memory and the loader, and leaves it from a dozen
-`unmap` sites, so a counter maintained at each of them drifts the first time one
-is missed — and a memory number that is quietly wrong is worse than no memory
-number. The walk descends only into *present* entries, so the lazily faulted
-mappings this kernel leans on cost one skipped entry rather than a probe per
-page; probing each page of each VMA instead would have been O(virtual size),
-which for a sparsely faulted mapping is most of the work for none of the answer.
-
-The lock order is `vmas` (70) then `memory_manager` (80), in that order.
-
-Holding the manager is not on its own enough to make the walk safe, which was
-the other thing the review caught. The reaper calls `Thread::free` *before*
-dropping the thread from the registry, and procfs snapshots the registry into
-`Vec<Arc<Thread>>` first, so it can reach a `MemoryManager` whose PML4 frame is
-already back in the allocator and possibly reused — and `mapper` is an
-`OffsetPageTable<'static>` whose lifetime says nothing about that. Reading the
-VMA count was safe because a Rust structure stays allocated; this is the first
-reader that follows the raw frame pointer. `Thread::free` now calls
-`release_page_tables()` under the mm lock before freeing the frame, and
-`resident_bytes` returns 0 once that is set.
-
-A first reading, `/bin/edos-wm`: 471 VMAs, 51100 KiB of address space, 42660 KiB
-resident. `/bin/sh` 208 KiB and `/bin/ps` 60 KiB resident against ~300 KiB
-binaries, which is demand paging visible in a number for the first time. Kernel
-threads report `-` rather than a figure: they have no address space of their
-own, and reporting the kernel's would be a lie that adds up.
-
-## strace exists, and it is now the first thing to reach for
-
-A program that failed silently used to leave nothing behind — this OS is driven
-through screenshots and a serial log, so "it printed nothing" was the end of the
-evidence. `strace` makes it the beginning. Full write-up in
-[`strace.md`](strace.md); the parts worth knowing before reading code:
-
-**It is not ptrace, and deliberately so.** `syscall_handler` is a single choke
-point for the entire syscall surface, so tracing is an entry record before the
-match, a return record after it, and a per-thread mark to decide whether to
-write either. Nothing stops the target and nothing changes its scheduling.
-
-**The mark is a generation, not a bool.** `Thread::traced` holds the trace
-session it was marked under, and only counts while that equals the live
-generation. Ending a session is therefore one increment rather than a walk of
-the thread table, and a mark a dead tracer left behind cannot reactivate under
-the next one. This matters more than it looks: a stale mark means a program
-writing records into a ring nobody drains, forever.
-
-**A tracer that dies releases the session**, because `thread_exit` calls into
-the tracer for the `+++ exited +++` record anyway. Ctrl+C on `strace -p` leaves
-nothing marked, which is verified behaviour and not an assumption.
-
-**Records can be lost and the count is printed.** The target never blocks on the
-tracer; a ring that fills drops and counts. A tool that silently omits calls is
-worse than one that admits it.
-
-**Three things the design bought that are worth keeping in mind:**
-
-- `/proc/syscalls` publishes the kernel's own syscall table (number, name,
-  argument kinds) and its errno names, so `strace` holds no duplicate that could
-  drift the way `WindowListEntry` could before it moved to `libs/window-abi`. **Adding a syscall now means adding a row
-  to `kernel/src/syscalls/table.rs`** or `strace` will print it as
-  `syscall_NNN(0x…, 0x…)`.
-- Buffer contents are captured on both sides: an input buffer on entry, an
-  output buffer on return, sized by the return value. The output side finds its
-  buffer through the arguments *copied at entry* and carried in a `TracedCall`,
-  not through the registers as they stand on return — `sys_execve` rewrites the
-  whole `SyscallContext`, so those can name a dead address space. An earlier
-  draft relied on "the dispatcher only ever assigns to `ctx.rax`", which is
-  false. That is what makes `write(1, "hi\n", 3)` and `read(3, "…", 4096) = 12`
-  readable.
-- A call still in flight prints `<unfinished ...>` and resumes later. `strace -T
-  sleep 1` showing `<... nanosleep resumed> = 0 <1.000049>` is the answer to
-  "the program is hung", not a guess about it.
-
-## Signals became a real subsystem
-
-`signal.rs` was 163 lines of pending bitmask and an ignore-or-die disposition.
-Five things landed on top of it; `programs/sigtest` covers each and is the
-thing to run before believing any change here.
-
-**Suspension happens at a boundary, not where the signal lands.** A stop sets
-`stop_requested` and wakes the target; the target parks itself in
-`stop_if_signalled` at its next syscall return or its next tick out of ring 3.
-That is the same boundary `killed` uses and for the same reason — it is where
-the thread provably holds no guard. The consequence worth keeping: a process
-suspended mid-`write` finishes the write first, so Ctrl+Z can never leave a
-filesystem lock held for as long as a user leaves a job suspended.
-
-**A handler runs by rewriting the syscall context.** Delivery builds a
-`SigFrame` on the user stack — the whole interrupted `SyscallContext`, the old
-blocked mask, and a magic word — then points `ctx.rip` at the handler with the
-restorer as its return address. `sigreturn` reloads it. Three things that are
-load-bearing rather than incidental:
-
-- The frame is written **below the red zone** and 16-aligned so that `rsp+8` is
-  16-aligned at handler entry, which is what the ABI actually requires.
-- `sigreturn` **checks the magic and masks rflags** before loading. It restores
-  `rip`, `rsp` and `rflags` wholesale from a user-writable address, so without
-  those two checks it is a privilege escalation rather than a syscall.
-- The saved `rax` is the interrupted syscall's **return value**, so a handler
-  that runs between a call finishing and userspace seeing its result is
-  invisible to the interrupted code. `sigtest`'s first case checks exactly that.
-
-**Delivery is syscall-return only.** A thread spinning without entering the
-kernel does not run a handler. Default actions still reach it from the tick, so
-Ctrl+C kills such a process — it just cannot *catch* it. Extending this to the
-tick path means building the same frame from a `CpuContext` instead of a
-`SyscallContext`, which is the work that was deliberately not done.
-
-**A handled signal must not also take its default action.** `kill_process_with_signal`
-returns early when a user handler is installed, leaving the signal pending for
-the handler path. Without that, a process asking to handle `SIGINT` gets killed
-by it anyway. `deliver_unblocked_signals` puts handled signals back for the same
-reason.
-
-**`Pipe::write` used to ignore its readers entirely** — a write with nobody
-reading buffered into the kernel heap forever, so `yes | head -1` was an
-unbounded allocation rather than a broken pipe. It now returns `None`, which
-the caller turns into `EPIPE` *and* a `SIGPIPE`.
-
-## The listen side of TCP had never been run (2026-08-11)
-
-`programs/tcpecho` is the first thing to call `listen`/`accept`, and it panicked
-the kernel on the first call and then broke on the second connection. Both are
-fixed; the mechanisms are worth keeping.
-
-1. **`sys_listen` inverted the port-table order.** It held the socket lock
-   (rank 260) and took the port table (250) under it. `handle_tcp` takes them
-   the other way round on the receive path, so this was an AB/BA the rank
-   tracker caught on the very first call: "tried to acquire 'sys_listen' (rank
-   250) while holding 'sys_listen' (rank 260)". `sys_bind` had it right all
-   along — validate under the socket lock, drop it, take the port table, then
-   re-take the socket — and `sys_listen` now has the same shape.
-
-2. **Closing an accepted socket unbound its listener.** The socket close path
-   removes `(proto, local_port)` from the port table, and a socket returned by
-   `accept` carries the *listener's* local port. So the first connection to end
-   took the listening entry with it and the next SYN was answered with RST. The
-   table maps a port to the socket that owns it, so the entry is now removed
-   only when it names the socket being closed (`Arc::ptr_eq`).
-
-Two things this exposed that are **still open** (both in engram): a segment
-is dropped outright on an ARP cache miss and never retried, so the first inbound
-connection after boot is lost; and the accept queue never drops an entry that
-never reached Connected, so every half-open SYN permanently occupies a backlog
-slot.
-
-### Things that will bite you
-
-- **The host reaches the guest on 127.0.0.1:2323**, forwarded to guest port 23
-  (`--ssh-fwd` in `scripts/edos-vm`). That is the only way in: user-mode slirp
-  has no route to the guest otherwise, so a server on any other port cannot be
-  tested from the host.
-- **The first connection after boot always fails**, because of the ARP drop
-  above. Warm the cache with a throwaway connection before judging a server.
-
-## Things that will bite you
-
-- **`USER_VA_END` cannot be put in a `VirtAddr`.** It is `0x0000_8000_0000_0000`,
-  the exclusive end of the user half, which is the *lowest non-canonical*
-  address; `VirtAddr::new` panics on it with "virtual address must be sign
-  extended in bits 48 to 64". Anything expressing a half-open range over the
-  whole user half — `MemoryManager::resident_bytes_in` is the one that hit it —
-  must carry raw `u64`s. The panic is not at boot: it fires the first time
-  something reads `/proc/processes`, which on the desktop is the panel, so the
-  session comes up and then dies a few seconds later.
-- `make edos-x86_64.iso` re-invokes the kernel target **without** any
-  `CARGO_FLAGS` you passed earlier, silently replacing an instrumented build
-  with a plain one. Pass the flags to the ISO target itself.
-- `cargo` does not notice that `std` changed. After rebuilding the toolchain,
-  `cargo +edos clean` in `programs/` or you will keep linking the old one, and
-  the build will cheerfully report success.
-- `sg` is also the name of the `ast-grep` binary. Scripts that need the group
-  tool must use `/usr/bin/sg`.
-- **`alloctest` never exits, by design.** Its whole body is
-  `loop { let v = vec![0u32; 256]; black_box(&v); drop(v); }`, an allocator
-  soak with no termination condition. It is not a hang and not a bug. Anything
-  that runs the stress binaries in sequence will sit there forever and silently
-  buffer the rest of the input; run it last, or not at all.
-- Symbol addresses move on every kernel rebuild, so resolve them from
-  `kernel/kernel` at runtime rather than hard-coding them.
-- **`make all` does not rebuild `sata-disk.img`**, and every `run` target
-  attaches it and prefers it over the live-root ramdisk. A rebuilt program is
-  invisible to the guest until `make sata-disk.img`, so a screenshot looks
-  exactly as if the change did nothing.
-- **`make sata-disk.img` used to fail while a VM was running** — `qemu-img`
-  reported "Failed to get write lock" — and worse, when it ran underneath
-  `make test` or `storage-check` the whole build died and read as a *test*
-  failure. The rule stops the guest itself now, so this only bites a VM started
-  outside `scripts/edos-vm`.
-- **A kernel edit no longer rebuilds `sata-disk.img`.** It used to, every time:
-  `live-root.img` depends on the phony `kernel` target, its recipe writes
-  `filesystem/boot/kernel`, and that path was in the manifest whose timestamp
-  decides the disk. `filesystem/boot` is excluded from the manifest now, so a
-  kernel-only cycle skips the 5 GB create, the `efs-mkfs` populate and the
-  qcow2 convert. The cost of the exclusion: the disk's own `/boot` can hold a
-  stale kernel, which nothing reads because the run targets boot the ISO.
-- **`make test` leaves the sched-test ISO in place.** A later `edos-vm start`
-  boots the test kernel rather than the desktop; re-run `make all` before manual
-  guest checks.
-- **`cargo check` from the repo root uses the wrong toolchain.** The root
-  `rust-toolchain.toml` says plain `nightly`, `kernel/` pins
-  `nightly-2026-03-06`, and the `x86_64` crate does not build on current
-  nightly. Use `make -C kernel check`.
-- **`efs-fsck` findings from a power-cut image are not trustworthy until the
-  journal is replayed.** The later phases check home blocks the ring may still
-  hold newer copies of, so orphan inodes and bitmap mismatches can be artifacts
-  rather than damage. The dirty-journal finding says so; run `--repair` (which
-  replays first) and re-check, or type `shutdown` in the guest rather than
-  `edos-vm stop`, which syncs every filesystem and leaves an image that checks
-  clean with no replay.
-- **Nothing on screen is addressed by pixel any more.** Windows go by title
-  (`edos-vm windows`, `edos-vm focus <title>`) from `/proc/windows`; the panel's
-  controls go by name (`edos-vm panel`, `edos-vm press <name>`, `edos-vm launch
-  <row>`) from what the panel itself publishes. No layout constant is left in
-  `scripts/edos-vm`, so moving the panel no longer silently misaims every
-  scripted click. A minimized window still has no geometry to click: `press
-  <title>` hits its task button, which restores it.
-- **The sched-test suite has a known flake with two signatures**: `ping-pong
-  count mismatch: 499 != 500`, and a TIMEOUT with ping-pong-pong never
-  reporting. It has been seen to fail **twice in a row** before passing, so a
-  single clean re-run is weak evidence either way; weigh whether the changed
-  code is reachable from the scheduler at all. Tracked in engram; it
-  points at a lost or late wakeup, and it has never been chased.
-
-## The shell can redirect any of the three standard descriptors now
-
-`2>file`, `2>>file`, `2>&1`, `1>&2` and `&>file` work, on a plain command and on
-each stage of a pipeline. Three things had to change, and the second was the one
-that would have been diagnosed as "redirection is broken" forever:
-
-1. `Redirects` is an ordered `Vec<RedirOp>` rather than three fields. Order is
-   the whole semantics: `>f 2>&1` sends both streams to the file, `2>&1 >f`
-   leaves the error stream on the terminal. `open_redirects` walks the list left
-   to right into a three-slot table where each slot is either an opened
-   descriptor or `Default(n)` — "whatever descriptor *n* would have been". A
-   pipeline stage resolves that table against the pipe ends, which is what makes
-   `ls / 2>&1 | wc -l` put the error stream into the pipe. `&>f` is `>f 2>&1`,
-   never two opens of the same file, or the two descriptions would each start at
-   offset 0 and overwrite each other.
-
-2. **`split_chain` ate the `&` in `2>&1`.** It ran before any redirect parsing
-   and treated an unquoted `&` at paren depth 0 as the background operator, so
-   `ls / 2>&1 | wc -l` was split into `ls / 2>` and `1 | wc -l` — with the
-   redirect code perfect, the command still made no sense. An `&` preceded by
-   `>`/`<` or followed by `>` is part of a redirection, not a job-control
-   operator.
-
-3. **`>` never truncated.** The shell opened with `O_CREAT` only, so writing a
-   short file over a long one left the tail behind. Adding `O_TRUNC` alone would
-   have broken `> /dev/klog`, because devfs has no `truncate` and the trait
-   default returns `IoError`: POSIX says `O_TRUNC` has no effect on anything but
-   a regular file, so `open_resolved` in `kernel/src/syscalls/io.rs` now checks
-   `FileKind` before truncating. Redirect opens also pass `O_WRONLY`; only
-   `mmap` enforces the access mode today, but the descriptor should still say
-   what it is for.
-
-Only descriptors 0, 1 and 2 can be redirected. `SYS_SPAWN2` takes exactly three,
-so `3>file` has nowhere to go; the shell says so rather than silently dropping
-it.
-
-### Things that will bite you
-
-- **Pipeline exit status is still not tracked.** `run_segment` returns 0 for any
-  pipeline regardless of what the last stage did, so `false | true` and
-  `ls /nope | wc -l` both look successful to `&&`, `||` and `set -e`.
-
-## The shell expands patterns now, and that broke `ls`
-
-`programs/edos-sh/src/glob.rs` matches `*`, `?` and `[...]` (with `!`/`^`
-negation and `a-z` ranges) one path component at a time, so `ls /bin/e*`,
-`echo /bin/ec?o` and `for f in *.txt` all work. The rules that matter:
-
-- **Expansion is per component, over `readdir`.** A word is split on `/`; a
-  component with no metacharacter is appended literally, one with a
-  metacharacter reads the directory built so far and keeps the names that
-  match. That is what makes `/bin/*/x` cost one `readdir` per surviving prefix
-  rather than a walk of the tree.
-- **A pattern that matches nothing is passed through unchanged**, so
-  `echo *.nomatch` prints `*.nomatch` — the shell convention, not an error.
-- **Components after the last pattern are checked for existence** before the
-  path is returned. `*/missing` was built by appending, not by reading a
-  directory, so without the check it would be handed to the command as a path
-  that does not exist. The check is skipped when the last component is itself a
-  pattern, since those names came from `readdir` and are known to exist.
-- **A leading `.` is only matched by a pattern that starts with a literal `.`**,
-  so `*` does not pick up dotfiles and does not expand to `.` and `..`.
-- **Quoted or backslash-escaped words are never patterns.** `parse_command`
-  already flagged a word that was quoted anywhere; a backslash escape now sets
-  the same flag, which also fixes `echo \>x` printing `>x` instead of
-  redirecting. The flag is per word, so `a"b"*` is literal in its entirety —
-  a deviation from POSIX, which tracks quoting per character.
-- The command word itself is not expanded, only its arguments.
-
-`extract_redirects` returns `Vec<(String, bool)>` rather than `Vec<String>` for
-this: the quoted flag has to survive redirect extraction to reach expansion.
-
-**`ls` could not take what globbing hands it.** It read `args[1]` and called
-`read_dir` on it, so `ls /bin/e*` — now nine real paths — printed
-`cannot access '/bin/echo': not a directory` and stopped. It takes any number of
-operands now: non-directories are listed by name first, then each directory,
-with a `path:` header when there is more than one operand. Any program that
-takes "a path" is a candidate for the same defect now that a single word can
-expand to many.
-
-### Things that will bite you
-
-- **`for f in *; do ...; done` on one line does not run.** Loops are a
-  multi-line script construct; the interactive shell reads `for`, `do` and
-  `done` as commands and reports them not found. This predates globbing and is
-  unrelated to it, but it is the first thing you will try when testing a glob.
-
----
-
-## `sed`, and the backslashes the shell was eating
-
-`programs/sed` is a stream editor over its own backtracking regex engine
-(`programs/sed/src/regex.rs`): POSIX BRE by default, ERE under `-E`, plus the
-GNU extensions scripts actually use (`\+`, `\?`, `\|`, `\{m,n\}`, `\w`,
-`\s`, `[[:class:]]`). Commands are `s`, `y`, `p`, `d`, `q`, `=`, `a`, `i`, `c`
-and `{}` blocks; addresses are a line number, `$`, `/re/` (with `I`), a range of
-either, and `!`. Options: `-n`, `-e`, `-f`, `-i[SUFFIX]`, `-E`/`-r`.
-
-**The engine matches `&[char]`, not `&str`.** Capture offsets are character
-indices, so a replacement splices out of the same `Vec<char>` without
-re-scanning UTF-8 and a multi-byte character can never split a capture.
-
-Two things in the matcher are not obvious and are load-bearing:
-
-- **A repetition whose body matched empty must not recurse.** `m_rep` refuses a
-  repetition that did not advance the position; without that, `\(a*\)*`
-  never terminates.
-- **An empty match abutting the previous match is not a new occurrence.**
-  `substitute` tracks `prev_end` and skips an empty match starting exactly
-  where the last one ended. Without it, `s/a*/-/g` on `baac` gives `-b--c-`
-  instead of GNU's `-b-c-`.
-
-**ROOT CAUSE FOUND WHILE TESTING IT: the shell was deleting backslashes inside
-single quotes.** `parse_command` in `programs/edos-sh/src/command.rs` had one
-backslash arm that escaped the next character unconditionally, "inside or
-outside quotes". So `echo 'a\1b'` printed `a1b`, and every sed script written
-the normal way — `sed 's/\(.*\) \(.*\)/\2 \1/'` — reached the program as
-`s/(.*) (.*)/2 1/`, which is a BRE with literal parentheses: it matches
-nothing, sed changes nothing, and the output is the input. This looked exactly
-like a broken regex engine. Fixed to POSIX 2.2.2/2.2.3: inside single quotes a
-backslash is literal, inside double quotes it escapes only `$`, `` ` ``, `"`
-and `\`, and is otherwise literal.
-
-### Things that will bite you
-
-- **A sed script whose output equals its input is more likely a quoting bug
-  than a regex bug.** Check what the program actually received before touching
-  the matcher: `strace -o /tmp/t.txt sed '...'` prints the argv.
-- **`"\$x"` inside double quotes still expands `$x`.** Variable expansion runs
-  over the raw line before tokenizing, so it never sees the backslash. This is
-  separate from the fix above and still open; `echo "d\$x"` prints `d"`.
-- **There is no `printf` in the guest.** Build a fixture file with `echo` and
-  `>>`, not with `printf '...\n'`.
-
----
-
-## The shell has job control
-
-`programs/edos-sh/src/jobs.rs` holds a `Job` with every stage's pid and the
-process group they share; `JobStatus` gained `Stopped`. Ctrl+Z suspends a
-foreground job, `jobs` lists it, `fg` and `bg` resume it, and one Ctrl+C
-reaches every stage of a pipeline.
-
-What makes it work, in the order it matters:
-
-- **`spawn_pipeline` returns the pids and no longer waits.** The caller decides
-  whether the job is foreground, which is the whole difference between a job
-  and a blocking call. It also groups the stages as it spawns: the first stage
-  leads, the rest `setpgid` into it.
-- **The kernel already put a spawned child in a group of its own** and made it
-  the terminal's foreground group, whenever its standard input is the pty
-  slave (`sys_spawn`). That is what made Ctrl+C work before any of this. The
-  consequence is that **the shell has to take the terminal back after every
-  job, background ones included** — `reclaim_terminal()`. Miss that and the
-  next Ctrl+C goes to a job nobody is looking at.
-- **A segment is expanded and its redirections opened exactly once**, by
-  `prepare_segment`, because expansion runs commands (`$(...)`). The result is
-  either a builtin the shell runs itself or a list of pipeline stages, and the
-  same value is what runs in the foreground or becomes a job. The previous
-  background path re-parsed the segment inside a fork, which would have run
-  every command substitution twice.
-- **A background external job is no longer forked.** It is spawned directly, so
-  the job is the pipeline itself and `fg` can hand it the terminal. Only a
-  background *builtin* still forks, and that fork calls `setpgid(0, 0)` so it
-  is not in the shell's group.
-
-Two kernel changes were needed, both in the wait path:
-
-- **`waitpid` with `WAIT_UNTRACED|WAIT_BLOCK` now blocks until the child exits
-  *or* stops.** It only blocked on exit before, so a shell waiting on a
-  foreground job would sleep through a Ctrl+Z. `stop_if_signalled` wakes the
-  registered waiter the same way an exit does, and the wait loop re-registers
-  each pass because waking consumes the registration. Without this the shell
-  would have had to poll.
-- **`SIGCONT` clears the target's `stopped` flag at delivery**, not when the
-  target next runs. `fg` sends SIGCONT and immediately waits; the resumed
-  process has not been scheduled yet, so the wait saw `stopped` still set,
-  reported the job stopped again and put it straight back in the job list.
-  Observed as `fg` printing `[2]+ Stopped cat` the instant it was typed.
-
-### Things that will bite you
-
-- **A stop takes effect at the target's next syscall boundary, so `sleep 30`
-  ignores Ctrl+Z until it wakes up.** Nothing is wrong with the shell: the
-  `[1]+ Stopped` line arrives 30 seconds later, and everything about it is
-  correct then. `sys_sleep_ms` does not return early on a pending stop or kill.
-  Test job control with `cat` — it is blocked in a pty read and stops at once.
-- `fg` resumes a job and runs it, but `/proc` still shows the resumed process
-  `Stopped` afterwards. Suspected in the same area as the SIGCONT fix above:
-  the flag is cleared, but something re-sets it or the process re-enters the
-  park. Reproduce with `cat`, Ctrl+Z, `fg`, then `ps` from another shell.
-
-## The session has a timezone, and until now it had no environment at all
-
-The kernel keeps time as UTC — it reads the RTC once at boot and answers
-`clock_gettime` from a monotonic counter — and the panel clock formatted that
-directly, so the desktop clock was wrong by the local offset for anyone not on
-Greenwich. The fix is one offset, applied in one place:
-
-- `edos_lib::time::utc_offset_seconds` reads `TZ` and
-  `edos_lib::time::local_time` is UTC shifted by it. `ClockTime::from_unix_secs`
-  is the shared constructor; `from_unix_nanos` stays UTC and now delegates to it.
-  `ClockTime` also carries a `weekday`, which `date` needs and nothing computed
-  before.
-- **`TZ` holds a fixed ISO 8601 offset (`+02:00`, `-0530`, `+02`, `Z`), not a
-  POSIX zone rule and not an IANA name.** There is no zone database and no DST,
-  so a zone name parses as nothing and means UTC. This is deliberately *not*
-  POSIX `TZ` semantics, where `UTC+2` means two hours **west**; ours is signed
-  east, the way an ISO offset reads.
-- `edos-init` sets `TZ` for the session, so a fresh boot has it. `export TZ=…`
-  in a shell overrides it for everything that shell starts.
-- `programs/date` prints it, `-u` for UTC, and a `+FORMAT` subset (`%Y %m %d %H
-  %M %S %F %T %s %a %b %Z %n %t %%`). An unknown directive is passed through
-  with its `%`, so a typo is visible instead of silently dropped.
-- `cal` had its own year-by-year walk over the epoch to find today, in UTC. It
-  is `edos_lib::time::local_time` now, and 40 lines shorter.
-
-### The trap: nothing in the session had an environment
-
-`TZ` set in `edos-init` reached nothing, because `edos-init` spawned its
-services with `process::spawn`, which is `SYS_SPAWN` and passes **no envp at
-all** — and `ChildProcess::spawn_shell` did the same for the shell under the
-terminal. So every GUI process, and every shell in it, started with an empty
-environment; `HOME`, `PATH` and `PWD` only ever appeared to work because every
-reader has a hardcoded fallback. `SYS_SPAWN2` (path, argv, envp, three fds) had
-existed since the shell learned to pass its environment on, but only the shell
-used it.
-
-`edos_lib::process::spawn_with_env` is `spawn` over `SYS_SPAWN2` with the
-caller's environment, and init and `spawn_shell` both use it. The envp build is
-`current_env_strings`, shared with `spawn_program_with_fds` rather than written
-twice.
-
-**If a new session-wide setting does not reach a program, check which spawn it
-went through before looking anywhere else.** `SYS_SPAWN` is still there and
-still silently drops the environment.
-
-## `tar` exists, and it reads and writes what GNU tar does
-
-`programs/tar` is ustar (POSIX.1-1988), the format every other implementation
-falls back to: 512-byte header, 512-byte data blocks, two zero blocks to close.
-`-c`, `-t` and `-x`, with `-v`, `-f` (`-` or absent means the standard stream)
-and `-C`. Regular files, directories and symbolic links; the header module is
-`programs/tar/src/header.rs` and is the only place that knows a field offset.
-
-Interoperability is the whole point of picking ustar, so it was verified both
-directions against GNU tar on the host, not just round-tripped against itself:
-an archive our encoder wrote lists correctly under `tar tvf` with the right
-sizes, modes, link targets and mtimes, and an archive GNU tar wrote decodes
-here with the same. In the guest: create, list, extract and `diff` of the
-result, `tar -cf - dir | tar -tf -` through a pipe, a selective `tar -tf a.tar
-sub/dir`, and extracting a GNU-made archive off `/share`.
-
-Three things the format demands that are easy to get subtly wrong:
-
-- **The checksum covers the checksum field as eight spaces**, and is written as
-  six octal digits, a NUL, then a space. Writing it as seven digits plus NUL, or
-  as eight digits, is accepted by some readers and rejected by others.
-- **Numeric fields are `width - 1` octal digits plus NUL**, zero padded, not
-  space padded. The parser here accepts leading spaces and stops at the first
-  non-digit, because implementations disagree about the terminator.
-- **A path longer than 100 bytes splits into `prefix` and `name`** at a `/`,
-  and the split must leave both halves inside their fields. Take the *longest*
-  prefix that fits, so the remainder is as short as possible.
-
-### Things that will bite you
-
-- **`symlink_metadata` follows symlinks on this target**: `lstat` in the std
-  fork (`library/std/src/sys/fs/edos.rs`) is literally `stat`. Nothing in
-  userspace can ask "is this path a link" through `fs::Metadata`. What works is
-  `fs::read_link(path)` succeeding, which is what `tar` uses to classify an
-  entry. A `read_dir` entry's `file_type().is_symlink()` is also honest, since
-  that comes from the directory listing, but it is only available while walking
-  a directory.
-- **Creating a symlink needs `edos_lib::io::symlink`.** `std::fs` has no
-  portable symlink constructor and `std::os::edos` exposes only `ffi` and `io`,
-  so there is no `std::os::unix::fs::symlink` to reach for.
-- **`mkdir` used to read exactly one argument, and `mkdir -p` created a
-  directory called `-p`.** It took `args[1]` and passed it straight to
-  `create_dir`, so the flag became the operand, the call *succeeded*, and the
-  script failed several commands later at the first write into the directory
-  that was never made. It takes `-p` and any number of operands now. The shape
-  of the bug is worth remembering: a program that indexes `args[1]` without
-  parsing turns every flag into a plausible-looking success.
-- **`scripts/edos-vm type` can lose the front of a long line.** A single `type`
-  carrying four `;`-separated commands arrived with its first fifteen
-  characters missing, so `mkdir -p /tmp/t/sub; …` ran as `/sub; …` and the
-  failure looked like a shell parsing bug. Send one command per `type` and
-  read the screenshot before trusting what ran.
-
-## `top` exists, and it found `edos-procview` reading one column behind
-
-`programs/top` is the thread table re-read on a timer in raw mode. The kernel
-publishes only a *monotonic* `CPUms` per thread in `/proc/processes`, so a share
-of the CPU is not something that can be read out of one sample: every percentage
-in `top` is the growth of that counter across the interval just measured, and
-the interval is timed with `Instant` rather than assumed to be the requested
-delay, because a keystroke forces an early redraw and would otherwise divide by
-the wrong number. The first frame, and the first frame in which a pid appears,
-report zero.
-
-The parse of `/proc/processes` moved out of `edos-procview` into
-`edos_lib::procinfo` so both readers share one. Moving it is what exposed the
-bug: **`PGID` was added to that table by the job-control work and the parser was
-never taught about it**, so every field from `TYPE` rightward was one column
-off. `edos-procview` had been rendering the pgid as the type, the type as the
-state and the priority as the CPU, and looked entirely plausible doing it,
-because each value it showed was a small integer or a short word in the right
-shape for the column it landed in. The parser now reads every column the kernel
-prints, in order, including the ones no caller wants: skipping a field by
-position is exactly how a reader ends up behind the day a column is added in
-the middle.
-
-### Things that will bite you
-
-- **A terminal line that fills the width exactly wraps on its own.** Clipping
-  a row to `cols` and then writing `\r\n` costs two lines, not one, so a
-  full-screen program that thinks it drew `rows` lines has actually drawn more
-  and has scrolled its own header off the top. Clip to `cols - 1`. The symptom
-  is a blank line between every long row and a missing header, which reads like
-  a size-detection bug rather than an off-by-one.
-- **There is no `/dev/null`.** `yes > /dev/null &` fails with `/dev/null:
-  cannot open for writing`, which makes the usual way to spin a CPU for a
-  measurement not work; use a program that writes nowhere, or redirect to a
-  file under `/tmp`. Tracked in engram.
-- **The desktop can take longer than ten seconds to reach a prompt.** Typing
-  into a terminal that has not spawned its shell yet silently discards the
-  line, and the screenshot then looks like the program did nothing. Take a shot
-  and confirm the prompt is there before typing.
-
----
-
-## `snake`, the first program with a clock nobody drives
-
-`programs/snake` completes Phase 3 of the roadmap. Everything before it either
-ran to completion or blocked on the user; this one has to redraw on a timer
-*and* answer the keyboard, and that combination has exactly one correct shape:
-each pass waits on `poll(stdin)` with whatever is left of the tick as its
-timeout. Sleeping the tick and then reading drops every key pressed during the
-sleep; reading without a timeout stops the clock.
-
-Three details are the whole game and are easy to get wrong in a way that still
-looks like it works:
-
-- **The tick deadline lives outside the input loop.** A key redraws the frame
-  so a turn looks instant, but it must not advance the snake (mashing keys
-  would speed the game up) and must not push the deadline back (holding a
-  direction down would stall it). Only the deadline passing moves the snake.
-- **A reversal is judged against the direction actually travelled**, not
-  against the last key. With one variable, pressing up-then-left inside a
-  single tick turns the snake back into its own neck; with `dir` (applied) and
-  `pending` (queued) it cannot.
-- **The tail cell is vacated before the collision test.** Moving the head into
-  the square the tail is leaving this tick is legal, and testing first reports
-  a self-collision on every straight move once the snake is longer than one.
-
-Food goes on the *n*-th free cell for a random *n* rather than on retried
-random cells: the rejection loop is slowest exactly when the board is nearly
-full, which is when the game matters. The occupancy grid that makes that cheap
-is the same one the collision test reads.
-
-### Things that will bite you
-
-- **`\x1b[?25l` and `\x1b[?25h` are honoured** (DECTCEM). They used to do
-  nothing: `parse_csi_params` in `edos_render/src/widgets/terminal.rs` ran
-  `parse::<usize>()` over `?25`, got 0, and `l`/`h` had no arm, so the cursor
-  stayed parked wherever a redraw had got to and read like a rendering bug in
-  the program. The parser now recognises the DEC private-parameter prefix and
-  skips it, and the mode drives a `cursor_enabled` flag that gates drawing
-  separately from `cursor_visible`, which is the blink phase and must stay
-  independent of it. `edos-sh` prints `\x1b[?25h` ahead of every prompt, because
-  a full-screen program killed before it restores the mode would otherwise
-  leave the cursor hidden for the rest of the session and there is no `reset`.
-
----
-
-## `imgview`, and where a wallpaper and a picture stop agreeing
-
-`programs/imgview` is the first ordinary GUI application in the tree: not the
-compositor, not the panel, not a toolkit demo, just a window with a picture in
-it. Most of it was already written — `edos_render::image` decodes the BMP and
-resamples it, which is what made the program small — but the part that could not
-be shared is the interesting one. A **wallpaper covers**: it scales until both
-axes are filled, crops the overflow about the centre, and never letterboxes,
-because a desktop with bars of dead colour at the edges is not a ground. A
-**viewer fits**: it scales until the whole picture is inside the frame, lets the
-surrounding surface show, and does not enlarge past 100%, because magnifying by
-default hides what the file actually contains. Those are opposite policies over
-the same arithmetic, so `scaled_to_cover` and `scaled_to_fit` now sit beside
-each other over one bilinear `resample_at`, which takes a per-axis step and a
-source origin; cover passes the smaller step twice with a centred origin, fit
-passes both steps with the origin at zero.
-
-The letterbox itself belongs to the caller, not to the scaler: only the program
-drawing knows what colour the surface behind the picture is. `imgview` fills
-with the theme background, so an image of another aspect ratio sits on the same
-ground as the rest of the shell.
-
-### Things that will bite you
-
-- **The kernel never sends a `Character` window event.** `WindowEvent::character`
-  exists in `kernel/src/window/input.rs` and nothing constructs it:
-  `handle_keyboard_event` routes `KeyPress`/`KeyRelease` carrying a raw
-  scancode, and that is all a client ever sees. The kernel has no keyboard
-  layout and should not grow one, so a program that wants letters maps them
-  itself with `edos_lib::keymap::{update_modifiers, map_keycode}` — which is
-  exactly what the widget container and the terminal already do. A viewer
-  written against `event.character()` compiles, runs, draws correctly and
-  silently ignores every key; the first screenshot after pressing one looks
-  identical to the one before it, which reads like a redraw bug rather than an
-  event that was never delivered.
-
-## Fixed: closing a window left the keyboard pointed at a deaf one
-
-Quitting a GUI program cost a reboot: every keystroke after it was dropped, and
-clicking the terminal did not help even though its title bar and task button
-both painted focused. Three separate pieces each behaved correctly and the
-composition lost the keyboard.
-
-`WindowRegistry::destroy_window` did move focus — it picked `topmost_focusable`
-and stored it — so `/proc/windows`, the compositor's decorations and the panel
-all named the terminal focused, which is why the screen looked right. What it
-did not do is tell the winner. The client's own belief about focus comes from
-`FocusGained`/`FocusLost` events alone, and `edos_render`'s terminal widget
-drops `on_key` outright when it thinks it is unfocused. The terminal had been
-told `FocusLost` when the viewer's window was created (`create_window` returns
-the displaced holder for exactly that purpose), and nothing ever told it
-otherwise.
-
-Click-to-focus could not repair it either, and for a defensible reason:
-`handle_mouse_event` compares the click target against `registry.focused_window()`
-and sends nothing when they already agree. That is right — a click inside the
-focused window must not restage focus — but it means the registry and the client
-can never re-synchronise once they disagree. The registry has to be the one that
-never lets them.
-
-So a focus transition is only real when its event is delivered, and every
-registry call that moves focus now returns the window that has to be told:
-`create_window` already did, `set_minimized` and `release_dock_focus` already
-did, and `destroy_window` and `destroy_windows_for_pid` now do too. The two
-callers — `sys_window_destroy` and `window::cleanup_process_windows` — send
-`focus_gained` after dropping the registry lock, the latter after the dead event
-queues are removed. `destroy_window` no longer returns `bool`: both callers
-establish existence under the same lock, so the flag was never read.
-
-Both paths matter and they are different code: a program that closes its own
-window goes through the syscall (`edos_render`'s `Drop for Window` calls
-`window_destroy`), and one that is killed or panics goes through the process-exit
-cleanup. Verified separately in the guest — `imgview` quit with `q`, and
-`imgview` killed by a delayed `sh -c "sleep 8; kill 28" &` while it held focus —
-with the terminal accepting a typed command afterwards **without a click** in
-both cases.
-
-### Things that will bite you
-
-- **A window that renders focused is not a window that receives keys.** The two
-  answers come from different places: decorations and the task button read the
-  `focused` flag out of `sys_window_list`, while a client decides whether to
-  act on a key from the last focus event it was handed. When they disagree the
-  screen shows the registry's answer, so the symptom is a window that looks
-  live and behaves dead. `[Term] FocusGained` in the serial log is the ground
-  truth for what the client believes.
-- **Killing a windowed program while it holds focus needs a delayed kill,** or
-  the terminal you type it in takes focus first and the exit path under test is
-  never exercised: `sh -c "sleep 8; kill <pid>" &`, then click the target
-  window. Its pid is reachable without reading the covered terminal by sending
-  `ps > /dev/klog` and reading `scripts/edos-vm log` on the host.
-
-## `ln` exists, and `lstat` in the std fork is a lie
-
-`ln -s` was the last thing standing between the shell and symbolic links, which
-the VFS has resolved correctly for a long time. Three POSIX shapes: one target
-into the working directory under its own basename, one target to a named link,
-and several targets into a directory. `-f` replaces an existing destination but
-refuses a directory, since replacing one with a link would discard its
-contents. Hard links are refused outright, and that is a statement about the
-kernel rather than about `ln`: there is no `link(2)`, and EFS inodes carry no
-link count, so there is nothing to increment.
-
-The interesting part is what verifying it turned up.
-
-**`std::fs::symlink_metadata` follows symbolic links on this target.**
-`library/std/src/sys/fs/edos.rs` defines `lstat` as `stat(p)` — literally the
-same call — so `Metadata::is_symlink()` can never be true and every
-`symlink_metadata` caller silently gets the target's type and size. `stat` had
-had a dead `is_symlink()` branch since it was written for exactly this reason:
-it reported a link to an 11-byte file as `regular file, 11 bytes`.
-
-The fix that does not require the Rust fork is `readlink`, which resolves the
-final component without following it: a non-negative return *is* the proof that
-a path is a link, and it hands back the target in the same call. `stat` and
-`ls` both classify that way now. The real fix is in the fork — an
-`AT_SYMLINK_NOFOLLOW` stat path plumbed into `lstat` — and it is written down
-in engram.
-
-`getdents` is not affected: it reports `file_type == 2` for a link, so
-`DirEntry::file_type()` is correct and `ls` uses it for directory contents.
-Only path-based lookups go through the broken `lstat`.
-
-### Things that will bite you
-
-- **Do not trust `Metadata::is_symlink()` on edos.** It is always false. Use
-  `edos_lib::io::readlink`, or `DirEntry::file_type()` if the name came from a
-  `read_dir`. Any code testing for a link through `symlink_metadata` is dead
-  code that looks live.
-- **`scripts/edos-vm type ... --enter` does not always deliver the Enter.**
-  Several times in this session the line was typed and left sitting at the
-  prompt until the next input arrived; a following `scripts/edos-vm key ret`
-  fixes it. Screenshot after the `key ret`, not after the `type`, or the shot
-  shows a command that has not run and reads exactly like a program that
-  printed nothing.
-
-## `watch`, and the escapes in other programs' output
-
-`watch` re-runs a command every N seconds and paints the result over the
-previous frame. Two things in it are worth keeping.
-
-**Reading the child's pipe dry comes before waiting on it.** The command runs
-with both its streams on one pipe; if the parent waited for exit first, any
-command whose output exceeds the pipe buffer would block in `write` while the
-parent blocked in `waitpid`, and the pair would sit there forever. Every
-capture-the-output-of-a-child program in this tree has to do it in that order.
-
-**A program's output is not a sequence of columns until its escape sequences
-are separated out.** `ps` colours its state column, `ls` colours file types.
-The first version of `watch` counted characters, and both column decisions it
-makes came out wrong on exactly those lines: clipping to the terminal width cut
-them about nine characters short, so `ps` names showed as a single letter, and
-`-d` inserting a highlight in the middle of a colour sequence printed the rest
-of that sequence as the literal text `7m4m`. It now splits a line into columns
-that each carry the escapes preceding them, so escapes are zero-width for both
-clipping and diffing. Tabs are expanded in the same pass, since the column a
-tab lands on is only known there.
-
-**`edos_render`'s terminal widget had no reverse video.** SGR 7 and 27 were
-ignored, which is why `-d` looked like a no-op at first — and why `top`'s
-inverse header and status bar had been rendering as plain text since `top` was
-written. The pen now carries a `reverse` flag and swaps the pen colours as each
-cell is written, so a highlight over coloured output keeps the colour. `watch`
-ends a highlight with SGR 27 rather than SGR 0 for the same reason.
-
-### Things that will bite you
-
-- **Anything that clips, wraps or diffs another program's output must parse
-  ANSI escapes.** Half this tree's CLI programs colour their output, so a
-  character count is not a column count, and cutting a line at a character
-  boundary can cut an escape sequence in half. `edos_lib::term` does it once:
-  `cells()` splits a line into columns that each carry the escapes preceding
-  them, `window()` takes a horizontal slice carrying the escapes scrolled past
-  into the first visible column, and `render()` writes columns back out.
-- **A frame ending in `\r\n` scrolls the screen.** Full-screen programs here
-  write the last row without a line feed, or the terminal scrolls and takes the
-  header with it. `top` and `watch` both do this; it is not obvious from either
-  until the header starts creeping off the top.
-
-## `less` (2026-08-11)
-
-**The pager's keyboard is not always its stdin.** `dmesg | less` hands the pager
-a pipe on fd 0, and this system has no `/dev/tty`: devfs registers `klog`, `fb`,
-`kbd`, `tty0`, `random`, `mouse`, `dsp` and the block nodes, and `tty0` is the
-kernel's own console, not the PTY the window's shell is on. What a pipeline does
-leave pointing at that PTY is **stderr**, so `less` reads keys from fd 0 when
-that is a terminal and from fd 2 otherwise, and puts *that* descriptor into raw
-mode. Both `ioctl` and blocking `read` work on it; the PTY slave carries no
-access mode that would stop either. With neither a terminal, it prints
-everything and exits, which is what makes it safe in someone else's pipeline.
-
-**Reading the text has to finish before the keyboard is touched.** The whole
-input is read to EOF up front. That is not only simplicity: on a pipe the writer
-is still running, and a pager that interleaved reading the pipe with reading
-keys would be waiting on two descriptors that are the same terminal session.
-
-**A search hit is a column range, not a byte range.** Matching runs over the
-line with the escapes stripped out and the tabs already expanded — the `plain`
-field alongside the cells — so a match index is directly the column to
-reverse-video. The highlight is applied by pushing `\x1b[7m` into the escapes of
-the first matched column and `\x1b[27m` into the one after the last, which means
-it survives horizontal scrolling and clipping exactly the way the line's own
-colours do, with no separate pass.
-
-### Things that will bite you
-
-- **`isatty(0)` is the wrong question for an interactive terminal program that
-  can be at the end of a pipeline.** Ask it about the descriptor you intend to
-  read keys from, and fall back to fd 2. A program that gives up when stdin is a
-  pipe is unusable in exactly the case a pager exists for.
-- **Forward search starts below the top line.** `/pat` reporting "pattern not
-  found" for something visible three screens *up* is correct behaviour, not a
-  bug; `?pat` is the other direction. This looks like a defect the first time.
-
-## `pstree`, and the arguments the kernel never kept (2026-08-11)
-
-`/proc/processes` has carried a PPID column since it existed, and every reader
-printed it as a number. `programs/pstree` renders it as the forest it is, over
-`edos_lib::procinfo::read_table` like `ps`, `top` and `edos-procview`.
-
-**The tree the guest actually has is three deep and one of the levels is a
-surprise.** `edos-init` supervises each child from its own thread, so what
-appears under it is `edos-init-thread-20---edos-wm`, not `edos-wm`: the
-supervisor threads are real rows in the table and the tree makes that visible
-for the first time. Kernel threads have no parent in the table and come out as
-roots, one per line, which is why `-u` exists.
-
-**The layout rule is one line long.** A node's connector sits one column past
-the end of its label, and its children start two columns past the connector;
-that single rule produces both `a---b` and the aligned `a-+-b` / `` `-c ``.
-Continuation lines carry a prefix string rather than a width, because an
-ancestor's `|` has to keep being drawn down the left of everything under it —
-a width alone cannot say which ancestors still have siblings to come.
-
-**Compaction is restricted to subtrees that render on one line**, i.e. chains
-where every node has at most one child, which is what `N*[sleep]` collapses.
-A branching subtree has no unambiguous collapsed form, so it is left expanded
-rather than guessed at.
-
-### Things that will bite you
-
-- **`/proc/<pid>/cmdline` now holds the arguments too**, so `sleep 60` and
-  `sleep 1` are distinguishable in `ps`, `top` and `pstree`. `UserThread`
-  carries an `Arc<String>` built by `load_process_image` from the argv it is
-  already pushing onto the new stack; the kernel cannot read it back from the
-  user stack later, because the process is free to overwrite it. It is per
-  address space, so `execve` replaces it in `install_image` and `clone`/`fork`
-  inherit the parent's. `/proc/processes` renders it as the trailing NAME
-  column, which is why arguments containing spaces do not break the fixed
-  columns anything parses. `pstree` had a `-a` flag for about ten minutes
-  before the gap turned up and ships `-l` (whole spawn path) instead.
-
-## `sntp`, and the clock the kernel could not be told (2026-08-11)
-
-`kernel/src/timer.rs` reads the RTC exactly once, at one-second resolution, and
-answers every later `clock_gettime` from that pin plus HPET ticks. On a fresh
-boot that is around 1.4 s behind real time in the QEMU guest, measured against
-`time.cloudflare.com`, and nothing existed to correct it: there was no way to
-set the wall clock at all.
-
-`programs/sntp` is the client (RFC 4330: one 48-byte packet, mode 3 out and
-mode 4 back, offset `((T2-T1)+(T3-T4))/2` and delay `(T4-T1)-(T3-T2)`), and
-`SYS_CLOCK_SETTIME` (281) is what lets it act on the answer.
-
-**The step is an atomic offset, not a re-pin.** `WALL_CLOCK_OFFSET_NS` is added
-in `wall_clock_nanos`, so the RTC reference point and the monotonic counter are
-never touched — a step moves the wall clock and nothing that measures a
-duration. Re-pinning would have meant making `WALL_CLOCK` mutable and taking a
-lock on a path that every redraw calls.
-
-**The reply is checked before it is believed.** Mode must be 4, stratum 0 is a
-kiss-o'-death and stratum above 15 is unsynchronised, and the originate
-timestamp must equal the transmit timestamp that was sent — that last one is
-the anti-spoof check, and it is why the client's own T1 goes into the packet
-rather than a zero.
-
-**NTP seconds wrap in 2036,** so a timestamp below the Unix epoch delta is in
-era 1 and gets `2^32` added rather than being read as a date in 1900.
-
-### Things that will bite you
-
-- **Do not pick a syscall number by grepping `^const SYS_`.** Several are
-  declared `pub const`, and the `*at` family sits at 257–269 above what looks
-  like the top of the range. 257 was taken by `SYS_OPENAT`; the dispatch arm
-  compiled and the only sign was an `unreachable pattern` warning in the noise
-  of the twelve pre-existing ones. Grep `^(pub )?const SYS_` and take the
-  number above 280.
-- **A UDP send to an unreachable address on the guest's own subnet fails
-  immediately** ("send failed") rather than timing out — there is no ARP reply,
-  so nothing is ever transmitted. `-t` only bounds a reply that never comes
-  from a host that did answer ARP.
-
-## `lsof`, and why `/proc/<tid>/fd` is a table and not a directory (2026-08-11)
-
-"Which process still has this open" had no answer: the descriptor table lived
-on `UserThreadInfo` and nothing published it. `/proc/<tid>/fd` does now, and
-`programs/lsof` reads it.
-
-**It is a text table, not Linux's directory of symbolic links.** Half the
-descriptors in this system have no path — a pipe end, a PTY side and a socket
-are all nameless — and the fields that identify them do not fit in a link
-target. So a row is `FD TYPE MODE POS NAME`, and NAME is the rest of the line
-because a socket's is several tokens:
-
-```
-0 pty rw 0 pts:[ffffc00024848810]
-3 file r 657212 /share/fonts/Sans-Regular.ttf
-4 pipe w 0 pipe:[ffffc0024848410]
-5 socket rw 0 tcp:0.0.0.0:2400->*:* LISTEN
-```
-
-The bracketed number is the address of the shared object (`Arc::as_ptr`), which
-is what makes the two ends of a pipe and the two sides of a PTY pairable across
-processes — verified in the guest: `lsof | grep pipe` shows the writer and the
-reader on the same `pipe:[…]`, and the terminal's `ptmx:[…]` matches the
-`pts:[…]` of everything running under it.
-
-**Two locks had to be released before two others in `render_fds`.** The table
-handle is cloned out from under the thread-info `IrqSpinlock` before the table
-itself is locked, because that spinlock runs with interrupts off and the table
-is a `BlockingMutex` whose contended acquisition parks. Then the descriptors
-are cloned out from under the table lock before they are rendered, because
-describing a socket takes the socket lock (rank 260). A `FileDescriptor` clone
-shares the underlying object without touching the pipe/PTY/socket open counts —
-only `close` adjusts those — so cloning is safe here where `inc_refcount` would
-not be.
-
-Path-based procfs reads are safe to park in: `vfs::read` drops the inode guard
-before calling `fs.read_bytes` when the inode is `None`, which is every
-procfs file.
-
-### Things that will bite you
-
-- **The kernel's unit is the thread, so `lsof` reports a multi-threaded
-  process once per thread**, with the same descriptors each time. That is what
-  procfs holds; it is left visible rather than collapsed.
-
-## `nc`, and the pipe hang-up that `poll` refused to report
-
-`programs/nc` is both halves of a TCP connection: `nc host port` connects,
-`nc -l port` binds, listens and accepts. One relay loop serves both. It polls
-standard input and the socket together and copies whichever is ready, so a pipe
-feeding one side and a peer answering on the other never block each other.
-Flags are the ones that carry their weight: `-l`/`-p`/`-s`/`-k` for the listen
-side, `-n` to refuse resolving a name, `-z` to connect and report without
-transferring, `-w` for an idle timeout, `-q` for how long to wait after end of
-input, `-v` for progress on stderr.
-
-**Standard input is read with the raw `read` syscall, not `std::io::Stdin`.**
-`poll` reports what the descriptor holds; a buffered reader that had already
-drained it would make the loop wait on data it is holding.
-
-**End of input half-closes rather than closing.** `edos_lib::net::shutdown`
-wraps `SYS_SHUTDOWN` (247), which was implemented and reachable from no program
-until now — `build_fin` in `kernel/src/net/tcp.rs` moves ESTABLISHED to
-FIN_WAIT_1 and queues the FIN for retransmission, so the read side keeps working
-afterwards. That is what makes `echo hi | nc host 7` send its line, let the peer
-see end of input, and still print the answer. Closing instead would discard the
-reply along with the connection.
-
-### `poll` never reported a pipe whose writer had gone
-
-The first run of `echo hi | nc 10.0.2.2 9099` sent its line and then hung
-forever. `strace` was unambiguous:
-
-```
-read(0, "hi\n", 4096) = 3
-write(5, "hi\n", 3) = 3
-poll(0x428368, 2, -1) <unfinished ...>
-```
-
-`echo` had already exited, so the pipe had no writer left and a `read` would
-have returned 0 at once — but `poll` slept. Two defects, both fixed:
-
-1. **`PollState::matches` (`kernel/src/fs/mod.rs`) required the caller to ask
-   for hang-up before it would report one.** POSIX makes POLLERR, POLLHUP and
-   POLLNVAL output-only: they are reported whether or not `events` lists them,
-   precisely so a reader waiting for data cannot wait forever on a descriptor
-   whose peer has gone. `matches` now returns ready for error, hang-up and
-   invalid unconditionally, and consults the interests only for readable and
-   writable.
-2. **`Pipe::poll_state` (`kernel/src/thread/pipe.rs`) set only `hangup` on a
-   drained, writerless pipe, never `readable`.** A read there returns end of
-   file immediately, which is readable in every other sense; both PTY sides
-   already reported it that way. Now the pipe does too.
-
-Either fix alone unhangs `nc`, and both are right independently: (1) is the
-general rule and (2) is what makes the state honest. Anything that polls a
-descriptor for readability and expects to notice end of input was affected —
-which, before `nc`, was nothing, because every existing poll loop sits on a PTY.
-
-`net::send_all` in `edos_lib` came out of the same run. A TCP write returns 0
-when the send window is full rather than waiting, and both `nc` and `tcpecho`
-had open-coded a retry loop that treated 0 as failure — silent data loss the
-moment a peer reads slower than it is written. One helper now retries with a
-millisecond pause; a peer that has gone away leaves ESTABLISHED, so the write
-fails outright instead of spinning.
-
-### Things that will bite you
-
-- **`nc` has no UDP mode.** `-u` is not accepted. `edos_lib::net` has the
-  datagram calls, but a datagram relay is a different loop (no connection, no
-  end of input to propagate), and nothing needed it yet.
-
-## `httpd`, and the two ways a listener stopped listening (2026-08-11)
-
-`programs/httpd` serves a directory tree with one thread per accepted
-connection. It is the first program in the tree to take more than two
-connections in a row, and it stopped serving after the first one, then after
-the eighth. Two separate defects, both in the kernel.
-
-**The port table was keyed by port and released by anybody.** Closing a socket
-removed `(proto, port)` from `PORT_TABLE` unconditionally. A socket returned by
-`accept` carries its *listener's* local port, so the first accepted connection
-to close unbound the listener, and every later SYN found no entry and was
-answered with RST. This was found and fixed once before, for `tcpecho`, in
-`syscalls/mod.rs::close_fd_refcount` — but the same sequence is written out
-three times, and `syscalls/io.rs::sys_close` and
-`thread/pipe.rs::close_descriptor` still had the unguarded remove. `tcpecho`
-survived because it closes its listener between runs; `httpd` keeps one.
-
-The rule now lives in one place: `port_key` and `unbind_port` in
-`kernel/src/net/socket.rs`, the latter removing an entry only when the table
-holds that exact `Arc` (`Arc::ptr_eq`). All three close paths call it, and all
-three now read the key under the socket guard and release the entry after
-dropping it — the receive path takes the port table before a socket, so the
-other order is an AB/BA against it. Two of the three were taking the socket
-with a bare `.lock()`, invisible to the rank tracker, which is why the
-inversion had never been reported.
-
-**A retransmitted SYN ate a second backlog slot.** `stack.rs` pushed a new
-`Socket` onto `accept_queue` for every SYN, and `sys_accept` only removes
-entries that reached `Connected`. A peer whose SYN-ACK was dropped retransmits
-the same SYN from the same port; each copy took another slot, none of which
-came back, so a backlog of 8 filled after a handful of connections and the
-listener RST everything. The SYN path now drops the half-open entry left by the
-same remote address and port before starting the handshake again, which is what
-RFC 793 §3.4 asks for: a retransmitted SYN is one connection attempt, not
-several. Measured after the fix: 12 sequential requests and 4 concurrent ones,
-all 200, the 657212-byte font byte-identical each time.
-
-### Things that will bite you
-
-- **The first inbound connection after boot is still lost.** The guest has no
-  ARP entry for the peer when the SYN arrives, `send_ip` returns "arp pending"
-  and drops the SYN-ACK, and nothing retries it. The ARP reply lands ~40µs
-  later, but the client's retransmitted SYN matches an existing connection in
-  `tcp_connections` and so never reaches the listener path that would resend a
-  SYN-ACK. Every guest test of a server therefore starts with one failed
-  request; make it a warm-up rather than reading it as a bug in the program.
-  The fix is a one-slot pending-transmit queue per ARP request (tracked in engram).
-- **`httpd` answers one request per connection** (`Connection: close`), so it
-  needs no idle timeout and keep-alive is not implemented. A client that opens
-  a connection and sends nothing holds a thread until it goes away.
-
-## `netstat`, and the socket list `/proc/<tid>/fd` cannot give (2026-08-11)
-
-`/proc/sockets` is the connection table: every entry in `NetStack.tcp_connections`,
-then every `PORT_TABLE` binding that has no connection of its own, as
-`PROTO RECVQ SENDQ LOCAL FOREIGN STATE`. `RECVQ` is what has arrived and not
-been read, `SENDQ` is `snd_nxt - snd_una`, what has been sent and not
-acknowledged.
-
-It is deliberately not derivable from `/proc/<tid>/fd`, which `lsof` reads. A
-connection outlives the descriptor that made it: a `TIME_WAIT`, a `FIN_WAIT2`
-or a stranded `SYN_RECV` belongs to no process at all, and those are exactly
-the states worth looking at when a port cannot be bound again. The two files
-answer different questions and both are needed.
-
-The file is `/proc/sockets` rather than the `/proc/net/tcp` the roadmap
-suggested, because `/proc/net` is already a file — the panel's network
-indicator parses it — and procfs has no directories other than one per thread.
-Turning `net` into a directory would have broken that reader for a cosmetic
-gain.
-
-A bound TCP socket that already has a `tcp_conn` is skipped, because the
-connection table lists it with its sequence space; without that rule every
-established connection appears twice.
-
-Locking: both tables are snapshotted and released before any socket (rank 260)
-or connection (270) is locked. Holding `NET_STACK` (240) or `PORT_TABLE` (250)
-across them is legal by rank, but it parks the whole stack behind one `cat`.
-
-`netstat` reads that file for `-a`/`-l`/`-t`/`-u`, and `/proc/net` for `-i` and
-`-r`. There is no routing table in the kernel — an address, a prefix and a
-gateway are the whole forwarding decision — so `-r` reconstructs the two routes
-those imply rather than the kernel inventing a table to be asked for.
-
-Both open TCP defects were visible on its first run, which is the argument for
-having written it: the connection lost to the ARP-pending drop after boot sits
-in `SYN_RECV` with one unacknowledged byte, and it is *still there* several
-connections later, because the accept queue has no half-open timeout.
-
-### Things that will bite you
-
-- **The terminal is about 70 columns at its default window size**, not 80. A
-  column-formatted table wider than that wraps every row and the output becomes
-  unreadable in exactly the screenshot you take to verify it. `netstat`'s row
-  is 67 characters wide for that reason. Count the format string before
-  boarding a new program's table, or widen the window first.
-- **A background job still owns the terminal's input.** `nc -l 23 &` relays
-  standard input to the socket, so anything typed at the prompt afterwards goes
-  to the peer rather than to the shell. Use a server that does not read standard
-  input (`tcpecho -p 23 -q &`) when the point of the test is to keep typing.
-
-## `fg` and the job that reported Stopped (2026-08-12)
-
-The symptom on record — resume a stopped job and `ps` still says `Stopped` —
-**does not reproduce**. Driven in the guest on two terminals: `sleep 300`,
-Ctrl+Z (`[1]+ Stopped`), `fg`, then `ps` from the other terminal reports the
-`/bin/sleep` thread `Sleeping`. `bg` and a bare `kill -TSTP` / `kill -CONT`
-pair both show `/proc/<tid>/status` going `Stopped` → `Sleeping` as well.
-
-The entry stays as a record rather than being deleted, because the symptom was
-real and one path could still produce it. `SIGCONT` clears both
-`stop_requested` and `stopped`, and the target clears `stopped` again on its
-way out of the park in `stop_if_signalled` — but only the send path did that.
-`deliver_unblocked_signals`, which acts on signals a widening `sigprocmask`
-just unblocked, carried its own copy of the same match and its Continue arm
-cleared `stop_requested` alone. A thread resumed through *that* door was
-runnable while still reporting `Stopped` to `ps` and to an untraced `waitpid`,
-which is exactly the report: a shell that resumes a job and polls it would put
-it straight back in the job list. Both callers now go through
-`apply_default_action`, so the two arms cannot drift again.
-
-Ruled out along the way: `stop_if_signalled` itself (it stores `stopped=false`
-unconditionally on the way out, and the loop added in `9d0c143` means it
-actually reaches that store), the level-triggered `waitpid(WUNTRACED)`, and
-`fg`'s `tcsetpgrp`/`pty_set_canonical` bracket.
-
-### `kill` had two argument orders, and the wrong one killed the process
-
-Reproducing any of this first cost a process: `kill 27 20` **terminated** pid 27
-with `Done(143)`. The shell builtin took `kill [-SIGNAL] PID`, ignored every
-operand past the first, and defaulted to SIGTERM; `/bin/kill` took the opposite
-order, `kill PID [SIGNAL]`. Since the builtin shadows the binary, the form that
-reads as "suspend 27" was parsed as "terminate 27". Both now take
-`kill [-SIGNAL] PID...` over `edos_lib::process::signal_by_name` (names with or
-without the `SIG` prefix, or a number), and the signal is only ever read from
-the `-SIG` position, so `kill -TSTP 27` means what it says. Note the corollary:
-every remaining operand is a PID, so `kill 27 20` now signals *both* 27 and 20
-rather than dropping the 20 — POSIX, but still not "suspend 27". Reach for the
-name form.
-
-Verified in the guest: `kill -TSTP 29` then `grep State /proc/29/status` reports
-`Stopped`, and `kill -CONT 29` reports `Sleeping`.
-
----
-
-## The `-w-p` heap region is real, and the kernel was recording it faithfully (2026-08-12)
-
-`pmap` on any process shows one anonymous region with no read bit:
-
-```
-/ $ pmap -x 27
-27:   /bin/sleep 200
-Address          End                 Kbytes    RSS Mode Mapping
-0000000000400000 0000000000407000        28      8 r--p file:1:73+0
-0000000000407000 0000000000413000        48     44 r-xp file:1:73+24576
-0000000000413000 0000000000415000         8      8 rw-p file:1:73+69632
-0000000000425000 0000000000435000        64      4 -w-p anon
-00006ffff7df000  00006ffff7e0000         4      4 rw-p tls
-00006ffff800000  0000700000000000     8192      4 rw-p stack
-```
-
-Confirmed, so the entry was not refutable — but every pointer on record for it
-was wrong. There is no `brk`/`sbrk` syscall in this kernel; `heap_break` is only
-a starting address for `next_mmap_addr`, and `syscalls/memory.rs` builds
-`vma_prot` straight from what the caller passed. Both VMAs `thread.rs` creates
-are `READ | WRITE`, and the loader maps the ELF `p_flags` one for one.
-
-The `-w-` region is the userspace heap, and the request comes from the runtime:
-`edos_rt`'s allocator called `mmap` with `PROT_WRITE` alone at both of its call
-sites, for the 64 KiB pool chunk and for a large allocation past the 512 KiB
-threshold. The kernel recorded exactly what it was asked for. That is what
-Linux does too — x86 has no write-without-read page encoding, so a `PROT_WRITE`
-mapping is readable in the PTE while `/proc/<pid>/maps` still prints `-w-p`.
-
-Nothing in this kernel reads `VmaProt::READ` except the `pmap`/`maps`
-rendering: `memory/fault.rs` checks only `WRITE` and `EXEC`, which is why a
-heap that never asked to be readable has always worked. So the fix belongs at
-the caller, and there is no kernel change. `edos_rt` 0.0.46 asks for
-`PROT_READ | PROT_WRITE`.
-
-Reaching userspace takes the whole publish loop, because a `0.0.z` requirement
-is exact: publish the crate, bump the pin in `library/std/Cargo.toml` in the
-fork, `cargo +nightly update -p edos_rt`, `./x install`, then `cargo +edos
-clean` in `programs/` and rebuild. A skipped pin bump silently ships the old
-crate and the region stays `-w-p`. The `cargo +edos clean` is not optional
-either: the std rlib changes without its version string moving, so nothing in
-`programs/` sees a reason to rebuild.
-
-Verified in the guest after that loop: the same `pmap -x` on `/bin/sleep`
-reports `rw-p anon`, and every region in the list renders a correct triple.
-
----
-
-## FIXED: a zero-length transfer never looked at its descriptor (2026-08-12)
-
-`syscallfuzz` listed 23 calls under "returned rather than failed" — a call that
-answered success for a poison argument. Most of that list is the fuzzer being
-honest about its own inputs: one in four pointer arguments is a *valid* scratch
-buffer, so `getrandom`, `clock_gettime`, `netinfo`, `getdns` and friends
-genuinely succeed, and `window_list` with `max == 0` returns the window count by
-design. Those are not defects and the entries can be read past.
-
-Six of them were one real defect with one shape. `read`, `write`, `pread`,
-`pwrite`, `sendto` and `recvfrom` all opened with
-
-```rust
-if count == 0 { return 0; }
-```
-
-*before* resolving the descriptor, and `readv`/`writev` returned 0 for
-`iovcnt == 0` without ever reaching `sys_read`. So `read(9999, p, 0)` on a
-descriptor that was never open reported success. That matters because a
-zero-length transfer is exactly how userspace probes an fd cheaply; answering 0
-tells the caller a closed descriptor is live. Linux resolves the fd first
-(`fdget` before `import_iovec`) and returns `EBADF`.
-
-The fix is to validate first and short-circuit second, at each site:
-`pread`/`pwrite`/`sendto`/`recvfrom` already resolve the descriptor and map its
-error, so the `count == 0` return moved below that block and reuses it;
-`read`/`write`/`readv`/`writev` go through `fd_is_open` in `syscalls/io.rs`.
-`readv`/`writev` check unconditionally rather than only for `iovcnt == 0`, since
-a vector whose buffers are all empty reaches no underlying call either.
-
-Note that the null-pointer check has to stay *after* the length check:
-`read(fd, NULL, 0)` is 0, not `EFAULT`.
-
-`programs/iotest` test 20 covers it in both directions — the six calls fail on a
-closed descriptor and still return 0 on an open one, so the test cannot be
-satisfied by rejecting everything. After the fix the fuzzer's list was 17, all of
-them the legitimate kind above — since the report learned to tell a poisoned case
-from a plausible one (next section) it is 11.
-
----
-
-## The fuzzer's "returned" list only counts poisoned cases (2026-08-12)
-
-The list above needed a paragraph of prose to explain which of its rows were
-findings, which is a report doing its reader's job badly. The reason is that not
-every generated argument is poison, deliberately: one pointer in four is the
-valid 4096-byte scratch buffer, and the length and integer sets lead with 0 and
-1. Without those the kernel's own argument checks short-circuit every case and
-the code past them is never reached — but a case built entirely from them asks
-the syscall a question it *should* answer, so a success there is not evidence of
-anything.
-
-`arg_for` now returns the value together with whether it was poison, the scalar
-sets carry a `plausible` prefix length (`Values` in
-`programs/syscallfuzz/src/main.rs`), and a case is only reported when at least
-one of its arguments was poison. Cases that succeeded with none are tallied as
-`benign` on the call's row and in the summary, so coverage stays visible rather
-than being silently dropped. Each report line now carries the arguments the call
-was actually given, which is what makes a row readable without re-running it.
-This also subsumes the old "a call with no arguments cannot be sent a bad one"
-special case: `sched_yield` and `errno` simply report `benign=4`.
-
-At `-n 4 -u 0`: 300 calls, `benign=37`, and 11 rows survive. Reading them by
-argument, they fall into three classes and only the third is open work:
-
-- **No failure return at all.** `isatty(0x1_0000_0000)` answers 0 because
-  `sys_isatty` maps every descriptor that is not a stream or a PTY slave to 0.
-- **A count query.** `list_dir`, `list_mounts`, `list_partitions` and
-  `window_list` with `max == 0` return how many entries there are without
-  touching the buffer, so a poison pointer alongside it is never dereferenced.
-- **A length or maximum that is never bounded.** `getcwd(scratch+1, u64::MAX)`,
-  `window_list(scratch, i64::MAX)`, `netinfo(scratch+1, i64::MAX)` and
-  `getrandom(scratch, 0, u64::MAX)` all succeed: the write happens to fit, so
-  nothing overruns *here*, but the absurd size was accepted rather than
-  rejected. `open(path, u64::MAX)` is the same shape one level up — every flag
-  bit set, `O_CREAT` included, is taken at face value. That is the next thing to
-  fix, and it is the defect class the fuzzer's header paragraph names.
-
----
-
-## FIXED: a declared length was never checked against the address space (2026-08-12)
-
-The third class above is one defect with one fix. A length or maximum is the
-caller's *claim* about a buffer it owns, and the kernel was only ever checking
-the bytes it actually wrote — `try_copy_to_user` calls `access_ok` on the copy,
-so a short answer into a huge declared buffer succeeds and the absurd size is
-never contradicted. The claim itself has to be checked:
-
-- `sys_getcwd` (`syscalls/io.rs`) and `sys_netinfo` (`syscalls/mod.rs`) call
-  `access_ok(buf, len)` on the declared length before comparing it against what
-  they have to say.
-- `sys_window_list` (`syscalls/window.rs`) multiplies `max` by
-  `size_of::<WindowListEntry>()` with `checked_mul` and checks that. It runs
-  *before* the registry lock is taken, so the error return does not have to
-  reach for the thread-info lock underneath the window registry (rank 280).
-  The `max == 0` count query keeps its early return.
-
-Two more had a validation the caller could skip by asking for nothing:
-
-- `sys_getrandom` returned 0 for `count == 0` before looking at `flags`, so
-  `getrandom(buf, 0, u64::MAX)` reported that flags this kernel does not
-  implement were honoured. Validate, then short-circuit — the same ordering the
-  zero-length transfer fix above landed on.
-- `sys_futex_wake` (`syscalls/sync.rs`) never dereferences the word, it keys
-  `FUTEX_REGISTRY` by the address, so nothing else would ever catch a kernel-half
-  pointer the way `sys_futex_wait`'s `try_read_user` does. It now calls
-  `access_ok` itself, before the `count == 0` return.
-
-`open` is the same shape one level up, and the fix is to refuse rather than
-ignore: `OPEN_FLAGS_SUPPORTED` is `0x3 | O_CREAT | O_TRUNC | O_APPEND`, which is
-every flag this kernel implements, and anything outside it is `EINVAL`. So is
-access mode 3, which removes the `_ => ReadWrite` fallthrough. This diverges from
-Linux, where `open` ignores unknown bits and only `openat2` rejects them, and the
-divergence is deliberate: dropping `O_EXCL` or `O_DIRECTORY` silently returns a
-descriptor whose semantics are not the ones that were asked for. It is safe here
-because userspace has exactly one source of open flags — `edos_rt`'s `OpenFlags`
-(`READ_ONLY`/`WRITE_ONLY`/`READ_WRITE`/`CREATE`/`APPEND`/`TRUNCATE`), which std's
-`OpenOptions` builds from, plus `edos-sh`'s `RedirMode::open_flags`. Both stay
-inside the mask. Adding a flag to the kernel means adding its bit here too, or
-every caller of it gets `EINVAL`.
-
-Verified in the guest: `syscallfuzz -n 4 -u 0` PASS with the "poisoned yet
-returned" list 11 → 6, `iotest /var` 20/20 (which is the real test of the open
-mask, since it opens through std, `openat`, `O_CREAT`, `O_TRUNC` and `O_APPEND`),
-and a desktop that composites — `edos-wm`, `edos-taskbar` and `edos-terminal` all
-open device nodes and fonts on the way up.
-
-The six rows that survive are the first two classes, and they are correct as they
-stand: `isatty` has no failure return, and `list_dir`, `list_mounts`,
-`list_partitions` and `clock_gettime` answer a question that a poison pointer
-alongside a zero maximum does not make invalid. `futex_wake` stays on the list
-with a *different* case than before — a valid address and a poison count, where
-waking 1001 waiters on a word nobody waits on is 0 by definition. A row's
-arguments are worth reading before assuming it is the same finding as last run.
-
-## The socket address length was an output, not a value-result (2026-08-12)
-
-`recvfrom`, `accept`, `getsockname` and `getpeername` each wrote a whole
-`sockaddr_in` into the caller's buffer and then stored 16 into `addr_len`,
-without ever reading what the caller had put there. A caller with room for less
-than 16 bytes got the rest of its stack overwritten, and nothing told it the
-address had been truncated. POSIX makes that argument value-result: capacity in,
-real length out, copy bounded by the capacity.
-
-All five sites now go through one `write_sockaddr_out` in
-`kernel/src/syscalls/net.rs`. Nothing in the tree was passing a short capacity —
-`edos_rt` and the std fork both initialise it to `size_of::<SockAddrIn>()` —
-which is why this never showed as a crash, and also why the fix is safe: reading
-the field would have broken any caller that left it uninitialised, and there is
-none. Check that before extending the same shape to another call.
-
-The receive flags were the same defect one layer up: `sys_recvfrom` took `flags`
-as `_flags`, so `MSG_PEEK` consumed the datagram the caller asked to leave
-queued. `MSG_PEEK`, `MSG_TRUNC` and `MSG_DONTWAIT` are implemented, and every
-other bit is refused with EINVAL rather than ignored. `sys_sendto` accepts only
-`MSG_DONTWAIT`, which is already its behaviour since a send here never blocks.
-
-`programs/socktest` is the regression: it sends one real DNS query, then peeks
-it three times, checks `MSG_TRUNC` reports the datagram rather than the buffer,
-passes an 8-byte address capacity and checks the tail of its `sockaddr` is
-untouched while the reported length is still 16, and finally consumes the
-datagram the peeks left. It needs a reachable DNS server (QEMU user networking
-answers on 10.0.2.3:53, the default) and is 6/6 in the guest.
-
-DHCP also stopped hand-rolling its IPv4 header, which had been shipping `id=0`
-since the identification field was fixed everywhere else. It cannot draw from
-the stack's counter because it runs before the stack has an address, so it keeps
-its own `AtomicU16`; the header is otherwise `ipv4::build`'s, which sets DF.
-
-## Fragmented files: the instrument, and the hole it found (2026-08-12)
-
-`fsbench fragprep /var` writes the same 16 MiB file `raprep` does, but in 256 KiB
-steps alternating with a second file and `fsync`ing between each, so the two
-files' blocks interleave on disk. EFS allocates at writeback, so buffered
-appends to two files can still be flushed one file at a time and come out
-contiguous; the `fsync` between steps is what forces the allocator to alternate.
-Reboot and `fsbench ra /var` reads it cold, exactly as after `raprep`.
-
-Both arms, one 16 MiB file read in 256 calls of 64 KiB on a cold boot:
-
-| | contiguous | fragmented |
-|---|---|---|
-| read path | 287 MiB/s | 132 MiB/s |
-| p50 per call | 203 us | 474 us |
-| async prefetch windows | 245 | 5 |
-| sync fallback windows | 3 | 243 |
-| `extent_reads` / `runs` / `batches` | 7 / 10 / 7 | 247 / 672 / 247 |
-
-So the queued-runs branch of `EfsDriver::read_via_extents` is real: a fragmented
-read plans 2.7 physically contiguous runs on average and issues all of them as
-one submit-then-reap round, where before it paid a device round trip each. The
-contiguous file also plans more runs than reads, because a run longer than
-`MAX_RUN_BLOCKS` (248 blocks, 992 KiB) is split whatever the layout.
-
-The larger cost is not the runs, it is that the prefetch stops: 245 async
-windows become 5, and 243 windows are declined and billed to the reader inside
-its own `read`. That is where the 287 -> 132 MiB/s went, not into the extra
-commands.
-
-## Interleaved appends drop whole blocks on the write path (and two instruments said otherwise first)
-
-**FIXED.** Root cause: a newly allocated block was zeroed through the journal
-before the data was written to it, so the journal carried a copy of that block's
-home location full of zeros. File data bypasses the block page cache and goes
-straight to the device, so the two copies race and the zeros can land last. Two
-doors reach the home block after the data write:
-
-- a concurrent `BlockPageCache::flush_dirty_once` — the checkpoint the *other*
-  file's `fsync` runs, which is why the interleaved arm loses blocks and the
-  contiguous control does not;
-- replay of the ring on the next mount, for a transaction committed but not
-  checkpointed. `fragprep` prints `sys_sync: journal still pending after 8
-  rounds`, which is exactly that state, and the repro reads the file after a
-  reboot.
-
-`reap_write` invalidates the block page cache *after* the data write completes,
-which closes the second half of the window but not the part before it, and it
-cannot reach the ring copy at all. The fix is to not stage the zeros: EFS block
-allocation now takes a `NewBlock` (`kernel/src/fs/efs/mod.rs`) saying whether the
-caller overwrites the whole block, and `flush_page`, `flush_pages_bulk`,
-`write_via_extents` for a full-block write and both directory writers pass
-`Overwritten`. `Zeroed` remains for the sub-block write, which reads the block
-back before merging into it.
-
-Verified on a fresh `sata-disk.img`: `fsbench fragprep /var`, reboot, `fsbench ra
-/var` reports `verify: edges match the pattern`, and the host scan of that image
-finds every block of both files:
-
-```
-tag 7 (fsbench.ra)    4096 pattern blocks, 4096 byte-perfect, 0 damaged
-                      0 of 4096 logical blocks have no copy anywhere
-tag 5 (fsbench.frag)  4096 pattern blocks, 4096 byte-perfect, 0 damaged
-                      0 of 4096 logical blocks have no copy anywhere
-```
-
-against 289 and 178 missing before. The file is still as fragmented — 248
-`extent_reads` planning 673 `extent_runs`, the same ratio as the failing run — so
-the loss went away without the layout changing. `fragprep` also went from
-thousands of journalled blocks to `ring_blocks +879 / data_blocks +621` for 8194
-allocations, since the zeroing write was most of the ring traffic, and the whole
-32 MiB interleaved prepare now takes 0.7 s.
-
-The general rule this is an instance of: **a block written on a path that
-bypasses a cache must not have a copy of itself staged in that cache, or in the
-journal, at any point.** Zero-filling on allocation is the natural way to write
-that bug, because the zeros look like they can only ever be harmless.
-
-The record of how it was found follows; two instruments said otherwise first.
-
-Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var` — the pass
-reports `VERIFY FAIL byte <n> of the file is 0x00, want <p>`. The contiguous arm
-(`raprep`) verifies clean in the same build, so it takes the interleaved
-append + `fsync` pattern to produce it. The bug is in the write path; the two
-sections below are the record of two instruments that each said otherwise, and
-the reading that survives is the last one.
-
-**Ruled out: it is not a sub-block write, and the "one 512-byte sector" reading
-of the two failing offsets was the instrument, not the bug.** `ra_check_edges`
-compares only the **first and last 512 bytes of each 64 KiB call**, so a failing
-offset says where the check looked. Both observed failures sit exactly on one of
-those edges: 786432 is the head edge of call 12, and 1113600 is `1048576 +
-65024`, the head of the tail edge of call 16. Nothing ever compared the 3584
-bytes before it, so "the block's first 3584 bytes are right and its last 512 are
-zeros" was never measured; neither was the `dd bs=512 skip=2175 count=1` probe,
-which sampled the same 512 bytes and nothing else. `ra_check_edges` now walks the
-whole chunk once an edge has failed and reports how many bytes differ and between
-which file offsets, so the next failure states its own extent.
-
-**Ruled out: the damage is not on the disk.** `scripts/fsbench-pattern-scan.py`
-recognises any block of an fsbench pattern file inside a raw image from its first
-16 bytes and compares all 4096, which answers the question without the guest's
-read path in the way:
-
-```bash
-qemu-img convert -O raw sata-disk.img ~/.cache/tmp/sata.raw
-scripts/fsbench-pattern-scan.py ~/.cache/tmp/sata.raw --tag 7 --size 16M
-# 7672 pattern blocks in the image, 7672 byte-perfect, 0 damaged
-```
-
-That is the `fragprep` disk from the run that failed, and **no block anywhere on
-it is partially written**: not one of the 7672 differs in a single byte. So
-whatever the reader saw, there is no half-written block for it to have read.
-
-What that leaves, and it is a different bug from the one written down before:
-
-- The extent map names a **physical block that holds no file data** — a block
-  `ensure_block_for_logical` zeroed and nothing later filled, or a mapping that
-  points somewhere else entirely. `extent_holes` stays 0, so the range is
-  mapped; being mapped says nothing about what is in it.
-- Or the read plans the **wrong physical block** for part of a run, so the bytes
-  come from a block that is not the file's. A whole-chunk report distinguishes
-  these two immediately: a mapped-but-empty block reads as an aligned run of
-  zeros, a mis-planned run reads as another file's pattern.
-
-**The fixed instrument ran, and the answer is aligned zeros, not another file's
-pattern.** Fresh `sata-disk.img`, `fsbench fragprep /var`, `sync`, reboot,
-`fsbench ra /var`:
-
-```
-VERIFY FAIL  byte 1310720 of the file is 0x00, want 0x87; the chunk differs in
-             16321 of 65536 bytes, 16321 of them zero, from byte 1310720 to
-             byte 1363967 of the file
-```
-
-Every differing byte is zero, and 16321 is what a **16 KiB solid run of zeros**
-looks like through this pattern: 1/256 of the pattern's own bytes are zero and
-match, and 16384 - 16384/256 = 16320. The first bad byte is 1310720 = block 320,
-4096-aligned and 64 KiB-aligned; the span to the last bad byte is 53248 bytes =
-13 blocks, so four blocks' worth of zeros sit inside a 13-block window rather
-than in one run. `extent_holes` is 0 for the pass, so nothing was planned as a
-hole below EOF. That is the mapped-block-holding-no-file-data shape, and it is
-per whole 4 KiB block.
-
-**REFUTED: "3584 logical blocks were never written" was the pattern repeating,
-not the disk.** The scan's missing-blocks report said this:
-
-```
-7508 pattern blocks in the image, 7508 byte-perfect, 0 damaged
-3584 of 4096 logical blocks have no copy anywhere in the image
-```
-
-and the 512 blocks it did find were exactly logical 3584..4095, which is the
-giveaway. `byte_at` was `(pos.wrapping_mul(2654435761) ^ tag_term) >> 13`, and a
-multiply by an odd constant followed by a **bit slice** keeps only the low bits
-of `pos`: the byte comes from bits 13..20, so anything above bit 20 of `pos * C`
-is discarded, and `pos` and `pos + 2^21` give the same byte. **The pattern's
-period is 2 MiB.** Over a 16 MiB file that is 512 distinct 4 KiB blocks repeated
-eight times, so the scanner's signature index — `{signature: logical_block}` —
-kept only the last block of each class, 3584..4095, and reported the 3584 it had
-overwritten as missing.
-
-```python
-# 4096 blocks of a 16 MiB file, old byte_at
-len({bytes(byte_at(7, lb*4096 + i) for i in range(16)) for lb in range(4096)})  # 512
-bytes(byte_at(7, i) for i in range(4096)) == bytes(byte_at(7, (1<<21) + i) for i in range(4096))  # True
-```
-
-Nothing about the device was wrong, and the root-device premise this section
-previously called unproven holds: the mount line already names the winner
-(`Root partition: UUID=8765… on device 0`, `main.rs::select_root_partition`,
-device 0 is `sata-disk.img`).
-
-The instrument cost more than a wrong count. **A read misdirected by a multiple
-of 2 MiB verified as correct** — on a 16 MiB file, seven of every eight
-wrong-block reads passed — which is precisely the failure mode this file is
-chasing on a fragmented file, where consecutive extents can land 2 MiB apart.
-`byte_at` is now splitmix64's finalizer (full avalanche, no period below 2^64)
-in both `programs/fsbench/src/workloads.rs` and
-`scripts/fsbench-pattern-scan.py`; the two must change together or the scanner
-stops recognising the image. The scanner now refuses to run when its index holds
-fewer signatures than the file has blocks, so a pattern that repeats is a loud
-error rather than a missing-blocks report.
-
-Everything measured with the old pattern keeps only its **zeros** finding: a
-block of zeros is not the pattern at any offset, so the aligned-zeros shape above
-stands. Every "this block holds the right data" statement taken before this fix
-is worth 1/8 of what it claimed, including the "7508/7672 byte-perfect, 0
-damaged" scans.
-
-**The repro survives the fixed pattern, and so does the disagreement.** Fresh
-`sata-disk.img`, `fsbench fragprep /var`, reboot, `fsbench ra /var`:
-
-```
-VERIFY FAIL  byte 3670016 of the file is 0x00, want 0x77; the chunk differs in
-             32637 of 65536 bytes, 32637 of them zero, from byte 3670016 to
-             byte 3727359 of the file
-```
-
-Again solid zeros (32637 ≈ 32768 − 32768/256, a 32 KiB run), again 4 KiB-aligned,
-this time at block 896 inside a 14-block window, with `extent_holes` 0 and 248
-`extent_reads` / 673 `extent_runs`. The host scan of that same disk:
-
-```
-7696 pattern blocks in the image, 7696 byte-perfect, 0 damaged
-13 of 4096 logical blocks have no copy anywhere in the image
-```
-
-so the missing count collapsed from 3584 to 13, and none of the 13 is block 896.
-That reading did not survive the next check, because both files were still
-sharing one tag: a "present" block could be the decoy's copy of that offset
-rather than the readahead file's.
-
-**REFUTED, and it is the write path after all: the zeros are missing from the
-disk.** `frag_prepare` now writes the decoy with `FRAG_TAG` (5) instead of
-`RA_TAG` (7), so every block found in an image belongs to exactly one file.
-Fresh `sata-disk.img`, `fsbench fragprep /var`, reboot, `fsbench ra /var`:
-
-```
-VERIFY FAIL  byte 3801088 of the file is 0x00, want 0xd0; the chunk differs in
-             20398 of 65536 bytes, 20398 of them zero, from byte 3801088 to
-             byte 3858431 of the file
-```
-
-and the host scan of that disk, per tag:
-
-```
-tag 7 (fsbench.ra)    3807 pattern blocks, 3807 byte-perfect, 0 damaged
-                      289 of 4096 logical blocks have no copy anywhere
-                      0 of 4096 logical blocks have more than one copy
-tag 5 (fsbench.frag)  3918 pattern blocks, 3918 byte-perfect, 0 damaged
-                      178 of 4096 logical blocks have no copy anywhere
-                      0 of 4096 logical blocks have more than one copy
-```
-
-Block 928 — the first byte the reader saw as zero, `3801088 / 4096` — is one of
-the 289. So `fragprep` loses **467 of 8192 blocks (1.9 MiB of 32 MiB) on the
-write path**; the reader is reporting the disk correctly, and every earlier
-"the damage is not on the disk" statement was the decoy's copy standing in for
-the missing block.
-
-Two properties of the loss narrow it further:
-
-- **Nothing is misdirected and nothing is partial.** No block has a second copy
-  anywhere in the image, and no copy differs in a single byte. The writes were
-  dropped whole, not sent to the wrong address and not torn.
-- **The missing blocks come in stride-4 runs**, seven or eight of them together:
-  705, 709, …, 733, then 897, 901, …, 953. One 4 KiB block missing out of every
-  16 KiB, over a span of ~128 KiB, then a stretch with nothing missing.
-  `efs_stats.blocks_allocated` is +8194 for the run, so allocation covered every
-  block; it is the data write that did not happen.
-
-**The contiguous arm is the control, and it is clean.** Fresh `sata-disk.img`,
-`fsbench raprep /var`, host scan of the same image: `4096 pattern blocks, 4096
-byte-perfect, 0 damaged / 0 of 4096 have no copy / 0 have more than one copy`.
-So the scanner reports a whole file when a whole file is there — the 289 missing
-blocks are not an artifact of it — and what produces the loss is the interleaved
-append + `fsync` pattern, not the writing of 16 MiB.
-
-`fsbench fragprep` also prints `sys_sync: journal still pending after 8 rounds`,
-the pre-existing warning listed under known failures — worth checking whether it
-is the same dropped writeback rather than an unrelated timeout.
-
-## Batch block allocation, exercised in the guest (2026-08-12)
-
-`EfsDriver` asks the allocator for a whole writeback batch at once and prefers a
-contiguous free run. The correctness question that raises is whether a run
-handed out in one request is fully accounted for when only part of it is
-consumed, so the closing evidence is a write-path run on a **freshly built**
-`sata-disk.img`, not a green suite:
-
-```
-iotest /var                    20/20     (test 16 logs `efs: read hole at
-                                          logical block 1` — that is its own
-                                          sparse-file case, not a lost block)
-fsbench write -n 32 /var       total 1.1 s, verify: all patterns match
-                               efs_stats.blocks_allocated +30792, orphans_marked +65
-                               journal commits 67 / ring_blocks 456 / commands 134
-                               ahci_stats.ncq_max_inflight +2
-fsbench write -n 8  /var       total 0.2 s, verify: all patterns match
-                               blocks_allocated +6418, blocks_freed +9512
-```
-
-Reading `verify: all patterns match` off the screen needs a redirect: the
-`KERNEL COUNTERS` block is longer than the terminal, so the verify line has
-already scrolled away by the time the run ends. `fsbench write -n 8 /var >
-/var/w.txt` then `grep verify /var/w.txt` — write the file to `/var`, since
-memfs `/tmp` reads past EOF and pads the last page with zeros.
-
-## Goal allocation: where the next block wants to land (2026-08-12)
-
-Batch allocation (`ensure_blocks_for_logical_batch`) asks for the whole batch in
-one request, so one writeback round lands as one extent. It does nothing for the
-*next* round: `alloc_blocks` searched every group from group 0, so batch N+1
-started at the first free bit on the device rather than where batch N ended, and
-a file appended in 8-block batches collected one extent per batch however much
-free space followed it.
-
-`alloc_blocks` now takes a **goal**, the physical block the caller wants the run
-to start at, and tries it before any scan:
-
-- `ExtentMap::goal_for(logical_block)` is where the extent immediately preceding
-  that logical block ends, plus any logical gap, so a sparse region still leaves
-  the file linear on the device.
-- An exact hit at the goal is taken *however short the run is*, since even a
-  single block continues the previous extent rather than opening a new one.
-- A taken goal falls back to first fit, but starting at the goal's own group and
-  wrapping, so the file stays near itself instead of restarting at group 0.
-- Metadata blocks need no special case: their bits are always set, so a goal that
-  lands on one finds a zero-length run and falls through.
-
-Both data-block sites pass a goal (the single-block `ensure_block_for_logical`
-and the batch path); extent-tree nodes and the inline-conversion block still
-allocate goal-free. Inside the batch loop, a request the allocator can only
-answer in pieces continues from `pool.last() + 1` on each further round.
-
-Evidence, freshly built `sata-disk.img`, cold boot:
-
-```
-fsbench write -n 32 /var    total 1.2 s  (1.1 s at fd2178a — within noise;
-                                          this changes placement, not the
-                                          per-batch command count)
-                            efs_stats.blocks_allocated +30792, orphans_marked +65
-                            journal commits 68 / ring_blocks 459 / commands 136
-iotest /var                 20/20
-```
-
-`fsbench ra /var` **needs `fsbench raprep /var` and a reboot first**; on a fresh
-disk it exits `entity not found` and reports one test failed. The extent-count
-win is only visible on that path (`/proc/efs_stats` `runs / reads`).
-
-Measured there, fresh disk, `raprep` then a cold boot then `ra`:
-
-```
-fsbench raprep /var     efs_stats.blocks_allocated +4096 (a 16 MiB file)
-  ... reboot ...
-fsbench ra /var         extent runs   4 reads planned 4 runs, queued in 4 submits
-                        windows sync fallback  0 declined, 0 failed
-                        readahead 248 async windows / 4048 async pages
-                        verify: edges match the pattern
-```
-
-`runs / reads` = 1.00: every bulk read of the appended file resolves to a single
-contiguous run, so the appended file is one extent per read and the heavier
-ext4-style delayed allocation or per-inode reservation window has nothing left
-to win. The counter to watch for a regression is `efs_stats.extent_runs` rising
-above `extent_reads` on this sequence.
-
----
-
-## Three user-visible defects, and two traps in verifying them (2026-08-14)
-
-### The sidebar only ever knew what it read once
-
-`edos-edit`'s tree read the root at open and each directory the first time it
-was expanded, and nothing ever re-read either. A file created afterwards was
-invisible until the program was reopened, including one the editor itself wrote
-with Ctrl+S on a new path.
-
-`Tree::refresh` re-reads the root and re-expands every folder that was open.
-The walk is forward over the rebuilt rows: `toggle` splices a directory's
-children in directly after it, so a nested folder's own row is reached later in
-the same pass and re-expands there. Three things ask for it -- F5, `FocusGained`
-(a file another program wrote while this one was in the background), and a
-successful save.
-
-There is no watch mechanism because the kernel has no change notification, so
-the sidebar is only ever as fresh as the last time something asked it to look.
-That is stated in the module doc rather than left for the next reader to
-rediscover.
-
-### Alt guards, the last three programs
-
-`cb7cb31` gave `edos-edit` and `WidgetContainer` the rule that a binding does
-not fire while Alt is held. `edos-files`, `imgview` and the terminal widget bind
-keys too and were never audited:
-
-- `edos-files` tracked no modifiers at all, so Alt+N made a folder. It now
-  carries a `Modifiers` and a `KeyRelease` arm; without the arm Alt would latch
-  on forever, since `handle` had no release path.
-- `imgview` binds bare `q`/`f`/`1`, so Alt+Q quit it.
-- `widgets::terminal` fed the chord's bare character to the pty, so Alt+F typed
-  `f` into the shell. `altgr` is a separate flag and still selects the third
-  character on a layout.
-
-The kernel grab (`35f0a39`) does not make this redundant: the window manager
-withholds only the chords it *claims*, and every other Alt chord still arrives.
-The comment in `edos-edit` that said nothing could claim one first predates that
-commit and is corrected.
-
-### efs-fsck counted one orphan twice
-
-One unnamed inode produced two Error findings -- `inode N: allocated but
-link_count == 0 (orphan)` from `scan.rs` and `orphan inode N` from `dirtree.rs`
--- so `remaining = initial_errors - repair_succeeded` never reached zero and a
-`--repair --yes` that freed the leak still exited 4. Only a second run came back
-clean.
-
-The scan finding is now a Warning. That phase sees only the stored link count;
-DirTree also knows how many directory entries actually name the inode, so
-DirTree is the phase that adjudicates and raises the fixable Error. The
-integration test asserts on the repair run's own exit code (1, ErrorsFixed)
-rather than on a second run, and was watched go red -- exit 4 -- against the old
-severity.
-
-### Trap: `cargo test` in tools/efs-fsck does not test what you just edited
-
-`tests/common/mod.rs::fsck_bin` runs
-`tools/efs-fsck/target/release/efs-fsck`, which is what `make efs-fsck` builds.
-A `cargo test` (debug) rebuilds the test binary and nothing else, so a source
-change is invisible until `make efs-fsck` is re-run. A revert-and-watch-it-fail
-check against a stale release binary silently proves nothing: it passes both
-ways.
-
-### Trap: a `shipped = false` program is moved out of `filesystem/bin`
-
-`programs/Makefile` moves every unshipped binary (currently `edos-edit`) from
-`filesystem/bin` into `pkgstage/bin` after each build, because that is what
-makes it packaged rather than imaged. Staging one into the guest for a test has
-to happen **after** the last program build and **before** `efs-mkfs` runs;
-`make edos-x86_64.iso` and `make sata-disk.img` both re-enter `make programs`
-and undo an earlier copy. Copying `pkgstage/bin/<name>` in and then running the
-`sata-disk.img` recipe's four commands by hand is the way that works.
-
-## A FAT12 entry can straddle a sector boundary, and three call sites did not (2026-08-14)
-
-A FAT12 entry is 1.5 bytes wide, so the 16-bit window covering one starts at
-`cluster * 3 / 2` and, for one cluster in every 342, that byte offset is 511:
-the low half of the entry lives on the last byte of a sector and the high half
-on the first byte of the next. Cluster 341 is the first (`341 * 3 / 2 == 511`),
-then 683, 1024, and so on, so any FAT12 volume with more than 341 clusters --
-anything past ~175 KB at one sector per cluster -- has them.
-
-All three sites read exactly one sector and indexed two bytes into it:
-
-- `fat32/traverse.rs::get_fat_entry` sliced `sector[off..off + 2]` on a 512-byte
-  `Vec`, which panics the kernel. Reachable from any read that walks a chain
-  through such a cluster, i.e. reading a file bigger than the straddle spacing.
-- `fat32/write.rs::set_fat_value` indexed `sec[within + 1]` the same way, same
-  panic, on link and free.
-- `fat32/write.rs::alloc_cluster`'s `search` had a `within + entry_size >
-  sec.len()` guard, so it did not panic -- it skipped the cluster and moved on.
-  That silently made ~1 cluster in 342 permanently unallocatable.
-
-`sector_span(within, size, bytes_per_sector)` in `fat32/mod.rs` answers how many
-sectors a window needs, and all three now read (and, where they write, write
-back) that many. It answers 1 for every FAT32 and FAT16 entry, whose widths
-divide the sector evenly.
-
-Two things ruled out while fixing it: the FAT32 and FAT16 arms of
-`get_fat_entry` cannot straddle, because their offsets are multiples of 4 and 2
-and the sector size is a power of two -- their `try_into().unwrap()` calls were
-structurally impossible rather than latent panics, and are now explicit byte
-indexing anyway. And the `search` guard was not dead code covering FAT32 too: it
-could only ever have fired for FAT12.
-
-### Exercised in the guest, and the recipe that works
-
-The read side is now proven on a real volume: the guest mounted a FAT12
-partition and `sha256sum /mnt/BIG.TXT` on a 256000-byte file (500 clusters,
-2..501, so its chain walks straight through the straddling entry for cluster
-341) returned the same digest as the host, and `wc -c` returned 256000.
-
-Building the image is fiddly and the working recipe is worth keeping. Format the
-**partition** standalone and `dd` it into a partitioned disk afterwards; do not
-try to format in place:
+One side fenced and the other not is the store-buffer litmus: the producer sees no
+waiter and skips the wake, the waiter sees no data and parks. LLVM lowers the fence to
+`lock orl $0, (%rsp)`.
+
+The two producers the fence protects, because their publication is a `Release` store
+followed by a wake with no RMW or lock between: `PageFillHandle::finish_success` /
+`finish_failed` (`kernel/src/fs/page_fill.rs`; a lost wake parks a reader on a finished
+fill) and the writeback kthread's `flush_completed` store before waking `sync_done_wq`
+(`kernel/src/fs/writeback.rs`; `wait_for_flush` is one un-looped `wait_until`, so a
+lost wake hangs `sync`). Producers that publish under the waiter's lock (pipes) or with
+a `compare_exchange` (`BlockIoHandle::complete`) are safe without it.
+
+Recurrence tell: a producer whose publication is a plain or `Release` store, with no
+RMW and no lock between it and a wake. `Scheduler::load` needs no such discipline: a
+stale load read costs a slightly worse placement, not a lost wakeup.
+
+### Waits on a peer must be killable
+
+A killed thread dies at the syscall return boundary. A wait loop whose predicate only
+a peer can satisfy never reaches it: the kill's wake fires, the predicate is still
+false, and the thread parks again. `WaitQueue::wait_until_killable`
+(`kernel/src/thread/waitqueue.rs`) also ends the park on the killed flag and returns
+`WaitOutcome::Killed`; the caller returns `EINTR`. It is opt-in, because a wait is
+abandonable only where the caller can abandon what it waited for: page fills and
+journal commits keep parking. Users: `accept`, TCP and UDP socket read, pipe read and
+write, pty-slave read and write. `sys_waitpid` carries the same check inline.
+
+A pending stop is not handled: `SIGTSTP` on a blocked call needs restart semantics the
+kernel lacks, so Ctrl+Z on a blocked `accept` does nothing until the call returns.
+
+Recurrence tell: a syscall that parks on a peer's action, and a process that survives
+`kill -9`.
+
+### Every park consumes a wake token, so a one-shot park is a latent no-op
+
+Every wake that ends a sleep or a park leaves a wake-pending token that survives into
+the thread's next park, and `transition_park_while` consumes it and declines to park.
+Any single, non-looping `thread_park_while` call is therefore a bug: loop on the real
+condition around the park, as `stop_if_signalled` does. Re-parking is safe only where
+the caller is enrolled on no wait queue.
+
+A syscall that sleeps in a loop against an absolute deadline (`sys_nanosleep`) must
+call `stop_if_signalled` as well as `exit_if_killed` inside the loop, or a kill gets
+through and a stop does not. Suspended time counts against the deadline.
+
+### The thread-exit path must not allocate or take a lock
+
+It can run with interrupts disabled (see the comment on `reaper_enqueue` in
+`kernel/src/thread/scheduler.rs`). Parentage bookkeeping runs in the reaper, and
+`record_thread_exit` takes the parent from the dying thread the caller already holds. A
+registry walk plus two `Vec` allocations on the exit path once showed up as a `make
+test` timeout, not a panic. Anything added to thread exit: assume no allocation and no
+locks, then run `make test`. `/proc/processes` prints `pending exit statuses`, which
+stays flat across spawns when orphaned statuses are dropped correctly.
+
+### Every default signal action goes through `apply_default_action`
+
+`apply_default_action` (`kernel/src/thread/thread.rs`) is called from both the send
+path and `deliver_unblocked_signals`. A second copy of that match once cleared
+`stop_requested` but not `stopped` on `SIGCONT`, leaving a runnable thread that `ps`
+reported `Stopped`. Do not reintroduce a per-caller copy. `SIGCONT` clears `stopped` at
+delivery, not when the target next runs; otherwise `fg`'s immediate wait sees it still
+stopped.
+
+Signal frame facts (`kernel/src/syscalls/sigframe.rs`; `programs/sigtest` is the test):
+
+- `SigFrame` holds the whole interrupted `SyscallContext`, the old blocked mask and a
+  magic word, written below the red zone so `rsp+8` is 16-aligned at handler entry.
+- `sigreturn` checks the magic and masks rflags before loading. It restores `rip`,
+  `rsp` and `rflags` from user-writable memory, so dropping either check is a
+  privilege escalation.
+- The saved `rax` is the interrupted syscall's return value, so a handler running
+  between a call finishing and userspace seeing its result is invisible to the code.
+- Delivery happens only at syscall return (`deliver_pending_handler`). Extending it to
+  the tick path means building the frame from a `CpuContext`.
+- A handled signal does not also take its default action: `kill_process_with_signal`
+  returns early when a handler is installed.
+
+### Pipes and terminals are bounded at 64 KiB
+
+`PIPE_CAPACITY` is 64 KiB (`kernel/src/thread/pipe.rs`). A write that does not fit
+parks, killably, until a read frees room or the last reader leaves. A write of at most
+`PIPE_BUF` (4096) waits for room for all of it, so two writers never interleave a small
+message. A reader leaving mid-write returns the bytes already transferred, not
+`EPIPE`.
+
+A bounded pipe deadlocks any writer that fills it before starting its reader.
+`edos-sh` feeds a heredoc from a thread that owns the write end (`heredoc_pipe`);
+feeding it inline hangs the shell on a heredoc over 64 KiB. Any code that writes to a
+pipe it will later read from itself needs the same shape. A program capturing a child's
+output reads the pipe dry before `waitpid`, for the same reason. Guest checks: `yes |
+head -3` terminates; `seq 1 200000 | wc -l` reports 200000; a 20000-line heredoc
+completes.
+
+`PTY_OUTPUT_CAPACITY` is 64 KiB (`kernel/src/thread/pty.rs`), with a killable wait in
+`sys_write` and poll's writable bit following free space. The bound is on stored bytes:
+`ONLCR` stores one newline as two, so `write_output` takes a `room` argument and never
+splits a CR from its LF. The input side discards rather than waits:
+`PTY_INPUT_CAPACITY` is 4096 (POSIX `MAX_INPUT`), with Ctrl-C, Ctrl-Z and Ctrl-D exempt
+so a full queue stays recoverable. A write to a slave whose last master closed is
+`EIO`, not `SIGPIPE`. `iotest` test 21 fills a pty nobody reads and checks the bound;
+setting `PTY_OUTPUT_CAPACITY` to `usize::MAX` turns it red.
+
+### The PTY translates newlines, and only a remote terminal shows it
+
+`LineDiscipline` (`kernel/src/thread/pty.rs`) carries `opost` (POSIX `OPOST` +
+`ONLCR`): on in canonical mode, off in raw. The `edos_render` terminal widget treats
+`\n` as CRLF, so a bare-LF bug is invisible locally and shows as a staircase over SSH.
+Check line endings over `ssh`. `edos-sh` is raw only inside `read_line` (the `RawMode`
+guard); its line editor emits CRLF explicitly.
+
+### The clock
+
+`Instant` holds nanoseconds (`kernel/src/timer.rs`), so values stay comparable across
+a change of clock source. The TSC is the source only when `invariant_tsc` reports
+`CPUID.80000007H:EDX[8]`, and each AP is checked against the HPET at bring-up
+(`verify_tsc_sync`). `clocksource=hpet` on the command line forces the HPET.
+
+QEMU advertises invariant TSC only when asked, so every run target and `scripts/edos-vm`
+pass `-cpu ...,+invtsc`. A new QEMU invocation without it silently falls back to the
+HPET, whose read exits to QEMU's userspace: 6361 ns per read against 16 ns for
+`rdtsc`, measured. Under TCG the bit is absent and the HPET is kept, which is correct
+because TCG's TSC counts instructions.
+
+`set_apic_timer` (`kernel/src/apic/mod.rs`) raises every duration to
+`MIN_TIMER_INTERVAL`: a count of 0 stops the one-shot permanently, and one tick at Div1
+fires before the arming handler returns. A loop that reads the clock gets no backoff
+from the read on the TSC, where it would from an HPET exit; suspect that first if a spin
+loop misbehaves.
+
+The wall clock reads the RTC once at one-second resolution and answers
+`clock_gettime` from that pin plus the monotonic clock. `SYS_CLOCK_SETTIME` steps it
+through the atomic `WALL_CLOCK_OFFSET_NS`; the pin and the monotonic counter are
+untouched, so durations never jump. `programs/sntp` (RFC 4330) checks mode 4, stratum
+1..15, and that originate equals the transmit timestamp it sent.
+
+### `stall-dump` and the heartbeat threads
+
+`kernel/src/debug/stall.rs` (feature `stall-dump`) declares a stall when its switch
+counter stands still for `STALL_MS` (4000 ms), prints every thread with its state and
+a backtrace once, then `stall: still nothing, switches=N` per later window.
+
+Five kthreads wake on a timer forever and would keep the counter moving on a
+deadlocked machine: `tcp-retransmit`, `nvme_watchdog`, `ahci_watchdog`,
+`block_writeback`, `journal_committer`. Each calls `stall::mark_heartbeat()` on entry,
+and `note_switch` skips a heartbeat thread's switch. A new periodic housekeeping
+kthread whose normal answer is "nothing to do" must call `mark_heartbeat` too, or the
+detector goes blind. The exclusion covers only the heartbeat thread's own switch.
+
+`make stall-check` proves the detector fires. A desktop boot never dumps: the taskbar
+clock alone is work every 4 s. `scripts/wedge-probe` is the first instrument for a
+suspected wedge (QMP counters, no rebuild); `stall-dump` is the next when the question
+is which thread waits on what.
+
+### A parked thread is not load
+
+The `load-parked-is-not-load` sched-test case (`kernel/src/thread/sched_test.rs`)
+compares two CPUs whose contents the test controls: 32 threads parked on one against
+`LOAD_SPINNERS` running on the other, asserting the parked CPU reports less
+`Scheduler::load` and wins a placement restricted to those two. Its first form asked
+whether the parked CPU won a placement against the whole machine; that depended on
+every other CPU, lost correctly to any idle one, and failed two runs in three with the
+fix in. Write an assertion over state the test owns, not over the machine.
+
+### Re-read every predicate after a mechanical lock rewrite
+
+Wrapping `wait_until(|| !self.queue.lock().is_empty())` in `ranked_lock!` once lost the
+negation. The boot hung right after the root mount with the serial log stopping: the
+FS mailbox thread waited on an inverted predicate. It looks like a deadlock in
+whatever ran last.
+
+## Memory
+
+### Per-process memory in procfs
+
+`/proc/processes` has an RSS column; `/proc/<tid>/status` has `VM Size` and `Resident`.
+Resident is counted from the page tables at read time (`MemoryManager::resident_bytes`
+/ `resident_bytes_in` in `kernel/src/memory/mapper.rs`), not kept as a counter: pages
+enter and leave through too many sites for a counter not to drift. Lock order for the
+walk: `vmas` (70) then the per-process mm (80).
+
+Trap: the reaper calls `Thread::free` before removing the thread from the registry, and
+procfs snapshots the registry first, so a reader can reach a `MemoryManager` whose PML4
+frame is back in the allocator. `Thread::free` calls `release_page_tables()` under the
+mm lock, and `resident_bytes` returns 0 once `released` is set. Any new reader of the
+raw page-table frame must check the same flag.
+
+### `USER_VA_END` cannot go in a `VirtAddr`
+
+`USER_VA_END` (`0x0000_8000_0000_0000`, `kernel/src/memory/vma.rs`) is the lowest
+non-canonical address, and `VirtAddr::new` panics on it. A half-open range over the
+whole user half uses raw `u64`, as `resident_bytes_in` does. A violation panics the
+first time something reads `/proc/processes` (the panel, seconds after boot), not at
+boot.
+
+### VMA protection is recorded as requested
+
+The kernel records protection exactly as the caller asked, and the loader maps ELF
+`p_flags` one for one. Nothing reads `VmaProt::READ` except `pmap`/`maps` rendering;
+`memory/fault.rs` checks only `WRITE` and `EXEC`. An odd triple such as `-w-p` in
+`pmap` is the caller's request, not a kernel bug. There is no `brk`; `heap_break` is
+only the starting address for `next_mmap_addr`.
+
+### `mmap` answers a `NonNull`, and `MAP_PHYSICAL` has its own wrapper
+
+`edos_lib::mem::mmap` returns `Result<NonNull<u8>, Errno>`, because the syscall has two
+non-mapping answers (a negated errno and null). A physical mapping is
+`mem::mmap_physical`, which sets `MAP_PHYSICAL` itself: the kernel reads `r8` as a
+physical address only under that flag and as a file descriptor otherwise, so the flag
+and the argument must never be set independently.
+
+## Syscalls and the ABI
+
+### Validate every argument, and check a declared length yourself
+
+A length or maximum a caller passes is a claim about a buffer it owns, and
+`try_copy_to_user` checks only the bytes written. A syscall taking a declared size
+checks the declared size: `sys_getcwd` and `sys_netinfo` call `access_ok(buf, len)`,
+and `sys_window_list` checks `max * size_of::<WindowListEntry>()` with `checked_mul`
+before taking the registry lock.
+
+Validate every argument before any zero-length short-circuit. `read(9999, p, 0)` must
+be `EBADF`, because a zero-length transfer is how userspace probes a descriptor:
+`read`/`write`/`readv`/`writev` check with `fd_is_open`, and
+`pread`/`pwrite`/`sendto`/`recvfrom` return for `count == 0` only after resolving the
+descriptor. The null check stays after the length check: `read(fd, NULL, 0)` is 0.
+`sys_getrandom` rejects unknown `flags` and `sys_futex_wake` calls `access_ok` before
+their `count == 0` returns. `iotest` test 20 checks the descriptor case.
+
+`open` refuses unknown flag bits with `EINVAL` (`OPEN_FLAGS_SUPPORTED` in
+`syscalls/io.rs`), deliberately unlike Linux: silently dropping `O_EXCL` or
+`O_DIRECTORY` would return a descriptor with the wrong semantics. Adding an open flag
+means adding its bit there, or every caller gets `EINVAL`. `iotest /var` exercises the
+mask through std.
+
+`O_TRUNC` truncates only a regular file (`open_resolved` checks `FileKind::File`), per
+POSIX; devfs has no `truncate`.
+
+### Reading `syscallfuzz` output
+
+`programs/syscallfuzz` draws some arguments from plausible values on purpose (one
+pointer in four is a valid 4096-byte scratch buffer; scalar sets lead with 0 and 1),
+or the kernel's own checks would short-circuit every case. A success is reported only
+when at least one argument was poison; the rest are tallied as `benign`. Rows that are
+not defects: calls with no failure return (`isatty`), count queries with a zero
+maximum (`list_dir`, `list_mounts`, `list_partitions`, `window_list`,
+`clock_gettime`), and `futex_wake` with a valid address and a huge count. Read a row's
+arguments before assuming it is last run's finding.
+
+### A failing syscall returns a negated errno
+
+The convention is in `CLAUDE.md`. Beyond it:
+
+- `Errno` uses Linux `asm-generic/errno.h` numbering. One macro in
+  `kernel/src/syscalls/mod.rs` generates the enum, `ALL_ERRNOS` and `name()`;
+  `edos_rt` has its own copy of the list, and its `from_raw` cannot be a `transmute`
+  since the values are sparse.
+- The sentinel test lives at several layers, and each must test the window, never
+  `== -1`: `edos_rt`'s `cvt`, the std fork's `cvt` in
+  `library/std/src/sys/pal/edos/common.rs`, `sys/stdio/edos.rs`, and raw-syscall
+  callers in `edos_render`, `edos-sh` and `syscallfuzz`. Changing the convention needs
+  one `./x install` per layer.
+- Errno is not cleared on success, by decision: `edos_rt::sys_result` reads it only
+  after a call reports an error, as POSIX means it, and clearing it would add a
+  `current_thread_info().lock()` to every successful syscall. Do not re-propose it.
+- Bisect a regression across these changes by checking out whole commits, kernel and
+  userspace together.
+
+### The syscall table is one list
+
+`kernel/src/syscalls/table.rs` holds one list, each entry `number, "name", function,
+(kind: type, ...)`, passed to a macro the caller names. `syscall_rows!` builds the
+`SyscallInfo` array `/proc/syscalls` publishes; `syscall_arms!` in `mod.rs` builds the
+whole `dispatch` function, because a `macro_rules!` invocation cannot emit match arms
+in place. Arguments come off `rdi, rsi, rdx, r10, r8, r9` through one `FromReg` impl
+per type, never `as` at a call site. Bodies return `Result<u64, Errno>`. `sys_sync` is
+the syscall; `io::sync_all` is the work, for callers such as `power::quiesce`.
+
+For a conversion across many syscalls: regex the repeating shapes, change the
+signature, let `cargo check --message-format json` enumerate the leftovers, and run
+`make guest-check` per file group, since a syscall regression is not a compile error.
+
+### A userspace wrapper passes every argument its syscall reads
+
+`SYS_IOCTL` reads five (`fd, request, arg, arg_len, flags`). Through `syscall3`, `r10`
+and `r8` carry whatever the caller left there, and a nonzero length with a read or
+write flag set sends `sys_ioctl` down its copy-in path, where `arg == 0` returns
+`EFAULT`. The failure depends on register contents, so one call site succeeds or fails
+according to what ran before it. `strace -e ioctl` shows the registers the kernel
+received.
+
+### Two path front ends
+
+User paths enter through `copy_user_path` (NUL-terminated) and `copy_user_path_len`
+(counted) in `kernel/src/syscalls/mod.rs`, filling a caller-owned stack `PathBuf` so
+path syscalls never allocate. `syscalls/fs.rs` adds only resolution policy
+(`read_user_path`, `read_user_path_with_len`, `read_user_path_at`). Do not fold the
+other copy helpers into these: `copy_in`/`copy_out` move counted bytes through the heap
+so a caller copies before taking a lock, and `read_user_str`/`copy_user_c_string`
+return owned values that are not paths.
+
+### `/proc/<tid>/fd` is a table, not a directory
+
+It is `FD TYPE MODE POS NAME`, NAME to end of line, because pipes, PTYs and sockets
+have no path. The bracketed number is `Arc::as_ptr` of the shared object, which pairs
+pipe ends and PTY sides across processes. `Procfs::render_fds` clones the table handle
+out from under the thread-info `IrqSpinlock` before taking the `BlockingMutex` table,
+and clones descriptors out before rendering because describing a socket takes the
+socket lock. A `FileDescriptor` clone does not touch open counts (only `close` does).
+Path-based procfs reads may park: `vfs::read` drops the inode guard before
+`fs.read_bytes` when the inode is `None`, which is every procfs file. The kernel's unit
+is the thread, so `lsof` lists a multi-threaded process once per thread.
+
+### The ACPI handler is never exercised
+
+The kernel does not run the AML interpreter: `power.rs` maps the DSDT and scans it by
+hand. Every hook in the `acpi::Handler` impl (`kernel/src/acpi/handler.rs`) is
+unexercised on any boot, so a change there is proven by review alone. A non-zero
+segment group or a config offset above 0xFF needs MCFG, which the kernel does not map:
+such a read answers all-ones and a write is dropped with one log line. `stall` spins
+and `sleep` parks (ACPI 6.5 §5.5.2.4.1). AML mutexes are the fixed 128-entry
+`AML_MUTEXES` table; a handle past it fails the method rather than the boot, and
+`release` ignores a caller that is not the recorded owner.
+
+## Storage, filesystems and the journal
+
+### `sync` and `/proc/journal_stats`
+
+`sys_sync` (`kernel/src/syscalls/io.rs`) loops commit, flush, `advance_tail` to a fixed
+point (`Journal::needs_sync_round`, which counts the open transaction), at most
+`SYNC_MAX_ROUNDS` (8), and logs `journal still pending after 8 rounds` when it gives
+up. `/proc/journal_stats` shows `active`, `sealed`, `pending`, `tracked`; after a plain
+`sync` all read 0. `pending` stuck non-zero while `tracked` is 0 means transactions
+committed and checkpointed but not retired: an `advance_tail` bound bug.
+
+A wait with a 30 s timeout on `commit_wq` (`force_commit_and_wait`) turns a lost wake
+into a 30 s stall; eight rounds of that is 240 s. A multi-minute silent stall in
+`sync`/`fsync` points there first.
+
+### When writes are not durable
+
+Checklist for an install-and-reboot or any "writes not durable" symptom (the last one
+was `doc/bugs/2026-08-19-sync-returned-before-the-extents-were-committed.md`):
+
+- Read `failed_sync_passes` in `/proc/block_cache` on the writing guest first. A forced
+  writeback pass that did not write every dirty page logs `writeback: forced pass for
+  request N did not write every dirty page; sync is returning without full durability`
+  and bumps it. `SYS_SYNC` returns no error, so `edos-install` reads the counter either
+  side of the sync, then issues `BLOCK_IOCTL_FLUSH` after it (a flush before the sync
+  empties a cache that has not yet received the sync's writes).
+- Refuted, do not re-check: `sys_sync` missing file pages (`BlockPageCache::sync_all`
+  runs `flush_dirty_inodes` between two block-cache drains); writeback submitting
+  without waiting (`write_batch` waits every handle); a stale journal tail
+  (`write_journal_sb` ends in `block_write_fua`); QEMU losing writes on kill
+  (`nvme-blank.img` is raw); deferred orphan eviction (an install unlinks nothing).
+- Do not add a settle delay to `scripts/nvme-check` after `edos-install` exits. It
+  would hide a real defect: a user who installs and reboots promptly gets the same
+  disk.
+- A repro starts from `make fresh-nvme-blank`. After one install, `nvme-blank.img`
+  carries a bootable ESP and QEMU boots it ahead of the CD. Plain `make nvme-blank.img`
+  is a file target and does nothing when the file exists.
+- Check an installed image with `tools/efs-fsck/target/release/efs-fsck -n -v
+  --partition-offset <bytes> <image>`. Directory blocks current against a stale inode
+  table and bitmaps is metadata left in an uncommitted transaction.
+- `efs-fsck` findings on a power-cut image are unreliable until the journal is
+  replayed: later phases check home blocks the ring may hold newer copies of. Run
+  `--repair` (replays first) and re-check, or `shutdown` in the guest instead of
+  `edos-vm stop`.
+
+### Orphan eviction waits for writeback on EFS
+
+An unlinked file with dirty pages is not evicted when its last descriptor closes.
+`DIRTY_INODES` (`kernel/src/fs/vfs.rs`) holds a strong `Arc<VfsInode>` so a close
+cannot free pages that never reached disk, so `VfsInode::drop` and
+`fs::evict::post_evict` fire only after `writeback_thread` releases it, up to one 5 s
+period later. Measured: `evicttest /tmp` passes in 0.7 s, `evicttest /var` in 5.0 s;
+`evicttest` polls on a 20 s deadline (`DRAIN_TIMEOUT`), and any orphan-reclamation test
+on EFS needs the same allowance. `/proc/evict_stats` separates `posted_count`,
+`drain_count` and `error_count`.
+
+Writing back an orphan's dirty pages is wasted I/O, but `remove_file` keeps them on
+purpose: live mappings keep reading and writing through them. Do not drop them at
+`mark_orphan` without a measurement and a plan for mapped orphans.
+
+### A filesystem cannot resolve a symbolic link
+
+A filesystem sees a mount-relative path and cannot know the mount table, so it never
+resolves a symlink target. Its walk stops at the first link it must follow and returns
+`Error::LinkEscape`. The VFS asks `FileSystem::link_escape`, which answers
+`LinkEscape::Absolute` or `LinkEscape::AboveMount` (see `fs::splice_symlink` in
+`kernel/src/fs/mod.rs`), builds an absolute path and restarts from the VFS root. The hop
+cap lives in the VFS and counts hops across mounts.
+
+- Escalation is error-driven: `fs::api::with_links` runs the operation and redirects
+  only on `LinkEscape`, so a path with no links costs one walk.
+- Follow versus nofollow travels as `LinkMode` from the API layer. `unlink`,
+  `readlink`, `symlink` and `rename` leave the final component alone; everything else
+  follows. `rename` settles both paths with `resolve_links` first.
+- `open` caches the path on the descriptor, so it takes the resolved one from
+  `file_info_resolved`.
+- Anything reaching the VFS outside `fs::api`'s retry loop sees `LinkEscape` as a plain
+  error. The ELF loader's door is `fs::api::resolve_inode`, which stays inside the
+  loop. A wrong errno (ENOEXEC, ELOOP, EIO) on a path `cat` reads fine is the
+  signature of a caller outside the loop.
+- Standing hazard: `link_escape` is asked with the API's `LinkMode`, not the mode the
+  filesystem walked with. A filesystem operation that follows a final component the
+  API says to leave alone surfaces as EIO. Any new filesystem operation must walk with
+  the mode `fs::api` passes for it.
+- `iotest` test 10 covers exec through a link, a linked directory, rename of a link,
+  `rmdir` refusing a link, and a two-link cycle.
+
+### FAT12 entries can straddle a sector
+
+A FAT12 entry is 1.5 bytes, so its 16-bit window starts at `cluster * 3 / 2`; for one
+cluster in every 342 that offset is 511 and the entry spans two sectors. `sector_span`
+(`kernel/src/fs/fat32/mod.rs`) gives how many sectors a window needs, and
+`get_fat_entry`, `set_fat_value` and `alloc_cluster` use it. FAT16 and FAT32 never
+straddle.
+
+A FAT12 test disk: format the partition standalone, then place it (`mkfs.fat --offset`
+inside a partitioned image did not mount):
 
 ```
 dd if=/dev/zero of=fat12.part bs=1M count=2
-mkfs.fat -F 12 -S 512 -s 1 -n FAT12TEST fat12.part      # 4039 clusters
-mcopy -i fat12.part big.txt ::/BIG.TXT                  # >175 KB, no mount needed
+mkfs.fat -F 12 -S 512 -s 1 -n FAT12TEST fat12.part
+mcopy -i fat12.part big.txt ::/BIG.TXT
 dd if=/dev/zero of=fat12disk.img bs=1M count=4
 printf 'label: dos\nstart=2048, size=4096, type=1\n' | sfdisk fat12disk.img
 dd if=fat12.part of=fat12disk.img bs=512 seek=2048 conv=notrunc
 scripts/edos-vm start --extra-disk /abs/path/fat12disk.img
 ```
 
-MBR type `1` is what `kernel/src/fs/mbr.rs` maps to `PartitionType::Fat12`. The
-extra disk enumerates as block device 2, so the guest mounts it with
-`mount 2 0 /mnt fat32` — the `fat32` driver serves all three widths.
-
-Four things that cost time. FAT12 caps at 4084 clusters, so a 16 MiB image at
-one sector per cluster is *too large* to format (`mkfs.fat: Not enough or too
-many clusters`); 2 MiB is right. `mkfs.fat --offset` did not produce a mountable
-partition inside an already-partitioned image in two tries, which is why the
-recipe above formats first and places second. A raw unpartitioned image gets no
-`/dev` node at all, since the kernel enumerates partitions and synthesises
-nothing for a bare volume. And `make test-headless` leaves a `sched-test` ISO in
-the tree, which boots, runs 51 tests and exits — check `run_log.txt` for a
-desktop rather than a test suite before concluding a guest failed to come up,
-and `make all` to get an ordinary ISO back.
-
-## Creating a file on a FAT12/FAT16 volume overwrites its boot sector (2026-08-14)
-
-Found while exercising the FAT12 straddle fix above, on the same volume.
-Reads are correct; **creating** anything in the root directory of a FAT12 or
-FAT16 volume writes the 32-byte directory entry over the boot sector, and the
-file is invisible from that moment on.
-
-`traverse.rs` uses **cluster 0 as the marker for the FAT12/16 root directory**
-(`root_dir_cluster`, line 32) because that root is a fixed region ahead of the
-data area and has no cluster chain. Every write-side function instead takes a
-cluster number and turns it into an LBA with `cluster_to_lba`, whose guard is:
-
-```rust
-if cluster < 2 {
-    return self.partition.starting_lba; // Fallback to partition start
-}
-```
-
-The partition's starting LBA is its boot sector. So `append_dir_entry(0, ..)`
-reads the boot sector, finds "free" 32-byte slots in it (everything past the
-BPB looks free), writes the entry there and writes the sector back.
-
-Measured, not argued: after four creates the guest's volume differed from the
-pristine image at partition offsets 0x20-0x3f, 0xc0-0x159 and nowhere else --
-all inside sector 0. `xxd -s 32` on the result reads `COPY    TXT`, sitting on
-top of `BPB_TotSec32`, `BS_VolID`, `BS_VolLab` and `BS_FilSysType`. Host
-`fsck.fat` then reports "Volume label 'FAT12TEST' stored in root directory and
-label '' stored in boot sector and different". The volume survived only by luck:
-this image uses `BPB_TotSec16`, so the zeroed `BPB_TotSec32` changed nothing.
-
-It is silent from userspace. `openat(..., O_CREAT)` returns a valid fd and
-`touch` exits 0; `ls` simply never shows the file. `cp` reports the *source* as
-"entity not found" because `programs/cp` prints `src` whatever step of
-`fs::copy` failed. FAT32 is unaffected — its root is an ordinary chain starting
-at `BPB_RootClus`, which is >= 2.
-
-FIXED. Two helpers on `Fatfs` name the case once — `root_dir_cluster()` for the
-cluster the root is reached by, and `is_fixed_root(cluster)` for the FAT12/16
-marker — and every write-side function that takes a directory cluster now
-addresses it through `dir_entry_region`, which already mapped cluster 0 to the
-root region for reads. `append_dir_entry` returns `NoSpace` on a full fixed root
-rather than allocating and linking a cluster, since that root cannot be extended.
-Making `cluster_to_lba` reject cluster 0 instead would only turn silent
-corruption into an error on a path that is meant to work, so it was not the fix.
-
-Verified in the guest against the recipe above: create, `cp` a 264000-byte file
-whose digest matched the host, `mkdir`, a long name, `rm`, `rmdir`. Host
-`fsck.fat -n` then exits 0 and the boot sector is byte-identical to the pristine
-image.
-
-### Two defects that only showed up once creation worked
-
-Both were found by running host `fsck.fat` on the volume the guest had written,
-and neither is FAT12-specific.
-
-**Deleting a long-named file orphaned its long-name entries, on every variant.**
-`remove_file` and `remove_dir` marked the short entry `0xE5` and *then* called
-`delete_long_name_sequence`, which finds the LFN run by scanning forward to the
-short entry it belongs to — and its `first == 0xE5` arm clears `pending` and
-skips, so the target was never matched and the preceding LFN entries were left
-behind. `fsck.fat` reports `Orphaned long file name part "..."`. The rename path
-was already correct because it deletes the sequence before patching the entry.
-The order is the fix: clean the long name first, mark the short entry second.
-
-**Only the first FAT was ever written.** `set_fat_value`'s doc comment claimed it
-wrote "both primary and backup FATs" and no arm did; `alloc_cluster` wrote the
-primary directly too. Every allocation and free therefore left the mirrors
-diverged (`fsck.fat`: "FATs differ but appear to be intact"), so a volume whose
-primary FAT is later damaged recovers to a stale mirror. FAT writes now go
-through `write_fat_sectors`, which repeats the write at `backup_fat_lba` when
-`BPB_NumFATs > 1`.
-
-### Note: FAT32 assumes 512-byte sectors in two different ways
-
-`read_disk_sectors`/`write_disk_sectors` hardcode `SECTOR_SIZE = 512`, and
-`traverse.rs` divides by a literal 512, while `write.rs` divides by
-`boot_info.bytes_per_sector`. They agree only because every volume tried so far
-has 512-byte sectors. A 4096-byte-sector volume would have the two halves
-disagree about which sector an entry is in. Pre-existing, not touched here.
-
----
-
-## A partial transfer reaches one page of two, and the panel was the proof (2026-08-14)
-
-`doc/design/wm-damage.md` predicted this and the taskbar demonstrated it: booting
-`scripts/edos-vm start --vga std` left the panel drawn on some boots and missing
-on others, two of four on an unmodified tree.
-
-**Mechanism.** The compositor composites into a shadow buffer that always holds
-the whole screen, and `Screen::flip_rect` copies one rectangle of it into VRAM
-before flipping. On the Bochs VBE path VRAM is two pages and the flip swaps
-them, so a rectangle only ever reaches the page that happened to be back at the
-time. The panel paints itself once at startup and never again, so that one paint
-landed on one page and the first flip showed the other. The clock repaints every
-minute and so reaches both, which is why it survived and the rest of the panel
-did not.
-
-**Fix**, in `Screen::flip_rect` (`edos_render/src/graphics.rs`): when the mapping
-reports two pages, publish the union of this frame's rectangle and the previous
-one, because the page about to be shown is exactly one frame behind. It starts
-with the whole screen pending, since a page nothing has been published to is
-missing all of it. The compositor needed no change: which rectangle to copy out
-of a complete shadow is knowledge `Screen` has and the compositor does not.
-
-**The test is deterministic, and counting boots is not.** Each flip alternates
-pages, so with the defect present a region painted once is visible on every other
-frame. Force frames with pointer moves and sample the panel row after each:
-
-```
-scripts/edos-vm start --vga std
-for i in 1..8: scripts/edos-vm move $((300 + i * 7)) 300; scripts/edos-vm shot mv$i.png
-```
-
-Reverted, that printed MISSING, DRAWN, MISSING, DRAWN, ... for eight moves in a
-row. With the fix, DRAWN eight times out of eight. Sample the row rather than
-reading a screenshot by eye: `im.getpixel((x, h - 20))` for a handful of x,
-compared against the same x at `h - 200`, which is desktop.
-
----
-
-## Packaged defaults merge now, and a plain diff3 would have closed almost nothing (2026-08-14)
-
-`grab` used to write a packaged default into `/etc` in two cases: nothing there,
-or the file still byte-identical to the default this package seeded. The gap was
-a corrected default never reaching a machine whose copy had been edited.
-
-`programs/grab/src/merge.rs` closes it, in **two** stages, and the second is the
-one that matters here.
-
-The first is diff3: longest common subsequence against the base from each side,
-the lines all three agree on as anchors, each region between them resolved from
-whichever side changed it. That handles a multi-line settings file as long as one
-untouched line separates the two edits.
-
-The second exists because diff3 alone would close almost nothing on this system.
-A setting is one value with its comment above it, so the case the whole feature
-is for — the package rewords the comment, the machine changed the value — is two
-edits on adjacent lines with nothing unchanged between them, and diff3 calls that
-a conflict. **GNU diff3 and git both do**; it was checked against `diff3 -m`
-rather than assumed. So when one side changed no significant line at all, its
-edit was documentation and can mean nothing else, and the other side's values are
-grafted into its comment scaffold. A significant line is one that is neither
-blank nor a `#` comment, which is what both `/etc` formats read.
-
-Anything left is a real disagreement: the machine's file stands untouched and the
-install says so, naming the copy under `share/defaults/` where the new default
-can be read. Nothing prompts — this runs on `edos-grab`'s worker thread with no
-terminal.
-
-**Verified in the guest**, with three archives whose names differ only in
-version so they are the same package (`cfgtest-1.0.tar.gz`, `-2.0`, `-3.0`;
-naming them `v1`/`v2` makes them two packages and the ownership check refuses the
-second, which is a trap already recorded here). Install 1.0, edit the value line
-by hand, install 2.0 whose comment moved: `merged the new default into
-/etc/cfgtest, keeping its edits`, and the file holds the new comment over the
-local value. Install 3.0, whose value also moved: `kept /etc/cfgtest, which
-changed the same setting the new default did`, with `/etc` unchanged and
-`/share/defaults/cfgtest` holding the new one.
-
----
-
-## `edos_http` connects on a deadline, and that took a change in the std fork (2026-08-14)
-
-An unreachable repository used to cost the caller the kernel's own five-second
-handshake wait with no way to shorten it. The kernel had grown the POSIX
-mechanism (non-blocking `connect` → `EINPROGRESS` → `poll` for writable →
-`SO_ERROR`), but nothing above it could reach the mechanism, and the layers
-explain why the fix is three commits in three repositories:
-
-1. **`edos_rt` 0.0.48** adds `EINPROGRESS`, `EALREADY` and `EISCONN`. The kernel
-   appends new codes after its own `UNKNOWN` so existing numbers do not move, and
-   this list mirrors it; before this, `Errno::from_raw` turned all three into
-   `UNKNOWN` and std could not tell a handshake in flight from a failure.
-2. **The Rust fork** maps the first two to `ErrorKind::InProgress` and
-   implements `TcpStream::connect_timeout`, which was `unsupported()` with a
-   comment saying there was no non-blocking connect to drive a deadline from.
-   That comment was true when it was written and is not any more.
-3. **`edos_http`** gains `Options::connect_timeout`, resolves first because a
-   deadline is only meaningful against a concrete address, and gives each address
-   the full timeout the way a blocking `connect` gives each one a full attempt.
-   The default is five seconds, so a program has to ask to be more impatient than
-   the system is.
-
-**The observable is which error comes back.** The kernel's blocking connect
-reports `ECONNREFUSED` when its wait runs out; the new path reports its own
-timeout. In the guest, `http http://192.0.2.1/` — TEST-NET-1, black-holed —
-answers `connect to 192.0.2.1:80: connection timed out`, and `grab update` still
-completes a TLS session against the real repository.
-
----
-
-## `sccache` serves stale artifacts after the std fork is rebuilt (2026-08-14)
-
-Cost most of an hour, so it is written down. After `./x install`, `make programs`
-failed with `can't find crate for getrandom` and `found possibly newer version of
-crate std which simd_adler32 depends on` — and kept failing across `cargo clean`
-and a full `rm -rf programs/target`.
-
-`~/.cargo/config.toml` sets `rustc-wrapper = "sccache"` for every build on this
-machine. `libstd`'s filename hash is derived from version and flags, not
-contents, so a rebuilt std keeps the name `libstd-750f271b2d6830a9.rlib` while
-its SVH changes. sccache's key does not include the sysroot's contents, so it
-served registry dependencies compiled against the old std, and rustc rejected
-them against the new one. Deleting `target/` does not help: the next build takes
-the same poisoned entries straight back out of the cache.
-
-**The fix is one run with the cache refreshed rather than read:**
-
-```bash
-rm -rf programs/target
-SCCACHE_RECACHE=1 make programs
-```
-
-Both halves are needed — `SCCACHE_RECACHE=1` alone leaves whatever the poisoned
-run already wrote into `target/` looking fresh to cargo, so nothing recompiles.
-Add this to the `edos_rt` publish loop: patch, bump, publish, move the fork's
-pin, `./x install`, then **that** pair of commands.
-
----
-
-## `edos-grab` never handled a key release, so its modifier set was a latch (2026-08-14)
-
-Found while verifying the Alt guard that was the point of the change, which is
-the useful part: the guard is what made a dormant defect fatal.
-
-`edos-grab` called `update_modifiers(.., true)` on `KeyPress` and had no
-`KeyRelease` arm at all, so every modifier ever pressed stayed pressed for the
-life of the process. Nothing depended on `self.mods` before, so nothing showed.
-Adding `if !self.mods.alt` around its shortcuts turned that into: the first Alt
-chord to arrive kills F5, the arrows and Page Up/Down for the rest of the
-session.
-
-`edos-edit`, `edos-files`, `imgview` and `WidgetContainer` all had the release
-arm already; `edos-grab` was the only one without it, checked by counting
-`update_modifiers(.., true)` against `(.., false)` in every file that calls it.
-
-**Instrument rather than infer.** Three screenshot-based attempts each gave an
-answer consistent with two different explanations. One `klog_dump` per key event
-settled it in a single boot, because the log carries what the app actually saw:
-
-```
-grabdbg press code=95 alt=false      <- LAlt
-grabdbg press code=5 alt=true        <- F5, skipped by the guard
-grabdbg release code=5
-grabdbg release code=95              <- clears alt, with the fix
-grabdbg press code=5 alt=false       <- and now it refreshes
-```
-
-Two traps around that measurement. `scripts/edos-vm key f5` works — F-keys do
-reach the guest, proven separately by `alt+f4` closing a window — so a
-non-reacting app is not a swallowed key. And a second `Refresh` sets the same
-status text as the first, so "the status did not change" only means something
-against a status that was going to change.
-
-## The initial process stack carries an auxiliary vector (2026-08-15)
-
-`setup_user_stack` (`kernel/src/thread/mod.rs`) now emits the full System V
-initial process stack: `argc` at `[rsp]`, `argv[]`, NULL, `envp[]`, NULL, then
-the auxiliary vector, then the string area holding the argument and environment
-bytes plus `AT_RANDOM`'s 16 bytes and `AT_EXECFN`'s path. This is step one of
-`doc/design/dynamic-linking-and-libc.md` stage 0; a libc's `crt1.o` and a
-dynamic linker both start by reading this and nothing else.
-
-Three things about it that are not obvious from the diff.
-
-**The stack has to be built after the image, not before.** `load_process_image`
-used to lay down the stack and then load the ELF. `AT_PHDR` and `AT_ENTRY` are
-not known until the ELF has been parsed, so the two swapped places. The Stack
-VMA is inserted before either, which is what lets `copy_to_user` demand-fault
-stack pages in the new address space, so the reorder is safe; the reloc table
-and `load_base` are still installed on the `MemoryManager` after the stack is
-written, so nothing in the fault path can see a half-built image.
-
-**`AT_PHDR` has two sources and both give the same answer here.** `PT_PHDR`
-names the table's address outright, and every binary this tree builds has one at
-`p_vaddr` 0x40. Without one, the fallback is the `PT_LOAD` whose file range
-covers `e_phoff` — and since that first `PT_LOAD` starts at file offset 0 with
-`p_vaddr` 0, it computes 0x400040 as well. Do not read a passing test as
-evidence that only one of the two paths works.
-
-**The entry alignment is deliberately still wrong, and must stay wrong for now.**
-The psABI wants `rsp % 16 == 0` at process entry; this kernel produces
-`rsp % 16 == 8`, the state a callee sees after `call` pushes a return address,
-because the fork's `_start` is an ordinary `extern "C" fn(argc, argv, envp)` and
-its prologue assumes it. glibc and musl both mask `%rsp` down first so they
-would tolerate either, but inverting the padding rule here without changing
-`_start` in the Rust fork GPFs on the first `movaps` spill. The same applies to
-`rdx`: the psABI reserves it for an `atexit`-registerable pointer, and glibc's
-`_start` moves it to `%r9` and calls it as `rtld_fini`, so a glibc binary
-entered with `envp` in `rdx` would call the environment array.
-
-### `programs/auxvtest`, and why it needs `#![no_main]`
-
-The vector's address is reachable only by walking `argv`: `argv[argc]` is NULL,
-`envp` begins one slot later, and the auxv begins one slot past `envp`'s NULL.
-Nothing in `std` hands out that pointer — `env::args()` yields strings, and the
-runtime's `_start` consumes `argv` without keeping it. `#![no_main]` plus a
-`#[unsafe(no_mangle)] extern "C" fn main(argc, argv)` takes over the C `main`
-symbol the PAL `_start` calls, which is the only way a program in this tree sees
-the real pointer. That is worth knowing for any future test of process entry.
-
-The suite checks 11 things, the strongest being that `AT_PHDR` minus `PT_PHDR`'s
-`p_vaddr` lands on this image's own `\x7fELF`, and that `AT_ENTRY` falls inside
-one of its `PT_LOAD`s. Watched go red: reversing the auxv push order so `AT_NULL`
-lands first turns the vector into a one-entry empty list and takes 7 of the 11
-checks with it. That red also found a weak assertion — a vector holding only
-`AT_NULL` satisfied "terminated" — which now requires more than one entry.
-
-`AT_RANDOM` differing across two boots (`99 37 f0 3f` then `38 06 a5 32`) is what
-distinguishes a live entropy source from a pointer into zeroed stack.
-
-## `mprotect`, and the COW hole it uncovered (2026-08-15)
-
-`SYS_MPROTECT` (289) is stage 0 item 3 of
-`doc/design/dynamic-linking-and-libc.md`. `sys_mprotect` splits the VMA set at
-both edges of the range, retags every VMA the range covers, then brings present
-PTEs into line; a hole anywhere in the range changes nothing and reports ENOMEM,
-so a partly-applied protection is never observable. `edos_lib::mem::mprotect` is
-the wrapper, and `mmaptest` tests 12 and 13 are the check.
-
-Three things about the implementation.
-
-**A present entry is edited, not rebuilt.** Reconstructing the flags from
-`vma.prot` would drop the PAT bits of a write-combining mapping and `COW_BIT` on
-a page still shared with a forked sibling. Only `WRITABLE` and `NO_EXECUTE`
-move.
-
-**A COW page stays unwritable even when this call grants write.** The first
-store faults, copies the frame, and takes its permission from the VMA that
-`mprotect` just updated. Setting `WRITABLE` directly on a page whose frame is
-shared would let two processes scribble on one frame.
-
-**Absent pages need nothing.** The demand-fault path reads `vma.prot` for every
-page not yet faulted in, so retagging the VMA is the whole of the change for
-them. Only the page table needs catching up.
-
-The `edos_lib` constant is local rather than re-exported from `edos_rt`, because
-nothing in `std` exposes `mprotect` and adding it to `edos_rt` would cost the
-whole publish-and-pin loop for no reader.
-
-### The hole
-
-Writing the syscall surfaced a live bug with no `mprotect` in it. Full
-post-mortem in `doc/bugs/2026-08-15-cow-granted-write-a-vma-refused.md`; the
-short form is that `handle_cow_fault` set `WRITABLE` from the page table alone,
-the fork walk sets `COW_BIT` on read-only anonymous pages as well as writable
-ones, and the COW handler runs ahead of the only code that reads `vma.prot`. A
-forked child could store into a `PROT_READ` mapping and the store landed.
-
-The lesson worth carrying: **the VMA is the authority on protection and a PTE is
-a lossy cache of it**, so a path that grants a permission must derive it from
-`vma.prot`. `COW_BIT` means "this frame may be shared", not "this page is
-writable".
-
-Watched go red: removing the guard and running `mmaptest /var` gives
-`FAIL test 12: a write to a PROT_READ mapping was allowed`.
-
-### Two traps in getting that red
-
-**`make all` does not regenerate `sata-disk.img`, and `scripts/edos-vm start`
-does not either.** Only the `run-*` targets do. The ISO is rebuilt, so the guest
-boots the new *kernel* while `/bin` comes off a stale disk — which reads as
-"the change had no effect" and is indistinguishable from a real green. The first
-run of `mmaptest` after adding tests 12 and 13 printed `all tests passed` after
-test 11 and nobody was any the wiser. `make clean-sata && make sata-disk.img`
-between a `make programs` and an `edos-vm start`, every time. File mtimes will
-not save you: a running guest writes to the qcow2, so `sata-disk.img` is always
-newer than the binary that is missing from it.
-
-**`> /dev/klog` does not capture a failure.** `mmaptest`'s `fail()` uses
-`eprintln!`, so the message goes to stderr and stays on the guest's terminal
-where a headless run cannot see it. The only symptom in `run_log.txt` was
-`exit: process exited with code 1`. Redirect with `2>&1`. Note the message then
-arrives unbuffered and one write per fragment, interleaved with whatever else is
-logging, so reassemble the line before reading it.
-
-## A failing syscall returns a negated errno (2026-08-15)
-
-Stage 0 of `doc/design/dynamic-linking-and-libc.md` is complete. A failure now
-leaves `[-4095, -1]` in the return register and anything outside that window is
-a result; `Errno` uses POSIX's numbering, matching Linux's
-`asm-generic/errno.h`, and carries 54 codes where it carried 26. `SYS_ERRNO`
-still answers from the thread's errno field, which the kernel keeps setting, so
-a runtime that has not moved off it keeps working.
-
-**Why POSIX numbers, stated plainly.** They are not required — newlib's stub
-layer would translate a private numbering in a `switch`. They delete that
-switch, and nothing about EDOS's design depends on `EINVAL` being 22. What a
-libc genuinely needs is the *width*: `ENOSYS` so a stub can say it is not
-implemented instead of choosing a nearby lie, and `EDOM`/`ERANGE`, which C99
-`math.h` requires and which had nothing to map from.
-
-**One substitution covers all 117 calls.** Every implementation already reported
-failure the same way — a bare `-1` with the code on the thread — so
-`syscall_handler` rewrites `u64::MAX` into the negated code once, after the
-match. Nothing per-syscall changed. An implementation that returns `-1` without
-setting errno now logs and reports `UNKNOWN` (4095, the top of the window),
-because `-1` read as a code means `EPERM` and silently blaming the wrong thing
-is worse.
-
-That substitution and its log are gone as of 2026-08-26: once every `sys_*`
-answers `Result<u64, Errno>` there is no sentinel to substitute and no way to
-fail without naming a code. See "The syscall table is one list, and the bodies
-answer Result" below.
-
-A macro generates the enum, `ALL_ERRNOS` and `name()` from one list, in the
-kernel and again in `edos_rt`. They were three parallel lists that had to be
-edited together. `edos_rt`'s `from_raw` also had to stop being a `transmute`:
-the values are sparse now, so a code the crate does not know would have been UB.
-
-### What broke, and the shape of it
-
-Every failure was the same defect in a different place: **a check that tested
-the sentinel rather than the window.** `x == -1` and `x == u64::MAX` stop being
-true the moment the code is anything but `EPERM`, and the value then flows on as
-a valid result — a byte count, a length, an address.
-
-- `edos_rt`'s `cvt` tested `t == -1`. A failed read returned `-22` and
-  `read_to_end` indexed a 32-byte probe buffer with it:
-  `range end index 18446744073709551594 out of range for slice of length 32`.
-  `edos-wm` and `sshd` crash-looped at boot.
-- The fork's std has its **own** `cvt` in `sys/pal/edos/common.rs`, and three
-  more copies of the test in `sys/stdio/edos.rs`. Fixing `edos_rt` did not touch
-  them, which is why `rmdir` on a symlink returned 0 while `strace` plainly
-  showed `rmdir("/var/t10l") = -20 ENOTDIR`. Four separate `cvt`s is the real
-  finding; `sys/net/connection/edos.rs` had a fifth and was already correct
-  because it tested `ret < 0`.
-- `iotest` asserts that certain calls *fail*, with `!= -1`. Those assertions
-  invert under the new convention: a real failure is `-9`, so the test reports
-  a failure that did not happen.
-
-`< 0` was correct everywhere it appeared — 97 sites needed no change at all. The
-16 that used an exact `-1` were the whole problem. When adding a new error path,
-test the window (`edos_rt::sys::is_err`, or `sys_result` when the code is
-wanted), never a specific value.
-
-`edos_lib` is the translation boundary for programs: wrappers that documented
-`u64::MAX` on error still return it, so `spawn`, `mmap` and their callers needed
-no edit. Only the wrappers themselves and the few programs that issue raw
-syscalls (`edos_render`, `edos-sh`, `syscallfuzz`) changed.
-
-### The entry alignment went with it
-
-`_start` in the fork is now a **naked** function that zeroes `%rbp` and masks
-`%rsp` before calling anything, the way every libc's `crt1.o` does. That is what
-let the kernel move to the psABI's 16-aligned process entry instead of padding
-to the post-`call` state a compiled function assumes. `auxvtest` checks it: the
-initial `rsp` is recoverable as `argv - 8`, because `argc` sits one word below
-`argv[0]`, and it must be 16-aligned.
-
-### Cost, for the next person who has to do this
-
-Three `./x install` cycles, because each layer's copy of the sentinel test was
-only found once the one above it was fixed and the guest got far enough to reach
-it. Check `./x check library/std --target x86_64-unknown-edos` first — it takes
-seconds and catches the compile errors; only the *behavioural* ones need the
-full install. And `rm -rf programs/target` really is required alongside
-`SCCACHE_RECACHE=1`: skipping it gives `can't find crate for rustls` and
-`found possibly newer version of crate std`.
-
-## C runs on EDOS: the newlib port (2026-08-15)
-
-Stage 1 of `doc/design/dynamic-linking-and-libc.md`. `libs/libgloss-edos` is the
-19-function layer newlib is written against, plus a `crt0` that turns the SysV
-initial stack into `main(argc, argv, envp)`. Build recipe and the full set of
-gotchas are in that directory's `README.md`; this is what is worth knowing
-before reading it.
-
-**No gcc cross-toolchain was needed.** clang targets `x86_64-unknown-elf`
-directly, and newlib's build system takes it through `CC_FOR_TARGET` with
-`llvm-ar` and `llvm-ranlib`. That removes the multi-hour binutils-and-gcc build
-that a port like this usually starts with.
-
-**Prove the compiler before pulling in the libc.** The first milestone was a
-freestanding `hello.c` with one inline `syscall` and no library at all, linked
-`ET_EXEC` and run in the guest. It exercises the whole path — clang, lld, the
-ELF loader, the syscall ABI — and is a two-minute loop, where a newlib failure
-is a twenty-minute one. It printed `hello from C on edos` and that was the first
-non-Rust program this system has ever run.
-
-### The two mismatches, both silent
-
-The design note's claim that all 19 functions land on existing syscalls held up.
-What does not carry across is the **constants**, and neither mismatch is a
-compile error.
-
-**Open flags.** `O_RDONLY`/`O_WRONLY`/`O_RDWR` are 0/1/2 on both sides and
-nothing above them agrees. newlib's `O_CREAT` is `0x200` where the kernel uses
-`0x40`, and newlib's `O_TRUNC` is `0x400`, which the kernel reads as
-`O_APPEND`. Symptom: `fopen(path, "w")` fails with `ENOENT` on a file it was
-asked to create.
-
-**errno.** This one corrects the reasoning that chose POSIX numbering in the
-first place. newlib has its own numbering. It agrees with POSIX across the
-classic UNIX range and diverges above it: **36 of the kernel's 54 codes are
-identical, 18 are not.** `ENOSYS` is 38 to the kernel and 88 to newlib, `ELOOP`
-40 against 92, and every socket error differs. Choosing Linux's numbering
-shortened the translation table by two thirds rather than deleting it. Still the
-right call, but the argument as originally made was too strong.
-
-Both tables live in `edos_syscall.h` and are written against newlib's own
-macros rather than its numbers, so neither can drift from the headers it is
-compiled with.
-
-### `%zu` is not free
-
-newlib's `printf` does not understand `%zu` unless it is configured with
-`--enable-newlib-io-c99-formats`. Worse than printing wrong: it emits a literal
-`zu` and **does not consume the argument**, so every later conversion reads the
-wrong slot. A `%s` after a `%zu` then dereferences an integer. The symptom was
-`KILL: PF addr=0x12` — a byte count of 18 used as a pointer — which reads like
-memory corruption and is a printf configuration flag. Any real C program hits
-this, so the flag is not optional.
-
-### What the stubs decide
-
-- **`sbrk` over one `mmap`.** There is no `brk`. The break lives inside a single
-  64 MiB anonymous reservation made on first use, because a second `mmap` need
-  not land adjacent to the first and `sbrk` must be contiguous. It costs a VMA
-  and no memory: anonymous mappings here are demand-faulted, which is what makes
-  reserving large the cheap option rather than the expensive one.
-- **`link` and `times` report `ENOSYS`** rather than approximating. EDOS has no
-  hard links, so faking one from a symlink would make `st_nlink` and `unlink`
-  lie; and there is no per-process CPU accounting to answer `times` from. This
-  is exactly what widening the errno list was for.
-- **`isatty` cannot report an error** — it answers 0 or 1 — so a failed syscall
-  becomes "not a terminal".
-
-### Verification
-
-`make -C libs/libgloss-edos install-test` puts `ctest` in the image.
-15 of 15 in the guest: `malloc` of 1 MiB and 4 MiB with the last byte checked,
-`fopen`/`fwrite`/`fread` round trip, `stat` on a file and a directory,
-`fseek`/`ftell`, `errno == ENOENT` on a missing file, `getpid`,
-`gettimeofday`, `times` reporting `ENOSYS`, `unlink`, float `printf`, `qsort`
-and `strtod`. Everything goes through a C library function rather than a raw
-syscall, because the point is that newlib's own machinery works on top of the
-stubs.
-
-
-## Where EDOS could be novel (2026-08-15)
-
-`doc/design/kernel-architecture.md` answers the standing "are we building a
-worse Linux" question with evidence rather than taste. Three findings are worth
-repeating here because they change what work is worth doing.
-
-**EDOS is already spawn-first and `fork` is nearly vestigial.** 34 `spawn` call
-sites against 16 `fork`, and 13 of the 16 are tests and benchmarks. The only
-real users are `edos-sh` (background jobs, subshells) and `strace`. `edos-init`
-uses `spawn` exclusively, and `SYS_SPAWN2` has `posix_spawn`'s shape. Deleting
-`fork` would remove COW, the whole class the 2026-08-15 COW bug came from, and
-the open pgid-inheritance defect, in exchange for two shell features. Nobody had
-written down that this design position was already half taken.
-
-**Adopting Linux's ABI is not what makes a clone.** Asterinas is Rust, x86-64,
-over 100K lines — EDOS's scale — and is *fully* Linux ABI-compatible with 210+
-syscalls, while being nobody's idea of a copy, because its novelty is structural:
-a framekernel with an intra-kernel privilege boundary and a memory-safety TCB of
-14.0% of the codebase. Against EDOS's **824 `unsafe` occurrences in 50,016
-kernel lines**, that is also the sharpest available critique of this kernel.
-
-**The scheduler is the best novelty target, and the reason is one sentence:**
-everything worth conceding is ABI, and the scheduler is the largest thing in the
-kernel that is not. Errno numbers and struct layouts are compatibility surface;
-scheduling policy is invisible across the syscall boundary, so being different
-there costs no software. `doc/SCHED-ROADMAP.md` already names four measured
-defects and `switchbench` plus `/proc/sched_prof` already exist to judge a fix.
-sched_ext and ghOSt made pluggable scheduling mainstream, and both are
-constrained in ways EDOS is not — sched_ext by having to coexist with EEVDF and
-live inside the BPF verifier.
-
-One thing found while reading: **OSDI '25 and SOSP '25 are dominated by
-datacenter and LLM-serving work** — GPU sharing, inference scheduling, SmartNIC
-offload — almost none of which transfers to a workstation-shaped hobby OS. The
-structural work of 2019–2021 is still the live reading for this project. The
-newest directly relevant hardware lever is user-level interrupts (Intel UINTR),
-which this machine cannot test against.
-
-
-## A parked thread is not load (2026-08-14)
-
-`Scheduler::thread_count` counted the threads that called a CPU home: `+1` in
-`spawn_thread`, a matched pair across the two steal paths, `-1` on exit, and
-nothing anywhere else. A park, a sleep or a block never touched it, so a thread
-that would not run again for the rest of the boot weighed exactly as much as one
-spinning flat out. Both consumers balanced that: `pick_sched` placed every new
-thread away from a CPU whose threads were all parked, and `try_rebalance` only
-stole toward it once its membership was two below the busiest.
-
-**The measurement came first.** A sched-test case pins 32 threads to the top CPU
-and parks them there. Against the old metric that CPU took **0 of 16**
-placements, and it was watched fail before anything was fixed — the only reason
-the gate is worth having.
-
-That first form of the assertion was also **flaky in the green direction**, and
-the reason generalises. "Does the parked CPU win a placement outright" depends
-on every other CPU in the machine: the parked CPU also hosts the affinity test's
-thread, so it has a unit of real work, and it correctly loses every sample to a
-CPU that happens to be idle. Two runs in three failed that way *with the fix in*.
-What ships instead compares two CPUs the test owns the contents of — 32 parked
-on one against `LOAD_SPINNERS` running on the other — and asserts the parked one
-reports less load and wins a placement restricted to those two. **Write the
-assertion over state the test controls, not over the machine.**
-
-**The fix is a deletion.** `Scheduler::load` is the runqueue's own length plus
-the thread running now, and `queued` is republished from `rq.total_len()` by
-`with_rq` / `with_try_rq` — the two places anything may touch a runqueue. A
-parked or sleeping thread is in neither term because it is in no runqueue, so
-the metric is right by construction rather than by remembering to adjust a tally
-at each of ten state transitions, which is what a second maintained counter
-would have cost. The steal paths lost their bookkeeping entirely: the pop lowers
-the victim and the enqueue raises the thief, both through the same helper.
-`reap_and_schedule` lost its decrement for the same reason.
-
-This is the shape of `WaitQueue::waiters`: a count written under the lock that
-owns the collection and read with no lock at all. It needs none of that fence
-discipline, and the reason is worth stating rather than copying — a stale
-has-waiters read loses a wakeup, while a stale load read is a slightly worse
-placement. Balance decisions are allowed to be wrong; wakeups are not.
-
-`/proc/sched` reports `CURRENT QUEUED LOAD STEALS` per CPU, so the quantity is
-readable from the guest and not only from a test. What an idle desktop looks
-like there is the whole change in one screen — 29 live threads, and:
-
-```
-CPU  CURRENT  QUEUED  LOAD  STEALS
-1    0        0       0     1
-2    0        0       0     2
-3    0        0       0     1
-0    28       0       1     0
-```
-
-Every CPU reports 0 except the one running the `cat`. The old metric would have
-put roughly seven on each of them, which is the number that was deciding where
-new work went.
-
-**Measure balance on more than one CPU.** `doc/SCHED-ROADMAP.md`'s rule that
-every number wants a single-CPU boot is about the switch and wake paths; it is
-exactly wrong here, where a second CPU is the thing under test. `switchbench` is
-the wrong instrument for the same reason.
-
-What this does not fix: a parked thread still does not migrate, so it wakes back
-onto the CPU it parked on. That is now a separate defect about locality rather
-than the same one about placement.
-
-### What it is worth, and the instrument that can say so
-
-Nothing in the tree could measure placement. `switchbench` is explicitly a
-single-CPU instrument and says so; `/proc/sched_prof` measures inside a call.
-So "does this make anything faster" had no answer until `programs/balancebench`,
-which is a straggler test: one worker per CPU bar one, each doing an identical
-lump, with eight blocked threads per CPU as ballast, against what one worker
-alone costs with a CPU to itself. `slowest / solo` is the report.
-
-Three runs each side, 4-CPU boot, same host:
-
-| | imbalance | wall |
-|---|---|---|
-| membership | 1.75, 1.93, 1.94 | 273, 299, 300 ms |
-| runnable load | 0.99, 0.98, 0.99 | 150, 150, 151 ms |
-
-Twice the throughput. Before the change two of three workers shared a CPU and
-took 294 ms against a 152 ms solo while a fourth CPU stood empty, because the 32
-blocked threads counted as work.
-
-Two calibration steps were needed before that number meant anything, and both
-are the reason to distrust the first reading of any new benchmark. At the
-original size one worker took 17 ms, which is three timeslices, so a single
-preemption moved the result; it is 180 ms now. And asking for a worker per CPU
-measured oversubscription rather than placement, because the compositor, the
-panel and the benchmark's own main thread are runnable too — one worker per CPU
-*bar one* reads 0.99 when placement is right, which is what makes 1.93 mean
-something.
-
-The switch path pays nothing for it: `switchbench` on a single-CPU boot, five
-runs each side, moved every metric by less than its own run-to-run spread
-(yield idle 308 → 304 ns, `getpid` 94 → 94, pipe echo 451 → 450). The
-`total_len()` sum and atomic store in `with_rq` are invisible against a 300 ns
-yield, so tracking the length inside `RunQueue` would buy nothing.
-
-**Found while re-measuring, and not this change:** `read` of a bad fd is 169 ns
-against the 128 recorded on 2026-08-11, the pipe echo 450 against 387, and the
-cross-process round trip 2266 against 2016 — on both builds either side of the
-load change, on a comparably quiet host. `getpid` is unchanged at 94, so the
-syscall boundary did not move; the error return did. `doc/SCHED-ROADMAP.md` has
-the table and names the negative-errno conversion as the first suspect.
-
-
-## A syscall paid a registry lookup for its own identity (2026-08-14)
-
-Re-measuring `switchbench` while pricing the load change found three figures
-worse than the 2026-08-11 table on a comparably quiet host — a bad-fd `read` at
-169 ns against 128, the pipe echo at 450 against 387, a cross-process round trip
-at 2266 against 2016 — while `getpid` sat unchanged at 94. A boundary that has
-not moved with everything on top of it moving says the cost is not in the entry
-stub, and the sharpest of the three was the **error** return.
-
-**The bisect.** Whole-tree checkouts either side, single-CPU boot, three runs
-each, reading the bad-fd `read`:
-
-| | bad fd | pipe echo |
-|---|---|---|
-| 2026-08-11, recorded | 128 | 387 |
-| `d965f88`, end of 08-13 | 144 | 452 |
-| `652b35c`, before negative errno | 140 | 450 |
-| `7be0b37`, negative errno | 169 | 450 |
-
-Two separate regressions, and reading the pipe echo column is what separates
-them: it had already arrived by 08-13 and did not move on 08-14, so the +29 ns
-on 08-14 belongs to the error path alone. That is `7be0b37`, whose whole cost is
-one line — `current_thread_info().lock().errno` in `syscall_handler`, on the way
-out of any call that failed.
-
-**The fix is not to that line.** `current_thread_info()` was a registry lookup
-*every time*: `without_interrupts`, a `RwLock` read over `THREADS.infos`, a
-`BTreeMap` get, an `Arc` clone. A syscall makes several — the errno it clears on
-entry, the fd table or working directory its arm wants, and now the errno on the
-way out — and `sys_getpid` is nothing but one of them plus a lock, which is why
-the shortest call in the kernel cost 94 ns. So the thing to fix was the lookup,
-not the caller that exposed it.
-
-`PerCpuData` now carries the running thread's `UserThreadInfo` beside the thread
-itself, keyed by thread id, filled on the first call of a turn, dropped by
-`set_current_thread`. Single-CPU boot, five runs, medians: `getpid` 94 → **85**,
-bad-fd read 169 → **145**, pipe echo 450 → **425**. Every syscall in the system
-is ~9 ns cheaper and one that touches a descriptor or fails is ~25 ns cheaper,
-because it was making more than one call.
-
-Four things make the cache sound, and all four had to be checked rather than
-assumed:
-
-- A live thread's registry entry is never replaced. Both `insert_thread_info`
-  call sites are creating a *child*, and `execve` mutates the existing info
-  through its lock rather than swapping the `Arc` — so a cached pointer cannot
-  go stale against a thread that is still running.
-- Thread ids are never reused (`allocate_thread_id` only counts up), so keying
-  the cache by id makes a hit self-validating rather than a matter of trusting
-  the invalidation.
-- The fill runs with interrupts off, so the thread cannot migrate between the
-  read of the current thread and the store into this CPU's slot.
-- Dropping the entry in `set_current_thread` is what keeps a dead thread's fd
-  table, working directory and address space from being held alive by whichever
-  CPU last ran it.
-
-**Still open: ~38 ns of the pipe echo.** It arrived between 2026-08-11 and
-`d965f88`, it is on the successful fd path rather than the error one, and only
-two commits in that window touch the fd or pipe code — `e5f22f3` (named pipes
-and the bounded PTY) and `3c24e7c` (`O_NONBLOCK` that outlives the open, which
-added a second table lookup to every read and write).
-
-**The harness, which is the reusable part.** `switchbench` reports every figure
-above, and driving it takes: `scripts/edos-vm start --smp 1`, wait for the
-`panel|` line in `run_log.txt`, then `click 400 300` — and *only* that click.
-Clicking the taskbar button first toggles an already-visible window to
-minimised, after which every keystroke lands on the wallpaper and the run
-silently produces nothing. Then `type 'switchbench 20000 -l' --enter` and wait
-for `sleep worst overshoot` to appear once per run. Bisect by checking out whole
-commits in place rather than kernel-only: an old kernel under current userspace
-crosses the negative-errno boundary in the middle of the range, and the two
-disagree about what a failure looks like.
-
-
-## The biggest thing in a context switch was the FPU, not the frame (2026-08-14)
-
-`doc/SCHED-ROADMAP.md` §3 has proposed for a while that the voluntary switch
-drop its 160-byte `CpuContext` and its kernel-to-kernel `iretq` for a
-Linux-shaped six-register save. Measuring the switch before rewriting it says
-that is not where the time is:
-
-| stage | ns/call | less ~8 ns of probe |
-|---|---|---|
-| `restore_fpu` (`fxrstor`) | 57.8 | ~50 |
-| `save_fpu` (`fxsave`) | 32.1 | ~24 |
-| `page` (`Cr3::read` + compare) | 25.8 | ~18 |
-| `restore_ctx` (clone + write under a Mutex) | 23.9 | ~16 |
-| `save_ctx` | 8.4 | ~0 |
-
-The FPU pair is ~74 ns of a 292 ns yield; the frame copies the roadmap blames
-are ~16, and the save side of them is free.
-
-**The skip, and why it is allowed.** The kernel target is built
-`-sse,-sse2,…,+soft-float`, so kernel code cannot touch an FPU register: a user
-thread's state survives arbitrary kernel execution, and the only thing that
-overwrites those registers is another restore. So the restore can be skipped
-when the CPU's registers already hold the incoming thread's state. `sched_yield`
-with nothing else Ready went **292 → 252 ns**, and the case is not exotic — it
-is every self-switch, and every user → driver kthread → same user thread hop.
-
-Both halves of the claim are needed, which took a moment to see: this CPU's
-`fpu_owner` alone misses the thread having run elsewhere and changed its
-registers there, and the thread's `fpu_cpu` alone misses this CPU having loaded
-someone else's state since. The **save stays eager**: deferring it until the
-next thread is known would be sound only if nobody could resume the thread in
-between, and `save_transition_switch` publishes the thread precisely because
-somebody can.
-
-**`programs/fputest` is the gate, and it was watched fail** — with the restore
-skipped unconditionally, four threads read their `xmm` lanes back as zero at
-round 0. The load, the `syscall` and the read-back are one `asm!` block so the
-compiler cannot use an `XMM` register in between and mask the failure.
-
-It does **not** cover the migration half: dropping the `fpu_cpu` check passes at
-4 threads and at 16 on a 4-CPU boot, because that race wants few threads and
-idle CPUs (a CPU keeping its claim while the thread runs elsewhere and returns),
-not many. Recorded rather than glossed: half of this check rests on reading.
-
-### Two things that measured as nothing
-
-Both were sized off `/proc/sched_prof` stage numbers and then measured, which is
-the right order and produced two negatives:
-
-- Caching the active `CR3` per CPU rather than reading `CR3` to compare. The
-  `page` stage suggested ~18 ns; measured, no change on any of eight figures.
-  Not kept — it made one function the only permitted writer of `CR3` in the
-  kernel, which is a real invariant to maintain for a win that is not there.
-- `wake_sleepers` returning early on the atomic `earliest_deadline` instead of
-  taking the sleepers lock to find an empty heap. Also nothing.
-
-**The lesson is one this repo already wrote down and I still walked into:** a
-`sched_prof` stage is one `rdtsc` wide before it measures anything, so it ranks
-the parts of a call and cannot size one. Anything under ~20 ns/call in that
-table is indistinguishable from its own probe.
-
-### The host was lying twice, and the harness checks it now
-
-Two five-run measurements were thrown away because a DDNet build and its test
-run took ~7 of this machine's 12 threads in bursts of about a minute. The
-signature: the *minimum* of the runs matches the baseline while the maximum is
-30% worse, because interference only ever adds time. `switchbench` already takes
-the best of six batches inside a run, so wide cross-run spread is always the
-host.
-
-The bench harness samples `/proc/stat` for percent-of-machine-busy over one
-second, refuses to start above 40%, and flags any run that went busy while it
-ran. The one-minute load average is the wrong instrument: it lagged the burst by
-minutes in both directions, missing one starting and then refusing to measure
-for minutes after one ended.
-
-## A benchmark reported 140x too good, because LLVM hoisted the work out of it
-
-`balancebench wake` parks a worker per spare CPU and times a burst of wakes, and
-its first form reported a burst of **0.02 ms against a 4.2 ms lump** — a fanout
-of 0.01 where 1.00 is theoretically perfect. The impossible direction is the
-tell: a broken measurement usually looks bad, and this one looked like a
-scheduler with nothing left to fix.
-
-The worker loop was:
-
-```rust
-for _ in 0..rounds {
-    read(req_read, &mut byte);
-    let checksum = work(WAKE_ROUNDS, seed);   // pure, and `seed` never changes
-    write(ack_write, &[checksum as u8 | 1]);
-}
-```
-
-`work` is a pure function of `(rounds, seed)` and both arguments are
-loop-invariant, so LLVM hoisted the **call** out of the loop: the arithmetic ran
-once and the remaining nine rounds were a bare pipe round trip.
-`#[inline(never)]` does not prevent this — it stops inlining, not licm, and a
-pure call is exactly what licm is allowed to move. The default `balancebench`
-mode never hit it because each of its threads calls `work` once.
-
-Two things worth copying:
-
-- **Give the inner call a loop-carried dependency** (`state = work(rounds,
-  state)`), rather than relying on a side effect that happens to sit next to it.
-  The bug was first *masked* by adding an `Instant::now()` inside the loop for
-  diagnostics, which is not a fix: it works only as long as nobody removes the
-  diagnostic.
-- **Measure the same interval from both ends.** Making each worker report the
-  microseconds it spent in its own loop, beside the waker's wall clock for the
-  burst, is what turned "the number is impossible" into "the arithmetic is not
-  happening". A single clock cannot tell you the work is missing.
-
-The scaffolding was suspect before the kernel was, which is the rule: the
-harness had been written in the same session, the kernel had not.
-
-## A benchmark's baseline was measured while the machine was still talking
-
-`balancebench wake` reports `median burst / solo`, and after the EEVDF change it
-read **1.31** where the bucket scheduler had read 2.00 — a headline improvement
-that was not real. The burst had barely moved (8.39 → 8.90 ms). The *solo* had
-gone from 4.16 ms to 6.80 ms, and a ratio flatters itself when its denominator
-grows.
-
-The solo was timed immediately after `out.line` wrote the run's header to
-`/dev/klog`, and that drain overlapped the first milliseconds of the lump. Every
-burst is timed after a 60 ms settle; the baseline was not, so the two were never
-comparable. Over the default mode's 152 ms lump the same interference is 1.7%
-and invisible, which is why it had never shown up before.
-
-**What caught it** was a cross-check inside the same run, not a rerun: the
-default mode measured 152.3 ms for `WORK_ROUNDS`, and `WAKE_ROUNDS` is exactly
-1/36.4 of it, so the wake solo should have been 4.19 ms. Two measurements of the
-same arithmetic disagreeing by 62% is a harness bug, and the 152.3 ms also
-matched the 152 ms already on record for the bucket era — which ruled out a real
-throughput regression in the same step. With the settle added the solo returned
-to 4.20/4.25/4.27 ms and the fanout to 1.99/2.01/2.05, i.e. unchanged.
-
-Two rules worth carrying:
-
-- **A ratio's baseline must be measured under the same conditions as its
-  numerator.** Settling before the measured burst but not before the baseline is
-  a bug even though it looks like care.
-- **Derive an expected value from another measurement in the same run.** A
-  benchmark that reports two things sized from the same constant can check
-  itself, and that is cheaper than rerunning and much cheaper than believing it.
-
-This is the second harness bug in the same file in one session; the first is
-"A benchmark reported 140x too good" above. Both produced numbers that were
-*better* than reality, which is the direction that gets published.
-
----
-
-## `html5ever` and `taffy` build for the edos target, and one of them lies about its version
-
-`programs/edos-web` exists and reads a real page: fetch with `edos_http`, parse
-with `html5ever`, print blocks as text. The three crates the browser plan named
-all build for `x86_64-unknown-edos` under `cargo +edos`, unpatched and with no
-feature surgery — `html5ever` 0.39, `markup5ever_rcdom` 0.39.0-unofficial,
-`taffy` 0.9. `taffy` is not a dependency yet; it was built only to answer the
-question, since stage 3 is where it earns its place.
-
-Three things cost time and will cost it again:
-
-- **`markup5ever_rcdom` is published only as a prerelease.** Every version
-  carries an `+unofficial` build tag, so a plain `"0.39"` requirement resolves
-  to nothing at all and the error reads like the crate is missing. The
-  requirement has to be written `"0.39.0-unofficial"`. Cargo's help text names
-  the fix, which is the one mercy here.
-- **Pin the two to the same major.** `markup5ever_rcdom` 0.39 wants `html5ever`
-  0.39, and asking for `html5ever = "0.35"` beside it does not fail — it
-  compiles *both* major versions, and the two `LocalName` types are then
-  different types with the same name.
-- **Reach the DOM root through `RcDom`'s `document` field**, not
-  `TreeSink::get_document`. The trait method needs `html5ever::tree_builder`
-  imported, which is a dependency on the parser's internals in exchange for
-  nothing.
-
-The whitespace model is the part worth knowing before changing `doc.rs`:
-collapsing happens as text is appended, against the *previous run's* trailing
-character rather than per text node, because a run boundary falls wherever a
-tag does and `<b>one</b> <b>two</b>` must not lose the space between them. The
-start of a block counts as ending in whitespace, which is what drops the
-leading indentation HTML sources are full of.
-
-What it does not do yet, and none of it is a bug: no CSS, no images decoded
-(an `img` contributes its `alt` in brackets), no `<base>` element, and links in
-a `nav` with no whitespace between them render run-together — which is what
-every text browser does with that markup, because the whitespace genuinely is
-not in the document.
-
----
-
-## The browser draws a page, and `edos-web` without a flag is now a window
-
-`edos-web URL` opens a window: a header carrying the page title and the address
-it ended up at, the blocks laid out below it, and scrolling by wheel, arrows,
-PageUp/PageDown and Home/End. The text rendering did not go away, it moved
-behind `-d`/`--dump` — **so the headless assertion is
-`edos-web -d https://edos.edgl.dev/ > /dev/klog 2>&1`, and the same command
-without `-d` opens a window and puts one summary line on stdout instead.**
-Anything that greps `run_log.txt` for page text and does not pass `-d` will see
-only that summary line and read it as a parse failure.
-
-Layout lives in `view.rs` and is one pass over the block list producing
-positioned lines of fragments, rebuilt only when the window width changes; a
-scroll costs a blit. Two things it does that are not obvious:
-
-- **A word carries its own style, and the space before it is measured in that
-  style.** Emphasis, code and links change appearance partway through a line,
-  so a line cannot be one string, and none of it can be positioned from a
-  character count — `edos_render`'s faces are proportional.
-- **Whether a word is glued to the one before it cannot be read off its own
-  run.** The space between two `<a>` elements is a *third* run carrying neither
-  link, so it contributes no words at all; the flag has to be carried across
-  runs. Getting this wrong glues `<b>bold</b> <b>face</b>` into one word while
-  leaving the run-together nav case above unchanged, which is why the two look
-  like the same bug and are not.
-
-The theme has no italic face. `<i>`/`<em>` without `<b>` borrows
-`title_accent` rather than being silently dropped, which is the honest
-degradation until a face exists.
-
-## Links are clickable, and a rename now repaints the title bar
-
-`edos-web` follows a link on a left click and goes back on Backspace or the
-`< Back` button in its header. Two pieces make that work, and one of them was a
-window-manager bug that had nothing to do with the browser.
-
-**Hit testing reuses the fragments the draw pass measured.** `Layout::link_at`
-in `view.rs` takes page coordinates -- window coordinates with the header
-removed and the scroll added back -- and finds the line whose band contains the
-y, then the fragment whose x range contains the x. There is no separate metric,
-which is the point: a proportional face makes any second opinion about where a
-word sits wrong at the first glyph that is not a fixed cell wide.
-
-**The back button keeps its slot when it is disabled.** Drawing it only when
-there is history would move the title sideways on the first navigation, under a
-pointer that is about to click.
-
-**A window that renames itself left a stale title in its frame.** The
-compositor draws `window.title_str()` fresh every frame, so the title was never
-the problem: `PrevWindowState` in `edos-wm/src/main.rs` did not record it, and
-a rename moves nothing, resizes nothing and changes no focus. The client's own
-damage report then took the `reported_region` path, which describes its content
-and by construction cannot include the decorations -- so the bar kept whatever
-it last had. Ruled out first, and worth recording because both look identical:
-the kernel registry was correct throughout, which the taskbar proved by showing
-the new title beside a frame showing the old one. The fix is a title hash in
-`PrevWindowState` and a `renamed` term beside `moved` and `focus_changed`, both
-marking the window whole-dirty and disqualifying the reported-region path.
-
-Any program that calls `set_title` after `show` was affected, not just the
-browser.
-
-## The session has a home directory, and a menu entry needs arguments
-
-`/home/edos` is in the `filesystem/` skeleton, and `edos-init` sets `HOME`,
-`USER` and its own working directory before spawning anything. The working
-directory is the load-bearing half: `spawn` copies the parent's cwd, so init
-chdir'ing is what puts the terminal's shell somewhere other than `/`. Setting
-`HOME` alone leaves the prompt at `/` and only fixes bare `cd`. An older
-installed root with no `/home/edos` keeps the directory it booted with rather
-than failing to start the session.
-
-**Three of the programs the applications menu wanted could not be launched by
-path alone**, which is the reason `Item::Launch` now carries an argument list.
-`imgview` and `play` exit with a usage message when given no file, and `snake`
-draws with terminal escapes and has no terminal when the panel spawns it
-directly -- so all three would have been menu rows that visibly did nothing.
-Hence `edos-terminal PROG [ARGS...]`, which runs that program on the far end of
-the pty instead of a shell and titles the window after it, and hence
-`share/sounds/chime.wav`, generated by `scripts/mksounds.py` on the same terms
-as the wallpapers: this repo holds no binaries, and a waveform from a formula is
-reproducible byte for byte, so it does not drag both disk images through a
-rebuild.
-
-The general rule the menu makes concrete: a launcher entry is only real if the
-program it names does something useful with the arguments the launcher can
-give it. Check that before adding the row.
-
-## Kernel clippy went 199 warnings to 0, and `cargo fix` needs two things
-
-`cargo clippy --fix` on this crate does nothing at all under normal conditions,
-and reports success while doing it. Two separate reasons:
-
-- **sccache.** `RUSTC_WRAPPER` is set globally on this machine, and a wrapped
-  `rustc` never hands the fix machinery its suggestions. The run finishes in a
-  few seconds, prints "generated N warnings (run `cargo clippy --fix` to apply
-  M suggestions)" -- the very command just run -- and leaves the tree clean.
-  `touch src/main.rs` first, so the crate actually recompiles rather than
-  replaying a cached result.
-- **One bad suggestion aborts the whole crate.** Fix applies every suggestion,
-  recompiles, and reverts *all* of them if the result does not build. Two lints
-  poison the batch here: `useless_format` rewrites `format!("literal")` to
-  `"literal".to_string()` without adding the `alloc::string` import a `no_std`
-  crate needs, and `map_entry` produced a suggestion referencing `std`. Both
-  fail the recompile, so a whole-crate fix run reverts the other 140 good edits
-  and prints a "this likely indicates a bug in rustc or cargo" wall.
-
-The way through is to drive it per lint: `-- -A clippy::all -W clippy::<lint>`,
-one lint (or one small group) per invocation, so a poisoned suggestion costs
-only its own lint. That took 199 to 73 mechanically.
-
-The rest is judgement, and the pattern for it is an `#[allow]` carrying the
-reason:
-
-- **`mut_from_ref`** on the six `&self -> &mut T` accessors (`PerCpuCacheCell`,
-  `PerCpuData::tss_mut`, `CachedPage`, `CachedBlockPage` x2, `FrameDrop`) is
-  deliberate. All six reach interior-mutable storage that `&self` is the only
-  handle to -- a per-CPU cell, or a frame behind an `Arc` -- and exclusion comes
-  from the documented safety contract (owning CPU with interrupts off, or the
-  page's `write_lock`), not from the borrow checker. Changing the signatures
-  would mean handing out `&mut self` to shared state, which is worse.
-- **`declare_interior_mutable_const`** on `const ZERO: AtomicU32` and friends is
-  the array-initializer idiom: each repeat is a fresh value, not a shared one.
-- **`large_enum_variant`**, **`too_many_arguments`** and **`module_inception`**
-  are all cases where the fix moves the same complexity one level out.
-
-The last 33 were hand-written, and only two of them were not mechanical:
-
-- **The FAT32 LFN write is not `copy_from_slice`.** Clippy's `manual_memcpy`
-  suggestion for `entry.name1[i] = chunk[i]` does not compile: `LfnEntry` is
-  `#[repr(packed)]`, and `copy_from_slice` needs a `&mut [u16]` to a field that
-  is not guaranteed aligned (E0793). Assign the whole array instead --
-  `entry.name1 = chunk[..5].try_into().unwrap()` -- which is a place expression
-  and takes no reference.
-- **`lock_order.rs`'s rank table was a `///` block on `RANK_VFS`.** The
-  `empty_lines_after_doc_comment` warning was the symptom; the table documents
-  the module, so it is `//!` now. A `///` block separated from the item below it
-  by a blank line silently documents whatever comes next, which is how a
-  50-line table ended up as the doc comment of a single `u16`.
-
-Both `cargo clippy --target x86_64-unknown-none` and the same with
-`--features sched-test` are clean, and the gate is worth keeping that way.
-
-## A waiter can lend its priority, and it only got half the inversion back (2026-08-15)
-
-`BlockingMutex` now does priority inheritance: a thread that blocks on one
-raises the holder to its own effective priority for the length of the section,
-and the holder drops every loan when it releases. `Thread::lent_priority` is
-where the loan lives, `Thread::effective_priority()` is `max(priority,
-lent_priority)`, and **every `weight_of` call site reads the effective one** --
-`clamp_lag`, `avg_vruntime` and `place` in `runqueue.rs`, and `charge_vruntime`
-in `thread.rs`. `Thread::priority()` still returns the static priority, which is
-what `/proc` and `sched_getattr` should report.
-
-Measured on the `prio-inversion` case: 18.17x before, 7.67x after, same 4-CPU
-boot and same 10 ms section.
-
-**Half a fix is the honest description, and the reason is in
-`doc/SCHED-ROADMAP.md` section 6.** Two things were ruled in as candidates and
-neither is the lending itself: the case is pinned to one CPU but the other 55
-tests in the suite are not pinned off it, and a loan raises the holder's weight
-without re-placing it, so the `vdeadline` it is already holding was computed at
-the old weight and stands until it is spent. Both before and after numbers are
-several times what the weight ratio alone predicts (1.95x of weight is a 66%
-share, so a 1.5x stretch), which is what says the gap predates the loan.
-
-Three things that are easy to get wrong here and are settled in the code:
-
-- **The uncontended path must not ask the scheduler anything.** `release()`
-  reads a plain `lent` flag on the mutex and only calls `current_thread()` when
-  a loan was actually made. `try_acquire` does pay one `current_thread_id()` to
-  publish the owner; that is the whole added cost of a free acquisition.
-- **Publish the owner after taking the lock and clear it before dropping it.**
-  A waiter that reads a holder therefore saw one that really held it. It can
-  still be one release stale, so after lending, the waiter re-reads the owner
-  and takes the loan back if it changed. Taking it back is conservative -- it
-  can cancel another waiter's live loan, which forfeits inheritance and never
-  grants it.
-- **The loan is a priority, not a stack.** A thread holding two of these gives
-  up an outer loan when it releases the inner lock. Paying for the exact case
-  costs the holder a list of what it holds, on the path where the uncontended
-  cost is the thing that matters.
-
-## `edos-web` has a cascade, and its unit tests run on the host (2026-08-15)
-
-Stage 2 of `doc/design/browser.md` is in `programs/edos-web/src/css.rs`: a
-stylesheet parser, a selector matcher, and a cascade that lands on every `Run`
-and every `Block` as a `Computed`. `view.rs` lets it override the plan a tag
-implies but only where the document said something, so a page with no CSS is
-set exactly as it was before.
-
-**The tests run on the host even though the crate cannot.** `cargo test -p
-edos-web` builds an `x86_64-unknown-edos` binary and then executes it, which
-SIGSEGVs on the host — the same trap any program in this workspace hits. But
-`css.rs` depends on nothing outside `std`, so it can be compiled as its own
-test crate. `make host-tests` does that, and is the gate to run; see
-"`make host-tests` is the userspace suite" below for the two mechanisms it
-uses and the stale-binary trap that makes running the `rustc` line by hand
-unsafe.
-
-**Three decisions in the parser that look like gaps and are not.** An
-`@supports` body is skipped whole, because applying rules conditional on a
-feature set this cannot answer for lets a page's fallback and its real styling
-both land. A selector containing `:`, `[`, `+` or `~` is dropped rather
-than matched loosely, since a `p[hidden]` matched as `p` restyles the whole
-document. The child combinator `>` and the universal selector `*` ARE
-supported: a `Selector` is a list of `Step`s, each carrying the compound and
-whether a `>` joins it to the one on its left, and matching right to left takes
-the parent instead of searching ancestors wherever that flag is set. `*` parses
-to an empty compound, which constrains nothing and contributes no
-specificity. And an unparseable value leaves the inherited one standing rather
-than falling back to a default the page never asked for.
-
-`assets/welcome.html` is installed at `/share/web/welcome.html` by the
-`filesystem` target and uses only the implemented subset, so it is both the
-demo page and the regression fixture: open it with `edos-web
-/share/web/welcome.html` and every styled element in it should differ visibly
-from the reader defaults.
-
-## The real site renders styled, and three small things stood between (2026-08-15)
-
-`edos-web` now fetches `<link rel=stylesheet>`, and `edos.edgl.dev` comes up in
-its own monospace face and its own link colours instead of the reader defaults.
-Fetching the sheet was the last step of three, and the other two are why doing
-it earlier would have looked like a regression:
-
-**`var()` and custom properties.** A sheet written this decade puts its palette
-in `--` properties, so a fetched sheet without them resolves most of its colour
-declarations to nothing while its `display` rules still apply. `Vars` in
-`css.rs` is the scope: an `Rc<BTreeMap>` handed down the element tree and cloned
-only by an element that declares something, so a page that sets forty properties
-once on `:root` does not copy them onto every node. Substitution happens after
-the cascade, not as each declaration is read — that is what the spec means by
-resolving at computed-value time, and it is why a `--x` written by a
-lower-specificity rule is still in scope for a declaration that reads it.
-
-**`@layer` bodies are parsed rather than skipped**, because Starlight and every
-other modern generator wrap essentially the whole sheet in one and the at-rule
-skipper was eating it. Layer *order* is not honoured, which differs from a real
-cascade only where two layers set the same property on the same element.
-
-**`:root` is the one pseudo-class implemented.** Everything else with a `:` is
-still dropped, but `:root` is where a sheet declares its palette, and in an HTML
-document it is exactly the `html` element, so it is rewritten to that tag.
-
-Two traps found on the way:
-
-- **`parse_rules` recognised an at-rule only when `@` was the very next
-  character**, so `@layer a, b; @layer a { ... }` left a space before the second
-  `@` and the whole layer was read as a selector prelude with a garbage
-  declaration block. It skips inter-rule whitespace now. Anything that looks at
-  a byte at a cursor in that loop must do the same.
-- **A local file has no origin.** `main::load` gives a file-backed document the
-  placeholder base `http://localhost/`, so its relative `href`s resolve to a URL
-  nothing answers and its external sheets silently do not load. That is why the
-  fixture carries its CSS inline, and it is the reason a page that renders styled
-  from disk proves less than the same page over HTTP.
-
-The fetch is serial, capped at `doc::MAX_SHEETS`, and runs on the thread about
-to lay the page out — the same blocking-`edos_http` problem the window already
-had, now on the load path twice over.
-
-## `@media` is answered from the window (2026-08-15)
-
-`css::media_matches` evaluates a media query list against a `Viewport`, so
-`@media` bodies are parsed when they apply and dropped when they do not, and a
-`<link media=...>` goes through the same evaluator instead of a three-keyword
-allowlist. It reads media types, `and`, `not`, `only`, comma alternatives,
-`width`/`height` in both the `min-`/`max-` and the range forms, and
-`orientation`. Two rules keep it from over-applying: anything it cannot answer
-(an unknown feature, a `vw` length, the boolean `(color)` form) is false, and a
-query whose *syntax* it cannot read is false even under `not` — otherwise
-`not (some-unreadable-thing)` would turn every print sheet into a match.
-
-**The viewport is read once, at parse time**, because a media query changes the
-cascade and the cascade runs inside `doc::parse`. `ui::Browser::navigate` hands
-it the window's content area, so following a link in a resized window uses the
-new size; resizing a window that already has a page loaded reflows the layout
-but does not re-cascade. Fixing that means keeping the DOM and the fetched
-sheets alive past `doc::parse` rather than anything about the evaluator.
-
-`assets/welcome.html` carries one query that applies and one that does not, so
-the fixture proves both directions: the `.wide` paragraph is green from a
-matching `@media screen and (width >= 20em)`, and the `p { display: none }`
-inside `@media (min-width: 100em)` leaves every paragraph standing at the
-760px window the browser opens at.
-
-## Images draw, and a local page needed an origin first (2026-08-15)
-
-`edos-web` decodes and draws `<img>`. The decode is `edos_render::image`, the
-same one `imgview` uses, sniffing the bytes rather than the URL: SVG stays a
-parsed tree (`doc::Picture::Vector`) so `view.rs` re-renders it at whatever
-column it ends up in, and BMP is resampled. Anything else — a PNG, a JPEG, a
-fetch that failed — leaves the block's `[alt]` text, so a page reads the same
-whether or not its pictures arrived.
-
-**The blocker was not the decoder, it was the base URL.** A document read from
-a path used to get `http://localhost/` as a placeholder origin, so every
-relative reference on it resolved to a URL nothing answered — which is why the
-fixture had to carry its CSS inline, and why an `<img src>` on it would have
-been dead on arrival. The base is now the file's own path under `localhost`,
-and `main::local_path` maps that host back to the filesystem, so a local page
-resolves its siblings and absolute paths like any other. One thing to know
-about it: a real HTTP server on the guest's own port 80 would be shadowed by
-the filesystem.
-
-`view::Line` carries a `LineKind` now instead of a `rule: bool`. An image line
-still holds one empty `Fragment` the width of the picture, so `link_at` finds a
-linked image with no knowledge that pictures exist.
-
-The fixture at `assets/welcome.html` shows all three paths — a linked SVG, a
-downscaled BMP wallpaper, and a PNG that renders as its alt text — which makes
-it what to open when an image stops drawing.
-
-## `Url::join` is RFC 3986 now, and a module can be tested on the host (2026-08-15)
-
-`edos_http::url::Url::join` was three `starts_with` cases and a string
-concatenation. It now implements RFC 3986 §5.2 and passes all 34 of the §5.4
-examples: `.` and `..` are resolved, climbing past the root is absorbed rather
-than an error, an interior empty segment survives while the separators either
-end does not, a fragment is stripped before anything reads the reference, and
-an empty or query-only reference keeps the base's path.
-
-Two behaviour changes fall out of the spec rather than out of taste:
-
-- **A reference naming a scheme is not a relative path.** `mailto:someone@x`
-  and `javascript:void(0)` used to be merged onto the base directory and
-  fetched as HTTP; they are now an error, and `doc.rs` drops the link. The rule
-  is positional, not a list of schemes: a colon in the *first* segment makes
-  one (RFC 3986 §4.2), so a relative reference that wants a colon has to write
-  `./notes:2026/x`.
-- **A query-only reference replaces the base's query** instead of being
-  appended to the base's directory, which is what `?page=2` on a paginated
-  index means.
-
-**These tests run on the host under `make host-tests`.** `edos_http` builds
-for `x86_64-unknown-linux-gnu` unchanged, so its `url.rs` tests need only the
-target flag; no harness and no `#[path]` module. See "`make host-tests` is the
-userspace suite" at the end of this file.
-
-`assets/welcome.html` names its SVG `../icons/edos.svg` and its self-link
-`./welcome.html`, so the fixture fails visibly if dot-segment resolution
-regresses: the mark falls back to `[the EDOS mark]`.
-
-**A resized window re-cascades the page, and only when an answer moved.**
-`Document` keeps its own bytes, its base URL and a cache of every subresource
-it fetched (misses included), so `Document::reflow` rebuilds at a new viewport
-with no network at all. What decides whether to rebuild is
-`css::MediaQueries`: `Stylesheet` records every `@media` prelude it read and
-every `<link media>` it tested, matched or not, and `differ` re-answers them at
-the new size. A page with no query, or a drag inside one breakpoint, keeps its
-blocks and only reflows its lines. `ui.rs` prints `edos-web: ~ WxH - N blocks`
-when a rebuild happens, which is the only way a headless run can tell the two
-apart.
-
-**An `em` in a media query is `doc::ROOT_PX`, which is 14, not 16.** A fixture
-threshold written as `50em` is 700px here, and the browser window opens 760
-wide, so a query meant to flip on a resize is already on the far side of itself
-before the drag starts -- which reads exactly like a reflow that did not fire.
-`filesystem/share/web/welcome.html` writes its resize pair in px for that
-reason. The rest of the sheet keeps its `em` sizes: relative type is the point
-there, and only the breakpoint needs to be a number the test can predict.
-
-**`scripts/edos-vm drag X Y TO_X TO_Y`** presses at one pixel, steps the
-pointer to another and releases, which is what resizes a guest window: the
-right border of a window listed at `X W` in `edos-vm windows` is at `X + W`,
-about 2px wide. It steps rather than jumping because the window manager resizes
-by the motion it is handed while the button is down, and a single event landing
-at the far corner is one it can miss between polls.
-
-## A page's own measure, and why width has to inherit (2026-08-15)
-
-`width` and `max-width` are honoured: they resolve to `css::Computed::measure`
-in pixels, `margin: 0 auto` sets `Computed::center`, and `view.rs` lays the
-block out in that measure and centres what is left of the column. A `<hr>`
-carries its box on `LineKind::Rule` so it stops where the column does rather
-than crossing the window.
-
-**Both fields inherit, unlike the CSS properties they come from, and that is
-the whole mechanism.** The block list is flat: the `<div>` or `<body>` that
-carries a page's measure is not a box any later stage ever sees, so a
-non-inherited `measure` would be computed for a wrapper and then thrown away,
-and the paragraphs inside it would still fill the window. Inheriting it is what
-carries the constraint down to the blocks that are laid out. Three things fall
-out of that:
-
-- **Nothing can widen a box.** A measure is min-ed with the one already in
-  force and clamped to the column, so a child asking to be wider than its
-  container is pinned to it. That is where this parts company with a real
-  browser, which would overflow -- but there is no horizontal scroll here, so
-  overflow has nowhere to go.
-- **A percentage width is of the containing block, not of the font size.**
-  `parse_length`'s `%` is em-relative, which is right for a margin and wrong for
-  a width, so `width`/`max-width` go through `parse_measure` with the parent's
-  measure as the basis, falling back to the window width at the root. Resolving
-  it during the cascade is what makes the basis available at all: the layout
-  pass has no parent to ask.
-- **`auto` on either horizontal margin centres**, not only the pair. A page
-  writing one means the pair, and a box pushed to one side by a single `auto`
-  is not something the flat block list can express anyway.
-
-`assets/welcome.html` now sets `body { max-width: 38em; margin: 0 auto }`, so a
-regression here is visible on the first screen: the column goes back to filling
-the window and the rule at the foot of the page crosses the whole of it.
-
-## A block paints its own box: background, padding, border (2026-08-15)
-
-`background-color` (and the colour token of a `background` shorthand),
-`padding` and `border` — both the shorthands and the per-edge longhands —
-compute onto `css::Computed` as `background`, `padding: Sides<Option<u32>>` and
-`borders: Sides<Border>`, and `view.rs` emits a `Decor` per block into
-`Layout::decor`, painted before any line.
-
-**None of the three inherits**, unlike `measure`, and the difference is worth
-knowing because it caps what this can do. A measure inherits so a wrapper's
-column reaches paragraphs the flat block list dropped the wrapper for; a
-background cannot use that trick, because a background inherited onto the
-children would paint each of them separately rather than painting the wrapper
-once. So a `<div class="card">` wrapping `<p>` elements paints nothing: the div
-opens a block that is flushed empty, and the paragraphs carry their own boxes.
-A block that is *itself* styled — `pre`, `blockquote`, a `<p class="...">`, a
-heading — is what works. Making the wrapper case work means a box tree, which
-is stage 3, not another inherited field.
-
-**A border needs a style, not just a width.** `border-width: 6px` alone paints
-nothing, which is CSS (`border-style` starts at `none`); `Border::on` tracks
-that separately from the thickness, and `Border::px()` is the only thing layout
-and drawing look at. A style written without a width is `medium`, 3px. A border
-with no colour is `currentColor`, kept as `None` through the cascade and
-resolved in `view::plan` against the colour the block ended up with — `css.rs`
-has no access to the theme and must not guess one.
-
-**The measure bounds the border box**, i.e. `box-sizing: border-box`, not the
-CSS default. A padded box sized to the column would otherwise run past the edge
-it was told to stop at, and there is no horizontal scroll to reveal it.
-
-**`view::fill` clips to the top of the page area now, not just to the buffer.**
-It always should have — a `<hr>` or an underline scrolled under the toolbar was
-painted over the chrome — but a one-pixel rule made it invisible where a
-full-block background makes it a solid bar across the toolbar. The `x_offset`
-parameter it carried went away in the same change: the rule case passed `x` in
-it and every other caller passed 0.
-
-`assets/welcome.html` carries a `.card` paragraph (background, padding on all
-four edges, a 1px border) and a `blockquote` (a 4px left bar with
-`padding-left`), so a regression shows on the first screen.
-
-## `text-align` is a shift applied after the line is measured (2026-08-15)
-
-`css::Align` computes off `text-align` and inherits the way the property does,
-which costs nothing: `Computed::inherit` keeps every field it does not name, and
-alignment is one of the properties that should be kept. `view.rs` wraps a line
-flush left as it always did, then `push_aligned` moves every fragment on it by
-one offset — `align_offset(align, avail, used)`. Measuring first and shifting
-after is what keeps the hit test honest: `Layout::link_at` compares against the
-fragment rectangles, so a link inside a centred paragraph is clickable at the
-place it is drawn without alignment appearing anywhere in the hit test.
-
-`justify` is set flush left rather than dropped. Dropping it would leave an
-inherited `center` standing on a paragraph the page explicitly justified, which
-is worse than the ragged right edge.
-
-An image takes the alignment of the block it sits in, since `<p
-style="text-align:center"><img></p>` is how a page centres a figure far more
-often than margins are. That is the only place a `text-align` value moves
-something that is not text.
-
-**`hr` ignores it**, deliberately: a rule spans the box it was laid out in, and
-CSS aligns a rule with the `margin` pair, which this does not compute for a
-`<hr>`.
-
-**Edit the fixture at `assets/welcome.html`, never at
-`filesystem/share/web/welcome.html`.** `filesystem/` is gitignored, so `git add`
-refuses the installed copy and a change made only there is invisible to the
-commit while being perfectly visible in the guest. The install is `cp -u`
-(GNUmakefile), so the edited copy is newer than its source and `make filesystem`
-will not restore it either — the two files simply disagree until someone looks.
-
-## `line-height` inherits as a factor, not as the length it resolved to (2026-08-15)
-
-`css::LineHeight` is three-valued — `Normal`, `Scale(f32)`, `Px(u32)` — rather
-than an `Option<u32>`, and the distinction is the whole point. A unitless
-`line-height: 1.5` inherits as the number and is resolved against *each*
-element's own font size (CSS 2.1 §10.8.1), so a `h1 { font-size: 2em }` inside a
-`body { line-height: 1.5 }` is led at 1.5 × its own size. Resolve the factor to
-pixels at the parent and every heading downtree gets the body's leading, which
-reads as headings that touch the paragraph under them. A length or a percentage
-does resolve once, at the element that wrote it, and inherits as that length —
-that asymmetry is in the spec, not an approximation.
-
-`view.rs` keeps the resulting leading per word (`Word::height`), because a span
-may carry its own `line-height` and the line takes the tallest. The extra space
-is split above and below the text: `Line::lead` is `(height - tallest face)/2`
-and the draw pass offsets both the glyphs and a link's underline by it.
-Half-leading is what makes an open `line-height` look like breathing room rather
-than like text stuck to the top of an over-tall box.
-
-`line-height: 0` is refused as a factor (it would stack every line on the one
-above) while `0px` clamps to a pixel, and anything with a `calc()` is refused
-like every other value this subset cannot compute.
-
-## `text-transform` recases at word boundaries, and `capitalize` has to know which words are real (2026-08-15)
-
-`css::Transform` is `None`/`Upper`/`Lower`/`Capitalize`, inherited like the
-property, and `Transform::apply` does the recasing so `view.rs` and any later
-caller share one definition. Two details are not the obvious implementation:
-
-- **A boundary is any non-alphanumeric except an apostrophe.** Uppercasing only
-  the first character gives `read-only`, where a browser gives `Read-Only`;
-  treating the apostrophe as a boundary gives `It'S`. Both are visible on the
-  first screen of the fixture, which is why they are worth the four lines.
-- **`capitalize` must skip a run glued *mid-word* to the one before it, and
-  only that.** `view::words` splits runs into words and marks the first word of
-  a run `glued` when no whitespace separates it from the previous run — but that
-  flag is also true for the first word of the whole block, where there is
-  nothing to be glued to. Gating on `glued` alone leaves a paragraph's opening
-  word lowercase; the gate is `glued && !words.is_empty()`. The fixture's
-  `it's cl<code>aimed</code>` is the case that distinguishes them.
-
-`text-indent` moves the first line only: `Plan::first_indent` seeds `flow`'s pen,
-and the wrap resets it to zero for every line after, so nothing else in the
-greedy wrapper changes. It is included in the `used` width a line is aligned
-with, which is what keeps a centred or right-flush indented line inside its box.
-A negative indent resolves to zero — `parse_length` already clamps — because at
-the page edge there is no margin for a hanging line to hang over, and an indent
-wider than the column stops a pixel short of it so a line always has somewhere
-to start.
-
-## `white-space`: one line breaker, and what `<pre>` actually is
-
-`white-space` answers two separate questions -- does the source's spacing
-survive, and may a line be broken -- so `css::WhiteSpace` exposes them as
-`keeps_spaces`, `keeps_newlines` and `wraps` rather than as a mode the layout
-switches on. `<pre>` is not a layout path: it is the UA default
-`white-space: pre`, applied in `doc.rs` after the cascade, so an author rule on
-the same element still wins and `pre-wrap`/`pre-line`/`nowrap` work on any
-element.
-
-`view.rs` had a second layout path for `pre` that set each source line as one
-fragment. It is gone, and with it the reason a link or a `<span>` inside a
-`<pre>` lost its styling: there was nowhere for a run to be seen. `words` now
-counts separators instead of discarding them -- each word carries how many
-spaces and how many breaks stand before it -- and `flow` is the only breaker.
-
-Two things fall out of that and are worth knowing before touching it:
-
-- **A surviving newline is a break, everywhere.** A collapsing box turns its
-  own newlines into spaces during parsing, so any newline still present when
-  the breaker runs came from `<br>` or from a box that keeps them. That is what
-  finally made `<br>` a line break; it had been collapsed to a space since the
-  program was written, because it was pushed through the same text path as
-  document text.
-- **A preserved block cannot be edge-trimmed like a collapsing one.** The first
-  attempt reused `trim_edges` and the leading indentation of every `pre` line
-  vanished -- the block's first run starts with exactly the spaces that are the
-  point. `trim_preserved` drops only what HTML itself ignores: the newline
-  after the start tag, and the trailing whitespace that is the closing tag's
-  indentation.
-
-A tab is set as a fixed four spaces. A real tab stop is measured from the start
-of the line, and a word that carries its own leading gap has no way to see one.
-
-## `word-break`/`overflow-wrap`: one loop, three answers (2026-08-15)
-
-The line breaker in `view.rs::flow` places a word whole unless it does not fit,
-and what happens then is the whole of these two properties. `css::Wrap` is the
-pair resolved into one value — `Word` (never cut), `Overflow`
-(`overflow-wrap: break-word`, cut only when an empty line would not hold the
-word either), `Anywhere` (`word-break: break-all`, cut wherever the line ends).
-`Wrap::breaks(alone)` is the whole decision, and `alone` is `width > avail`.
-
-They are kept as two independent booleans on `Computed` rather than one enum
-the parser writes, because the properties really are independent: a page may set
-`overflow-wrap: break-word` on `body` and `word-break: normal` on one element,
-and a single field would make the second declaration silently undo the first.
-`Computed::wrap()` resolves them at the point of use, `word-break` winning.
-
-The placement is a loop over the word rather than a single decision, and each
-pass either shortens the text or empties the line, so it always terminates.
-`fit_prefix` finds the longest proper prefix that fits by scanning one character
-at a time and stopping at the first overflow — a longer prefix of the same
-string is never narrower, whatever the face, so there is nothing to bisect.
-
-**A tail carries no gap.** The remainder of a cut word starts the next line with
-`gap = 0` however the source spaced the word itself, which also matches what the
-existing wrap did: a word pushed to a fresh line drops the space before it.
-
-The fixture needs a word that genuinely exceeds the column or the item cannot be
-verified at all. The first attempt used a 79-character URL, which measures about
-526px against the fixture's 38em (~608px) column, so the `break-word` paragraph
-rendered identically to the default one and looked like a bug in the cut. Check
-the measure before reading anything into a fixture that does not break.
-
-## `list-style-type`: the marker is a property, not an element (2026-08-15)
-
-`<ul>` and `<ol>` do not decide what an item wears; they only supply the value
-the UA stylesheet would, and `list-style-type` overrides it. So `doc::Marker`
-stopped being `Bullet | Number(n)` — a shape in which a `ul` could never be
-numbered — and became the resolved `css::ListStyle` plus the item's position.
-
-Two consequences fall out of that and both are load-bearing:
-
-- **Every list counts, ordered or not.** The counter used to advance only inside
-  an `<ol>`, so `ul { list-style-type: lower-roman }` would have numbered every
-  item `i.`. The position is a property of the item, not of the element that
-  opened the list.
-- **The nesting bullet is a UA rule, not a renderer default.** An unordered list
-  with nothing said about it wears disc, then circle, then square by depth (HTML
-  Standard §15.3.10). That is `depth % 3` in `doc.rs::marker`, and it is only
-  reached when the cascade left `list_style` at `None`.
-
-`ListStyle::marker` writes the counter in the style's alphabet: bijective
-base-26 for `lower-alpha` (a…z, aa), Roman for `lower-roman`. A counter outside
-a style's range is written in decimal instead, which is what CSS Counter
-Styles §5 asks for and what a Roman numeral past 3999 gets. `ascii_marker` is
-the same thing for the `-d` text dump, where the bullets are spelled `*`, `o`
-and `-` so the output stays ASCII.
-
-`list-style: none` keeps the item at its indent and drops the marker, rather
-than dropping the indent too — that is what a page styling a navigation list
-means by it, and `view.rs` gets there by turning the empty marker string into
-no marker fragment at all.
-
-## `margin-right` was silently dropped, and the order it is applied in is the bug behind the bug (2026-08-15)
-
-`css.rs` matched `"margin-right"` only when the value was `auto`, and the
-`margin` shorthand read three of its four sides. A page writing
-`margin-right: 4em`, or `margin: 0 2em`, got a box that ran to the full column
-on its right with nothing to say it had been ignored — the failure is invisible
-because a block filling its column is also what a block with no margin looks
-like. `Computed::margin_right` now holds the length, and both horizontal
-margins reset on `inherit()`.
-
-The layout half took two tries and the first one *looked* right in the
-unit tests. Subtracting the right margin from the column before the measure and
-the centring is wrong: `center` inherits here (the block list is flat, so a
-centred wrapper is not a box any later stage sees), and centring a box that has
-already given its margin back slides it **left** of the very neighbours it
-shares a column with. Measured on the fixture: the box's left edge landed 98 px
-left of every paragraph around it, which is the opposite of what the property
-asks for.
-
-The order that is right: the measure and `center` settle the container, and
-only then does `margin-right` come off that container's right edge. `view.rs`
-computes `container` first, centres with it, and takes `plan.trail` off it last.
-Every case with no right margin is arithmetically unchanged, which is why the
-existing tests could not have caught the first version — the fixture and a
-screenshot could, and did.
-
-## `letter-spacing`/`word-spacing`: the tracking belongs in the blitter (2026-08-15)
-
-The obvious implementation — draw each character at a position of its own,
-advancing by the character's width plus the tracking — is wrong for a
-proportional face. `edos_render`'s blitter carries an `f32` pen and adds each
-glyph's fractional advance to it; drawing character by character rounds the pen
-to an integer at every step, so a run drifts from `font::measure`'s width by up
-to a pixel per character. That width is what positions an underline and what
-`Layout::link_at` hit-tests, so a tracked link would have been underlined short
-and clickable in the wrong place. `text::draw_tracked` adds the tracking to the
-same `f32` pen instead, and `text::width_tracked` is `width + letter * chars`,
-which is exactly what that pen ends at.
-
-Two smaller things worth knowing:
-
-- **These are the only lengths in `css.rs` that keep a negative sign.**
-  `parse_length` floors negatives at zero, which is right for a margin or a
-  padding in a flat block list that has nowhere to put them, and wrong for a
-  page tightening a display heading by `-0.02em`. `parse_signed_length` is the
-  shared core; `parse_length` clamps its result, and `parse_spacing` also maps
-  `normal` to zero. A side effect of the refactor: a negative length with an
-  unrecognised unit is now refused rather than resolving to zero.
-- **The tracking reaches the space between two words, not just the letters
-  inside them.** A space is a character, so a tracked line opens up between its
-  words as well; `word-spacing` is added on top of that. Both ride on `Word`
-  rather than on `Style`, because `Style` is the face the whole shell shares and
-  a `<span>` can change either partway through a line.
-
-The fixture's `.tracked` and `.tight` paragraphs show both directions, and the
-tight one is the reason to keep it: a page pulling its type in a pixel is
-invisible in a unit test and obvious beside its neighbours in a screenshot.
-
-## `text-decoration`: a UA line has to be told apart from an inherited one (2026-08-15)
-
-The property became a `Decorations` set — `underline`, `line_through`,
-`overline` — rather than the single bool it was, because `text-decoration:
-line-through overline` names two lines in one declaration and the shorthand also
-carries a colour, a style and a thickness that are ignored without taking the
-line with them.
-
-The part that is not obvious is where `<del>`, `<s>`, `<u>` and `<ins>` get
-their line from. `Computed.decoration` inherits, so by the time `doc.rs` reaches
-a `<del>` the field already holds whatever an ancestor set, and there is no
-field saying who set it. `del { text-decoration: none }` therefore cannot be
-honoured by looking at the value alone. `ua_decoration` compares the cascaded
-value against the parent's: unchanged means the cascade said nothing about this
-element, which is the only case where the UA line is added, and it is *merged*
-into the inherited set rather than replacing it, since a decoration propagates
-to a subtree.
-
-Author rules still replace rather than merge. Real CSS propagation cannot be
-cancelled by a descendant — `text-decoration: none` inside an underlined block
-leaves the underline standing — but a reader that honours that has no way to
-suppress the default underline on a link inside a decorated ancestor, and
-suppressing it is the case pages actually write.
-
-A word is a `Fragment` of its own, so a rule drawn per fragment comes out
-dashed. The draw loop extends each rule to the next fragment's `x` when that
-fragment is decorated the same way, in the same colour and at the same size,
-which is what puts the line through the spaces as well. The underline on a
-multi-word link was dashed the same way before this and is now continuous too.
-
-The three rules are positioned off the same anchor the underline always used,
-three pixels above the text box's bottom edge: the strike sits `0.3em` above
-that, which lands through the lowercase, and the overline at the top of the box.
-Scaling the strike with `style.px` rather than with the line box matters because
-`line-height` moves the box and not the letters.
-
-The fixture's `.ruled` paragraph and the `<del>`/`<ins>`/`.plain` line show all
-four outcomes, including the link the page asked to leave unruled.
-
-## `vertical-align`: the fragments were never on a baseline to begin with (2026-08-15)
-
-`vertical-align: super`/`sub` and the UA shift `<sup>`/`<sub>` carry look like
-one property, and adding them exposed that `view.rs` had no baseline at all.
-Every fragment on a line was drawn at `y + line.lead`, its *top* edge, so a run
-set smaller than its neighbours -- which a superscript is, since the UA sets it
-at 5/6 -- hung from the line's ceiling instead of standing on its floor. A
-shift applied on top of that would have moved the wrong thing.
-
-So `Line` now carries `natural`, the tallest face on the line, and a fragment is
-drawn at `lead + (natural - own) - shift`. For a line whose runs are all one
-size the correction is zero and nothing moves, which is what makes the change
-safe; it is only visible where a line mixes sizes, and there it is a fix in its
-own right.
-
-Two things follow from the shift rather than from the baseline:
-
-- **The line has to grow, or a superscript prints into the line above.** The
-  rise and the drop are taken from the fragments in `push_line`, the height
-  becomes at least `natural + rise + drop`, and `lead` is at least the rise. A
-  page that also sets `line-height` keeps whichever is larger.
-- **The rules follow the run.** `text-decoration` is drawn from the fragment's
-  own top and its own face height, not from the line's, so an underlined
-  footnote marker is underlined where it now sits. Two neighbouring fragments
-  only share one continuous rule when their shifts match as well as their size
-  and colour.
-
-The rise is a fraction of the size the run *would* have been set at, not of the
-size it ends up at: `Script::shift` is handed the block's base px, before
-`Script::px` shrinks it. Measuring it against the shrunk size gives a
-superscript that barely leaves the baseline.
-
-`vertical-align` inherits here, unlike in CSS. The reason is the one `measure`
-already gives: the inline model is flat, so a `<sup>` is not a box any later
-stage sees and the `<b>` inside it has no other way to learn it is a script.
-The keywords that align against the line box rather than a baseline -- `top`,
-`middle`, `bottom`, `text-top`, `text-bottom` -- parse to a zero shift on
-purpose: there is no line box to align against, and leaving the run on the
-baseline is better than putting it somewhere arbitrary.
-
-## `make host-tests` is the userspace suite (2026-08-15)
-
-`make test` boots a guest and runs the in-kernel suite; nothing ran the unit
-tests in `programs/` at all. There are 101 of them across four crates — URL
-resolution (`edos_http/src/url.rs`), the CSS cascade
-(`edos-web/src/css.rs`), the SSH wire format, key exchange and auth
-(`sshd/src/*.rs`), and `grab`'s merge — and every one is decidable without a
-kernel. `scripts/host-tests` runs them all in about a second.
-
-Two mechanisms, because `programs/` defaults to `x86_64-unknown-edos`:
-
-- **`cargo +nightly test --target x86_64-unknown-linux-gnu -p <crate>`** for a
-  crate whose whole dependency tree is portable: `edos_http`, `grab`, `sshd`.
-  This works today and is the reason the earlier claim that "`sshd`'s test
-  modules are never run by a plain `cargo test`" needed only the target flag,
-  not a port.
-- **`rustc +nightly --edition 2024 --test <file>`** for a single pure-`std`
-  module inside a crate that cannot build for the host. `edos-web` links
-  `edos_render` and `edos_lib`, which call `std::os::edos` and `File::ioctl`,
-  so the crate has no host build; `css.rs` on its own has no such dependency.
-
-**The trap that cost real coverage.** `rustc -o` leaves the previous binary in
-place when compilation fails. Running the `rustc` line and then the binary by
-hand — which is how `css.rs`'s tests were run for a dozen iterations — reports
-a green suite from stale code. It hid a `vertical_align_resolves_against_the_font`
-test that never compiled: it called the `element(tag, classes)` helper with
-`&[("class", class)]`, and the last several "44 host css tests passed" claims
-were a binary built before that test was written. `scripts/host-tests` deletes
-the binary first and runs under `set -e`, which is most of why it exists.
-
-Adding a test module to a program means adding its crate to the `-p` list in
-that script, or its file to `STANDALONE` if the crate cannot build for the
-host. Nothing discovers them automatically.
-
-## Attribute selectors: the tokenizer, not the matcher, was the work (2026-08-15)
-
-`css.rs` matches `[attr]`, `[attr=v]`, `~=`, `|=`, `^=`, `$=`, `*=` and the
-`i`/`s` flag, and `Element` carries every attribute (names lower-cased) from
-`doc.rs::attrs` so a selector has something to ask. An attribute test counts at
-the class level of specificity, per CSS Selectors 4 §17.
-
-The part that needed care is that a selector could no longer be split with
-`split_whitespace` after `text.replace('>', " > ")`. A quoted attribute value is
-allowed to hold a space, a `>`, or a comma, so `p[title="a > b"]` is one
-compound and `a[href="x,y"]` is one selector. `tokenize_selector` walks the
-string tracking bracket depth and the open quote, and only splits at depth zero;
-`parse_selectors` still splits the prelude on `,` before that, which is the one
-remaining place a comma inside a quoted value would be read wrong. No page in
-the fixture set does that, and fixing it means moving the comma split into the
-same tokenizer.
-
-Two rules that follow from CSS rather than from taste, both covered by tests:
-
-- **`~=` matches whole words.** `[class~="lead"]` must not match `class="leader"`,
-  and a value that itself contains whitespace can never match, since no
-  whitespace-separated word contains any.
-- **`^=`, `$=` and `*=` never match an empty value.** `[href^=""]` selects
-  nothing; the naive `starts_with("")` would select every element carrying the
-  attribute.
-
-The `i` flag folds the *value*, not the name: names are already lower-cased on
-both sides because HTML attribute names are case-insensitive, while
-`[type=TEXT]` deliberately does not match `type="text"`.
-
-## `:nth-child` is a question about the document, not about the render (2026-08-15)
-
-`css.rs` matches the structural pseudo-classes — `:nth-child`,
-`:nth-last-child`, `:nth-of-type`, `:nth-last-of-type` with the full `An+B`
-microsyntax, plus `:first-child`, `:last-child`, `:only-child` and the
-`-of-type` forms. `Element` carries a `Siblings`: 1-based index among its
-element siblings, the count of them, and the same pair over the siblings
-sharing its tag, filled in by `doc::sibling_positions`.
-
-Three things that decide whether the numbering is right:
-
-- **Count elements the walk skips.** `doc.rs` returns early from `<style>`,
-  `<head>`, `<script>` and `<svg>`, and `display: none` pops the element back
-  off the stack. None of that may change a sibling's index: a stylesheet
-  writing `li:nth-child(2)` is counting the document's children, and a
-  `<style>` sitting among them still occupies a position. `sibling_positions`
-  therefore runs over the raw child list before any of those decisions, and
-  hands each child its position whether or not the walk goes on to render it.
-- **Text nodes count for nothing but hold their place.** The function returns
-  one entry per child so a caller can `zip` children and positions; a text or
-  comment child gets `Siblings::default()`, which no element ever reads.
-- **`Siblings::default()` is an only child, not a zero.** The root element is
-  reached with a default, and `:first-child`/`:only-child` must both match it.
-  A derived `Default` would have given index 0, which matches nothing.
-
-**The parenthesis had to become opaque to `tokenize_selector`.** It splits a
-selector into compounds at whitespace outside brackets, so `li:nth-child(2n + 1)`
-split into three tokens and the rule was dropped. `(`/`)` now raise and lower
-the same depth counter `[`/`]` do. An unknown pseudo-class still drops the whole
-selector rather than matching without it, and `::before` is refused at the
-second colon, since a pseudo-element is not a test on the element at all.
-
-## Sibling combinators: two axes, and only one of them moves (2026-08-15)
-
-`+` and `~` are the first combinators that do not walk *up*. `Selector::matches`
-now carries two cursors instead of one: the ancestors still open above the
-subject, and the siblings standing before it. A sibling combinator advances the
-second and leaves the first alone, because siblings share every ancestor, so
-`div > h2 ~ p` searches the *parent's* row once the `>` step has landed on the
-parent. Landing on an ancestor resets the sibling cursor to that ancestor's own
-row; nothing else touches it.
-
-**The row is shared, not accumulated per child.** `Element` carries
-`siblings: Rc<Vec<Element>>` — every element sibling, itself included, in
-document order — and finds its own preceding ones with `position.index`, which
-`:nth-child` already needed. `doc::walk_children` builds that row once per
-parent and hands the same `Rc` to each child, so a list of 500 items costs one
-row rather than 500 growing prefixes. The entries inside a row carry an empty
-row of their own: a chain like `p + p + p` keeps walking the subject's row and
-never asks a sibling for its siblings, so there is no reason to pay for the
-recursion.
-
-**A `~` inside `[...]` is not a combinator.** The tokenizer already tracked
-bracket depth for attribute selectors, so `[data-note~="second"] + p` splits
-correctly; it is only the top-level `+`/`~`/`>` that become tokens. A dangling
-or doubled one still drops the whole selector.
-
-**The trap that cost twenty minutes: this fixture cannot show `font-style`.**
-`welcome.html` sets `body { color: var(--ink) }`, and `view.rs` substitutes the
-theme's accent colour for italic *only* where the run has no colour of its own —
-the theme has no italic face. Every element in that page inherits a colour, so
-italic renders identically to upright and a screenshot proves nothing about it.
-The same is true of the `:nth-last-child(2)` rule already in the fixture. Use a
-weight, a colour or a box to demonstrate a selector there; check the cascade
-itself with a host test.
-
-## `:not()` fails open, and a selector list was never split safely (2026-08-15)
-
-`:not()`, `:is()` and `:where()` are one test in `css.rs` — does any argument
-compound match — with `:not()` inverting it. Two things about them are worth
-keeping.
-
-**An unread `:not()` matches more, not less.** Everywhere else in this parser,
-refusing to read a construct is the conservative move: an unknown pseudo-class
-drops its rule and nothing gets styled. Negation reverses that. Drop the
-argument from `p:not(.lead)` and the rule applies to every `p` on the page
-rather than to none, so "parse what you can and ignore the rest" would restyle
-the document. `parse_compound` therefore rejects anything it cannot represent
-inside an argument — whitespace and `>` now join `+`, `~` and the stray
-parens/brackets it already refused — and the whole selector is dropped. Before
-that, `:not(.a > .b)` parsed as two classes, one of them named `a > `, which no
-element can carry: the negation was then always true and the rule applied
-everywhere.
-
-**Specificity is the heaviest argument, not one class each.** CSS Selectors 4
-§17: `:where()` weighs zero, `:not()`/`:is()` weigh their largest argument.
-That could not be expressed while `Compound::specificity` counted
-`pseudos.len()` at the class level, so each `Pseudo` now reports its own
-weight and the compound sums them. The structural family still answers
-`(0, 1, 0)`, which is what that line meant before.
-
-**`parse_selectors` split the prelude on a plain `split(',')`.** That was
-already wrong for `p[title="a,b"], p` — the attribute value ended the selector
-and both halves were dropped — and `:is(.x, .y)` made it visible. The fix is
-`split_selector_list`, which splits on commas outside `(`, `[` and quotes; it
-serves both the top-level prelude and the argument of a logical pseudo-class.
-The pseudo-class argument reader had the matching bug: it stopped at the first
-`)`, so `:not(:nth-child(2))` was truncated. It now tracks nesting and quotes.
-
-The parser recurses through an argument, so `MAX_SELECTOR_NESTING` (4) bounds
-it; a page nesting `:not(:is(:not(…)))` deeper than that is not describing
-anything.
-
-## `display` names the box; the element only decides where it says nothing
-
-`css.rs` read `display` as one question — is it `none`? — which meant a
-`<span style="display:block">` stayed inline and a `<li>` in a nav bar styled
-`display: inline` still opened a block and drew a bullet. `Computed` now
-carries a `display: Option<Display>` beside `hidden`, and `doc.rs` picks the
-box from it:
-
-```rust
-let block = match self.computed.display {
-    Some(Display::Inline) => None,
-    Some(Display::Block | Display::ListItem) => {
-        Some(block_kind(&tag).unwrap_or(BlockKind::Paragraph))
-    }
-    None => block_kind(&tag),
-};
-```
-
-Three things that are easy to get wrong here:
-
-- **`hidden` stays its own field.** `visibility: hidden` reaches the same
-  outcome by another property, so folding "not rendered" into a `Display::None`
-  variant would have made the walk ask two questions instead of one.
-- **`display` must not inherit.** It is reset in `Computed::inherit`, next to
-  the margins. Most of `Computed` inherits deliberately — `shift` does, even
-  though the CSS property does not — so a new non-inherited property that skips
-  that reset silently blocks every descendant of the first `display: block`.
-- **The marker belongs to `list-item`, not to `<li>`.** Browsers drop the
-  bullet for `li { display: block }`, which is why that idiom appears in nav
-  bars at all. The marker is now drawn when the computed display *is*
-  `list-item`, or when the page said nothing at all and the tag is `<li>`, and
-  `marker()` already handled an empty list stack, so `display: list-item` on a
-  `<span>` outside any list gets a disc at depth 0.
-
-An unrecognised keyword leaves the declaration invalid rather than guessing a
-box, and a two-keyword value (`inline flow-root`) is answered by the first
-keyword that names something: css-display-3 §2 puts the outer type first in
-every ordering it allows. `contents` maps to `Inline` and that is exact, not an
-approximation — it asks for the box to be dropped and the children kept, and an
-inline box in a flat inline model opens nothing.
-
-## A declared height needs its own length parser (2026-08-15)
-
-`height`, `min-height` and `max-height` size a block's border box in
-`edos-web`, applied in `view::block_height` once the content, padding and
-bottom border have been advanced over — so the same number feeds the `Decor`
-the block paints and the `y` the next block starts at, and the two cannot
-disagree. Content taller than the box overflows and is still drawn: nothing in
-this renderer clips, so `overflow: visible` is the only honest answer.
-
-The trap is the percentage. `parse_length` reads `50%` as half the element's
-em, which is wrong for every property but deliberately useful for the ones it
-was written for — a percentage margin or padding is of the containing block's
-*width*, and the em is the closest thing a flat block list has to it. A
-percentage height is of the containing block's *height*, which a flowed column
-never has, and css-sizing-3 §5.1 says that case behaves as `auto`. Routing the
-three height properties through `parse_length` therefore turns
-`min-height: 25%` into a silent 3px floor rather than into nothing.
-`Computed::absolute` is the parser that refuses a percentage outright, and any
-future property whose percentage basis this layout does not have wants it too.
-
-The clamp order is the other half: css-sizing-3 §5.4 applies `max-height`
-first and `min-height` over it, so a box given both keeps the floor. Writing
-them the other way round reads identically until a page sets both.
-
-## A chained `.lock()` acquires the second lock inside the first (2026-08-18)
-
-`current_thread_info()` returns an `Arc<IrqSpinlock<UserThreadInfo>>`, and the
-fd table inside it is an `Arc<BlockingMutex<FileDescriptorTable>>`. Four call
-sites reached the second through the first in one expression:
-
-```rust
-let read_fd = info.lock().fd_table.lock().allocate_fd(...);
-```
-
-The `IrqSpinlock` guard is a temporary, so it lives to the end of the statement,
-and `BlockingMutex::lock` runs inside it with interrupts disabled. Uncontended
-that is invisible — `try_acquire` succeeds and nothing parks. Contended, the
-thread parks with interrupts off, which is what the interrupt/park discipline
-forbids and what `mutex.rs`'s debug assertion catches:
-`BlockingMutex::lock contended with interrupts disabled`, from `sys_pipe`, on
-the second `balancebench wake` of a boot.
-
-The fix is one `let`, which is where the guard's life ends:
-
-```rust
-let fd_table = info.lock().fd_table.clone();
-let read_fd = fd_table.lock().allocate_fd(...);
-```
-
-`sys_dup` was already written this way and was the model. `sys_pipe`,
-`sys_openpty`, `sys_fstat` and the last-thread fd drain in `Thread::exit` were
-not. Post-mortem in `doc/bugs/2026-08-18-fd-table-locked-with-interrupts-off.md`.
-
-**The general shape:** method chaining hides lock nesting completely, and the
-nesting it hides is invisible to the lock-order tracker as well, because an
-`IrqSpinlock` carries no rank. Take the inner `Arc` out of the guard before
-locking it.
-
-## Placement: the poke and the steal were counting the queue, not the work (2026-08-18)
-
-Both halves of work-stealing thresholded on the runqueue's length and ignored
-the thread running on the CPU. `poke_idle_cpu` returned early on `queued() < 2`
-and `try_steal` skipped a victim with `total_len() < 2`, so a CPU running one
-thread with a second queued neither asked for help nor could be helped: a CPU
-that *was* poked found it ineligible and went back to a halt of up to 100 ms,
-which outlasts the burst being measured.
-
-The tell was in `balancebench`'s own report and had been there all along. With
-`solo` at 4.4 ms the slowest worker's own loop read 8.3 ms — the worker was not
-waiting to be placed, it was running at half speed for the whole lump because it
-shared a CPU while two others sat halted. A placement-latency problem would show
-the opposite: a long wall over a solo-length loop.
-
-Both rules count `load` now (queue plus the thread running), which is the unit
-commit 3128ad1 made the scheduler's own. `tick_finish` also pokes after
-re-enqueuing a preempted thread, since a preemption is an enqueue like any
-other. Wake fanout 2.05 → 1.19 and sleep fanout 2.13 → 1.20 on an 8-CPU quiet
-host, with the switch path and the idle switch count unchanged. A third
-candidate, a poke from `spawn_thread`, was measured in and out and buys nothing:
-it can only fire when every CPU has work, and then there is no halted CPU to
-claim. Full tables in `doc/SCHED-ROADMAP.md`.
-
-## One orphaned guest wedged every storage gate, and nothing could see it (2026-08-19)
-
-`make storage-check` and `make recovery-check` both died in the first
-`edos-vm start`, with QEMU refusing to set up the `tcp:127.0.0.1:2323-:23`
-forward and a Python traceback on top of it. Neither is a filesystem or driver
-failure: a QEMU from an earlier session was still up, holding the forward, the
-QMP socket and the qcow2 write lock.
-
-What made it unrecoverable rather than merely annoying is the order inside
-`cmd_start`. It checks `running()` first, then unlinks `SOCK` and `PIDFILE`,
-then launches. A launch that fails *after* the unlink — the forward already
-taken, a disk QEMU refuses — leaves the previous guest with no pidfile, and
-`running()` read only the pidfile. From that point the guest is invisible:
-`status` says "not running", `stop` says "not running", and every `start`
-re-runs the same failure. One aborted run poisons the host until somebody
-reads a QEMU command line out of `ps`.
-
-`running()` now falls back to scanning `/proc/*/cmdline` for a
-`qemu-system-x86_64` carrying this RUNDIR's `-pidfile` path, which no other
-process on the machine passes, so an orphan is found and `stop` can kill it.
-**What actually failed `fs-regression --fat32`, twice, was neither of those.**
-`Qmp.__init__` did `json.loads(self.io.readline())`, and a QEMU that is on its
-way out can accept the connect and then send nothing. `readline()` returns
-`""`, `json.loads` raises `JSONDecodeError` — which is *not* an `OSError`, so
-it walked straight through `cmd_stop`'s `except OSError` and out of the
-process, failing the harness with a traceback that named JSON rather than the
-dead guest. `os.kill(pid, 15)` on a pid that exited in the same window is the
-second half of the same shape: `ProcessLookupError`, uncaught. `Qmp` now
-raises `ConnectionResetError` on EOF so every caller's existing "the guest is
-gone" handler sees it, and the `SIGTERM` tolerates an already-dead pid. The
-fat32 phase passes.
-
-**A `SIGKILL` escalation in `cmd_stop` was tried and taken back out.** Every
-harness calls `vm("stop")` under `check=True`, so turning "the guest is taking
-longer than five seconds to die" into a raised `SystemExit` failed
-`fs-regression --fat32` outright where the old code merely printed "stopped"
-and carried on. Whatever kept `running()` true past the kill was transient and
-harmless; the orphan the fix exists for is reachable through `SIGTERM`. Do not
-re-add it without first showing a guest that survives one.
-
-The harnesses retire the guest before starting one, through a new
-`vmdrive.start()` that the five `vm("start", ...)` sites now go through
-(`guest-check`, `ssh-check`, `recovery-check`, `orphan-check`, and `boot()`
-itself for `fs-regression` and `fsbench-run`). This is the rule the
-`sata-disk.img` recipe already follows and states the reason for at
-`GNUmakefile:481`: a running guest holds the qcow2 write lock, so retire it
-rather than explain the failure afterwards.
-
-**Ruled out:** this is not a regression from NVMe Phase 3 (b6dc2c10). The
-failure is in the host script before QEMU has executed a single guest
-instruction, and it reproduces with any disk argument.
-
-## NVMe Phase 3, reviewed: a failed read published pool bytes (2026-08-19)
-
-The Phase 3 review found two things worth fixing before namespaces register
-with `block_io`, and both are now fixed.
-
-**A failed read copied recycled DMA-pool memory into the caller's buffer.**
-`complete_command` (`kernel/src/drivers/nvme/mod.rs`) ran the bounce copy-back
-inside the `PENDING -> COMPLETED` arm, *before* the CQE status was turned into
-a result. The bounce comes from `dma().allocate_sized_uninit`, which by its own
-contract hands back a pooled page still holding whatever its frames last did —
-the same bucket the e1000e rings and the AHCI bounce pages draw from. On a
-media error, an out-of-range LBA or a controller reset the device writes
-nothing, so the copy published unrelated kernel and device memory into the
-caller's buffer. Once namespaces register that buffer is a page-cache page,
-reachable from userspace. The copy is now gated on `result.is_ok()`.
-
-**A read above 2 MiB allocated megabytes of contiguous DMA only to fail.**
-`MAX_SECTORS_PER_COMMAND` was 65536, the command format's own maximum (32 MiB),
-but `build_prp` describes a transfer with a single PRP list page and refuses
-anything over `PRP_LIST_ENTRIES` (512 pages, 2 MiB). Between the two, a large
-read took the bounce path: `build_prp` on the caller's pages returned
-`Unsupported`, the `Err` arm allocated and `map_memory_contiguous`-mapped the
-whole request, and `build_prp` then failed on the bounce for exactly the same
-reason, because nothing about bouncing fixes a page-count overflow. The
-constant is derived from `PRP_LIST_ENTRIES` now, so the refusal happens in the
-argument check. `submit_read` also bounds `lba + sectors` against
-`lba_count`, which nothing did.
-
-MDTS is still not enforced — `ident.mdts` is computed in `mod.rs` and dropped
-— and that belongs with Phase 5's splitting, not here.
-
-**Checked and clean,** so that a later reader does not re-derive it: every
-early return in `submit_read` reclaims its bounce and PRP list page; no path
-allocates a cid without installing an op; the `OP_CANCELLED -> OP_RECLAIMED`
-CAS is a correct single-winner gate, so no double reclaim; `NvmeOp::cancel`
-touches neither cid, bounce nor `prp_list`; the dispatcher's park loop has the
-required `loop { park_while(pred); work }` shape with no lost-wakeup window;
-`cmd_slots` (182) is never co-held with the CQ (186) or SQ (192) locks; and the
-`create_io_cq`/`create_io_sq` CDW encodings match NVMe 2.0.
-
-## NVMe becomes a disk: id ranges, the probe barrier, and the id ioctl (2026-08-19)
-
-Namespaces now register with `block_io` under `3000 + controller_index * 64 +
-(nsid - 1)`, so the block-device id space has four ranges: AHCI `0..1000`, USB
-mass storage `1000..2000`, ramdisk `2000..3000`, NVMe `3000..`. The base and
-the per-controller stride are `pub const`s in `drivers::nvme`;
-`devfs::block::device_name` imports them rather than repeating the numbers,
-because it undoes exactly that arithmetic to produce `nvme<c>n<n>`.
-
-A namespace is refused, by name in the log, when its logical block size is not
-512, when its active LBA format carries metadata (`MS != 0`), or when its
-`nsid` falls outside the 64 ids reserved per controller. Everything above
-`block_io` counts in 512-byte sectors and has nowhere to put per-block
-metadata, so registering such a namespace would mean misreading it rather than
-supporting it.
-
-**The probe barrier is not optional and must fire on machines with no NVMe.**
-`fs_main_thread` waits on `nvme::api::wait_probe_complete()` beside the
-existing `ahci::api::list_devices()`, because the boot-time `block_io::list()`
-scan runs once: a driver still probing when it runs has its partitions found
-only by a later rescan, which is too late to be root. `NVME_PROBE_DONE` is
-therefore signalled unconditionally at the end of the probe kthread, including
-the no-controller path — an early `continue` that skipped it would hang boot on
-every AHCI-only machine. `NVME_NAMESPACES` is published *before* it, so a
-released waiter also sees the list.
-
-**A `/dev` name cannot be parsed back into a device id, and `edos-install` was
-doing exactly that.** devfs derives the name from the id, and the derivation is
-not invertible: `sd*` numbering continues from the live AHCI device count into
-USB storage, so a stick's letter says nothing about its id, and NVMe encodes a
-controller and a namespace number against a base that is absent from the name.
-`BLOCK_IOCTL_DEVICE_ID` (`0x424B_0005`) returns the node's own id, and
-`edos-install` now opens the device first and asks it. This was already wrong
-for USB storage before NVMe existed.
-
-### Traps hit while doing this
-
-**Do not edit `scripts/edos-vm` while a gate is running.** `make storage-check`
-shells out to it three times over about ten minutes; an edit that lands between
-two of them runs the half-finished script. This cost a `storage-check` run:
-`fs-regression` passed both halves (efs OK, fat32 OK) and `fsbench-run` then
-died in `cmd_start` on an `args.no_sata` that existed in the function body but
-not yet in the argparse block. The failure looks exactly like a guest problem
-from the log — a `CalledProcessError` on `edos-vm start` — and is not one.
-
-**`scripts/edos-vm --no-sata` exists because both root images are bootable.**
-`sata-disk.img` and `nvme-disk.img` come from the same `filesystem/` tree and
-the same `efs-mkfs`; their partition GUIDs differ, so root selection is decided
-by the cmdline rather than being a race, but with both attached the disk under
-test is not necessarily the one mounted. Dropping the SATA disk leaves one
-candidate.
-
-## NVMe writes, flush and MDTS splitting (2026-08-19)
-
-QEMU's `-device nvme` reports `mdts=524288` (512 KiB) with `vwc=true`. The
-filesystem layer batches at 248 pages (992 KiB), from AHCI's PRDT, so **every
-large run on an NVMe root is split**: one boot of the desktop plus a single
-`echo hi > /var/nvmew` already showed `split_requests=6 split_commands=12` in
-`/proc/nvme_stats`. Splitting is not a corner the `mdts=1` red gate has to
-manufacture; the default QEMU device exercises it on boot.
-
-The split shape: one `SplitOp` holds the caller's `BlockIoHandle`, a count of
-outstanding parts, and a `failed` flag. Each part is an ordinary `NvmeOp` that
-reclaims its own cid, bounce buffer and PRP list page, then reports through
-`Completion::Part`. Two things are load-bearing:
-
-- The first failure completes the handle immediately and sets `failed` **before**
-  the `fetch_sub`, so the part that sees the counter reach zero also sees the
-  flag. `BlockIoHandle::complete` publishes its error code *before* the state
-  CAS it may lose, so an `Ok` racing a recorded failure would store `error = 0`
-  under a `FAILED` state and a waiter would decode `BlockError::from_code(0)`.
-  That is why the success path is gated on `!failed` rather than leaning on
-  `complete`'s idempotence.
-- A submit failure mid-way accounts for **all** the parts never issued in one
-  `parts_done(parts - part, Err(e))`, and returns `Ok(handle)` rather than
-  `Err`: parts are already in flight and the caller must still wait for them.
-
-`BlockBuffer::subrange` is what lets a part address a slice of the caller's
-buffer. It clones the ownership rather than borrowing, and bumps
-`borrowed_dma` for the `ReapedBySubmitter` case so the `thread_exit` assertion
-still balances.
-
-Flush is gated on `Identify Controller` VWC bit 0, logged per namespace at
-probe. With the bit clear the handle completes `Ok` with no command and
-`flushes_elided` counts it, so "the flush did nothing" is answerable from
-`/proc/nvme_stats` rather than by inference.
-
-`Direction::Flush` exists as its own variant instead of being folded into
-`Write`: the completion path's copy-back test asks "was this a read", and a
-flush answering "write" would have been a lie the next reader has to re-derive.
-
-Verified for real: NVMe-**root** boot (`--nvme-disk --no-sata`, `limine.conf`
-cmdline pointed at `NVME_UUID`, restored afterwards) reaches the desktop, root
-mounts on device 3000, a write reads back, `flushes=1`, `command_errors=0`.
-
-## The NVMe admin queue is polled-only, and a reset is what proved it
-
-The NVMe dispatcher used to drain the admin completion queue on every wake,
-alongside the I/O queue. That is harmless at bring-up, where every admin
-command is issued before the dispatcher loop starts, and wrong the moment
-anything issues an admin command while the driver is live: `admin_command_polled`
-runs its own `drain`, so a completion the dispatcher consumes first is one the
-poll never sees, and the command times out with the controller entirely healthy.
-
-The controller reset path is exactly that case. It re-runs Set Features
-(Number of Queues) and Create I/O CQ/SQ from the watchdog kthread, and every
-one of them timed out at 7.5 s (`CAP.TO`) while the dispatcher quietly ate the
-completions. The fix is to make the admin queue polled-only: the dispatcher's
-park predicate and drain now consider I/O queues alone. Nothing else needs an
-admin completion asynchronously.
-
-Two related traps in the same path:
-
-- **A reset stops the controller before it fails anything, and the order is
-  the correctness argument.** Failing a command releases its buffer, and on the
-  ordinary path that buffer is the caller's own memory rather than a `dma()`
-  page: `build_transfer` describes the caller's pages whenever `build_prp` can,
-  so the device writes straight into a page-cache frame or a kernel-heap `Vec`.
-  Release one while `CSTS.RDY` is still set and the controller finishes the
-  command into memory the allocator has since handed to somebody else. That was
-  the kernel-heap corruption behind the hostile boot's `LinkedList::pop` #GP,
-  and it fired on 557 of 558 resets. `reset_controller` therefore takes the
-  fail-all pass as an argument -- disable, wait for `CSTS.RDY`, *then* fail --
-  and `abandoned_while_live` in `/proc/nvme_stats` counts any that is not.
-  Post-mortem: `doc/bugs/2026-08-26-the-device-was-still-writing-into-the-buffer.md`.
-  AHCI had the same shape (`fail_all_ncq_slots` before `restart_port` stopped
-  the engine) and the same fix, counted as `failed_while_running`.
-- **A reset cannot assume the command slots stay empty, and clearing a slot is
-  not the same as emptying it.** The watchdog fails every outstanding op while
-  the controller is disabled, but nothing excludes a submitter from installing
-  a new command in the window between that pass and the queue rebuild -- and
-  that window is the busy one, because the fail-all pass wakes every waiter
-  with `Io` and `block_io`'s retry re-issues from those same threads at once.
-  `installed_during_reset` reads in the thousands on one hostile boot.
-  `NvmeQueue::reset_state` therefore **takes** each op out of its slot and
-  retires it, looped until a pass finds nothing new; it used to scan and then
-  overwrite the slots with `None`, which destroyed anything installed between
-  the two passes -- no command id freed, no handle completed, and a submitter
-  parked on a completion nobody owed it for the rest of the boot. Post-mortem:
-  `doc/bugs/2026-08-26-the-reset-dropped-a-command-instead-of-failing-it.md`.
-  `DmaBuffer` has no `Drop`, so clearing a slot any other way strands that
-  command's bounce buffer and PRP list page. `NvmeQueue::reset_state` therefore
-  retires whatever it finds through the ordinary `retire_op` sequence rather
-  than asserting the slots are empty; a command installed after that is not
-  lost either, since its completion never arrives and the next sweep fails it.
-  The first version of this asserted instead, and panicked within 400 ms of
-  boot under `nvme_timeout_ms=0`.
-- **`nvme_timeout_ms=0` is hostile enough to kill the boot, and what it can
-  prove is narrower than it looks.** It declares every command hung the instant
-  it is issued, so the reset path is reached immediately and repeatedly — which
-  is the point — but the I/O it fails includes the boot's own reads, and
-  nothing above `block_io` re-issued a `BlockError::Io`: the root mount
-  returned it, `mount_system_fs` unwrapped it, and the kernel panicked inside
-  half a second.
-
-  `block_io::{read,write,flush,read_batch}_blocking` re-issue an op the device
-  abandoned, bounded by a ten-second window rather than a count, and the three
-  paths that keep commands outstanding instead of calling those — the journal's
-  ring writes, replay's home blocks, EFS's staged extent writes — hold on to
-  the LBA, length and buffer that let them issue again. The bound has to be
-  time, not attempts: what abandons an op is a reset, a reset refuses every
-  command issued while it runs, and a fixed handful of attempts lands entirely
-  inside one. Ten seconds rather than two because two lost the root mount about
-  one boot in four here, with a five-millisecond backoff against a controller
-  resetting continuously. With that in, a zero-timeout boot mounts its root,
-  starts init, and reports no failed read or write at all.
-
-  It still does not give a responsive desktop, and no correctness fix will. The
-  sweep interval is `min(1 s, max(timeout, 1 ms))`, so a zero timeout sweeps
-  every millisecond against a reset that takes two or three, and the controller
-  is in reset most of the time — around 930 resets a second, measured. The
-  guest reaches init in a second or two and the taskbar sometimes not at all.
-  The other direction is no better: at `nvme_timeout_ms=1`, commands complete
-  in about a hundred microseconds under KVM, so nothing is ever declared hung
-  and the watchdog never fires at all. Zero is the only setting that exercises
-  the path, which is why `nvme-check`'s watchdog case asserts what it can prove
-  — init runs, the watchdog fires, the reset completes, and no I/O is reported
-  failed — and not that the desktop comes up.
-
-  Two traps in reading that boot's log. **A kernel `log!` line the boot emitted
-  once may simply not be there:** a thousand watchdog messages a second evict
-  it from the ring before the klogger drains it, so `Root filesystem mounted`
-  is routinely missing from a boot that plainly mounted its root. Userspace
-  writes to the serial console directly and is not affected, which is why
-  `init: pid` is the liveness marker rather than anything the kernel logged.
-  And **do not sample `run_log.txt` while a loop of boots is running**:
-  `edos-vm start` truncates it, so a grep taken between two boots reports the
-  new boot's first few hundred microseconds and reads as a guest that got
-  nowhere. Copy the file aside per iteration.
-
-  One boot in eight wedges at `Starting mountfs thread` with no sweep, no reset
-  and nothing failed — a hang rather than the retry path, and undiagnosed. The
-  watchdog case says which of the two it saw, so a red run points at the right
-  thing.
-
-## The NVMe dispatcher parked on a lock the watchdog then started holding (2026-08-19)
-
-`nvme_dispatcher_main` parks with
-
-```rust
-thread_park_while(|| controllers.any(|c| c.io_queue().is_some_and(|q| q.has_pending())))
-```
-
-and `NvmeQueue::has_pending` takes rank 186, the CQ lock. A park predicate runs
-with interrupts off after the CPU has pivoted onto the transition stack —
-`debug/lock_order.rs` carries a defensive check for exactly this — so spinning
-there is safe only while nothing else can hold the lock.
-
-That was true through Phase 5, when the dispatcher was the only thread that
-touched any completion queue. **Phase 6 made it false**: `watchdog_sweep` drains
-the I/O completion queue from the watchdog kthread before it judges anything
-stale, so a watchdog preempted under that guard left a dispatcher parking on the
-same CPU spinning with interrupts off, on a stack it had already left. It was
-never observed — the window is a few hundred nanoseconds against a one-second
-sweep, and every gate was green with it in place — which is the point: a lock
-taken from a park predicate is a hazard you find by reading, not by running.
-
-The predicate is the interrupt counter now, which is the shape AHCI already used
-(`drivers/ahci/mod.rs` reads `HBA.IS`, also lock-free):
-
-```rust
-let mut seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
-loop {
-    thread_park_while(|| NVME_IRQS_FIRED.load(Ordering::Acquire) == seen);
-    seen = NVME_IRQS_FIRED.load(Ordering::Acquire);
-    // ...drain every controller's I/O queue...
-}
-```
-
-**Reading `seen` before the drain is the whole correctness argument.** A
-completion posted after that read is either picked up by the pass about to run,
-costing one spurious wake next time round, or lands after it and leaves the
-counter ahead of `seen`, so the next park returns immediately. Reading it after
-the drain instead would lose exactly the completions that arrive during a pass.
-`NvmeQueue::has_pending` had no other caller and is gone.
-
-**Gate state at `168573cd` (Phases 1-6, SATA boot), all green:**
-`make -C kernel check` warning-free across every feature combo, `make host-tests`
-138, `make test AUDIODEV=none` 58/58, `make guest-check` 16/16,
-`make recovery-check`, and `make storage-check` (fs-regression efs and fat32,
-fsbench-run `/var`). The same four fast gates are green with the predicate
-change, and an NVMe-**root** boot (`--nvme-disk --no-sata`, `limine.conf`
-cmdline pointed at `NVME_UUID` and restored afterwards) reaches the desktop with
-root on device 3000, so the whole of userspace loaded through the new predicate.
-
-**A gate that hides its own stderr costs a re-run.** The first `storage-check`
-of the night died with nothing but `Command '[... edos-vm, stop]' returned
-non-zero exit status 1`: `vmdrive.run` passes `capture_output=True` so callers
-can read the serial tail, and that swallowed whatever `edos-vm` printed. It does
-not reproduce — the same gate ran green immediately afterwards, both halves of
-fs-regression included — so the cause is still unknown, and `run` now forwards a
-failing command's stderr and stdout before re-raising, which is what the next
-occurrence needs.
-
-## An NVMe root needs its own ISO, because root selection is by GUID (2026-08-19)
-
-`select_root_partition` (`kernel/src/main.rs`) matches `root=UUID=` against
-every enumerated partition and mounts memfs when nothing matches. Nothing is
-positional. `nvme-disk.img` deliberately carries a different partition GUID from
-`sata-disk.img` — two disks sharing one GUID make which disk boots a race — so
-the stock ISO's cmdline can never select the NVMe disk, and an NVMe-root boot
-was done by hand-editing the tracked `limine.conf` and remembering to restore it.
-
-That is not something a gate can do. The ISO recipe is now a `define build_iso`
-taking the output path, a staging directory and the partition GUID, and it
-writes `limine.conf` through `sed 's/$(PARTITION_UUID)/$(3)/'` instead of
-copying it. `$(IMAGE_NAME).iso` passes `PARTITION_UUID`, so its content is
-byte-identical to before; `edos-nvme.iso` passes `NVME_UUID`. `limine.conf`
-stays one tracked file. `scripts/edos-vm --iso IMAGE` picks which one to boot.
-
-The trap this removes: an NVMe-root boot that silently lands on memfs looks like
-a working desktop. The `Root partition: ... on device 3000` line is the only
-thing that distinguishes it, which is why `nvme-check` asserts on that line
-rather than on reaching a desktop.
-
-`edos-install` needs none of this. It writes its own GPT with a random root GUID
-and its own ESP carrying a `limine.conf` that names it, so the install case
-boots with `--no-cdrom --no-sata` and the disk supplies its own cmdline.
-
-## A three-argument wrapper for a five-argument syscall returns EFAULT (2026-08-19)
-
-`edos-install --yes /dev/nvme0n1` failed with
-
-    /dev/nvme0n1 did not answer BLOCK_IOCTL_DEVICE_ID (-14)
-
-on an otherwise healthy boot where `ls /dev/nvme0n1` worked and the devfs node
-was registered. -14 is `EFAULT`: a failing syscall returns a bare `-1` and the
-dispatcher in `kernel/src/syscalls/mod.rs` rewrites it to the negated errno on
-the way out, so a userspace `-14` names the errno, not the return.
-
-`SYS_IOCTL` takes five arguments -- `fd, request, arg, arg_len, flags` -- but
-`edos_lib::io::ioctl` invoked it through `syscall3`. `r10` and `r8` then carry
-whatever the caller left in them. When those happen to hold a non-zero length
-and a set `IOCTL_FLAG_READ`/`IOCTL_FLAG_WRITE` bit, `sys_ioctl` takes its
-copy-in path, finds `arg == 0` for a request that never wanted a buffer, and
-rejects it with `EFAULT`. It is register-dependent, so the same call site
-succeeds or fails according to what ran before it: `BLOCK_IOCTL_DEVICE_ID` was
-the first caller unlucky enough to be measured.
-
-The fix is `syscall5(SYS_IOCTL, fd, request, arg, 0, 0)`. **A wrapper must pass
-every argument its syscall reads, including the zeros.** The kernel cannot tell
-a garbage `flags` from a deliberate one, so the shorter `syscallN` is not a
-harmless abbreviation for any call that reads more registers than it fills.
-
-## The nvme-check root assertion matched the partition scan, not the mount
-
-`case_coexistence` asserted `"on device 3000" not in log` to prove the SATA
-disk still won root selection. Every boot with an NVMe disk attached logs
-`GPT found on device 3000` from the partition scan, whether or not that disk
-became root, so the assertion reported the case backwards -- failing on a boot
-that was correct. `scripts/nvme-check` reads the id off the `Root partition:`
-line now, through one `root_device()` helper all three root assertions share.
-
-## A gate that boots the default SATA disk must depend on sata-disk.img (2026-08-19)
-
-The `syscall3` -> `syscall5` fix above was correct and did not change the
-symptom: `edos-install --yes /dev/nvme0n1` kept failing with `-14` on the
-`nvme-check` install case, on a guest whose `/bin/edos-install` disassembled
-with `r10` and `r8` zeroed. `strace -e ioctl -o /dev/klog` settled it in one
-boot:
-
-    ioctl(4, 0x424b0005, NULL, 2, 0x2) = -14 EFAULT
-
-`arg_len=2`, `flags=IOCTL_FLAG_WRITE`: the running binary was the pre-fix one.
-`nvme-check` cases 2 and 4 boot with the SATA disk attached, and the root
-selection prefers a real disk, so those two cases root on `sata-disk.img` and
-run whatever userspace that image happens to hold. `make all` builds
-`programs`, `kernel` and the ISO -- it never touches `sata-disk.img`, and the
-gate did not list it as a prerequisite, so the image was days old while every
-other artifact was current.
-
-Two rules fall out of this:
-
-- **Any make target that boots a guest with the default SATA disk lists
-  `sata-disk.img` as a prerequisite.** The image's mtime is not a hint: QEMU
-  writes to the qcow2 on every boot, so a stale image looks freshly built.
-- `nvme-blank.img` is now rebuilt by a `fresh-nvme-blank` phony, in the shape
-  `recovery-check` already uses for `journal-test.img`. The install case writes
-  a GPT and a root filesystem onto it, so a second gate run would otherwise
-  install over an installed disk rather than a blank one.
-
-The general form: when a fix demonstrably lands in the source and the symptom
-does not move, disassemble or `strace` the artifact the guest actually ran
-before re-diagnosing the source.
-
-## `edos-install` parks after the copy, and every block queue is empty
-
-`nvme-check`'s install case still fails, one layer past the EFAULT above. The
-guest is not wedged and the driver is not stalled: with the installer sitting
-at `Copying the system...` for four minutes, a second terminal opened from the
-launcher runs `cp /bin/edos-wm /mnt/target/probe` to the same NVMe-backed EFS
-and exits 0.
-
-What the live guest says, all of it read through `cat <file> > /dev/klog` from
-that second terminal while the install is hung:
-
-- `/proc/processes`: `/bin/edos-install` is **Parked**, and `/proc/32/status`
-  reports `Sleep Deadline: 0` with `CPU Time: 333.979 ms` unchanged across
-  three minutes of sampling. It is parked indefinitely, not spinning and not
-  sleeping on a timer.
-- `/proc/nvme_stats`: `inflight=0 command_errors=0 watchdog_firings=0`,
-  1433 commands submitted, 86 split requests. `/proc/ahci_stats`:
-  `ncq_inflight=0 firings=0 stranded=0`. `/proc/inflight_stats`: `current=0`.
-  **No block I/O is outstanding anywhere in the system**, so this is not a lost
-  completion in either driver.
-- `/proc/block_cache`: `dirty_pages: 1`, and memory is not tight
-  (`FramesFree: 428089`).
-- The copy looks finished: `/mnt/target` and `/` agree on every top-level
-  entry, on `bin` (129 each), `share` (5), `share/fonts` (4), `boot`, `etc`,
-  `home`, `root` and `var`. `  {copied} files`, the line `copy_root` returns
-  into, never printed.
-
-So the installer is parked with no I/O to wait for, at or very near the end of
-the copy. Ruled out by the evidence above: an NVMe lost wakeup, an NVMe command
-id leak (a leak would park a *submitter* in `alloc_cid_blocking`, but then
-`inflight` could not be 0 while 64 cids were reserved), AHCI, memory pressure,
-and a wedged target filesystem.
-
-The gate could not answer this by itself, because everything `edos-install`
-prints goes to the GUI terminal and the serial log never sees a word of it. It
-traces to `/dev/klog` now (`programs/edos-install/src/klog.rs`): one line per
-phase, and one line per file and directory *before* it is written. One rerun
-named the culprit on the first try:
-
-    copy /var/run/svc.status
-    copy /var/run/svc.ctl        <- and nothing after it, ever
-
-`/var/run/svc.ctl` is the **named pipe** `svc` uses to reach `edos-init`
-(`doc/services.md`). `copy_tree` asked only whether the entry was a directory
-and treated everything else as a file, so the copy called `fs::read` on a FIFO
-with no writer, which parks by definition. It is not an NVMe bug, it is not a
-new bug, and it would hang an install onto a SATA disk exactly the same way --
-it has simply never been reached before, because nothing ran `edos-install`
-end to end after named pipes landed and `edos-init` started publishing that
-FIFO.
-
-`copy_tree` copies a regular file, recurses into a directory, and skips
-anything else with a traced line. A FIFO, a socket and a device node are all
-live state of the running system rather than content; the skip list that keeps
-`/dev` and `/proc` out of the copy was already making the same judgement one
-directory at a time.
-
-The general lesson is about the diagnosis, not the fix: five `/proc` files read
-from a second terminal narrowed a system-wide hang to "not block I/O, not
-memory, not the target filesystem" but could not name the file, and one line of
-tracing to a log the host can read did it in a single boot. When a hang is
-inside a loop over data, log the datum before touching it.
-
-Method note for a hung guest generally: the taskbar launcher opens a second
-terminal, and `cat /proc/... > /dev/klog` from it puts kernel state in the
-serial log where the host can grep it. That works on any hang that has not
-taken the compositor with it, and it is far quicker than a rebuild with print
-statements.
-
----
-
-## Three NVMe bring-up findings, closed: an orphaned CQ, an unclamped queue, and an INTx line nothing could deassert (2026-08-19)
-
-The last three findings of the Phase 3 review. None of them is reachable under
-QEMU, which is why all three survived every gate the driver has: each needs a
-controller QEMU does not emulate by default, and the review found them by
-reading the failure arms rather than by running them.
-
-**1. `create_io_sq`'s failure arm handed a live DMA target back to the pool.**
-`setup_io_queue` creates the I/O CQ first, then the SQ. If the SQ creation
-failed it called `queue.dealloc_all()`, which returns the CQ's pages to the
-shared DMA pool while the controller still has CQ 1 registered at exactly that
-address with `IEN` set. The old comment argued this was safe because
-`io_queue` stays empty and nothing would ever submit against the orphan --- true
-of this driver, and beside the point: what the controller does with a queue it
-was told about is not the driver's decision, and the next allocation out of that
-pool gets the pages. It now issues Delete I/O CQ (`ADMIN_OPC_DELETE_IO_CQ`,
-declared since Phase 3 and used nowhere until now) and reclaims only if the
-controller acknowledges. If the delete fails, the pages **leak on purpose**:
-`DmaBuffer` has no `Drop`, so dropping the queue without `dealloc_all` is the
-leak, and a leak costs one boot's worth of pages where the alternative aliases
-a live DMA target.
-
-**2. The I/O queue pair ignored `CAP.MQES`.** `NvmeController::new` refuses a
-controller whose `MQES` is below the 32-entry admin pair, and nothing checked
-the 128-entry I/O pair after that. A controller reporting `MQES` in [31, 126]
---- legal, and what `-device nvme,mqes=N` produces --- fails Create I/O CQ with
-"Invalid Queue Size", and `mod.rs` turns that into *no I/O queue at all* rather
-than the smaller working one it could have had. `setup_io_queue` now clamps SQ
-and CQ entries to `MQES + 1`, and clamps `IO_CID_DEPTH` with them: the cid
-bitmap is what bounds outstanding commands, and the SQ's "can never fill"
-property is exactly the invariant `cid_depth < sq_entries`. Clamping one without
-the other would trade a refusal for a ring overrun.
-
-This one is exercised, not just reasoned about: QEMU's `-device nvme,mqes=N`
-reports the ceiling, `scripts/edos-vm --nvme-mqes` passes it, and
-`--nvme-mqes 63` boots an NVMe root to the desktop on a 64-entry queue pair
-(`nvme: MQES caps the I/O queue at 64 SQ / 64 CQ entries, 63 outstanding`,
-then `registered as block device 3000`, then `Root partition: ... on device
-3000`). Findings 1 and 3 stay unexercised for the reason above.
-
-**3. The INTx fallback could not deassert its own line, and is gone.** An NVMe
-pin-based interrupt stays level-asserted until the CQ head doorbell is written.
-This driver writes that doorbell from the dispatcher thread, deliberately --- the
-handler bumps a counter, wakes the dispatcher and EOIs --- so on a level-triggered
-line the IOAPIC re-delivers continuously until the dispatcher is scheduled,
-which is a livelock on the CPU taking the interrupt. `INTMS`/`INTMC` are the
-fix (mask in the handler, unmask after the drain pass) and were declared but
-written nowhere. Since no controller the driver can run on lacks both MSI-X and
-MSI, the branch is removed and `configure_interrupt` returns `Unsupported` by
-name. An untestable path that livelocks is worse than an absent one that says
-why.
-
-The doc's "what QEMU cannot tell us" list shrank accordingly: `mqes=` is no
-longer an unexercised knob for a code path that could not use it.
-
-## A pidfile check that loses its own race (2026-08-19)
-
-`scripts/edos-vm`'s `running()` did `os.path.exists(PIDFILE)` and then opened
-it. `cmd_start` unlinks that file before launching and QEMU rewrites it, so the
-window between the two is real, and landing in it raised `FileNotFoundError`
-out of `cmd_stop` --- which is how every `nvme-check` run printed a Python
-traceback before case 1, from the harness's own opening `stop()` on a machine
-with no guest. It is now one `try`/`except (OSError, ValueError)` around the
-open, with a half-written pidfile treated the same as a missing one: fall
-through to the `/proc` scan that finds an orphaned guest.
-
-## A PRP list test only tests anything over a discontiguous buffer (2026-08-19)
-
-`build_prp` translates every page of a transfer separately because a virtually
-contiguous kernel buffer is not physically contiguous — the heap is mapped by
-`map_memory`, a frame at a time. Deriving later pages by adding 4096 to the
-first would DMA into unrelated frames.
-
-The probe that was meant to catch that read four pages through a PRP list and
-compared them against the same four pages read one at a time. It did not catch
-it. `BitmapFrameAllocator::find_free_frame` scans forward from `next_free_hint`,
-so consecutive `map_memory` calls at boot hand out consecutive frames, and a
-fresh four-page heap allocation was measured as one contiguous run
-(0x99000..0x9c000). Over a contiguous run the naive derivation is *right*, so
-the comparison passed with the bug deliberately reintroduced. This is the shape
-of the trap: the test exercised the code, the code was wrong, and the test was
-green, because the property under test was accidentally satisfied by the input.
-
-The fix has two halves, and the first one alone was not enough.
-
-**Half one: make the gate report its own discriminating power rather than
-assume it.** `build_prp` counts each page it translates past PRP1
-(`prp_pages`) and each one whose frame is not the first page's frame plus the
-page index (`prp_pages_discontiguous`), both in `/proc/nvme_stats`. The probe
-grows the buffer — 4 pages, then 16, 64, 256, capped by MDTS and by the 512
-entries one list page holds — until that counter moves, and only then runs the
-comparison, logging `PRP gate discriminating: N pages ... M of them not where
-naive addressing would have looked`. When no size is discontiguous it logs
-`PRP GATE NOT DISCRIMINATING` instead of a pass.
-
-**Half two: build the buffer discontiguous instead of hoping.** Growing a heap
-allocation until it happens to be scattered is still luck, and the luck ran out
-the first time the whole gate was re-run: a boot of the same ISO found every
-size up to the 64-page MDTS ceiling physically contiguous and `make nvme-check`
-went red on `PRP GATE NOT DISCRIMINATING` — the gate working exactly as
-designed, refusing to claim a pass it could not back, but a gate that is red on
-luck is not a gate. `discontiguous_buffer` in `nvme/mod.rs` constructs the
-property instead. `BitmapFrameAllocator::find_free_frame` scans forward from
-`next_free_hint` and `deallocate_frame` moves that hint *back* to any frame it
-frees below it, so mapping a comb of `2 * pages` frames and unmapping every
-other one leaves an alternating free/busy run, and the next `pages` allocations
-are served from exactly those holes in ascending order. Every page of the
-buffer then sits at least two frames past its predecessor. The escalation loop
-stays as the fallback for the one case construction cannot exclude — a
-concurrent allocation taking one of the holes — which is also why the probe
-still checks the counter rather than asserting the outcome.
-
-The comb's odd frames are returned once the buffer is mapped and the whole
-buffer is unmapped after the comparison, so the probe leaks neither frames nor
-kernel address space. It issues no TLB shootdown for the unmapped comb: those
-virtual addresses are never read or written again, so a stale entry on another
-CPU is unreachable.
-
-That counter is derived from the difference between the translated address and
-the naive one, so the discriminating check is self-referential in the useful
-direction: reintroducing the `+4096` derivation drives it to zero and the probe
-reports NOT DISCRIMINATING. Verified both ways on real boots — NOT
-DISCRIMINATING at every size up to the MDTS ceiling with the bug patched back
-in, and, once the buffer is constructed rather than allocated, discriminating
-on the first candidate with *every* page past PRP1 scattered (`4 pages via PRP
-list, 3 of them not where naive addressing would have looked`) rather than the
-one page a lucky heap allocation used to give.
-
-`edos-nvme.iso` now carries `nvme_probe_read` on its cmdline, which is what lets
-`scripts/nvme-check`'s first case assert on the word *discriminating* without
-spending a fifth boot. The `build_iso` macro takes an optional fourth argument
-appended to the `root=UUID=` cmdline line only, so `edos-x86_64.iso` is
-unchanged and the `root=live` entry in both ISOs is unchanged.
-
----
-
-## `evicttest` was measuring the writeback timer, not the evict pipeline
-
-The eviction pipeline was never broken. `/proc/evict_stats` now carries
-`posted_count` and `error_count` beside `drain_count`, and those three separate
-the three ways it could have failed: the orphan never reached the queue, the
-kthread never drained it, or `evict_inode` returned an error. Measured on a
-boot, `evicttest /var` moves `posted_count` and `drain_count` by exactly +32
-each with `error_count` 0. Nothing is lost.
-
-What the test got wrong is *when*. An unlinked file with dirty pages is pinned
-by `DIRTY_INODES`, which holds a **strong** `Arc<VfsInode>` so that closing the
-last descriptor cannot free pages that never reached the disk. `VfsInode::drop`
-— and therefore `post_evict` — cannot fire until writeback releases that pin,
-and `writeback_thread` waits up to five seconds per pass. So on any filesystem
-with writeback the eviction lands on the next pass, and `/tmp` (memfs, no
-writeback, no pin) drains instantly while `/var` (EFS) does not.
-
-The old test spun a fixed 200,000 iterations with no sleep, exhausted them in
-about 1.2 s, and gave up roughly four seconds before the orphans it created
-were posted. It waits on a 20 s wall-clock deadline now, polling every 100 ms.
-Observed on a real boot: `/tmp` passes in 0.7 s, `/var` in 5.0 s — one
-writeback period, which is the confirmation that the period is what it was
-waiting on. `evicttest` is back in `make guest-check`, which is 17 suites.
-
-Two traps this cost time on, both recurring:
-
-- The guest under `scripts/vmdrive` boots the **SATA disk**, and `make all`
-  does not rebuild `sata-disk.img`. A userspace fix appears to change nothing
-  until `make sata-disk.img` runs. This is the same trap `nvme-check` case 4
-  hit, and it is closed the same way: `guest-check`, `storage-check` and
-  `ssh-check` name `sata-disk.img` as a prerequisite now, so the gate builds
-  the userspace it is about to judge. `test`, `recovery-check`, `orphan-check`
-  and `nvme-check` already did.
-- Writing back the pages of a file that has just been unlinked is pointless
-  I/O — the blocks are freed immediately afterwards. Dropping an orphan's dirty
-  pages at `mark_orphan` time would remove both the I/O and the delay, but
-  `remove_file` documents the opposite on purpose: live mappings keep reading
-  and writing through those pages. Not attempted; it belongs behind its own
-  measurement.
-
----
-
-## The gate set, and which of them build the disk they judge (2026-08-19)
-
-There are ten local gates now and they do not cost the same thing or need the
-same setup. Run whole, in this order, they take a little over an hour.
-
-| gate | what it is | needs |
-|---|---|---|
-| `make -C kernel check` | every feature combination, one at a time; must be warning-free | nothing |
-| `make host-tests` | 138 userspace unit tests that need no guest, about a second | nothing |
-| `make test AUDIODEV=none` | the in-kernel `sched-test` suite, 58 cases, 4-CPU KVM | `/dev/kvm`; a PipeWire session unless `AUDIODEV=none` |
-| `make guest-check` | 17 guest suites in one boot, each judged by its exit code | `/dev/kvm` |
-| `make nvme-check` | five boots: NVMe root, SATA+NVMe coexistence, the 4Kn refusal, install-and-reboot, and the watchdog under `nvme_timeout_ms=0` | `/dev/kvm`; builds `edos-nvme.iso` and a blank `nvme-disk.img` |
-| `make recovery-check` | pause checkpointing, cut power, remount, assert replay | a `fault-inject` ISO, which it builds; a freshly formatted `journal-test.img` |
-| `make orphan-check` | unlinked-but-open files across a power cut | the same fresh image, plus `efs-fsck` |
-| `make storage-check` | `fs-regression` over EFS and FAT32, then `fsbench-run` | `/dev/kvm` |
-| `make profile-check` | the sampling profiler end to end: the guest profiles a known workload, the host resolves it, and `sha256sum`'s compression loop has to come out on top | `/dev/kvm` |
-| `make ssh-check` | the host's own OpenSSH client against the guest's `sshd`: auth, a refused password, exit status, ~10 MB each way, concurrent sessions | `/dev/kvm`; the host's `ssh` |
-
-**Only the first four run in CI.** `ci.yml` boots a guest for `make test` and
-`make guest-check` and for nothing else, so `nvme-check`, `recovery-check`,
-`orphan-check`, `storage-check`, `ssh-check` and `profile-check` gate nothing
-but a local run —
-`doc/ci.md`'s "What is not covered" says what that costs and what the fix would
-look like.
-
-**Every one of them that drives a real guest runs the userspace inside a disk
-image rather than the one in `filesystem/`** — `nvme-disk.img` now, since NVMe
-became the default root. Building a program does not put it in that image, so a
-stale image judges whatever binaries it happened to hold. That cost two separate
-investigations in one day — `nvme-check` case 4 chasing an `edos-install`
-`EFAULT` that had already been fixed, and `evicttest` appearing not to change.
-
-This is now handled rather than remembered: `scripts/edos-vm start` rebuilds any
-attached image older than `filesystem/.manifest` before booting, and every gate
-inherits it through `vmdrive.boot()`. So `make programs` followed by a bare
-`start` is correct, and `--no-rebuild` opts out. Do not compare file mtimes by
-hand to decide this — a running guest writes to its own image, so the image is
-normally *newer* than the binary missing from it, and the manifest is the only
-comparison that works.
-
-Every gate above that boots a guest names the image as a prerequisite too. The
-rebuild is not free (a 5 GB raw image, `efs-mkfs`, and a qcow2 convert, roughly
-a minute) and it discards whatever the development root held, which is the price
-of judging the tree you actually have.
-
-**A gate holds the one QEMU slot for its whole run, and an idle-looking guest
-is usually a live gate's.** `scripts/edos-vm` keeps a single pidfile and a
-single QMP socket under `$XDG_RUNTIME_DIR/edos-vm`, so any shell can stop any
-guest, and a `qemu-system-x86_64` sitting there with no visible driver reads
-exactly like the orphan that cost iteration 1 of the overnight run an hour.
-It is not the same thing: `fs-regression` reboots between its write and verify
-phases, so for a second or two between them there is no guest at all and then a
-new one, and `scripts/nvme-check` does the same four times. Before stopping
-what looks abandoned, ask who owns it —
-`pgrep -af 'fs-regression|fsbench-run|guest-check|nvme-check|ssh-check|orphan-check|recovery-check'`
-names the running gate, and `ls -l /proc/<make-pid>/fd/1` names the log it is
-writing to. All seven guest-driving gates have to be in that alternation or the
-remedy misses the one that owns the slot: the first version of it listed five,
-and the two it left out are the two that cut power, which is exactly when a
-guest looks abandoned. A stop issued into a live gate's write phase does not fail loudly; the
-script proceeds to its verify phase and judges an image the guest never
-finished writing.
-
-That is enforced now rather than left to the reader. Importing
-`scripts/vmdrive.py` takes an exclusive `flock` on
-`$XDG_RUNTIME_DIR/edos-vm/slot.lock` and records the gate's pid and command
-line in it, held for the gate process's lifetime, so a second gate refuses at
-its own first step with the name of the one that has the slot. `edos-vm start`
-and `edos-vm stop` refuse for the same reason, and so do the `sata-disk.img`
-and `nvme-disk.img` rules, whose `edos-vm stop` no longer runs under a `-`:
-rebuilding a disk out from under a running gate is worse than a failed make.
-The lock is by open file description, so a killed gate releases it and nothing
-has to be cleaned up. A gate's own `edos-vm` calls are allowed because the
-holder is one of their ancestors, and `--force` takes the guest anyway.
-
----
-
-## The whole gate set, run at `f3212014`
-
-Every gate the overnight charter names was run against the tree as it stands,
-plus the formatter, in one serial chain — nothing here shares the single QEMU
-slot:
-
-| gate | verdict |
-|---|---|
-| `cargo fmt --manifest-path kernel/Cargo.toml` (not a gate, but run first) | clean |
-| `make -C kernel check` | warning-free across every feature combination |
-| `make host-tests` | 138 |
-| `make test AUDIODEV=none` | 58/58 |
-| `make guest-check` | 17/17 |
-| `make storage-check` | `fs-regression` EFS OK, FAT32 OK, `fsbench-run /var` OK |
-| `make recovery-check` | green at `dfedf441`, not re-run here |
-| `make nvme-check` | 4/4 at `dfedf441`, not re-run here |
-
-The last two rows carry over rather than being re-measured: `f3212014` is
-`dfedf441` plus one commit that touches this file and nothing else, so the
-kernel and the images those two gates judge are byte-for-byte the ones they
-were run against. `storage-check` is the slow gate and the chain reached it
-last; run it first next time, since a stricter `sys_sync` is where a
-round-count latency change would show. It found none: `fsbench-run /var` is
-green at `f3212014` with the fixed-point change in.
-
-`make orphan-check` and `make ssh-check` are the two of the nine this chain did
-not run. Both were green at `b769ee40`, but `orphan-check` is the one to run
-first next time: unlinked-but-open files across a power cut is exactly the
-shape the `sys_sync` fixed-point change at `dfedf441` moves, and no gate has
-judged it since. **Both were run at `5c9c7381` and both are green** — see the
-section below.
-
-This section used to report the same set at `f27f37c1`, where it was also
-green. That reading did not survive: `nvme-check` went red at `b769ee40`, three
-doc-only commits later, and stayed red through two more fixes before the actual
-cause — `sys_sync` converging one round early — was found. The sections below
-carry that evidence in the order it was found.
-
-`storage-check` is the slow one: `fs-regression` over EFS and FAT32 and then
-`fsbench-run /var`, and its `/proc/nvme_stats` sample is the only place a
-SATA-rooted whole-set run touches the new driver.
-
-Two things about running them unattended, both learned the same night:
-
-- **They print nothing until they exit when you redirect them to a file.**
-  Python line-buffers a terminal and block-buffers a pipe, so
-  `make orphan-check > log 2>&1 &` shows a boot and then five silent minutes,
-  which reads exactly like a hang and invites killing a healthy run. Every gate
-  script's shebang is `#!/usr/bin/env -S python3 -u` now, so the `[1/4]`,
-  `[2/4]` progress lines arrive as they happen.
-- **They take no arguments and do not say so.** `scripts/guest-check --help`
-  does not print usage, it boots a guest and runs the whole gate. `--fat32` on
-  `fs-regression` and the `edos-vm` flags are the only options anything here
-  accepts.
-
----
-
-## `nvme-check` case 4 went red again, and the installed filesystem is the evidence (2026-08-19)
-
-FIXED — the answer is the `sync` fixed point at the end of this section; the
-investigation is kept because three hypotheses were refuted along the way.
-It was deterministic: two consecutive whole runs failed the same way, in
-2 min 25 s and 2 min 35 s. The gate was green 4/4 three separate times, and at
-`b769ee40` — three doc-only commits later — case 4's second half fails: the
-install reports `ok`, and the boot from the installed disk never reaches a
-desktop. The serial log names the reason exactly:
-
-```
-Root partition: UUID=... on device 3000
-efs journal: replay scan start tail_seq=35 tail_block=376
-efs journal: scanned, nothing to replay
-Root filesystem mounted
-boot-load bin/edos-init: resolve_inode: FileNotFound
-```
-
-So the target mounted, the journal had nothing outstanding, and the tree was
-not there. `efs-fsck` on the image the installer wrote says how badly:
-
-```
-tools/efs-fsck/target/release/efs-fsck -n -v --partition-offset 537919488 nvme-blank.img
-```
-
-77 orphan inodes, leaked inode-bitmap bits at 154..160, `dir inode 1` with
-entries `boot`, `etc`, `home`, `lib`, `opt`, `root`, `share` and `var` all
-pointing at **unallocated** inodes, `inode 1 link_count on-disk=14 observed=6`,
-and a dir-tree walk that reaches 5 directories and 1 file. The directory data
-blocks landed; the inode table and bitmaps they refer to are an older version
-of themselves. That is a half-written filesystem, not a half-finished copy.
-
-**Ruled out, do not spend the time again:** `sys_sync` failing to write file
-pages. `syscalls/io.rs::sys_sync` calls `BlockPageCache::sync_all`, which bumps
-`flush_requested`, wakes the writeback kthread and waits for the matching
-`flush_completed` — a *forced* pass, which runs `flush_dirty_inodes` between
-two block-cache drains. Dirty file pages are covered.
-
-**The experiment that discriminates, and its answer.** Run the same install by
-hand and leave the guest alive 15 s before stopping it, then boot the installed
-disk: it comes up, `Root partition: ... on device 3000`, desktop and all. The
-install itself is fine — `edos-install` traced 146 `copy` lines including
-`copy /bin/edos-init`, returned `rc=0` 7.4 s into the boot, and the same code
-produces a bootable system whenever the guest is allowed to keep running. What
-the gate does differently is stop the guest the instant `edos-install` exits.
-So **`edos-install` returns success before its writes are durable**, and up to
-one 5 s writeback period later they become so.
-
-**Refuted, both checked in code rather than guessed:**
-
-- *Writeback only submits and does not wait.* `BlockPageCache::write_batch`
-  pushes every `submit_write_frame` handle onto `inflight` and calls
-  `handle.wait()` on each before releasing its guard. The flush is synchronous
-  through to device completion.
-- *`sys_sync` misses file pages.* Covered above: `sync_all` forces a pass that
-  runs `flush_dirty_inodes` between two block-cache drains, and waits for it.
-
-**Leading hypothesis, untested:** `sys_sync`'s last act is a loop of
-`advance_tail()` over every journal, which writes the journal superblock — and
-nothing flushes the block cache afterwards, so that write is still dirty when
-the caller returns. The code's own comment says what a stale on-disk tail
-costs: the next mount "re-applies transactions whose blocks have since been
-checkpointed and overwritten -- it reverts good data with older journal
-copies." A partial revert is exactly the shape `efs-fsck` reports, current
-directory blocks against a stale inode table and bitmap. Against it: the
-failing boot logged `nothing to replay`, so on that boot the tail was not
-stale. Settle that contradiction before changing anything.
-
-Other things worth checking, in order:
-
-- `programs/edos-install` ends with `BLOCK_IOCTL_FLUSH` and *then* `SYS_SYNC`.
-  The device flush precedes the sync that dirties the block cache again, and
-  nothing flushes the device after `sys_sync`'s final `advance_tail`, which
-  writes the journal superblock. A published tail whose checkpoint writes are
-  still in a cache is exactly a mount that replays nothing and finds nothing.
-- The whole gate now takes 2 min 25 s warm and the install itself 7.4 s,
-  against the minutes it took when it was last green. Whatever the window
-  was, it got much narrower, which fits a gate that used to pass by timing
-  rather than by construction.
-- `scripts/nvme-check` stops the guest immediately after `edos-install` exits.
-  Adding a settle there would turn the gate green and hide the defect: a user
-  who installs and reboots promptly gets the same broken disk. Fix the
-  durability, not the gate.
-
-Reproduce with `make nvme-check` and read `run_log.txt` — but note it holds the
-*reboot* guest's log, since each boot overwrites it. Capturing the install
-guest's serial needs a copy taken before the second boot starts, and the copy
-is worth having: `edos-install` traces one `copy <path>` line per file to
-`/dev/klog`, so the install guest's log says whether `bin/edos-init` was
-written at all.
-
-**A repro must recreate `nvme-blank.img` first.** Once a run has installed onto
-it, the image carries a bootable ESP, and QEMU prefers that disk over the CD:
-the next `edos-vm start --nvme-disk nvme-blank.img` boots the installed system
-rather than the ISO, and the guest that comes up is the corrupt one under
-investigation. It announces itself in the cmdline — `root=UUID=` naming the
-GUID `edos-install` generated instead of `87654321-4321-8765-cba9-987654321fed`
-from `limine.conf`. The target to run is `make fresh-nvme-blank`, which the
-gate itself depends on: plain `make nvme-blank.img` is a file target and does
-nothing at all when the file is already there, which is exactly the case after
-a run.
-
-### Two defects found by reading the sync path (2026-08-19, iteration 17)
-
-Neither is proven to be the whole cause of the case-4 corruption above, and
-both are real regardless of that.
-
-**`edos-install` flushed the device before it synced.** The tail of
-`programs/edos-install/src/main.rs` ran `BLOCK_IOCTL_FLUSH` and *then*
-`SYS_SYNC`. `sync` is what puts the two new filesystems' dirty pages on the
-wire, so the flush emptied a write cache that had not yet received them and
-nothing flushed afterwards. Every byte `sync` submitted was left in the drive's
-volatile cache, which is exactly the window a prompt reboot loses. The two
-calls are swapped now.
-
-**A failed forced writeback pass reported success.** `flush_dirty_once` used
-`?` on `write_batch`, so the first failing batch returned from the whole
-function and abandoned every shard after it. `writeback_thread` then logged the
-error, discarded it, and stored `flush_completed = req` anyway, which is what
-`sync_all` waits on. A single bad write therefore shrank a *forced* pass to a
-prefix of itself and `sys_sync` still returned success. That is the exact shape
-of the corruption `efs-fsck` reports on the installed image: some inode-table
-and bitmap blocks current, others an older version of themselves, with the
-directory blocks that reference them written. `flush_dirty_once` now records
-the first error and keeps going so every dirty page is attempted, and a forced
-pass that did not write everything logs
-
-```
-writeback: forced pass for request N did not write every dirty page; sync is returning without full durability
-```
-
-and bumps `failed_sync_passes` in `/proc/block_cache`. The request number is
-still published on failure: a waiter that is never answered parks forever, so
-the choice is between saying it out loud and hanging.
-
-**Ruled out for the case-4 corruption, do not spend the time again:**
-
-- *The journal tail is published into the block cache and left dirty.* This was
-  the previous section's leading hypothesis. `Journal::write_journal_sb` ends in
-  `block_write_fua`, so the superblock write is durable before `advance_tail`
-  returns. Refuted.
-- *QEMU loses the writes when the gate kills it.* `nvme-blank.img` is **raw**,
-  not qcow2, so a guest write that completed is in the host page cache and
-  survives the process dying. There is no qcow2 L2 table held in QEMU's memory
-  to lose. The lost writes never left the guest.
-- *Deferred orphan eviction.* `fs::evict` only runs for inodes with no links;
-  the install creates files and unlinks nothing, so no install write depends on
-  the `evict-inode` kthread.
-
-The install guest's own serial log from the 2026-08-19 repro
-(`copy` traces, `flushed in 0.6s`, `rc=0` at 7.4 s) carries **no**
-`writeback: flush error`, no `sys_sync:` line and no `journal still pending`,
-so on that run nothing failed loudly. The new counter is what would say so; if
-case 4 fails again, read `failed_sync_passes` in `/proc/block_cache` on the
-install guest before theorising further.
-
-**The gate was re-run at 7a110a65 and is STILL RED — but it fails somewhere
-else now, and the new failure names the mechanism.** Cases 1, 2 and 3 pass and
-case 4's install passes; the boot from the installed disk gets further than it
-used to and then dies differently:
-
-```
-Root partition: UUID=... on device 3000
-efs journal: replay scan start tail_seq=4 tail_block=192
-efs journal: scanned, nothing to replay
-Root filesystem mounted
-efs: read hole at logical block 1 (byte 4096) of a 248448-byte file, 1 extents mapped
-Spawned bin/edos-init tid=20 cpu=0
-```
-
-No `resolve_inode: FileNotFound` any more: the directory tree and the inode
-allocations are durable now. What is not durable is **a file's extent list**.
-`bin/edos-init` has its correct on-disk size, 248448 bytes, and exactly one
-mapped extent, so everything past the first 4 KiB is a hole. The kernel spawns
-it anyway and the desktop never comes up.
-
-Size and extents come from different places, which was the whole lead:
-`page_cache_write` stamps the size **synchronously** through
-`pc_ops.update_size` — `vfs::flush_dirty_inodes` passes `None` for the size
-precisely because of that — while the extents the flush allocates ride the
-journal.
-
-### `sync` returned one round before the extents were committed — FIXED
-
-That lead was the bug. `sys_sync` loops commit-then-flush to a fixed point, and
-its fixed point was `Journal::needs_checkpoint()` — `sealed` non-empty or
-`committed_pending` non-empty. The flush pass allocates the extents for the
-pages it writes and enrols the inode and bitmap blocks into the journal's
-**active** transaction (`TxHandle::drop` merges into `state.active`; it does not
-seal), and the test could not see that transaction. So the round that wrote the
-data and created its mapping read as converged, the loop broke, and `sync`
-returned with every extent it had just allocated in memory only. The one extent
-each file kept is the block `convert_inline_to_extents` allocated at first
-write, committed by the periodic committer long before the sync — hence a
-correct size and exactly one mapped extent.
-
-The fixed point is `Journal::needs_sync_round()` now, which counts the open
-transaction as work. It terminates because every round commits the active
-transaction before flushing again, so a round's enrolments are the next round's
-committed work and a pass that writes nothing new enrols nothing; two rounds is
-the normal case, and the gate boot logs no `journal still pending`.
-`/proc/journal_stats` gained an `active` field beside `sealed`, `pending` and
-`tracked`, so this is readable from a guest rather than inferrable.
-
-`make nvme-check` is **green 4/4** at this fix, install case included, with the
-guest still stopped the instant `edos-install` exits.
-
-**The reasoning that produced the bug is worth more than the fix.**
-`doc/bugs/2026-08-09-sync-that-left-the-journal-dirty.md` recorded, as a
-termination requirement, that the loop must test *only* committed work, since
-"the open transaction is refilled by every flush and is never replayed". Never
-replayed is true, and it is exactly why an open transaction must not be left
-open: that post-mortem was answering "does `sync` leave the journal
-replay-clean", and the question a caller asks is "does `sync` make my writes
-durable". The two differ by precisely that transaction. Full write-up in
-`doc/bugs/2026-08-19-sync-returned-before-the-extents-were-committed.md`.
-
----
-
-## The two gates the fixed-point change had never been judged by (2026-08-19)
-
-`sys_sync`'s convergence test changing at `dfedf441` moves exactly one thing:
-when metadata reaches disk relative to the call that asked for it. Two of the
-nine gates read that directly and neither had run since the change —
-`orphan-check`, which power-cuts a guest holding eight unlinked-but-open files
-and asserts the next mount finishes the deletions, and `ssh-check`, which is
-the only gate that moves ten megabytes each way through the file system under a
-real network client. Both are green at `5c9c7381`:
-
-| gate | verdict at `5c9c7381` |
-|---|---|
-| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | clean |
-| `make -C kernel check` | warning-free across every feature combination |
-| `make orphan-check` | `efs: freed 8 orphaned inode(s)`, `efs-fsck` exit 0, no orphans reported |
-| `make ssh-check` | auth, refusal and exit status; 11,854,720 bytes each way with matching sha256; three concurrent sessions |
-
-The other five carry over from the runs recorded above rather than being
-re-measured, and the reason is checkable rather than assumed: `5c9c7381` is
-`dfedf441` plus three commits, and the only one of them that touches a `.rs`
-file at all changes a comment inside `sys_sync`. The kernel image those gates
-judged is the one they would build today.
-
-**A gate that collides with another gate fails as a Python traceback, not as a
-message.** Two `make orphan-check` runs and one `make ssh-check` overlapped
-here, and what came out was `FileNotFoundError` on the QMP socket from
-`cmd_click`, wrapped in a `CalledProcessError` from `vmdrive.run` — nothing in
-it says "another gate owns the guest". The failing run is the loser of the
-race and the winner's verdict is still sound (`ssh-check` printed all three
-phases with real byte counts and hashes, and re-ran identically with the slot to
-itself), but the traceback reads exactly like a driver bug in the gate that
-lost. Before believing one, check whether a
-second gate was running: the `pgrep` alternation above names them.
-
-The collision is refused rather than raced now, by the slot lock described
-above, and the traceback is gone twice over: the second gate stops before it
-boots anything, and a command that does find the socket missing reports
-`no guest on <sock> ...; it exited or was stopped`, naming the gate holding the
-slot when there is one. `Qmp.__init__` raises that as `NoGuest`, an `OSError`
-subclass, so `cmd_stop`'s existing fallback to `kill` still catches it.
-
----
-
-## The whole gate set once more, at `d97b802a`, with the slot lock live (2026-08-19)
-
-The slot lock is the thing under test as much as the tree is: every gate now
-takes `RUNDIR/slot.lock` through `vmdrive.py` before it boots anything, so a
-serial chain of all nine is also the first run where each gate's `edos-vm`
-calls go through a lock its own process holds. Nothing in the chain refused
-itself, and an outsider was refused by name while `recovery-check` held it:
-
-```
-$ scripts/edos-vm start
-refusing to start: pid 2616005 (scripts/recovery-check) holds the guest slot. [...]
-$ scripts/edos-vm status
-pid 2616013, running, vnc 127.0.0.1:5901
-```
-
-`status` still answers, which is right: reading the slot is not driving it.
-
-| gate | verdict at `d97b802a` |
-|---|---|
-| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | clean |
-| `make -C kernel check` | warning-free across every feature combination |
-| `make host-tests` | 138 across eight binaries |
-| `make nvme-check` | 4/4: NVMe root, coexistence, the 4Kn refusal, install-and-reboot |
-| `make recovery-check` | `replayed 1 transactions (7 ring blocks)`, `rec_a`/`rec_b`/`rec_c` survived |
-| `make orphan-check` | `efs: freed 8 orphaned inode(s)`, `efs-fsck` exit 0, no orphans reported |
-| `make ssh-check` | auth, a refused password and exit status; 11,854,720 bytes each way with matching sha256; three concurrent sessions |
-| `make storage-check` | `fs-regression` EFS OK and FAT32 OK, `fsbench-run /var` OK in 15.6 s, `/proc/nvme_stats` reporting no command errors |
-| `make test AUDIODEV=none` | 58/58 |
-| `make guest-check` | 17/17 |
-
-Timings, for sizing an unattended run: the whole chain took 11 minutes wall on
-this host with a warm build tree — `nvme-check` 1m28s, `recovery-check` 1m33s,
-`orphan-check` 1m22s, `ssh-check` 44s, `storage-check` 4m27s, `make test` 10s,
-`guest-check` 1m11s, and the three build-and-lint gates seconds each. The
-"a little over an hour" in the section above is a cold-build figure; the gates
-themselves are not the cost, rebuilding two ISOs and two disk images is.
-
-`make ssh-check` and `make storage-check` each rebuilt `sata-disk.img` as a
-prerequisite, and each rebuild ran `scripts/edos-vm stop` under the new rule
-that refuses while a gate holds the slot. Both went through, because a make
-rule's prerequisites run before the gate script that claims the slot. That
-ordering is what makes the strict `stop` safe to depend on: the refusal is for
-a *second* gate, not for the one whose own prerequisites are still building.
-
-## A completion handle published its error outside the CAS that owned it (2026-08-19)
-
-`BlockIoHandle::complete` stored the error code *before* the state CAS that
-decides idempotence:
-
-```rust
-self.error.store(code, Ordering::Release);
-if self.state.compare_exchange(PENDING, new_state, ..).is_ok() {
-    self.waiters.wake_all();
-}
-```
-
-The store has to come first, because a waiter reads `error` only after it has
-seen `state` terminal. But it is unconditional, so a caller that goes on to
-*lose* the CAS has already overwritten the winner's answer. A late
-`complete(Ok(()))` stores zero, and a waiter that reads `BLOCK_IO_FAILED`
-decodes that zero through `BlockError::from_code` into `Io` — a different,
-entirely plausible error that never happened.
-
-The fix is to claim before publishing anything: a `claimed: AtomicBool` swapped
-`true`, and whoever finds it already set returns without touching either field.
-The state is then a plain `store`, since the claim already picked the winner.
-
-**Two fields that must be read in a fixed order cannot be guarded by a CAS on
-the second one.** The CAS orders the *state*, and by the time it answers, the
-other field is already written.
-
-## A split NVMe request completed its caller while its siblings were still writing
-
-`SplitOp::parts_done` completed the caller's handle on the first error, on the
-reasoning that the data was already wrong and each still-outstanding part would
-reclaim its own bounce buffer and PRP list page when the device finished with
-it. Both halves of that are true, and the conclusion was still wrong: the
-caller's handle is what releases the submitting thread, and a
-`BlockBuffer::reaped_by_submitter` range is only promised to stay valid *until
-that thread reaps*. Every outstanding part holds live PRP descriptors into a
-`subrange` of it, and `retire_op` copies a bounced read back into it. So the
-early completion invites the device, and the driver, to write into a buffer
-whose owner has been told it may go.
-
-Reachable three ways: `issue_transfer` returning `NoMemory` part-way through the
-loop, any one part completing with a non-zero status, and the watchdog's
-fail-all, which fails one part and reaches the rest on a later pass. Latent
-rather than observed — a split needs a request over MDTS, 512 KiB on QEMU, and
-then an error on one part — and in a debug build the `borrowed_dma` assertion at
-`thread_exit` is what would catch it. A release build would not.
-
-`parts_done` records the first error and completes the handle exactly once, when
-`remaining` reaches zero, whatever the outcome. The caller waiting out parts the
-device still owns is not a cost to be optimised away; it is the contract.
-
-**The rule this is an instance of:** a handle that fans out to several device
-commands may not be completed until every one of them has reported, because
-completing it is what tells the owner of the buffer that nobody is reading it
-any more.
-
-## Is NVMe faster than AHCI? Yes, once the scheduler stopped napping (2026-08-19)
-
-The question was asked directly and the first answer was wrong. `fsbench raw`
-on both devices in one boot said NVMe lost at every request size, 2-4x. It also
-said NVMe's *median* won at every request size. Both were true, and the second
-is the one that mattered: the throughput gap was one ~100 ms stall per test
-against p99s in the tens of microseconds.
-
-That 100 ms is `Scheduler::run_idle`'s fallback timer, not a device time.
-Root cause and fix in
-`doc/bugs/2026-08-19-idle-cpu-halted-with-a-runnable-thread.md`; it is a
-scheduler defect that every IRQ-driven driver was paying, not a storage one.
-
-Answer, best of five sweeps per device in one boot, after the fix:
-
-| request | NVMe | AHCI |
-|---|---|---|
-| 512 B | 77.7 MiB/s | 37.9 |
-| 4 KiB | 92.4 | 41.2 |
-| 64 KiB | 674 | 455 |
-| 1 MiB | 996 | 983 |
-
-**How to ask this question again, because three of the four ways are wrong.**
-
-- Both devices in **one boot** (`edos-vm start --nvme-disk nvme-disk.img`
-  keeps SATA). Two boots compare host cache states, not drivers.
-- `fsbench raw /dev/sdX` and `raw /dev/nvme0n1`, not a filesystem sweep. A
-  filesystem run measures EFS's 992 KiB batching against NVMe's MDTS splitting
-  and the page cache in front of both.
-- **Best of several sweeps, not one.** Consecutive 4 KiB sweeps in an identical
-  configuration read 21.4 and 57.6 MiB/s. A single run invents findings; the
-  guest is running a desktop beside the benchmark, and interference only ever
-  makes a round look slower.
-- **Read the max column, not just MiB/s.** The whole finding lived there.
-
-`/dev/ram0` in the same boot is the control worth having: no storage driver at
-all, so it isolates the driver from everything above it. Do not read it as
-memory speed, though -- it is the ceiling of *this path*, and the path is not
-cheap. EFS reads a real AHCI disk faster (over 1.7 GiB/s via `read_via_extents`)
-than the RAM disk manages here, and ram0's 42 us at 64 KiB is 2.6 us per 4 KiB
-page against a copy costing a few hundred nanoseconds. It also inverts, 1452
-MiB/s at 64 KiB down to 1170 at 1 MiB, where neither disk-backed device does.
-That is its own open item; see `doc/fsbench.md`.
-
-Not settled by this: the images differ (`sata-disk.img` is qcow2,
-`nvme-disk.img` raw), and QEMU's device models are not silicon. The comparison
-rests on the latency distribution, which those differences do not explain.
-
-## NVMe is the default root now (2026-08-19)
-
-`edos-x86_64.iso`'s `root=` names `nvme-disk.img`'s partition GUID, every `run`
-target and every gate attaches both disks, and `scripts/edos-vm` attaches the
-NVMe namespace unless told `--no-nvme`. So an ordinary boot roots on
-`/dev/nvme0n1` with `/dev/sda` beside it.
-
-Two reasons: NVMe measures faster than AHCI at every request size once the
-scheduler stall was fixed (`doc/fsbench.md`), and it is the less proven of the
-two drivers, so making every gate boot it is free coverage.
-
-**The trap this sets, and what it cost to find.** Three of `nvme-check`'s four
-cases exist to prove the NVMe disk does *not* become root: coexistence, the 4Kn
-refusal, and installing onto a blank image. Flipping the default ISO silently
-inverts all three -- the coexistence assertion starts asserting the opposite of
-what it means, and the other two lose their root entirely and fall back to
-memfs, because a blank or 4Kn NVMe disk has no partition matching the GUID the
-cmdline now names. They boot `edos-sata.iso` for that reason, and a fourth ISO
-is not needed only because the GUID is already a `build_iso` parameter.
-
-**A second trap, from the disk-image rules.** `nvme-disk.img` is a prerequisite
-of nearly every target now, and its rule begins with `scripts/edos-vm stop`,
-which refuses while a gate holds the slot. That is deliberate -- rebuilding a
-disk under a running gate is the worse outcome -- but it means a `make` in one
-terminal while a gate runs in another now fails on the *image* rule rather than
-somewhere confusing later. The failure names the gate holding the slot.
-
-Also worth knowing: a gate that dies without releasing its guest leaves a QEMU
-holding the slot, and the next `make` fails on that same `stop`. `scripts/edos-vm
-status` names the pid and `stop --force` clears it.
-
-## `make clippy` and `make fmt-check` are gates now (2026-08-19)
-
-Both trees are clippy-clean at `-D warnings` and both are wired into CI. The
-kernel job had been gated for a while; userspace never was, which is how it
-accumulated 137 warnings nobody saw.
-
-**Two of those were deny-level lints that made `cargo clippy` on `programs/`
-fail outright**, which is why the other 135 were invisible: the run aborted
-before reaching them. Worth knowing as a shape -- a lint gate that has never
-been green does not degrade gracefully, it just stops reporting.
-
-One of the two was a real behavioural bug. `top`'s interval wait never looped:
-every path through it broke, so any keystroke forced an immediate redraw,
-contradicting the comment directly above it. `handle_key` returned a bare bool
-and could not distinguish "changed an option" from "ignored". `uniq` had
-another, found only once `-D warnings` was on: `lines().filter_map(|l| l.ok())`
-spins forever on a persistent read error, where `map_while(Result::ok)` stops.
-
-**A grep for `^warning:` undercounts.** Several clippy messages begin with a
-backtick (``warning: `filter_map()` will run forever...``), so a count keyed on
-a leading letter misses them. The honest measure is the exit code under
-`-D warnings`, which is what `make clippy` uses.
-
-**`.cargo/config.toml` is found relative to the working directory, not to
-`--manifest-path`.** `cargo +edos clippy --manifest-path programs/Cargo.toml`
-run from the repo root silently ignores `programs/.cargo/config.toml`, so it
-loses both the default target and the workspace-wide lint allow. The make rule
-and the CI step both `cd programs` first. This cost a confusing round where the
-same command passed locally and failed from the root.
-
-`clippy::too_many_arguments` is allowed globally rather than per site:
-`kernel/src/main.rs` for the kernel, `programs/.cargo/config.toml` for the
-131-member workspace, where the per-crate attribute would mean 131 edits.
-
-## The preemption count was raised on one CPU and lowered on another (2026-08-19)
-
-CI's `guest suites` job had never passed once. `b7702071` fixes the kernel race
-behind it; the post-mortem is
-`doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md` and the
-runner-QEMU angle is in `doc/ci.md`.
-
-The short form, because it is a shape worth recognising elsewhere:
-`preempt_disable` reached a **per-CPU** count in two instructions —
-`get_percpu_data()` reads the GS base into a register, then `fetch_add` goes
-through that register. The caller is still preemptible in between, because the
-count that would stop it has not been raised yet. A tick landing there moves the
-thread, the increment lands on the CPU it left, and the guard's release wraps the
-arriving CPU's count below zero. Both CPUs stop preempting for good, and the
-thread that trips `thread_park_while with preemption disabled` is the first one
-to *park* on the wrecked CPU — the reaper, which holds nothing.
-
-Now one GS-relative instruction each way (`addl $0x1,%gs:0x508`), which an
-interrupt cannot split, plus a `debug_assert` that the release lowers a non-zero
-count. `tlb_shootdown` had the same defect one layer up and was fixed with it: it
-read `current_cpu_index()` before suppressing preemption, so a moved caller
-exempts the CPU that keeps the stale translation and waits on one that was never
-sent an IPI.
-
-**Three things to carry forward.**
-
-- A panic naming a thread that holds nothing is evidence about state it
-  *inherited*. Look for who wrote the state, not for what the victim was doing.
-  The suggested first step at the time — assert on every blocking primitive that
-  can park — would never have found this, because the leaker is the primitive.
-- The sweep for other instances came back clean: every other per-CPU accessor
-  already wraps the whole sequence, e.g. the allocator's `heap_cache` inside
-  `without_interrupts`. `preempt_disable` was the odd one out.
-- **Do not upgrade the runner's QEMU.** 8.2 lands the interrupt in that window
-  inside one boot; this host's 10.0 almost never does, which is why the same gate
-  was green here forever. It is the only host in the project that reproduces this
-  class reliably. The container repro is in `doc/ci.md`, and it is 17/17 across
-  four runs now.
-
-## Reading a page cost six passes over its bytes (2026-08-19)
-
-`ebee0138`. Full write-up in `doc/STORAGE-ROADMAP.md` section 7; `doc/fsbench.md`
-carries the corrected ram0 finding.
-
-`fsbench raw /dev/ram0` is pure path cost, and the path was passing over every
-byte six times: zero the staging buffer, device → staging, staging → cache
-frame, zero the `read_bytes` output, frame → that output, output → user. Two
-were memsets of buffers overwritten whole (the kernel allocator has no
-`alloc_zeroed` override, so `vec![0u8; n]` really is one), and one was a gather
-into an allocation that existed only to be copied out again — which
-`page_cache_read_to_user` had already stopped doing for regular files. Three are
-gone: +5-8% at every request size, +14.8% at 1 MiB, best of four sweeps each
-side.
-
-**Two traps, both cost a build.**
-
-- **`sys_read` has a devfs fast path that bypasses the VFS entirely**
-  (`try_lookup_from_full_path` → `device.read()`, at two call sites in
-  `syscalls/io.rs`). Wiring the new `read_to_user` through `vfs::read_to_user`
-  first was dead code for `/dev/ram0`, and the measured gain at that point was
-  the memsets alone. Check which path a devfs fd actually takes before
-  optimising one.
-- **Measure the old build the same way.** Best-of-four against best-of-four
-  needed the change stashed and the tree rebuilt; single runs on a guest that is
-  also running the desktop have a wide enough tail to invent a result either way.
-
-What the measurement refuted is worth as much as what it found: cache thrash at
-256 pages per request is not the cause (0.99 misses and 0.99 evictions **per
-page** at 64 KiB and 1 MiB alike), and `MAX_RUN_PAGES` is not either (992 KiB is
-one command and has already given up 85% of the loss). `fsbench raw` now sweeps
-densely enough to show that and prints per-size counter deltas under each row.
-
----
-
-## `fork` gave the child six registers fewer than its parent (2026-08-25)
-
-CI's `guest suites` job had been red for a week on `mmaptest` test 8, and it
-never once failed here. The evidence that settled it was already in the
-artifact: the children of tests 5 and 8 faulted at `0x1000` and `0x0`, which is
-`ptr.add(PAGE)` and `ptr` evaluated with a null `ptr`, while test 6's child ran
-the same expression against the correct address. A child's copy of a pointer its
-parent had just checked was reading as zero.
-
-Not the mapping, and not COW: the value lived in a register. The SYSCALL stub
-restores `rdi`, `rsi`, `rdx`, `r8`, `r9` and `r10` before `sysretq`, and the raw
-stubs declare only `rax`, `rcx` and `r11` as clobbered, so the compiler is free
-to hold a live value in one of them across an inlined `syscall`. `sys_fork` was
-copying `rbx`, `rbp` and `r12`–`r15` into the child and zeroing the rest.
-Whether a call site notices is a register-allocation accident, which is the
-whole of the "CI only" mystery — the same kernel bug was here all along in a
-binary that happened not to use those registers at those two sites.
-
-**Reproducing the environment was the wrong instinct.** Nested KVM and Intel vs
-AMD were the standing suspects and neither was worth an hour: `programs/forktest`
-now forks with a known value in every preserved register and reads them back on
-both sides, and it went red on the first local run.
-
-### The bug hiding behind it
-
-Hardening `mmaptest` to check *which* address the child died at (a negative case
-that asserts only "the child died" passes on any fault, and in CI test 5 was
-passing on a null dereference while claiming a past-EOF rejection) turned up a
-second defect. The child records the address, the parent reads it back, and the
-parent's `read` failed — `EINVAL`, which after `sys_read` was taught to report
-the filesystem's own error turned out to be `EIO` from `try_copy_to_user`.
-
-`fork` marks the address space copy-on-write on both sides. A write to such a
-page is a protection violation on a *present* page, and the ring-0 branch of the
-page-fault handler serviced only *not-present* faults before falling through to
-the uaccess fixup. Ring 3 had a COW branch; ring 0 did not. So a syscall writing
-into any page its caller had not touched since forking failed and reported a bad
-buffer — one `Vec::with_capacity` away at any time in a parent process.
-
-Both are written up in `doc/bugs/2026-08-25-what-fork-did-not-give-the-child.md`.
-Gates: `forktest` is in `guest-check` (18 suites now), and `mmaptest` 5, 6 and 8
-pin the faulting address.
-
----
-
-## The gate baseline, measured
-
-Every gate the tree has was run from a clean shell on 2026-08-26 against
-`611413a3`, with a warm `target/` in both workspaces. **All of them are green.
-There are no pre-existing failures.** Anything red after this point was
-introduced after it.
-
-| gate | verdict | wall, warm |
-|---|---|---|
-| `make -C kernel check` | green | 16 s |
-| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | green | 1 s |
-| `make host-tests` | green, 138 passed across 8 binaries | 4 s |
-| `make programs` | green | 5 s |
-| `cd programs && cargo +edos clippy --all-targets -- -D warnings` | green, 0 warnings | 5 s |
-| `cd kernel && cargo clippy` | green, 0 warnings | 3 s |
-| `cd kernel && cargo clippy --features sched-test` | green, 0 warnings | 3 s |
-| `cd kernel && cargo clippy --features trace` | green, 0 warnings | 3 s |
-| `cd kernel && cargo clippy --features sched-prof` | green, 0 warnings | 3 s |
-| `make test AUDIODEV=none` | green, ALL 58 TESTS PASSED | 12 s |
-| `make guest-check` | green, 18 suites passed | 84 s |
-
-**The times are warm-incremental and are not a build budget.** Nothing in that
-table rebuilds a workspace from scratch; the four clippy runs at three seconds
-are re-checking an already-checked tree. A cold clone pays the kernel build and
-the whole `programs/` workspace before any of it. Read the column as "what an
-iteration pays to re-verify", not as "what CI pays".
-
-**Run `make test` before `make guest-check`, never after, and never expect the
-second number to be a boot.** `make test` builds the ISO with `--features
-sched-test`; `guest-check` depends on the same ISO path with the default feature
-set, so it rebuilds the kernel and relinks the ISO before it boots anything.
-The 84 s above is that rebuild plus one boot plus 18 suites, and running the
-pair in the other order just moves the rebuild to the other gate. Both also
-depend on `sata-disk.img` and `nvme-disk.img`, so a touched `filesystem/` adds
-an `efs-mkfs` of each.
-
-Three counts in `CLAUDE.md` were checked against the run rather than trusted:
-138 host tests, 58 sched-test cases, 18 `guest-check` suites. All three are
-correct.
-
-
-## Button and checkbox took PS/2 set-1 scancodes, not kernel keycodes
-
-`Button::on_key` compared its argument against `28 || 57` with a comment reading
-"28 = Enter, 57 = Space", and `Checkbox::on_key` against `57` with "57 = Space".
-Those are AT set-1 make codes. The value that actually reaches `on_key` is a
-`pc_keyboard` `KeyCode` discriminant, the same space `container.rs` compares
-against `keycode::TAB`, and there 28 is `OEM_MINUS`, 57 is `NUMPAD8`, `RETURN`
-is 72, `NUMPAD_ENTER` is 92 and `SPACEBAR` is 96. So a focused button fired on
-minus and on numpad 8, and Enter and Space did nothing; a focused checkbox never
-toggled from the keyboard at all.
-
-The trap is that the comment was self-consistent and cited a real table, so
-reading the code confirms it. Only running it disagrees. Watched in a guest
-(`wintest`, whose Status line shows a click counter): with the fix, minus and
-numpad 8 leave the count alone, and Enter, Space and numpad Enter each raise it
-by one; clicking `Enable sound` turns it ON and Space turns it OFF.
-
-Every other widget already used `keycode::`. After this there are no numeric
-scancode comparisons left in `programs/`: `grep -rn 'scancode ==' programs/ |
-grep -v 'keycode::'` returns nothing, which is the check to re-run before
-trusting a new widget's key handling.
-
-## The intrusive list's tests were written twice and run zero times
-
-`tests/intrusive_list/` was a whole crate whose `lib.rs` was, apart from one
-`#[allow(dead_code)]`, byte-for-byte the `#[cfg(test)] mod tests` already inside
-`libs/intrusive_list/src/lib.rs`. Checked before deleting, with
-`diff <(sed -n '492,959p' libs/intrusive_list/src/lib.rs) <(sed -n '9,477p'
-tests/intrusive_list/src/lib.rs)`, which printed one line. Nothing was lost.
-
-Neither copy ran. `tests/` was in no workspace, no Makefile target and no CI
-job, and `scripts/host-tests` only knew about crates under `programs/`. So the
-23 cases covering the structure the scheduler's runqueues are made of were
-decorative, and had been for as long as they existed.
-
-`libs/` is the trap: those crates are in **no** workspace, because they are
-shared with a kernel that builds for `x86_64-unknown-none`. That is why nothing
-picked them up by accident and why `host-tests` now iterates their manifests
-explicitly. A new crate under `libs/` gets the same treatment or it gets no gate
-at all; adding it to a workspace is not an option.
-
-Host-test count moves 138 → 164: intrusive-list 23, efs-common 3, window-abi 0.
-`window-abi` has no tests and is in the loop anyway, so that it is at least
-compiled for the host on every run.
-
-## A widget had two identities, and a wrapper existed to hide one of them
-
-`WidgetContainer::add` handed back an id, and every widget *also* carried an
-`id: WidgetId` field taken by its constructor. The two never agreed: all 27 call
-sites in the tree passed `0`, and the container discarded that value, boxed the
-widget inside a private `WidgetWrapper` and answered `Widget::id()` from the
-wrapper instead. The wrapper therefore had to forward all fifteen trait methods
-by hand, which is a silent failure every time the trait grows a defaulted method
-— the wrapper inherits the default and the real widget never hears about it.
-Both `CLAUDE.md` and the trait's own doc comment described that hazard rather
-than removing it.
-
-The container now stores `(WidgetId, Box<dyn Widget>)` and `Widget` has no
-`id()`: identity belongs to the container, which is the only thing that ever
-knew it. The `id` field, the constructor parameter and the `fn id` impl are gone
-from all six widgets, so `Widget::new(0, x, y, ..)` is now `Widget::new(x, y, ..)`.
-
-Two things fell out of it:
-
-- `get_mut` has to be spelled `Option<&mut (dyn Widget + 'static)>`. The box is
-  `Box<dyn Widget + 'static>`, a `&mut` to a trait object is invariant in the
-  object's lifetime, and the elided return type would ask it to shrink to the
-  borrow. The shared `get` needs no such thing, `&` being covariant.
-- `edos_lib::keymap::Modifiers` is now `Copy`. `handle_event` used to hold
-  `&self.mods` and `&mut self.widgets` at once through disjoint field borrows;
-  going through `self.get_mut()` borrows all of `self`, so the modifier state is
-  copied out first.
-
-`focus_next` and `focus_prev` were two near-identical 30-line blocks and are now
-`focus_step(±1)` over `focusable_ids()`. `set_focus` on a non-focusable widget
-used to unfocus the current widget and leave `self.focused` pointing at it; it
-is now a no-op.
-
-Verified in a live guest, not just by the gates: `wintest` renders, a click
-activates the right button, typed text reaches the focused field, Tab steps
-focus, Space toggles a checkbox, arrows move a slider 50% → 52%, and Ctrl+C /
-Ctrl+V round-trip through the field ("Ada" → "AdaAda") — the three clipboard
-methods being exactly the ones the wrapper forwarded by hand.
-
-## Kernel dead code: the whole sweep, and what a blanket allow hides
-
-`ROADMAP-CLEANUP.md` E1–E4 are closed together, because they are one question
-asked four ways: which suppressions are load-bearing.
-
-The recipe, which is worth repeating whenever the count creeps back up:
-
-```
-sed -i 's/#\[allow(dead_code)\]/#[cfg_attr(any(), allow(dead_code))]/g; \
-        s/#\[allow(unused)\]/#[cfg_attr(any(), allow(unused))]/g' <files>
-cd kernel && for f in "" "--features sched-test" "--features trace" \
-                      "--features sched-prof"; do
-  touch src/main.rs; cargo check $f --message-format=short; done
-```
-
-`cfg_attr(any(), ...)` is inert but still an attribute, so it survives in
-positions a bare deletion would not parse — `TransferError(#[allow(dead_code)] u8)`
-is the one that matters. **`touch src/main.rs` between feature sets is not
-optional**: without it cargo replays the previous build's cached diagnostics and
-every feature after the first appears to have no warnings at all.
-
-The sweep found 29 items dead under all four feature sets, one more (`TraceEvent`
-variants `StealSkip` and `StateChange`) dead only under `trace`. 19 were
-deleted, 10 kept with a reason. What went, beyond the obvious unused methods:
-`TimerCalibration` now holds only `ticks_per_microsecond`, the field anything
-reads — the APIC and TSC frequencies are still printed at calibration, just not
-stored afterwards; `UserThreadTls` keeps only `mapping_base`/`mapping_size`, the
-pair the unmap path uses; and `AhciNcqOp::slot` is gone, since the op lives in
-`ncq_waiters[slot]` and a second copy of an index is a way for the two to
-disagree.
-
-**The trap: a blanket allow over an `impl` block hides its own consequences.**
-`window/registry.rs` had `#[allow(dead_code)]` on `impl WindowInfo` and
-`impl WindowRegistry` entire, so it covered every method in them, present and
-future; `thread/fd.rs` and `thread/pty.rs` each had one on both the struct and
-its `impl`. Four dead methods were sitting under those four attributes and
-nobody would have been told about a fifth.
-
-The sharper version is a **trait default method**. `CancellableOp::id` carried an
-allow and no callers, but four types override it (AHCI, AHCI NCQ, NVMe,
-page-fill). Deleting the trait method is what surfaces them, and only then does
-`AhciNcqOp::slot` — the field the `ahci` override read — show up as never read.
-A lint that stops at the first attribute reports one dead method where there
-were six dead items.
-
-Five allows suppressed nothing at all and are gone: `irqlock::lock_ranked`,
-`thread::lock_ranks`, `owned_ops_push`/`owned_ops_remove` (18 call sites between
-AHCI, NVMe and `fs/page_fill.rs`), and the `unused` allows in `thread/pipe.rs`
-and `syscalls/mod.rs`. Two of those also carried "Phase 3b, Session B", so a
-slice of G1 went with them.
-
-Judgement calls kept, each now saying why in its own doc comment: `MAP_FIXED`
-and `MS_INVALIDATE` (flags userspace may pass that the kernel does not honour,
-a missing implementation rather than dead code), the xHCI scratchpad array and
-its pages plus `output_ctx` (DMA the controller reaches by physical address, so
-holding the field *is* the job), `FaultReject`'s payloads and `XhciError::
-TransferError` (read only through a derived `Debug`, which the lint does not
-count), `BufferOwner::{Owned,Static}`, and `VfsInode::kind`.
-
-## "Phase" in a kernel comment is sometimes the code and sometimes the plan
-
-The sweep that took plan vocabulary out of kernel comments (Foundation #N,
-Phase N, Task N.Nb, "Phase 0 census") touched 16 files. The grep that finds
-them also finds four places where the word names something real, and rewriting
-those would make the code harder to read, not easier:
-
-- `thread/interrupt.rs:58,98` — the context switch genuinely has two halves,
-  and the second one runs on a different stack. "Phase 1 saved the outgoing
-  thread's context" is the only short way to say which half already ran.
-- `drivers/usb/xhci/mod.rs:754,787` — reading a configuration descriptor is a
-  9-byte header fetch followed by a full-length fetch sized from `wTotalLength`.
-- `drivers/nvme/queue.rs` — the completion queue's *phase bit*, which is the
-  NVMe spec's own name for it. Phase 0 and phase 1 here are values the
-  controller writes, not steps in a plan.
-- `debug/lock_order.rs:117` — "phase compare" in the same NVMe sense.
-
-The tell is whether a reader with no access to the plan can act on the
-sentence. "Wired in Phase 5" and "Task 2.4:" name a place in a schedule nobody
-kept; "Phase 1 saved the outgoing thread's context" names a state the machine
-is actually in.
-
-Two comments were carrying a claim worth keeping and lost only the citation:
-the lazy-reloc path asserts that no `R_X86_64_RELATIVE` straddles a page
-boundary and that exactly one writable `PT_LOAD` carries relocs, which used to
-read "per Phase 0 census". The assertion enforces it either way, so what the
-census bought was confidence, not a guarantee; the comments now state the
-property and let the `assert!` be the enforcement.
-
-One line was deleted rather than rewritten: `sys_mmap` opened with
-`let _file_offset = r9; // used in Phase B for file-backed path`, a binding
-that named a plan step and was never read — the real one is 150 lines further
-down, where the file-backed branch reads `r9` for itself.
-
-## The ABI's fifth file kind is a fifo, and only userspace said so
-
-`DirEntry::file_type` is the one place the kernel/userspace duplication of the
-syscall ABI has actually drifted. The kernel's declaration documented
-`4=device`; `edos_lib` documented `4=fifo`. `file_kind_to_u8` in
-`kernel/src/syscalls/io.rs` is what fills the field, and it writes 4 for
-`FileKind::Fifo`, so the side that *defines* the ABI was the side describing it
-wrongly, and nothing caught it because a comment does not compile.
-
-Two smaller versions of the same duplication are now gone rather than
-documented: `Timespec` was declared in both `edos_lib::time` and `edos_lib::io`
-— two `#[repr(C)]` structs of identical layout inside one crate, one of which
-would eventually have grown a field — and `strace` had its own `struct Stat`
-counting calls, errors and nanoseconds per syscall, colliding by name with
-`edos_lib::io::Stat`, which is the `fstat` ABI struct. It is `CallStats` now.
-`Timespec` lives in `edos_lib::time`; `io` imports it, and `utimensat`'s
-callers reach it through `edos_lib::time::Timespec`.
-
-## libs/syscall-abi: the syscall structs now have one declaration
-
-`libs/syscall-abi` is to the syscalls what `libs/window-abi` is to the window
-system: one `no_std` crate holding every `#[repr(C)]` type that crosses the
-boundary, depended on by `edos-kernel` and by `edos_lib`, declared by neither.
-It holds `PollState`, `SelectFd`, `DirEntry`, `Stat`, `RawStatFs` and
-`SockAddrIn`, and `grep 'struct DirEntry'` over the tree now returns one hit
-where it returned two.
-
-Three things fell out of the move rather than being decided separately:
-
-- The kernel called the `fstat` reply `FstatEntry` and userspace called the
-  same layout `Stat`. One layout under two names is worse than one under one,
-  because grep cannot pair them; it is `Stat` on both sides now.
-- `PollState::with_readable` and `PollState::merge` were carrying
-  `#[expect(unused)]` and had no caller on either side. Moving them into a
-  library crate would have laundered them into "public API", so they are
-  deleted.
-- `SockAddrIn::new` used to read `sys::AF_INET as u16` from `edos_lib`. The
-  constant is `AF_INET: u16` in the ABI crate now, next to the only struct
-  whose field it fills.
-
-`Errno` did not move and cannot, without leaving this tree. The kernel's list
-is `kernel/src/syscalls/mod.rs`; userspace reads `edos_rt::sys::Errno`, and
-`edos_rt` is published from the Rust fork. Making it depend on a path in this
-repository means the full publish loop, so the two lists are still kept in step
-by hand. That is what remains of roadmap item A1.
-
-## Two partition listings, one set of names
-
-`gpt::print_partitions` and `mbr::print_partitions` each carried their own
-`match` over `PartitionType` and `FilesystemType`, which are both declared in
-`gpt.rs` and used by both. The MBR table was the shorter of the two and ended
-in `_ => "Other"`, so a GPT-only variant printed as "Other" there and by name
-in the other listing.
-
-The names are on the enums now: `Display for PartitionType`, and
-`FilesystemType::name`. `Display` goes through `Formatter::pad` rather than
-`write_str`, because a `Display` impl that writes directly ignores the format
-width, and both listings put the type in a `{:<20}` column.
-
-Neither listing runs in the `make test` boot -- they are called from
-`fs::mod.rs` only when a partition scan finds a table -- so this is compile-
-and boot-verified, not output-verified.
-
-## Layout: one algorithm, two axes
-
-`edos_render`'s box layout is `widgets/layout/linear.rs`. `HBoxLayout` and
-`VBoxLayout` no longer exist; `LinearLayout::horizontal()` and
-`LinearLayout::vertical()` construct the same type, and `Axis` supplies the six
-axis-dependent answers (size policy, alignment, half of a `SizeHint`, margin
-extent, a `Rect`'s origin and its extent) that the two copies used to differ in.
-
-The thing that had kept them apart was `HAlign` and `VAlign`: two enums with the
-same four variants, so no single expression could align on "the main axis". They
-are one `Align` now, and `Alignment { horizontal, vertical }` is what says which
-is which. Anything reaching for `HAlign::Center` wants `Align::Center`.
-
-`set_uniform_columns` is `set_uniform`. The pass it names -- give every
-content-sized item the extent of the largest, so the next column starts at the
-same offset on every row -- was never horizontal in anything but its name.
-
-Verified in a guest: `wintest` renders its five rows aligned, the two
-uniform checkbox rows keep their columns, and Tab still walks the buttons.
-
-## The kernel has two path front ends, not five
-
-`kernel/src/syscalls/mod.rs` owns both: `copy_user_path` for a NUL-terminated
-user path and `copy_user_path_len` for a counted one. Both fill a caller-owned
-`PathBuf` (a stack array, so `open`/`stat`/`mkdir` never reach the allocator)
-and hand back a `&str` borrowed from it.
-
-`syscalls/fs.rs` owns policy on top and nothing else: `read_user_path` resolves
-against the working directory, `read_user_path_with_len` against a caller-named
-one, and `read_user_path_at` implements the `*at` rule. Each is three lines.
-
-The other user-copy helpers are not this operation and should not be folded in:
-`copy_in`/`copy_out` (`io.rs`) move counted bytes through the heap so a caller
-can copy *before* taking a lock, and `read_user_str` / `copy_user_c_string`
-answer with an owned `CString` / `Vec<u8>` for values that are not paths.
-
-## One extent-tree encoder for the driver and for `efs-mkfs`
-
-`efs_common::build_extent_tree` writes an inode's extent node: a flat inline
-list up to `MAX_INLINE_EXTENTS`, and past that a depth-1 tree whose inline
-entries are `EfsExtentIndex` entries naming leaf blocks. `max_extents` states
-the depth-1 ceiling beside it.
-
-The two callers only ever disagreed about where a leaf block comes from, so
-that is the one thing the encoder asks for: `emit_leaf(index, node)` is handed
-each finished leaf in tree order and answers with the block it now lives on.
-The driver reuses the tree blocks the inode already holds -- a single-page
-`flush_page` on a fragmented file stores the map again, and churning the tree
-every time would allocate and free on every page written -- and frees whatever
-the new shape does not reuse. `efs-mkfs` allocates fresh blocks in the file's
-preferred group.
-
-Two implementations of an on-disk allocation rule is how an image `efs-fsck`
-calls clean fails to mount, which is why this belongs in `efs-common` rather
-than being kept in sync by hand.
-
-**Verifying a change to `efs-mkfs` needs the image rebuilt first.**
-`scripts/edos-vm start` rebuilds an image that is older than
-`filesystem/.manifest`, which a change to the *tool* does not touch. Run `make
-nvme-disk.img sata-disk.img` before the gates when the encoder or the layout
-code changed, or the guest boots an image the old tool wrote.
-
-## Focus and enablement are one state, not four methods per widget
-
-`FocusState { focused, enabled }` in `programs/edos_render/src/widgets/mod.rs`.
-A widget holds one and implements `Widget::focus_state` / `focus_state_mut`;
-`focusable`, `set_focused`, `enabled` and `set_enabled` are trait defaults
-written against that. `focus_state` returning `None` means "decoration": never
-focusable, always enabled, `set_*` ignored, which is exactly what `Label`
-wanted and now says by writing nothing at all.
-
-Two widgets need more than the state change and override one method each:
-`Button::set_enabled` also drops hover and press, `TextInput::set_focused` also
-restarts the cursor blink. Both call the inherent `FocusState` setter first, so
-the rule that disabling drops focus is still stated once.
-
-Verified in a guest: `wintest` auto-focuses "Say Hello", Space fires it, Tab
-walks Count, Reset, the text input and on to the first checkbox while skipping
-the disabled "Greet" button, and Space there toggles it.
-
-## The block-error type above `drivers/` is `BlockError`, not `AhciError`
-
-`AhciError` was never one variant of `fs::Error`. It was the type the whole VFS
-layer wrote its block failures in: 91 mentions across nine files under `fs/`,
-including every `block_io::lookup` miss and every `submit_*` result. So the
-async block layer's own `BlockError` had to be converted *into* a SATA
-controller's vocabulary to travel upward, and `From<BlockError> for AhciError`
-collapsed `Cancelled`, `InvalidArg` and `NoMemory` into a single `IoError`.
-With NVMe the default root, that meant a cancelled or out-of-memory NVMe
-request reached userspace as a plain `EIO` with the cause thrown away twice:
-once at the driver boundary and again in `fat32`'s `ahci_to_fs`.
-
-`BlockError` is now that type end to end. The mapping was mechanical --
-`AhciError::InvalidDevice` is `BlockError::DeviceGone`, `AhciError::IoError` is
-`BlockError::Io`, and no other variant ever reached `fs/` -- and the conversions
-that existed only to cross the old boundary deleted themselves: nine
-`Into::into`/`map_err` calls became `?`, and `ahci_to_fs` became nothing.
-`AhciError` no longer leaves `drivers/ahci`.
-
-Two things fall out of it. `fs::Error::Block(#[from] BlockError)` means a block
-failure now propagates with `?` from anywhere in `fs/` that returns a
-`fs::Error`, where before it needed a closure. And `From<BlockError> for Errno`
-in `syscalls/mod.rs` gives each cause its own number -- `ETIMEDOUT`, `EINTR`,
-`EINVAL`, `ENODEV`, `ENOMEM` -- so a storage failure is diagnosable from
-`strace` without a serial log.
-
-**`unreachable!` is not callable from a `const fn`.** `BlockError::from_code`
-is `const`, and `unreachable!("msg")` expands to a `panic!` carrying a
-`format_args!`, which is a non-const formatting macro (E0015). A bare
-`panic!("literal")` is const-callable and is what the wildcard arm uses. The
-arm is genuinely unreachable: `complete` writes `e as u32` from this same enum,
-every discriminant is >= 1, and the success path writes 0 with a state the
-decoder never reads.
-
-## A fully off-screen rect used to fill whole rows
-
-`widgets::draw_rect` clamped its right edge as
-`((x + width as i32) as u32).min(buffer_width)`. For a rect entirely left of the
-surface the sum is negative, the `as u32` makes it ~4 billion, the `min` pulls
-it back to `buffer_width`, and `start_x` clamps up to 0 -- so the rect that
-should have drawn nothing painted the full width of every row it spanned. The
-`if idx < buffer.len()` test on each pixel could not see it: every one of those
-indices was in range.
-
-Edges are computed and clamped in `i64` now, `end_y` is clamped against the rows
-the slice actually holds rather than the height it claims, and a row is one
-`fill` on a subslice. That makes the clamp the bounds check, which is what the
-per-pixel test was pretending to be.
-
-Nothing on screen moved, which is the point: no current caller passes a
-negative-past-the-edge rect. It was a trap waiting for one that does.
-
-## No gate formats `programs/`
-
-`make fmt` and the charter's fast gate both run `cargo fmt` inside `kernel/`
-only. Userspace has its own workspace and its own toolchain, so a `use` block
-left unsorted there survives every gate and lands. Five `edos_render` widget
-files reached trunk that way before anyone ran `cargo +edos fmt -- --check` by
-hand. Run it in `programs/` alongside the kernel's, or add it to `make fmt`.
-
-## `edos_lib::process` answers `Result`, and the traps that came out of it
-
-Every entry point in `programs/edos_lib/src/process.rs` now returns
-`Result<T, Errno>`, built on `sys::sys_result`, which was already there and
-already knew both of the kernel's failure conventions. Three shapes did not fit
-the rule and were decided rather than mechanically converted:
-
-- `execve` and `reboot` return **only** on failure, so they answer `Errno`, not
-  `Result`. A kernel that answered success without replacing the image (or
-  without stopping) is reported as `Errno::UNKNOWN`, a code it never sends of
-  its own accord. `exectest` tests exactly that, and its old `>= 0` check maps
-  onto `== Errno::UNKNOWN` one for one.
-- `fork` answers `Result<u64, Errno>` where `Ok(0)` is the child. Callers that
-  branch before knowing whether the fork succeeded read `if pid == Ok(0)`,
-  which is why the `PartialEq` on the result is load-bearing.
-- `close` (`i32`) and `waitpid` (`-1` for a failed wait) are untouched: neither
-  is an `i64`, an `isize` or a sentinel `u64`, so neither is in C1's scope.
-
-`sys_kill` was deleted. It was `kill` with a different name and one extra hop.
-
-Two traps this converting run hit, both worth knowing before doing `io.rs`:
-
-- **`Errno` has no `Display`.** It lives in `edos_rt`, which this repo does not
-  own, so every `{e}` in a message the conversion touched has to become `{e:?}`.
-- **`#[must_use]` arrives with `Result`.** 28 call sites that ignored a raw
-  `i64` became warnings the moment the return type changed, and the userspace
-  build is warning-free. `let _ =` is right where the failure genuinely has no
-  handling (a signal to a process that is already gone, restoring a saved
-  `sched_setattr`); it is not right anywhere else, and each one was read.
-- **`clippy::while_let_loop` fires on the rewrite.** `loop { let Ok(n) = f()
-  else { break }; ... }` is a clippy error under `-D warnings`; write
-  `while let Ok(n) = f()` instead. Four sites.
-
-
-## Converting a sentinel wrapper to `Result`: the count/unit split
-
-`edos_lib::io`'s path and metadata calls now answer `Result<(), Errno>` or
-`Result<usize, Errno>` instead of a raw `i64`. Three things about that
-conversion are worth knowing before doing the next batch.
-
-**A blanket `!= 0` → `.is_err()` rewrite is only correct for the unit-returning
-half.** For `readlink`, `readlinkat` and `getdents`, `rc != 0` never meant
-"failed": it meant "returned a nonzero count". `getdents(dir, buf, COUNT) != 0`
-was the assertion that reading past the last entry yields end of directory, and
-rewriting it to `.is_err()` turns it into a test that passes on any successful
-short read. Those three compare against `Ok(n)` instead. Only the calls that
-answer `Result<(), Errno>` translate mechanically, because for them 0 and
-success are the same statement.
-
-**`Errno`'s discriminants are the kernel's own error numbers.** `sys_result`
-builds one with `Errno::from_raw(code)` and `errno()` transmutes the syscall
-return, so `e as i32` is exactly what a negated syscall return carried, and is
-a valid argument to `std::io::Error::from_raw_os_error`.
-
-**Enumerate the call sites with `--keep-going`.** A plain `cargo +edos check
---all-targets` stops at the first crate that fails, so it reports one call site
-per run; `cargo +edos check --all-targets --keep-going --message-format=short`
-lists all of them at once and turns the conversion into one pass.
-
-The two shapes the wrappers collapse to are `sys::sys_ok` and `sys::sys_count`
-in `programs/edos_lib/src/sys.rs`; use them rather than writing
-`sys_result(ret).map(|_| ())` out again.
-
-## `edos_lib::io`'s descriptor group answers `Result`
-
-The last sentinel returns in `edos_lib` are gone. `open`, `openat` and `mmap`
-answer `Result<u64, Errno>`; `ioctl` answers the request's own value the same
-way; `close`, `munmap` and `set_winsize` answer `Result<(), Errno>`; `sys_read`,
-`sys_write`, `pread`, `pwrite`, `readv`, `writev` and `poll` answer
-`Result<usize, Errno>`. `mmap` used to fold a negated errno into `!0`, which is
-the one case where the sentinel was load-bearing rather than accidental: a
-caller that skipped the check mapped at an address the kernel never gave it.
-
-Two shapes that read like sentinels are not: `sys_read` answering `Ok(0)` means
-end of file (or nothing waiting on a non-blocking descriptor), not failure, so
-`n <= 0` becomes `.unwrap_or(0) == 0` and not `.is_err()`; and `poll` answering
-`Ok(0)` means the timeout expired first. Getting those two backwards turns a
-quiet end-of-input into a spin.
-
-The conversion touched 20 programs and about 180 call sites. `cargo +edos check
---all-targets --keep-going` is the tool for it: `--keep-going` is what makes one
-pass enumerate every crate instead of stopping at the first, and `--all-targets`
-catches the `unused Result` warnings that a plain check does not, since
-`Result` is `#[must_use]` where a bare `i64` was not. Half a dozen call sites
-were discarding a return value the old signature let them ignore silently.
-
-`iotest` carried 104 of those sites and rewriting it by regex needs two guards:
-`write_vectored`/`read_vectored` are `std`'s and still answer a plain `usize`,
-so a blanket `!= N` → `!= Ok(N)` rewrite corrupts them, and a `let x = open(..)`
-whose guard is folded into `unwrap_or_else` leaves any later `x as i64` reading
-as a cast on the wrong type. Both were caught by the compiler, but only because
-the whole workspace was rechecked rather than the one crate being edited.
-
-## `edos_render::surface::Surface` is the one rasteriser
-
-Every drawing operation in the toolkit is a method on `Surface`, which owns the
-pixels, the width, the height and an optional clip. `Widget::draw` takes
-`&mut Surface<'_>`, and so do `WidgetContainer::draw_all` and `Terminal`'s
-`draw_changed`/`scroll_pixels`. There is no `widgets::draw_rect`,
-`theme::draw_gradient_v` or `Canvas` any more: `Canvas` carried the same three
-fields and the same methods as `Surface`, which is why programs that held one
-now hold a `Surface` and nothing else changed.
-
-Two things fall out of the move that are easy to miss:
-
-- `Surface::rect` intersects the clip. The old free function did not know the
-  clip existed, so a widget drawing inside a clipped region painted its ground
-  outside it and only the glyphs were cut.
-- `Surface::text` returns the width it drew, which is what `Canvas::text` did
-  and what a caller laying out a run beside it needs. `draw_text` returned
-  nothing and every such caller re-measured with `text_width`.
-
-`Surface` lives in its own module rather than in `text.rs` because `text.rs`
-draws *into* one; the file that owns the type and the file that owns the glyph
-blitter being the same file is what made `Canvas` look necessary.
-
-Twelve `buffer: &mut [u32]` parameters are left, all outside the toolkit:
-`edos-web` rasterises its own boxes and rounded boxes, `termbench` owns a bench
-buffer, and `wintest` has a private `draw_hline`. Those are the rest of D2.
-
-## `too_many_arguments` is on, and the count it was hiding was small
-
-The kernel and the userspace workspace each disabled `clippy::too_many_arguments`
-wholesale. Turning both on costs one warning in the kernel across every feature
-set (default, `sched-test`, `trace`, `sched-prof`) and eight in userspace -- not
-the 45 the suppression was assumed to be hiding. Most of that count was the
-`buffer: &mut [u32], width, height` triple, and `Surface` absorbed it.
-
-Measuring this needs an edit, not a flag. `cargo clippy -- --force-warn
-clippy::too_many_arguments` reports nothing: the crate is already built and
-clippy does not re-lint a fresh cache, and a `touch` of the crate root is what
-makes it re-run. Delete the attribute instead.
-
-Five per-site allows in the kernel (`thread.rs`, `net/tcp.rs`, `syscalls/mod.rs`,
-`usb/mass_storage.rs`, `fs/efs/mod.rs`) were dead under the crate-wide one and
-are now live. Four more were added in userspace, each naming why. Three of those
-four -- `graphics::render_text_wrapped` and `edos-web`'s `fill`/`fill_rounded` --
-are rasterisers carrying their own buffer, dimensions and clip, so the lint is
-pointing at the same missing `Surface` the toolkit already has.
-
-## `edos_render::graphics` was mostly a library nobody linked
-
-`Texture`, `DrawRequest` and `Screen` each carried their own rasteriser:
-`fill_rect`, `fill`, `clear`, `draw_line`, `draw_circle`, `fill_circle`, six
-`blit_texture_*`, five `draw_texture_*`, `capture_region`, plus a complete
-bitmap-font text engine (`TextStyle`, `TextMetrics`, `render_character_at`,
-`render_string_at`, `render_text_wrapped`, `blend_text_pixel`). Grepping the
-whole tree for each name found no caller outside `graphics.rs` itself, and the
-dead-code lint could not say so because they are `pub` in a library crate. They
-are gone: 2329 lines to 1272.
-
-What survives is what the compositor actually uses. `Texture` is the 16x16
-cursor bitmap `edos-wm` builds; `DrawRequest` is the screen's Vec-backed back
-buffer; `Screen`'s primitives are `draw_rect`, `fill`, `set_pixel`,
-`draw_styled_text`, `draw_texture_transparent` and `blit_pixels_clipped`, and
-each is now a few lines over `Screen::surface()`.
-
-`Screen::surface()` is the accessor: it ensures the back buffer, reads the
-stride (screen width in both the Vec and the shadow case) and returns a
-`Surface` with `clip_bounds()` already installed. Two consequences worth
-knowing:
-
-- `Screen::fill` honours the clip now. It did not before, which contradicted
-  `set_clip`'s own documented contract ("confine every subsequent draw").
-- `Surface::blit_region` replaced the compositor's hand-rolled clipped blit and
-  kept its row-`copy_from_slice` shape. Do not turn it into the per-pixel loop
-  `Surface::blit` used to be: it runs on every damaged rectangle of every
-  frame. `Surface::blit` is now a call to it, so the widgets got the memcpy for
-  free.
-
-The one path a headless drag cannot reach is a window clipped by the *left*
-screen edge, because `edos-vm`'s pointer is relative and drifts. It is covered
-anyway: every damage-driven repaint sets a clip inside the window, so
-`blit_region`'s source-origin realignment (`skip_x`/`skip_y`) runs on nearly
-every frame.
-
-## The ANSI palette, the layout doc comments, and the last five kernel TODOs
-
-`Theme::ANSI` is a `[Color; 16]` beside `Theme::DEFAULT`, indexed by the ANSI
-colour number: eight normal then eight bright, the order SGR 30-37 / 90-97 fix.
-It is separate from `DEFAULT`'s named chrome fields on purpose. Chrome colours
-are chosen; these are addressed, and a caller reaching one has an escape-code
-parameter in hand, not a role. `terminal.rs`'s SGR handler is the only reader.
-
-The palette values are unchanged from the literals they replaced, so a screenshot
-before and after is identical. Guest-verified anyway, since a wrong index would
-still render *something*: `ls /` puts directory entries in Ayu blue
-(`0x59C2FF`, ANSI 4/12) and the shell prompt in green (`0xAAD94C`, ANSI 2), both
-of which came out right.
-
-45 doc comments across ten `edos_render` files said only what the signature said
-("Set the label text.", "Get the current padding.") and were deleted. Two rules
-decided which stayed: a comment that names a constraint stays and was kept
-(`set_uniform` says what breaks without it, `cursor_byte` says what the offset
-means at the end of the text), and a comment on a trait method is not special
-(`Sizable::size_hint` said nothing the name did not).
-
-The five kernel `TODO`s in §G4 are gone, four of them rewritten as statements of
-what the code does rather than what someone might do later. The fifth is worth
-recording: `scheduler.rs`'s "refactor queue, so it isnt limited to 65k" named a
-limit that no longer exists. The runqueues are intrusive lists keyed by thread
-pointer, with no 16-bit index anywhere, so the note described a data structure
-two rewrites ago. It was deleted rather than moved to a todo. A `TODO` that has
-outlived its subject reads exactly like one that has not; grep found the text,
-only reading the code found that it was fiction.
-
-`edos_lib::mem` is the last sentinel in `edos_lib` (`mmap` returns
-`u64::MAX as *mut u8`) and it is not the ten-line change the roadmap sized it
-as. Converting `mmap` to `Result<NonNull<u8>, Errno>` breaks `mmaptest` in 90
-places and `fsbench/src/workloads.rs` in 11: both do pointer arithmetic on the
-result (`.add`, `.read`, `.write`) and each site prints its own failure message,
-so the conversion is a rewrite of two programs. Measured, then reverted; the
-roadmap entry now says E3.
-
-## `mmap` answers a `NonNull`, and the second mmap wrapper is gone
-
-`edos_lib::mem::mmap` returns `Result<NonNull<u8>, Errno>`; `munmap`,
-`mprotect` and `msync` return `Result<(), Errno>`. `NonNull` rather than
-`*mut u8` because the syscall has two ways to hand back something that is not a
-mapping -- a negated errno, which is a plausible address once it is in a `u64`,
-and a null one -- and the type is what stops either reaching a `.read()`. The
-old wrapper collapsed the first into `u64::MAX` and left every caller to spell
-out `ptr.is_null() || ptr as usize == usize::MAX`, which two of the fourteen
-call sites wrote differently from the other twelve.
-
-The roadmap sized this at 101 call sites and it was 46. The measurement had
-counted every line that mentioned a pointer some mapping produced, not every
-line that had to change; the pointer-arithmetic uses (`.add`, `.read`,
-`.write`) are unaffected because `as_ptr()` hands the raw pointer straight
-back. Take a call-site count from the lines that name the *function*, not from
-the lines that name its result.
-
-Two duplicates fell out of it:
-
-- `io::mmap`/`io::munmap` were a second wrapper pair with no callers anywhere in
-  the tree. `io::mmap`'s fifth parameter was named `phys_addr`, but the kernel
-  reads that register as a file descriptor unless `MAP_PHYSICAL` is set
-  (`kernel/src/syscalls/memory.rs:148`), so the name was true only for a flag
-  the function never set. The physical form is now `mem::mmap_physical`, which
-  sets the flag itself, so the overload cannot be got wrong from outside.
-- `edos_render/src/graphics.rs` declared its own `PROT_READ`, `PROT_WRITE`,
-  `MAP_PRIVATE`, `MAP_PHYSICAL` and `MAP_WRITE_COMBINING` and issued a raw
-  `syscall5`. It calls `mem::mmap_physical` now, and `MAP_PHYSICAL` and
-  `MAP_WRITE_COMBINING` live beside the other flags in `mem.rs`.
-
-Verified in a guest, not only by the gates: `make guest-check` is 18/18 with
-`mmaptest`'s thirteen cases included, the desktop still reports `screen: VRAM
-mmap mode` and renders (so `mmap_physical` returns the aperture the raw
-`syscall5` did), and `fsbench -q -m 1 /var` still reports both mmap workloads
-(`mmap store 4MiB + msync`, `mmap load 4MiB faulted in`) with real numbers.
-
-## ROADMAP-CLEANUP E5: the twelve kernel `unimplemented!()` were all one file
-
-Every `todo!()`/`unimplemented!()` in `kernel/src` lived in the `acpi::Handler`
-impl (`kernel/src/acpi/handler.rs`): the six PCI config accessors, the three
-timing hooks, and the three AML mutex hooks. None is reachable today, because
-the kernel parses static tables and never runs the AML interpreter (`power.rs`
-maps the DSDT and scans it by hand), but the trait is one method away from a
-kernel panic the day anything does.
-
-What they are now:
-
-- PCI config access goes through the existing `drivers::pci::config` helpers.
-  `acpi::PciAddress` carries a segment group and a 16-bit offset, and the
-  0xCF8/0xCFC pair can express neither a non-zero segment nor an offset above
-  0xFF; those need the MCFG mapping this kernel does not have. `legacy_config`
-  is the one place that decides, so a read answers all-ones (what the bus
-  returns for an absent device) and a write is dropped, once, with a log line.
-- `nanos_since_boot` reads `timer::uptime_nanos`, which is new and is now what
-  `uptime_us` divides down, so the two cannot drift.
-- `stall` spins and `sleep` parks. ACPI 6.5 §5.5.2.4.1 says a stall must not
-  give up the processor, which is the whole difference between them.
-  `thread_sleep` returns immediately when no thread is running, so `sleep`
-  falls back to spinning before the scheduler exists.
-- AML mutexes are a fixed 128-entry table of `(owner, depth)` atomics indexed by
-  handle, not an allocation: the DSDT declares them once and never frees them.
-  They are reentrant per ACPI 6.5 §19.6.2, which is why the depth is there.
-
-Two things fell out of it. `pci_write_u8` carried `#[expect(unused)]` and now
-has a caller, and the `Handler` impl carried a blanket `#[expect(unused)]` that
-existed only because twelve method bodies ignored their parameters; both are
-gone, so `kernel/src` has no blanket suppression of any kind left. The
-per-access `println!` in every read/write hook went with them — those are the
-hooks a running AML interpreter calls in a loop.
-
-Verified by boot, not only by the gates: `make test AUDIODEV=none` is 58/58,
-which exercises ACPI table parsing, the uptime refactor and the boot log.
-
-## `fs::Error::IoError` stopped being the catch-all (ROADMAP-CLEANUP B5)
-
-`Error::IoError` in `kernel/src` is 136 → 47, and the 47 left all belong to a
-different enum (`graphics::Error`, `AhciError`, `DevFsError`, `HdaError`);
-`kernel/src/fs` keeps exactly one, the `DevFsError::IoError => fs::Error::IoError`
-conversion, which is honest.
-
-Four variants were added to `fs::Error` because the code already knew the cause
-and had nowhere to put it: `NoMemory` (ENOMEM), `NotEmpty` (ENOTEMPTY),
-`BadAddress` (EFAULT) and a corrected `Unsupported` (EOPNOTSUPP, previously
-EIO). What changed at the syscall boundary, all of it user-visible:
-
-- `rmdir` on a populated directory answers ENOTEMPTY. It answered EIO, so
-  `rmdir /d1` printed "Input/output error"; it now prints "directory not empty".
-- A bad user pointer in `read`/`write` answers EFAULT. Six `try_copy_*_user`
-  failures in `vfs.rs` reported EIO.
-- A full filesystem answers ENOSPC. EFS's block and inode allocators, FAT32's
-  cluster allocator and memfs's id space all reported EIO when exhausted, which
-  is why a disk-full failure looked like a device failure.
-- A frame allocation that fails inside `page_fill` answers ENOMEM, and an
-  `owned_ops` registry that is full answers EBUSY.
-- An operation a filesystem does not implement answers EOPNOTSUPP: the `mmap`,
-  `ioctl`, `truncate` and `rename` defaults on the `FileSystem` trait, devfs's
-  `create_file`/`create_dir`/`remove_dir`, and mounting an `Unknown`, `Iso9660`
-  or `Ntfs` partition.
-- A failed mount replies with the driver's own error. The FAT and EFS arms of
-  the fs kthread logged `EfsDriver::new`'s error and then replied EIO; they now
-  carry it, and "no partition matched" is a distinct `FileNotFound`.
-- A `BlockError` reaches the syscall layer intact through the existing
-  `Error::Block(#[from] BlockError)` rather than being flattened by a
-  `map_err(|_| Error::IoError)` closure. `block_io::lookup` returning `None` is
-  `BlockError::DeviceGone`, not EIO.
-
-### The partition scanner names its failures
-
-`parse_gpt` and `parse_mbr` answered `Result<_, &'static str>`, so a read that
-failed on a real device was reported as "Failed to read GPT header" with the
-`BlockError` thrown away. Both now answer `gpt::PartitionError`, which carries
-the block layer's cause (`read of 8 sector(s) at lba 34: command timeout`) and
-distinguishes a structural refusal from an I/O one: `Signature` for a table
-without its magic, `Truncated` for one shorter than its own layout, `Malformed`
-for bytes that will not cast. `scan_device` in `fs/mod.rs` logs them unchanged;
-only the text improved.
-
-The two files also carried the same `read_sectors_vec` verbatim, with a `_buf:
-Vec<u8>` parameter every one of the seven call sites passed `Vec::new()` for and
-the body ignored. There is one `gpt::read_sectors(device_id, lba, sectors)` now,
-`mbr` uses it, and `EFS_MAGIC` is declared once instead of twice.
-
-Every disk the tree builds carries a GPT, so a normal boot only ever walks the
-success path. To watch the failure path, attach a disk with no partition table
-at all: `dd if=/dev/zero of=~/.cache/edos/blank.img bs=1M count=8` and
-`scripts/edos-vm start --extra-disk ~/.cache/edos/blank.img`. The scan then logs
-`GPT parsing failed on device 2: GPT header carries no signature, trying MBR`
-and the boot continues normally.
-
-`map_err(|_| ...)` across `kernel/src` is 65 -> 59. The four left under `fs/` are
-the `bytemuck` casts, where the discarded error genuinely says nothing the
-variant does not already name. The rest are in `fs/memfs` (9),
-`drivers/usb/xhci` (9), `thread/thread.rs` (5), `syscalls/fs.rs` (4),
-`fs/devfs/block.rs` (4) and `drivers/virtio/gpu.rs` (4).
-
-### `load_elf` splits into a parse step and a map step
-
-`kernel/src/loader/mod.rs`. One 498-line function parsed attacker-controlled
-ELF bytes, validated them, built VMAs and mapped pages, interleaved. It is now
-`parse_image` -> `ElfImage` -> `map_image`, and `load_elf` itself is fifteen
-lines.
-
-The ordering changed as a side effect and is worth knowing: the section-header
-walk that finds the relocations used to run *after* the `PT_LOAD` loop, so a
-binary with an unsupported relocation had already had its partial tail pages
-pre-faulted and mapped into the address space by the time the load failed. The
-caller unwinds that, but the failure is cleaner when nothing was mapped, and
-that is now the case for every parse error.
-
-Behaviour that is deliberately unchanged: `p_memsz == 0` still skips a header
-(the check moved ahead of the `p_type` match, which reaches the same set of
-headers because no other type is acted on), `max_addr` still defaults to
-`0x10000000` when no `PT_LOAD` contributes one, and the reloc-bearing writable
-`PT_LOAD` is still resolved by intersecting the parsed targets with the
-writable segments rather than assumed to be the only one.
-
-`resolve_reloc_segment` returns an index rather than a `&LoadSegment`: the
-`RelocTable` build wants `image.relocs` by value, and a reference into
-`image.segments` held across that point makes the partial move unborrowable.
-
-## The cleanup run's closing measurements
-
-`doc/ROADMAP-CLEANUP.md` was worked from the top over one night. 21 of its 31
-entries are struck; D1 and G2 are struck with a named remainder. What follows
-is what the run moved, measured on 2026-08-26 so that the next reader does not
-re-derive it.
-
-Gate state, run whole on the final pass and green: `make test AUDIODEV=none`
-58/58 on four CPUs and again on one, `make guest-check` 18/18, `make
-host-tests` 164, kernel check and clippy at zero warnings.
-
-Counts the work invalidated, old -> new:
-
-```
-TODO/FIXME/HACK/XXX in Rust           5 -> 0      G4
-colour literals outside theme.rs     28 -> 7      D6 took the ANSI palette
-buffer: &mut [u32] signatures        55 -> 12     D1, D2; 9 of the 12 are edos-web
-functions with 7+ parameters         45 -> 29     D1, D2, I3
-!0u64 under kernel/src/syscalls     255 -> 253    unchanged in substance; B2 is open
-errno = Errno:: under syscalls      477 -> 477    B2 is the item that moves this
-unwrap() in the kernel               84 -> 84
-unwrap() across userspace           107 -> 106
-Rust lines (tokei, code)            143k -> 140k
-```
-
-Two of those deserve reading as a pair. `buffer: &mut [u32]` and the
-seven-or-more-parameter count are the same defect counted twice, and both are
-now one cluster rather than a spread: `programs/edos-web` never adopted
-`edos_render::Surface`, so `view.rs` and `ui.rs` still rasterise their own
-boxes with `(buffer, width, height, top)` by hand. Porting that one crate
-closes H5 and D1's remainder together, and nothing else in the tree is left in
-that shape.
-
-The largest untouched item was B2/B3, and its size is worth stating plainly:
-477 hand-written errno assignments across nine files, 380 of them real (the
-other 97 are the `Errno::Clear` reset at entry), plus an 831-line dispatch
-match that writes the argument shapes out a second time beside `table.rs`.
-Both closed on 2026-08-26; the section below is what came of it, and the
-roadmap's smallest-first order was the way in.
-
-## `edos-web` draws through `edos_render::Surface`
-
-The browser was the last crate rasterising by hand. `view.rs` and `ui.rs`
-threaded `(buffer, width, height, top)` through nine signatures, with `top`
-standing in for a clip: every one of `fill`, `blit`, `fill_rounded` and
-`stroke_rounded` re-tested `py < top || py >= height` per pixel. That is what a
-`Surface` clip already is, so `view::draw` sets `clip_to(0, top, width,
-view_h)` once and the four rasterisers became `surface.rect`, `surface.blit`,
-and two helpers taking a `Rect`.
-
-Two things fall out that are worth knowing before touching this again:
-
-- A function that borrows the surface for part of a frame must put the clip
-  back, because the caller draws the address bar into the same surface
-  afterwards and would otherwise inherit the page's clip. `Surface::clipped`
-  returns a `ClipGuard` that restores on drop, which is what `view::draw` and
-  `ui::toolbar` use; saving `surface.clip` into a local and assigning it back at
-  the end of the block is correct only while nothing in between can return
-  early, and a leaked clip blanks everything drawn after it rather than
-  failing.
-- `Surface::rect` clamps the far edges in `i64` and bounds writes by
-  `pixels.len() / width`, which the hand-rolled `fill` did not. Nothing in the
-  browser relied on the old behaviour, but the difference is real for a rect
-  that starts left of or above the surface.
-
-Verified in a guest on `/share/web/welcome.html`, which is the fixture that
-exercises all of it: rounded fills and strokes (the pill, the ring, the 50%
-dot), table and left-edge borders, `<hr>` rules, an SVG and a raster image, and
-the scrollbar. A picture scrolled halfway under the toolbar is cut at the
-chrome line with nothing bleeding over it, which is the clip the old `blit`
-open-coded.
-
-Counts this moved, against the table in "The cleanup run's closing
-measurements" above:
-
-```
-buffer: &mut [u32] signatures        12 -> 4    all four in termbench, on purpose
-#[allow(clippy::too_many_arguments)] 14 -> 10   git grep -c, exact
-```
-
-The closing table's "functions with 7+ parameters 45 -> 29" has no recorded
-command behind it and no scan reproduces it; the allow count above is the
-replacement, because `git grep -c too_many_arguments -- '*.rs'` can be re-run.
-
-## Two header fields and one AML mutex that could halt the machine
-
-Three panics reachable from data the kernel does not control, found reading the
-cleanup run's own diff.
-
-**`p_offset` was the one ELF header field nobody validated.**
-`loader::validate_load_segment` `checked_add`s `p_vaddr` and `p_memsz`, bounds
-the segment to `USER_VA_END`, and its doc comment named the attacker-controlled
-fields; `p_offset` was not among them. The System V ABI congruence
-(`p_offset % p_align == p_vaddr % p_align`) was a `debug_assert!`, and the line
-under it computed `p_offset - vaddr_offset`. A `PT_LOAD` naming a `p_offset`
-below its own page offset therefore panicked the kernel, in a build with debug
-assertions at the assert and in one without them at the subtraction. Any user
-who can write a file and spawn it could halt the machine; no crafted relocation
-or truncated header was needed, just two mismatched low halves. It is a real
-check now, answering `InvalidSegment`, and it is never stricter than the ABI:
-congruence modulo a `p_align` of 0x200000 implies congruence modulo 0x1000.
-
-**An AML `Release` with no matching `Acquire` wedged the mutex it named.**
-`AmlMutex::release` decremented `depth` unconditionally, so an unpaired release
-wrapped a `u32` to its maximum and left `owner` set. The mutex was then held
-forever by a thread that had already moved on, and no later `Acquire` could
-take it. Release now returns unless the caller is the recorded owner. AML is
-firmware-supplied, so "the interpreter pairs them" is an assumption about
-someone else's bytes.
-
-**A DSDT with more than 128 mutexes failed the boot rather than the method.**
-`create_mutex` asserted against the table size. Handles past the end are handed
-back now and `aml_mutex` answers `None` for them, which turns into
-`MutexAcquireTimeout` at `acquire` and a no-op at `release`: the AML method that
-wants such a mutex fails, and the machine still boots.
-
-All three are latent on this hardware today -- QEMU's DSDT declares few mutexes
-and the AML paths the mutex hooks serve are not reached -- except the loader
-one, which is on the spawn path every process takes.
-
-## The syscall table is one list, and the bodies answer Result
-
-ROADMAP-CLEANUP B2 and B3, closed together on 2026-08-26 because both live in
-`syscalls/mod.rs` and the wrong order means touching 124 dispatch arms twice.
-Six commits, `7c3f7f17..79485ab5`, net -2,600 lines.
-
-**B3 first, and it is what made B2 cheap.** `table.rs` holds one list of 124
-entries, each `number, "name", function, (kind: type, ...)`, and hands itself
-to a macro named by its caller: `syscall_rows!` in that file builds the
-`SyscallInfo` array `/proc/syscalls` publishes, `syscall_arms!` in `mod.rs`
-builds `dispatch`, where the implementations are in scope. A list macro rather
-than a plain one because the two expansions land in different modules, and a
-`macro_rules!` invocation cannot produce match arms in place — so `syscall_arms!`
-emits the whole function.
-
-Arguments come off `rdi, rsi, rdx, r10, r8, r9` through a `FromReg` impl per
-type. Not `as` at the call site: `as` would let a pointer argument be cast to
-an integer by a typo, and the impls are the only conversions that exist. The
-arities are spelled out in `syscall_invoke!` because a register sequence cannot
-be indexed inside a macro repetition, and because a dispatch table is worth
-being able to read.
-
-**The merge is where a drift would have shown, and there was none.** All 124
-table rows agreed with the arms on arity, and every arm read its registers in
-ABI order. Two clipboard arms looked reordered and were not: they bound `rsi`
-to a local before the call and passed `rdi` first. Checking that mechanically
-before trusting the conversion cost ten minutes and is the reason the first
-guest boot worked.
-
-**B2's one design decision: errno is not cleared on success.** The roadmap
-asked for `Ok(v)` to clear it. It does not, and the reason is that nothing can
-observe the difference: `edos_rt::sys_result` reads the field only after a call
-has already reported an error, and that is also what POSIX says errno means.
-Clearing it would have added a `current_thread_info().lock()` to every
-successful syscall including `getpid`, which is 94 ns and pays for everything
-added to that path. The 97 entry-time `errno = Errno::Clear` resets went away
-with the same argument.
-
-**What the conversion found, in the order it found it.** Each is a failure that
-was already unreportable, and a `Result` is what made it a compile error rather
-than a shrug:
-
-- `sys_shm_size` returned `-1` with no errno set at all. The dispatcher logged
-  "returned -1 with no errno set" and reported `UNKNOWN`. It names `EINVAL` now.
-- `sys_sync` could not fail, yet `power::quiesce` called it for its effect and
-  had to discard a `Result`. Split: `sync_all` does the work, `sys_sync` is the
-  syscall over it.
-- `sys_mkdirat`'s doc comment was attached to `sys_mkfifoat`, and had been since
-  both were written.
-- Every `-> 0 on success, -1 on error` line in `fs.rs`, `window.rs` and `io.rs`
-  restated a signature that had stopped saying that. `window.rs`'s went further
-  and listed the argument registers a second time, which is the dispatch table's
-  job now.
-
-**Method, for the next conversion this size.** A regex pass over the two
-repeating shapes (`errno = X; return SENT;` and the same in value position),
-then the signature, then let the compiler enumerate the rest — `cargo check
---message-format json` gives the exact line of every `unused variable: info`
-left behind by a deleted errno write, which is a script rather than a read.
-Per file: convert, compile, then run the gate. `make guest-check` after each
-group rather than at the end, because a syscall regression is not a compile
-error.
-
-**The one flake seen.** `iotest /var` failed once at test 19 with `read_link:
-invalid input parameter`, in the guest-check after `memory`/`shm`/`sync`
-converted. It did not reproduce: the same binary passed standalone, passed
-again with `iotest` run before it in the same boot the way the gate does, and
-`make guest-check` was green on the immediate re-run and on all three later
-runs. EINVAL out of `read_link` is `fs::api::read_link` saying the path is not
-a symbolic link, moments after `soft_link` created it on EFS — an FS-layer
-visibility question with nothing in the converted files on the path. Recorded
-rather than chased.
-
-## The text coreutils are executed by a gate now, and their expectations were built on the host
-
-`programs/texttest` runs 24 cases over the nine text tools -- uniq, sort, cut,
-tr, wc, head, tail, sed, grep -- and `scripts/guest-check` runs it as its
-nineteenth suite. Before this, 131 binaries shipped in `/bin` and not one text
-tool was executed by anything. That is the blind spot `uniq` spinning forever
-on a persistent read error lived in: a tool that compiles is indistinguishable
-from a tool that works until something runs it.
-
-**Redirection is by descriptor, not by pipe.** Each case opens its fixture
-`O_RDONLY`, opens `/tmp/texttest/out.txt` `O_WRONLY|O_CREAT|O_TRUNC`, and hands
-both to `process::spawn` as the child's stdin and stdout. A pipe would deadlock
-the moment a tool wrote more than the pipe buffer before the parent read, and
-the parent cannot read while it is blocked in `waitpid`. The suite is a
-statement about a tool's output, not about the plumbing carrying it.
-
-**The expected strings were validated on the host first, and that is the
-transferable part.** None of the nine tools depends on `edos_lib`; they are
-plain `std` programs. So
-
-```
-rustc +nightly -O --edition 2024 -o /tmp/wc programs/wc/src/main.rs
-```
-
-builds the *same* implementation for the host, and a shell loop over the
-fixtures printed every tool's real output in one second. GNU coreutils are no
-help here -- the padding and the `-c` line format are this tree's own -- but
-the tree's own source compiled natively is exact. One expectation was wrong
-(`tr -d an` deletes the `a` in `apple` too, so the answer is `pple`, not
-`apple`), and catching it on the host rather than in the guest saved a full
-image rebuild and boot. Do this before every guest round trip when the program
-under test is `std`-only.
-
-**The gate was watched going red.** `wc`'s line count was given a deliberate
-`+ 1`, `make programs && make guest-check` reported `texttest FAILED (exit 1)`,
-and `run_log.txt` carried `FAIL wc -l: want "       6\n", got "       7\n"`.
-Reverted, green again at 19 suites. A gate never seen red is not a gate.
-
-**That host-compile trick no longer works on these nine, and the replacement
-is `cargo +edos check`.** Converting them to `edos_lib::args` gave every one of
-them a dependency on `edos_lib`, which pulls in `edos_rt` and only builds for
-`x86_64-unknown-edos`, so `rustc +nightly` on a single `main.rs` now fails at
-the `use`. The fast loop is
-`cd programs && cargo +edos check --target x86_64-unknown-edos -p wc -p sed ...`
--- around a second warm for all nine, and it still costs no image rebuild and
-no boot. What is lost is *running* them on the host, so a new expected string
-has to be validated in the guest now. Any tool still free of `edos_lib` keeps
-the old trick; check its `Cargo.toml` before reaching for either.
-
-**`eprintln!` is the wrong call for a failure line under `guest-check`.** The
-suites run as `name > /dev/klog 2>&1`, so stderr and stdout land in the same
-place -- but stderr is flushed per fragment, and the same message arrived split
-across four klog lines (`FAIL `, `wc -l`, `: `, then the strings) while the
-`println!` copy arrived whole. `texttest` prints its verdict on stdout only.
-
-## The NVMe hostile-boot wedge is all four CPUs halted, not a live-lock
-
-`scripts/wedge-probe` called a boot wedged after 12 s of serial silence and gave
-up on it after 120 s. Both numbers were too small for the hostile cmdline. Under
-`nvme_timeout_ms=0` the watchdog fires on every command, so a healthy hostile
-boot spends minutes resetting the controller, and the log it produces is bounded
-— a run that finished normally in this batch wrote 317 KB with 1314 watchdog
-firings, and its serial output arrives in bursts with quiet stretches between
-them. Twelve seconds of quiet is inside the normal range. The thresholds are now
-`SILENCE = 60` and `RUN_CAP = 600`.
-
-Ten hostile boots on a quiet host at 60 s: **9 pass, 1 WEDGE**, which is the
-recorded 1-in-10 and not the probe's thresholds. So the wedge is real. What it
-is, however, is the opposite of what was written down:
-
-```
-IDLE_CPU_MASK          0x000000000000000f   (all four CPUs)   stable across 2 s
-NVME_INFLIGHT          0x0000000000000001                     stable
-WATCHDOG_RESETS        0x0000000000000a24                     stable
-query-status           running
-CPU#0..3               RIP=ffffffff80049062  HLT=1
-```
-
-`addr2line` puts that RIP in `Scheduler::take_idle`
-(`kernel/src/thread/scheduler.rs:1189`). **All four vCPUs are halted in the
-scheduler's idle path, every idle bit is published, and nothing is running.**
-The earlier note that this shape is a live-lock with `SWITCHES` advancing
-~2100/s is wrong for this boot: `SWITCHES` did not even resolve here, because
-`debug::stall` is not compiled into the default kernel that the hostile ISO
-carries, so the probe never read that counter and the live-lock reading came
-from a different build.
-
-The shape is therefore a **lost wakeup**: one NVMe command is in flight, the
-watchdog that would time it out is asleep, and no interrupt or enqueue ever
-pokes a halted CPU to run it. `WATCHDOG_RESETS` frozen at 0xa24 says the
-watchdog thread stopped being scheduled, not that it decided there was nothing
-to do. The next reading is which thread is blocked on what: dump the runqueues
-and the watchdog kthread's state rather than the registers, since the registers
-now only ever say "halted".
-
-Reproducer, ~10 minutes on a quiet host:
-
-```
-make edos-nvme-hostile.iso
-WEDGE_OUT=logs/<date>-wedge scripts/wedge-probe 10
-```
-
-Do not run a build, another VM or a gate beside it: a 20-run batch previously
-read 2 wedges in its first 10 and 5 in the next 6 purely from host load. The
-per-run `.qmp` file in the output directory carries the counters and registers
-above; the `.log` beside it is that boot's serial.
-
-## `gzip -9k` is why a level is not `Spec::numeric` (2026-08-29)
-
-`gzip`, `ln`, `tee` and `tar` were the four hand-rolled short-flag loops
-`ROADMAP-CLEANUP` §C2 named, and they now parse through `edos_lib::args`.
-Three were mechanical. `gzip` was not, and the reason is worth keeping,
-because the obvious spelling is wrong and compiles.
-
-`Spec::numeric(short)` maps a bare `-<digits>` argument onto a named option, so
-`gzip -9` setting the compression level looks like exactly what it is for. It
-is not: `numeric` is checked before the cluster loop and only fires when the
-argument is digits **all the way through**, and `gzip -9k` is a cluster of a
-digit and a flag. Under a `numeric` spelling that argument falls to the cluster
-loop, finds no short option `9`, and the tool dies with "unknown option -9".
-
-So the nine levels are nine `Opt::short_flag('1'..'9')` entries and the level
-is read out of `occurrences()`, last-wins, which is also what makes
-`gzip -9 -1` compress fast rather than small. The seven middle digits carry an
-empty help string, so `--help` prints them as bare rows between `-1 fastest`
-and `-9 smallest`.
-
-The general rule: `Spec::numeric` is for a digit run that is the *whole*
-argument, as in `head -20`. A digit that can appear inside a cluster has to be
-a short option like any other.
-
-`programs/filetest` is the gate. It was watched failing on exactly this case:
-swap the nine entries for `Spec::numeric('L')`, rebuild, and `make guest-check`
-reports `FAIL gzip -9k /tmp/filetest/gz-plain: exited 1`.
-
-## `filetest`, and why its cases are round trips (2026-08-29)
-
-Nothing in the tree ran `tar`, `gzip`, `gunzip`, `ln` or `tee` before this.
-`texttest` had closed the same blind spot for the nine text coreutils; these
-five were the other half of it, and all five had just had their argument
-parsing replaced, which is the change a compile is least able to judge.
-
-Its cases are round trips rather than stdout diffs, which is a different shape
-from `texttest` on purpose. An archive that lists and extracts to the bytes
-that went in, and a stream that survives a compression cycle, are what these
-tools are for; more usefully, a round trip is what fails loudly when an option
-is read as a filename, and that is the failure a rewritten parser actually
-produces. `tar -cf ARCHIVE -C DIR one.txt` is the case that matters: three
-operands, two of them values belonging to options, one a positional.
-
-One trap in writing it: `capture` read the tool's stdout with
-`read_to_string`, and `gzip -c` writes a deflate stream there, so the suite
-failed with "stream did not contain valid UTF-8" against a tool that was
-working. It reads bytes now, and the `-c` case asserts the RFC 1952 magic
-(`1f 8b`) rather than a string, which is the better assertion anyway.
-
-## `edos_lib::args`, and the two shapes a generic parser has to have (2026-08-28)
-
-`programs/edos_lib/src/args.rs` replaced the hand-rolled flag loops in the nine
-text coreutils. A program declares a `const SPEC: Spec` of `Opt`s and calls
-`SPEC.parse_env()`; the parser does short clusters, `-n5` / `-n 5` /
-`--lines=5` / `--lines 5`, `--`, `-` as a positional, and an implicit `--help`
-that prints the spec's own usage text and exits 0.
-
-Two things in it are not generic-parser boilerplate; they are the reason a
-naive parser could not have replaced these loops:
-
-- **`Value::Optional`** takes a value only when it is written attached.
-  `sed -i file` must edit `file` in place with no backup suffix, while
-  `sed -i.bak file` must keep one. A required-value option would have eaten
-  `file` as the suffix and left sed with nothing to read.
-- **`Spec::numeric(short)`** maps a bare `-<digits>` onto a named option, which
-  is what `head -20` and `tail -5` have always meant. Without the dial a
-  leading digit is an unknown short option, which is what every other tool
-  wants, so it cannot be unconditional.
-
-`Matches::occurrences()` yields the options in the order they were written.
-`sed` needs exactly that and nothing weaker: `-e` and `-f` build one script
-between them, so `sed -f a.sed -e 's/x/y/'` and the reverse are different
-programs. A parser that only answers "what was the last `-e`" cannot express
-it.
-
-`Matches::parsed()` treats a value that will not parse as a usage error rather
-than falling back to the default. The old `head` did `parse().unwrap_or(10)`,
-so `head -n banana` printed ten lines and looked like it worked.
-
-`texttest` is what holds this: it asserts every one of the nine answers
-`--help` on stdout with a first line of `usage: <name>` and exit 0, that
-`grep -- -pattern` treats the pattern as a pattern, and that `wc -l -` reads
-stdin. A tool that drifts back to parsing its own flags fails those.
-
-## `[lints.clippy]` in the kernel, and why the fourth lint is commented out
-
-`kernel/Cargo.toml` carries `unnecessary_safety_comment`,
-`unnecessary_safety_doc` and `allow_attributes_without_reason` at `warn`, which
-`make -C kernel clippy`'s `-D warnings` turns into errors.
-`undocumented_unsafe_blocks` is the fourth of the set and is commented out: it
-reports 720 blocks across 84 files, which is `doc/ROADMAP-CLEANUP.md` §I5a's
-remaining work. Uncommenting it is the commit that closes I5a; a crate-level
-allow to turn it on sooner is exactly what the other three lints exist to stop.
-
-Two things the conversion taught, both worth knowing before the next pass:
-
-- `allow_attributes_without_reason` fires on `#[expect]` as well, and the kernel
-  had more reasonless `expect` (63) than `allow` (40). Grepping for
-  `#\[allow(` alone undercounts the work by half, and a multi-line
-  `#[expect(\n    dead_code,\n    reason = "..."\n)]` does not match a
-  line-oriented `grep -v reason` either, so it overcounts in the other
-  direction. `cargo clippy` is the only honest count.
-- `#[expect]` is the wrong attribute where the lint fires under some feature
-  sets and not others: `main.rs`'s `unreachable_code` is unfulfilled in the
-  default build and needed under `sched-test`, so it stays an `allow` with a
-  reason. The kernel clippy target loops over every feature, which is what
-  catches this; a single default-feature run reports it as dead and invites
-  deleting it.
-
-`clippy::undocumented_unsafe_blocks` wants a `// SAFETY:` on *each* `unsafe
-impl`, so the tree's common shape of one comment covering a `Send`/`Sync` pair
-leaves the second impl flagged; thirteen of those got their own one-line
-comment pointing at the argument above.
-
-## `stall-dump` fires, and why it never did before (`make stall-check`)
-
-The detector in `kernel/src/debug/stall.rs` had never printed. That was not
-because stalls are rare: **it could not fire on any boot this tree runs.** It
-declares a stall when its switch counter stands still for 4 s, and five kernel
-threads wake on a timer forever, whatever else the machine is doing:
-
-| thread | tick |
-| --- | --- |
-| `tcp-retransmit` (`net/stack.rs`) | 200 ms |
-| `nvme_watchdog`, `ahci_watchdog` | 1 s |
-| `block_writeback`, `journal_committer` | ~5 s |
-
-Measured on a deliberately deadlocked guest, that is ~5 switches per second
-forever, so the counter's longest still window was 200 ms against a 4000 ms
-threshold. No threshold fixes it; the count advances indefinitely.
-
-The fix is `stall::mark_heartbeat()`, called by those five on entry: a thread
-whose body is `sleep(tick); look; repeat` and whose normal answer is "nothing
-to do" is not the machine making progress, so `note_switch` skips it. The
-exclusion is narrow on purpose — if housekeeping ever *does* wake a real
-waiter, that waiter is not a heartbeat and the counter moves, which is the
-whole distinction between a stalled machine and a quiet one.
-
-**The reproducer, so the next session can re-run it:** `make stall-check`.
-It builds `edos-stall.iso` (`--features stall-dump`, `stalltest` on the
-cmdline); `mount_system_fs` then spawns `stall-holder`, which takes a
-`BlockingMutex` and parks forever, and `stall-waiter`, which blocks behind it,
-and never loads init. QEMU is killed after 90 s and the verdict comes from
-`run_log.txt`. Confirmed output: `=== STALL: nothing ran for 4000 ms (400
-switches this boot) ===`, twenty threads with their state, and
-`stall-waiter`'s backtrace resolving through `addr2line` to
-`edos_kernel::debug::stall::waiter`. After the one dump it prints
-`stall: still nothing, switches=408` per window, which is how a machine that
-stayed stopped is told from one that started again.
-
-Do not point this at a desktop boot: a running session is never idle for 4 s
-(the taskbar clock alone is work), and that is correct behaviour, not a
-missing dump. `scripts/wedge-probe` remains the first instrument for a
-suspected wedge — it reads the same counters over QMP with no kernel build.
-
-## The `[lints]` table outside the kernel, and what an unfulfilled `expect` means
-
-`programs/` is a workspace, `libs/` and `tools/` are not. So the same three
-lints reach them two different ways: `[workspace.lints.clippy]` in
-`programs/Cargo.toml` plus `lints.workspace = true` in every member manifest
-(133 of them; a workspace lint table reaches no member that does not opt in,
-silently), and a plain `[lints.clippy]` in each of the nine `libs/` and four
-`tools/` packages.
-
-Converting `#[allow]` to `#[expect]` outside the kernel found eleven
-suppressions with nothing behind them, all `dead_code` or `unused` on a `pub`
-item in a library target -- where `dead_code` does not fire at all, because the
-item is reachable from the crate root. Seven were in `tools/efs-fsck`, three in
-`programs/{edos_render,edos-web,edos-wm}`. That is the whole value of
-`allow_attributes_without_reason` plus `expect`: the conversion is mechanical,
-but the compiler answers back, and a suppression the code has outgrown is a
-one-line deletion rather than a reworded comment. Delete those; do not invent a
-reason for a lint that never fires.
-
-`tools/` is not covered by `make clippy`'s `-D warnings` for the default lint
-set: `cargo clippy --all-targets` in `tools/efs-fsck` prints eight findings
-(`collapsible_if`, `manual is_multiple_of`, `&mut Vec` parameters, a
-`too_many_arguments`) that predate this table and that no gate reads. They are
-not from the three lints above.
-
-The edition bump of the last three 2021 programs (`edos-taskbar`,
-`edos-terminal`, `wintest`) is not free either: edition 2024 stabilises let
-chains, so `collapsible_if` starts reaching `if cond { if let ... }` pairs it
-could not rewrite before, and both of the affected programs had one.
-
-## `undocumented_unsafe_blocks` ratchets per module, not per crate
-
-`kernel/Cargo.toml`'s `[lints.clippy]` carries three of the four `unsafe`-hygiene
-lints. The fourth, `undocumented_unsafe_blocks`, stays commented out because
-turning it on crate-wide reports hundreds of findings at once, and the only way
-to make the build green that day is a blanket `allow` — exactly what the other
-three lints exist to prevent.
-
-A module that is finished denies it on its own `mod` declaration in `main.rs`:
-
-```rust
-#[deny(clippy::undocumented_unsafe_blocks)]
-mod memory;
-```
-
-That is enough to make the lint fire for everything under the module while the
-rest of the kernel is still exempt, so each module's work is locked in as it
-lands. When the last module has its own `deny`, they all collapse back into the
-one line in `Cargo.toml`.
-
-Two traps in this:
-
-- **Do not write the literal `SAFETY:` in a comment above a `mod` item.**
-  `unnecessary_safety_comment` reads any comment containing that token as a
-  safety comment on the item below it, and a module cannot have one, so a note
-  explaining the `deny` fails the build. Say "documented" instead.
-- **`cargo clippy --manifest-path kernel/Cargo.toml` from the repo root is the
-  wrong toolchain.** It does not pick up `kernel/rust-toolchain.toml`, and the
-  failure is `x86_64-0.15.4` not implementing `Step::forward_overflowing` — a
-  dependency error that looks nothing like a toolchain mismatch. Run it with
-  the cwd inside `kernel/`, or go through `make -C kernel clippy`.
-
-## `kernel/src/syscalls/` is the second module clean under `undocumented_unsafe_blocks`
-
-All 107 `unsafe {` across its thirteen files (`mod.rs` 27, `net.rs` 23,
-`io.rs` 20, `fs.rs` 12, `window.rs` 7, `trace.rs` 5, `memory.rs`/`sigframe.rs`/
-`sync.rs` 3 each, `profile.rs` 2, `ioctl/mod.rs` 2) carry a `// SAFETY:`, and
-`mod syscalls;` in `main.rs` denies the lint on its own declaration the way
-`mod memory;` does. 608 blocks remain outside the two, `usb/xhci/mod.rs` (77),
-`ahci/port.rs` (38), `virtio/gpu.rs` (33), `thread/scheduler.rs` (28) and
-`allocator.rs` (21) first.
-
-**What the comments say, and why it is not boilerplate.** Roughly eighty of the
-107 are calls into `util/uaccess`: `try_copy_to_user`, `try_copy_from_user`,
-`try_read_user`, `try_write_user`, `try_copy_string_from_user`. Those helpers
-already null-check and `access_ok` the *user* address and trap a fault instead
-of taking it, so a comment that argues about the user pointer is arguing about
-the half the helper handles. What the caller actually has to uphold is the
-*kernel* side, and it is exactly where syscall length bugs live:
-
-- a length that is the source slice's own (`bytes.len()`, `size_of_val`),
-- a length clamped against both the kernel buffer and the caller's claim
-  (`data.len().min(count)`),
-- an offset into a user buffer whose `written + needed <= size` check is
-  several lines up (`sys_list_mounts`, `write_dir_entries`, `sys_get_partitions`),
-- a `T: Copy` read out of userspace, where the claim is that `T` is plain
-  integer data with no invalid bit pattern (`SockAddrIn`, `WindowEvent`,
-  `SchedAttr`, `Timespec`, `SpawnArgs`).
-
-Each comment names which of those bounds *its* length. A reviewer changing a
-buffer's size now has the claim it would break written next to it.
-
-**Trap: the lint wants the comment adjacent to the block, not to the
-statement.** `kernel/src/syscalls/ioctl/mod.rs` has two sites shaped
-`if copy_in && !unsafe { ... }`. A `// SAFETY:` above the `if` does not satisfy
-`undocumented_unsafe_blocks` — it is not the preceding line of the *block*. It
-has to go between the `if` condition's first operand and the `&&`, which
-`cargo fmt` then keeps in place. The error is identical to having written no
-comment at all, so the fix is not obvious from the diagnostic.
-
-The worse shape is `if unsafe { ... }` and `match unsafe { ... }`, where the
-block opens the condition or scrutinee and there is no earlier operand to hide
-the comment behind. `kernel/src/interrupts/idt.rs` had four of them, both fault
-paths in each of the ring-0 and ring-3 branches. Bind first and test the
-binding:
-
-```rust
-// SAFETY: ...
-let filled = unsafe { crate::memory::fault::handle_demand_fault(address, error_code) };
-if filled.is_ok() {
-```
-
-A `&&` chain still short-circuits when it becomes a `let`, so
-`let copied = is_cow_candidate && unsafe { handle_cow_fault(address) };` does
-not call the handler for a fault that is not a COW candidate. That is worth
-checking rather than assuming, because the same rewrite applied to a `||` or to
-an operand with a side effect would change what runs.
-
-## Counting what `undocumented_unsafe_blocks` has left, and the flag that reads zero
-
-`grep -c 'unsafe {'` is not the number. It counts blocks the lint already
-accepts, misses `unsafe impl`, and misses a block written without the brace on
-the same line. The number the ratchet is against comes from clippy itself:
-
-```
-cd kernel && touch src/main.rs
-cargo clippy --target x86_64-unknown-none -- -W clippy::undocumented_unsafe_blocks \
-  2>&1 | grep -cE '^\s+--> '
-```
-
-Two things bite. `touch src/main.rs` is required: a `-W` passed after `--` does
-not change the fingerprint clippy caches against, so a warm tree answers 0 and
-reads exactly like a finished module. And **`--message-format short` also
-answers 0** for a grep on the lint name -- the short format prints
-`file:line: warning: <message>` with the lint name dropped, so the count has to
-be of the `-->` lines, not of `undocumented_unsafe_blocks`.
-
-Measured this way after `util/`: 529 blocks over the whole kernel, largest
-`usb/xhci/mod.rs` 77, `ahci/port.rs` 38, `virtio/gpu.rs` 33,
-`thread/scheduler.rs` 26, `interrupts/idt.rs` 18, `fs/efs/mod.rs` 18,
-`allocator.rs` 15.
-
-## `kernel/src/util/` is the third module clean, and what its comments had to say
-
-`memory/` and `syscalls/` are about validity -- is this pointer live, is this
-length inside the buffer. `util/` is not, and writing its comments in that voice
-would have produced nothing true:
-
-- **`per_cpu.rs`** is a set of GS-base reads, so what every block turns on is
-  *migration*, not validity. `get_percpu_data` returns a `&'static PerCpuData`
-  derived from a register, and the pointee is a leaked `Box` or a `static`, so
-  validity is never in question; what a caller can get wrong is being moved
-  between the read and the access, which is
-  `doc/bugs/2026-08-19-preempt-count-incremented-on-the-wrong-cpu.md`. So
-  `set_current_thread` and `cache_thread_info` say "the caller cannot migrate",
-  and the `wrgsbase`/`rdfsbase` blocks say "CR4.FSGSBASE is set on this CPU",
-  which is a fact about `HAS_FSGSBASE` having been stored by
-  `probe_and_enable_fsgsbase` and about the CPUs being homogeneous.
-- **`uaccess.rs`** is the callee that ~80 of `syscalls/`'s comments defer to, so
-  its own comments are the other half of that argument: `try_copy_from_user`
-  checks the *user* pointer (null, and inside the user half, for the reason
-  `access_ok` gives) and the *kernel* side is the caller's, which is why its
-  `# Safety` now lists only `dst`. `do_user_copy`'s asm block is the one place
-  the fixup has to be argued: a fault lands on `5:`, which falls through into
-  the same `clear_resume` call the success path takes, so the resume point is
-  disarmed on both exits.
-
-Four `unsafe fn` there had no `# Safety` section at all (`tss_mut`,
-`set_current_thread`, `init_gs_for_this_cpu`, `init_gs_for_bsp_static`), and
-`setup_fault_resume`/`clear_fault_resume` are `unsafe extern "C"` reachable only
-from `do_user_copy`'s asm -- which is now what their contract says, rather than
-"called from assembly" above a signature that already said so.
-
-That last part closed `doc/ROADMAP-CLEANUP.md` §G2's named remainder in the same
-pass: `uaccess.rs` was the tree's last pocket of restate-the-signature doc
-comments, and a file being rewritten for `// SAFETY:` is the cheapest time to
-fix them, since every one of them is being read anyway.
-
-## `acpi/` and `apic/`: sixteen trait methods that all make the same claim
-
-`kernel/src/acpi/` and `kernel/src/apic/` are the sixth and seventh modules
-clean under `undocumented_unsafe_blocks`, done in one pass because the second
-reads the first's tables. Twenty-six blocks; fifteen of them are in one file.
-
-`acpi/handler.rs` implements the `acpi` crate's `Handler`, which is sixteen
-methods wide: four widths of memory read, four of memory write, three of `in`,
-three of `out`. Every one is a one-line `unsafe` block, and every one rests on
-the *same* fact -- the address or port came out of an AML OperationRegion, so
-the DSDT is the thing being trusted, not the kernel. Sixteen copies of that
-paragraph is not documentation, and there is no helper to hoist it into either:
-a private `unsafe fn read_at<T>` moves the block without removing it, and the
-call sites need a comment each anyway. What is written instead is the argument
-in full four times -- once for a memory read, once for a memory write, once for
-`in`, once for `out`, since those four differ in what could go wrong -- and
-a one-line "a mapped firmware address, as in `read_u8`" for the rest. The
-substance of it: reads and writes only reach a region the interpreter first
-asked `map_physical_region` for, x86 permits an unaligned load of any of these
-widths so a misdescribed field reads neighbouring bytes rather than faulting,
-every 16-bit value is a port the instruction can address, and a read of a port
-nothing decodes returns all-ones.
-
-`apic/init.rs` had `enable_io_apic` wrapped in a single 75-line `unsafe` block
-that contained the page-table `translate`/`map_address` match, the
-interrupt-source-override scan and two byte-identical redirection-entry setups
--- all safe code. Four calls in it are actually unsafe (`IoApic::new`,
-`ioapic.init`, `set_table_entry`, `enable_irq`), so the block became four, the
-two entry setups became a two-element loop, and the comments have something to
-say. A wide `unsafe` block is worse than an undocumented one: it is
-undocumented *and* it hides which operation the reader should be looking at.
-
-`enable_lapic` and `enable_io_apic` were `unsafe fn` with "Should only be
-called once" and nothing. What they actually require: for the first, that the
-calling CPU has no LAPIC recorded yet, because it `Box::leak`s a fresh one into
-the per-CPU slot and a second call would strand the old one while two
-`&'static mut` named the same register block; for the second, that it runs once
-from the BSP after `enable_lapic`, because the redirection table is global to
-the machine and it needs a LAPIC to read the destination id from.
-
-`get_ioapic` hands out a second `IoApic` over the same window every time it is
-called, which looks like aliasing and is not: the type is a handle over MMIO,
-not an owner of it. What callers must not do is write the same redirection
-entry from two of them, and that is what its comment says.
-
-## FIXED: the framebuffer ioctls read past the ioctl buffer
-
-`sys_ioctl` copied `arg_len` user-chosen bytes into a kernel buffer and handed
-the device the pointer alone, so `FB_IOCTL_DRAW` sliced `header.pixel_count`
-u32s past a buffer bounded by nothing. `arg_len` now reaches the device through
-`DevFsDevice::ioctl` / `FileSystem::ioctl`, and every framebuffer arm goes
-through a bounds-checking `IoctlBuf`. `programs/fbtest` is the gate, the
-twentieth suite in `scripts/guest-check`.
-
-Full write-up, including why the buffer became a `Vec<u64>` and how to check
-another device for the same shape:
-`doc/bugs/2026-08-28-the-framebuffer-ioctls-read-past-the-buffer.md`.
-
-## The thirteen small modules are clean under `undocumented_unsafe_blocks`
-
-`boot`, `cmdline`, `debug`, `gdt`, `loader`, `logs`, `net`, `power`, `profile`,
-`serial`, `smp`, `timer` and `window` now carry their own
-`#[deny(clippy::undocumented_unsafe_blocks)]` in `main.rs`, 48 blocks between
-them. Three of the thirteen (`cmdline`, `logs`, `window`) contain no `unsafe`
-at all and cost only the attribute. That leaves `drivers/` (307), `thread/`
-(61) and `fs/` (60) as the whole of §I5a's remainder: 397 blocks, down from
-445.
-
-Worth doing as one pass because the arguments repeat across the group rather
-than within any one file, and several are the same fact:
-
-- **Bring-up code argues "nothing else exists yet", not "nothing else
-  aliases".** `gdt::init_current_cpu`, `smp::ap_start` and `boot::kmain` run
-  before their CPU has a scheduler to be preempted by, which is what makes a
-  `&mut` into a per-CPU TSS or a GS-base write sound. Written down at each
-  site, because the moment any of them is called twice the claim is gone.
-- **A port write is bounded by who else drives the port, not by memory.** The
-  PIT (`timer.rs`), `RST_CNT` and the 8042 pulse (`power.rs`), and the
-  emergency UART (`serial.rs`) each say which driver owns the port and why a
-  concurrent write cannot arise — or, for `emergency_write`, why interleaved
-  bytes are the accepted worst case of bypassing the lock on purpose.
-- **`_rdtsc` is the same argument nine times**, so it is written out once in
-  `TscClock::now` (architectural on x86_64, unprivileged unless CR4.TSD which
-  this kernel never sets, no side effect) and referred to from the other eight.
-  Whether the counter is *usable as a clock* is a different question, answered
-  by `invariant_tsc` and `verify_tsc_sync` before `TSC_ACTIVE` lets it run.
-- **`profile::walk_kernel` reads memory whose contents are untrusted.** The
-  range check before the two loads is what makes them sound; the frame chain
-  they return is checked afterwards and ends the walk rather than faulting.
-  The comment has to separate those two, or it reads as a claim the frame
-  pointer is valid, which is exactly what a sampling profiler cannot assume.
-
-`TimerCalibration::setup_pit_oneshot` was the only `unsafe fn` in the group
-without a `# Safety` section.
-
-## `kernel/src/thread/`, documented: the last module outside `drivers/`
-
-56 `unsafe` blocks across nine files (`scheduler.rs` 26, `sched_test.rs` 7,
-`thread.rs` 6, `runqueue.rs` 6, `rwlock.rs` 5, `mutex.rs` 3, and one each in
-`paging.rs`, `util.rs`, `interrupt.rs`), now under `mod thread;`'s own
-`#[deny(clippy::undocumented_unsafe_blocks)]`. §I5a's remainder is 295 blocks
-and they are all in `drivers/`.
-
-- **The runqueue's six are one argument.** Every pointer in the list came from
-  an `Arc::into_raw` in `enqueue`, the list holds that reference for as long as
-  the node is linked, and `unlink` is the only way out and takes the `Arc`
-  back — so a linked pointer is never dangling. Written out once in
-  `avg_vruntime` and referred to from `pick_next` and `steal_victim`.
-- **A guard's `Deref` names the state value that excludes everyone else**, not
-  "the guard means we have the lock". `BlockingMutexGuard` cites `locked` and
-  its own `Drop`; `RwLockReadGuard` cites a non-negative `state`;
-  `RwLockWriteGuard` cites `state == -1`. Two of these replaced informal
-  `// Safe:` comments the lint does not recognise.
-- **The scheduler's `context` is one of exactly two things**, and every comment
-  says which: the interrupt frame the entry stub pushed, which `check_context`
-  validated on the way in, or the synthetic frame `save_transition_switch`
-  built on the calling thread's own stack. Nothing else ever reaches these
-  functions, and saying so is more useful than restating that the pointer is
-  non-null.
-- **The per-CPU calls argue migration, not validity**, the same way `util/`
-  does. `sched()` is the sharp case and says it outright: a thread moved
-  between the GS-base read and the load answers with *another* CPU's scheduler,
-  which is still the live `'static` one that CPU's `init` leaked, so the risk
-  here is reading the wrong CPU's scheduler and never an invalid pointer.
-  `set_current_thread`, `cache_thread_info` and `tss_mut` all carry contracts
-  that name interrupts-off, and each call site says where its interrupts-off
-  comes from.
-- `context_switch_to`, `switch_away` and `save_transition_switch` were
-  `unsafe fn` with no `# Safety` section. `save_transition_switch`'s is the
-  interesting one: `arg` must stay valid *for as long as the thread is away*,
-  which in practice means the caller's own frame, since the caller is suspended
-  for exactly that long.
-
-### A soundness fix on the way: `RwLock`'s `Debug`
-
-It loaded `state` and then, in the `0` arm, read `value` straight through the
-`UnsafeCell`. A writer arriving between the load and the read is a data race
-for the sake of a debug line, and no honest `// SAFETY:` could be written above
-it. `RwLock` now has a `try_read` — the read-side counterpart of the `try_lock`
-`BlockingMutex`'s own `Debug` already used — and the formatter goes through a
-guard like every other reader. The three-way `<write-locked>` /
-`<read-locked, N readers>` split went with it: what a formatter can actually
-report is "I got the lock" or "I did not".
-
-### Trap: a `#[deny]` is only proven by the feature sweep
-
-Two of `scheduler.rs`'s blocks live inside `trace_event!`, which expands to
-nothing unless `--features trace` is on. A plain `cargo clippy` and a
-`cargo clippy --features sched-test` both reported the module clean while those
-two were still bare; only `make -C kernel clippy`, which loops over every
-feature set, caught them. So when adding a module's deny, the check that it is
-actually satisfied is the sweep, not a single run — and the same holds for
-counting what is left, since the tree-wide `-W` measurement is a default-feature
-run and undercounts any module with feature-gated `unsafe`.
-
-## `drivers/` is ratcheted per submodule, not whole
-
-`drivers/` is the last module I5a has to cross and it is far too big to take in
-one sitting (295 blocks when it opened, `usb/xhci/mod.rs` alone 77). The
-`#[deny(clippy::undocumented_unsafe_blocks)]` therefore goes on each `pub mod`
-line inside `kernel/src/drivers/mod.rs` rather than on `mod drivers;` in
-`main.rs`, which lets a finished submodule be locked in while its neighbours are
-still bare. Eighteen of the twenty-one now hold one: `ahci`, `block_io`, `dma`,
-`e1000e`, `fpu`, `hda`, `hpet`, `keyboard`, `mouse`, `msi`, `null`, `nvme`,
-`pci`, `ramdisk`, `random`, `rtc`, `tty`, `vga`. Left: `usb`, `virtio`, and
-`drivers/mod.rs`'s own ten blocks, which cannot be denied until every sibling
-is, because a deny on the parent reaches the children.
-
-**The two arguments that cover almost all of it.** A driver's blocks are not
-varied. The first shape is `read_volatile`/`write_volatile` of a field in a
-mapped BAR window: what makes it sound is the mapping that produced the pointer
-(and it should be named -- "BAR0's register window, mapped in
-`NvmeController::new`"), that the field is naturally aligned inside it, and
-that `volatile` is there because the *device* changes the value, not this code.
-The second is a port-I/O pair: what bounds it is who else drives the port. For
-`pci/config.rs` that is "this module is the only thing in the kernel that
-touches 0xCF8/0xCFC, and `PCI_CONFIG_LOCK` keeps the address write and the data
-access together against every other CPU" -- the lock is load-bearing to the
-*safety* argument, not just to correctness, and saying so is the point.
-
-**Where the real gap was: the FPU/SSE bring-up path had no contracts at all.**
-`fpu.rs`, `hpet/driver.rs` and `rtc.rs` between them held nine `unsafe fn` with
-no `# Safety` section. `init_fpu`, `enable_fpu`, `enable_sse` and
-`enable_fsgsbase` each write a control register on the calling CPU, so the
-contract is a *non-migratable caller*, the same shape `util/per_cpu.rs`'s
-comments argue -- the danger is not an invalid write, it is writing the CPU you
-were on rather than the one you are on. `restore_fpu_state`'s is different and
-worth knowing: `FXRSTOR` raises `#GP` if the saved `MXCSR` has a reserved bit
-set, so the contract is that the image came from `save_fpu_state` or
-`init_fpu_state` and not from arbitrary or merely zeroed bytes. That is also why
-`FpuState::default` writes `MXCSR_DEFAULT` instead of leaving 512 zeroes.
-
-**A third shape, and it is the one that carries the DMA-ring drivers.**
-`ahci/`, `hda/` and `e1000e/` are not mostly register pokes; they are mostly
-copies between a caller's buffer and a driver-owned DMA buffer. The in-range
-half of such a comment is the easy half and is not where the soundness lives.
-The load-bearing half is **why the device is not touching that buffer right
-now**, and it is a different sentence in each direction: a submit-side copy into
-a pool page is sound because the command has not been issued yet, a
-completion-side copy out of one is sound because the slot's `SACT` bit has
-cleared or `wait_for_completion` returned, and an `e1000e` descriptor `&mut` is
-sound because the NIC owns only `[RDH, RDT)` and this slot is the one just
-outside it. Write that clause first; if it cannot be written, the code is the
-problem rather than the comment. `AhciPort::fail_all_ncq_slots` is the same
-argument already made in prose in `restart_port`'s doc comment, which is what a
-correct comment here looks like.
-
-**Say the shared argument once.** AHCI's four `setup_*_command_table` functions
-and its two `issue_*` functions open with byte-identical `DmaRegion` reasoning,
-and HDA has eight MMIO accessors that differ only in width. Repeating the same
-six lines six or eight times is worse than useless: it is six places to drift.
-Both took one comment above the group plus a one-line `// SAFETY: see the note
-above this group.` on each block, which is what the lint actually requires and
-leaves exactly one copy of the argument to keep true. Note that `cargo fmt`
-re-indents those one-liners with the block they sit above, so grep for them by
-text and not by column when checking that the deny is honest.
-
-**The `if !unsafe { .. }` restructure appears once more.** `tty::write_from_user`
-had the same shape `fs/` and `interrupts/` did: clippy will not accept a comment
-above an `if` whose condition opens with the block, and there is nowhere inside
-`if !` to put one, so the call becomes a `let copied = unsafe { .. };` binding.
-Expect this in `drivers/` too.
-
-## `virtio/`: the fourth shape is a scratch buffer, and most of its `unsafe` was not unsafe
-
-`drivers/virtio/` came out of I5a smaller than it went in: 55 blocks to 26,
-without a single comment written for the 29 that went away.
-
-**Seventeen of them were `core::mem::zeroed()` on a command struct.** Every
-virtio-gpu command is a `#[repr(C)]` of `u32`, `u64` and small integer arrays,
-so a `#[derive(Default)]` is exactly the same bytes with none of the
-obligation. The rule this is an instance of: before writing a `// SAFETY:`,
-check whether the operation needs `unsafe` at all. A comment justifying a
-`zeroed()` that `Default` would do is a true comment on a block that should not
-exist, and the lint is satisfied either way, which is why the pass has to look.
-`clippy::field_reassign_with_default` then fires on `let mut x = X::default();
-x.field = ...` and wants the struct literal, so the two go together.
-
-**Twelve more were the same three lines against a DMA scratch buffer**: copy a
-command struct in at an offset, zero a response area at another offset, read a
-response back. `DmaBuffer` carries its own `size`, so those became three safe
-free functions -- `write_at`, `zero_at`, `read_at` -- that assert the range is
-inside the buffer and hold the one `unsafe` each. That is not the "moves the
-block without removing it" shape that got a `read_at<T>` rejected in `acpi/`:
-there the helper would have been an `unsafe fn` and every caller would still
-have opened a block. These are safe, because the bound is *checked* rather than
-asserted in prose, and the caller has nothing left to uphold.
-
-`read_at` is generic and reads bytes the device wrote, so a safe signature over
-any `T` would be a lie (`read_at::<bool>` is instant UB). The bound is a private
-`unsafe trait DeviceResponse` with a `# Safety` section saying the implementor
-must be `#[repr(C)]` integer data, implemented for the three response structs.
-Three documented `unsafe impl` in exchange for a safe call site is the right
-trade; a marker trait is the cheapest way to say "this type has no invalid bit
-pattern" until Rust has one of its own.
-
-**A real bug came out of writing one of these comments.** `Virtqueue::reclaim`
-walks the descriptor table with a head index, and `poll_used` handed it the `id`
-the DEVICE wrote into the used ring, unchecked. An id at or above the queue's
-size would have the driver write past the descriptor table -- the same shape as
-the framebuffer ioctls in
-`doc/bugs/2026-08-28-the-framebuffer-ioctls-read-past-the-buffer.md`, one layer
-down. `poll_used` now refuses such an entry and logs it. The tell is the same
-one that doc names: a length or an index that came from outside the kernel and
-is used to form a pointer without a bound in between. QEMU never does this,
-which is why it survived; that is not a reason it was sound.
-
-`create_resource_blob` also wrote the scratch buffer without calling
-`begin_command()` first, which every other command path does and which
-`begin_command`'s own doc comment claims they all do. It is reached only during
-`setup_framebuffer`, when nothing is in flight, so it never misbehaved -- but
-the invariant is "the buffer is drained before it is written", and one path
-exempting itself is how it stops being true. It calls it now.
-
-## I5b, the `unsafe fn` contracts: what a script has to look for (2026-08-28)
-
-I5a's half is a lint; I5b's has none and can have none, because a caller of an
-undocumented `unsafe fn` has nothing to uphold and so there is nothing to check
-mechanically. The sweep is a script, and `grep` is wrong in both directions:
-
-- `grep -B3 'unsafe fn'` reports seven declarations as bare when they are not.
-  Their `# Safety` section sits above a **multi-line `#[expect(...)]`** -- the
-  `mut_from_ref` suppressions on the page caches -- so a fixed-size window of
-  preceding lines lands inside the attribute. The walk-back has to skip
-  attributes, including their continuation lines, before it gives up.
-- `grep -c '\bunsafe fn '` misses `unsafe extern "C" fn`, which is where the
-  kernel's three entry points are: `kmain`, `ap_start` and the naked
-  `timer_interrupt_handler`. That is why the tree-wide count read 65 while a
-  real parse read 73.
-
-The seven that were genuinely bare split two ways, and neither is the shape
-I5a's blocks were.
-
-**Trait impl methods** (`GlobalAlloc::alloc`/`dealloc`,
-`FrameDeallocator::deallocate_frame`, `AcpiHandler::map_physical_region`) cannot
-restate the trait's contract, since the trait owns it. What they can say is
-which part of it *this* implementation leans on. `dealloc`'s is the interesting
-one: a block may be freed on a CPU other than the one that allocated it, because
-`try_percpu_dealloc` derives the size class from `layout` alone and pushes onto
-whichever CPU is doing the freeing. The pair (`ptr`, `layout`) matters; the CPU
-does not. Somebody will eventually read the per-CPU cache and assume the
-opposite.
-
-**`extern "C"` entry points** have a contract that is about *who* enters and how
-many times, not about pointer validity: Limine once on the BSP for `kmain`,
-Limine once per AP for `ap_start` with that AP's own `MpInfo` (its `lapic_id` is
-taken as the identity of the CPU executing), and, for
-`timer_interrupt_handler`, an IDT gate for the LAPIC timer vector on a CPU that
-already has its GS base and per-CPU scheduler stack. That last one is not
-callable from Rust at all -- it assumes a CPU-pushed interrupt frame, pivots the
-stack and leaves through `iretq` -- and saying so is the whole value of the
-section.
-
-**The plausible wrong rule: "no `unsafe` block in the body, so it should be a
-safe fn".** Sixteen `unsafe fn` across the tree have a body with no unsafe
-operation in it. `BlockBuffer::owned` stores a raw pointer; `deallocate_frame`
-returns a frame to the bitmap; `uaccess::setup_fault_resume` hands out the
-address of per-CPU state. Every one is safe to *execute* and unsound to *have
-executed* -- the UB is deferred to whoever next dereferences, maps, or migrates.
-Do not strip `unsafe` from these. The one real instance of the mistake was
-`programs/fstest`'s `edos_sync`, an `unsafe fn` around a `sync` syscall that
-takes no arguments and therefore has no contract; it is a safe fn now, and
-`scripts/fs-regression` is what proves it still flushes (it writes, syncs,
-reboots, and reads back from a cold cache).
+FAT12 caps at 4084 clusters, so 16 MiB at one sector per cluster is too large; 2 MiB
+works. A raw unpartitioned image gets no `/dev` node. Mount with `mount <dev> 0 /mnt
+fat32` (the driver serves all three widths); check the device index first, since both
+NVMe and SATA disks are attached.
+
+### FAT12/16 roots are a fixed region, not a cluster chain
+
+The root is addressed as cluster 0. `Fatfs::root_dir_cluster`, `is_fixed_root` and
+`dir_entry_region` (`kernel/src/fs/fat32/traverse.rs`) name that case, and every
+directory write goes through `dir_entry_region`. Never pass a directory cluster to
+`cluster_to_lba`: its `cluster < 2` guard returns the partition start, the boot sector,
+and a directory entry written there is silent corruption. A full fixed root returns
+`NoSpace`.
+
+In `fat32/write.rs`: delete a long-name sequence before marking the short entry `0xE5`
+(`delete_long_name_sequence` skips entries already marked, so reversing orphans the
+LFN entries), and every FAT write goes through `write_fat_sectors`, which mirrors to
+`backup_fat_lba`. Host `fsck.fat -n` on an image the guest wrote catches these; guest
+`ls` and exit codes do not.
+
+`determine_fat_variant` refuses any volume whose `bytes_per_sector` is not 512, and
+`traverse.rs` computes FAT sectors with a literal `/ 512` while `write.rs` uses
+`boot_info.bytes_per_sector`. Lifting the refusal requires fixing `traverse.rs` first.
+
+### Filesystem errors carry their cause
+
+`fs::Error` has `NoMemory`, `NotEmpty`, `BadAddress`, `Unsupported`, and
+`Error::Block(#[from] BlockError)`. A new error path picks the variant that names the
+cause; `map_err(|_| Error::IoError)` flattens a `BlockError` the syscall layer could
+have reported. `FileSystem` trait defaults answer `Unsupported`. `gpt::parse_gpt` and
+`mbr::parse_mbr` answer `gpt::PartitionError`, separating structural refusals
+(`Signature`, `Truncated`, `Malformed`) from I/O ones. `loader::load_elf` is
+`parse_image` then `map_image`, so every parse error fails before anything is mapped.
+
+### One extent-tree encoder
+
+`efs_common::build_extent_tree` (`libs/efs-common/src/extent.rs`) encodes an inode's
+extent node for both the kernel EFS driver and `efs-mkfs`; they differ only in
+`emit_leaf`. Keep on-disk allocation rules in `efs-common`: two implementations is how
+an image `efs-fsck` calls clean fails to mount.
+
+### `DmaPool` does not zero a recycled buffer
+
+`DmaPool::allocate_sized` (`kernel/src/drivers/dma.rs`) serves AHCI per-command buffers
+up to 2 MiB, and a memset per pop is a storage regression. A parser that reads a fixed
+size out of such a buffer, instead of the byte count the device reports, returns the
+previous owner's bytes after a short transfer. This bit xHCI descriptors, USB mass
+storage and AHCI ATAPI. Any new driver reading from `DmaPool` bounds its parse by the
+transferred count.
+
+### A `/dev` descriptor bypasses the VFS read path
+
+`sys_read` and `sys_pread` try `devfs::try_lookup_from_full_path` then
+`device.read_to_user` before the VFS. An optimisation in `vfs::read_to_user` never
+reaches `/dev/ram0` or any other device node. The kernel allocator has no
+`alloc_zeroed` override, so `vec![0u8; n]` is a real memset.
+
+### `fsbench` output scrolls its own verdict away
+
+The `KERNEL COUNTERS` block is longer than the guest terminal, so the `verify:` line
+scrolls away. Redirect and grep: `fsbench write -n 8 /var > /var/w.txt`, then `grep
+verify /var/w.txt`.
+
+## NVMe
+
+### What a zero NVMe timeout can and cannot prove
+
+`nvme_timeout_ms=0` declares every command hung the instant it is issued, so the reset
+path runs immediately and repeatedly. The watchdog sleeps
+`WATCHDOG_TICK.min(timeout.max(1 ms))` (`drivers/nvme/watchdog.rs`), so it sweeps
+every millisecond against a reset that takes two or three, and the controller is in
+reset most of the time: about 930 resets a second, measured. With the block-layer
+retry the boot mounts root, starts init and reports no failed I/O, but the desktop is
+not responsive and the taskbar sometimes never appears. No correctness fix changes
+that. `nvme_timeout_ms=1` exercises nothing: commands complete in about 100 us under
+KVM. Zero is the only setting that reaches the path, which is why `case_watchdog` in
+`scripts/nvme-check` asserts init runs, the watchdog fires, the reset completes and no
+I/O fails, and not that the desktop comes up.
+
+Reading that boot's log: a kernel `log!` line may be missing although the event
+happened, because about a thousand watchdog lines a second evict it from the ring
+before the klogger drains it, so `Root filesystem mounted` is often absent. Userspace
+writes serial directly, so `init: pid` is the liveness marker.
+
+### Block-device ids, the probe barrier, and the id ioctl
+
+Block-device id ranges: AHCI `0..1000`, USB mass storage `1000..2000`, ramdisk
+`2000..3000`, NVMe `3000..`. `devfs::block::device_name` imports the NVMe base and
+stride from `drivers::nvme`.
+
+`NVME_PROBE_DONE` must be signalled on every path out of the probe kthread, including a
+machine with no controller. `fs_main_thread` waits on `nvme::api::wait_probe_complete()`
+because the boot-time `block_io::list()` scan runs once, so a skipped signal hangs boot
+on every AHCI-only machine. `NVME_NAMESPACES` is published before the signal.
+
+A `/dev` name cannot be parsed back into a device id: `sd*` letters continue from the
+AHCI count into USB storage, and an NVMe name omits the 3000 base. A program needing the
+id opens the node and asks with `BLOCK_IOCTL_DEVICE_ID` (`fs/devfs/block.rs`), as
+`edos-install` does.
+
+### The default QEMU NVMe device splits every large run
+
+QEMU's default `-device nvme` reports MDTS 512 KiB, and the filesystem batches up to
+248 pages (992 KiB, from AHCI's PRDT), so every large run on an NVMe root is split. The
+splitter runs on every boot: `split_requests` in `/proc/nvme_stats` is nonzero after a
+desktop boot. `SplitOp::parts_done` (`drivers/nvme/cancel_op.rs`) records the first
+error and completes the handle once, from the last part, because the parts still hold
+PRP descriptors into the caller's buffer.
+
+## Networking
+
+### Loopback and the source address
+
+`NetStack::source_ip_for(dst)` (`kernel/src/net/stack.rs`) is the only place that
+decides a packet's source address; `send_ip_inner`, `send_udp` and `sys_connect` call
+it. Loopback rewrites the source to `127.0.0.1`, so a transport computing its
+pseudo-header checksum or connection key from `stack.local_ip` breaks loopback
+silently. A new transport calls `source_ip_for`. The passive side keys a connection by
+`ip_hdr.dst_addr`.
+
+Non-blocking `connect` returns `EINPROGRESS`; `poll` reports writable when the
+handshake resolves; `SO_ERROR` carries the outcome once; a second `connect` answers
+`EALREADY` / `EISCONN` / the failure. Over loopback `EINPROGRESS` is never observable,
+because loopback delivers inside the sending syscall. `programs/socktest` covers the
+contract plus one connect to an address nothing answers.
+
+Regression check for a leaked handshake: run `socktest`, then `netstat` immediately. A
+surviving `SYN_SENT` row is the defect (`TcpConnection::abort`, called by `sys_close`
+when `build_fin` returns `None`).
+
+### ARP holds one packet per unresolved target
+
+`ArpCache` holds one pending packet per unresolved target (`queue_pending_tx` /
+`take_pending_tx`, `kernel/src/net/arp.rs`, RFC 1122 §2.3.2.2), flushed when the reply
+arrives; newest wins, capped at 16 targets. `send_ip` returns `Ok(())` for a packet not
+yet on the wire, and no caller retries on ARP. A cold-cache ping includes resolution in
+its RTT. A stranded `SYN_RECV` with Send-Q 1 on the first connection after boot is the
+signature of a packet dropped before the neighbour resolved. A UDP send to an
+unreachable address on the guest's own subnet fails at once: no ARP reply, nothing
+transmitted.
+
+### Socket address lengths are value-result
+
+`addr_len` on `recvfrom`, `accept`, `getsockname` and `getpeername` is capacity in,
+real length out, copy bounded by capacity; all go through `write_sockaddr_out`
+(`kernel/src/syscalls/net.rs`). `edos_rt` and the std fork initialise it to
+`size_of::<SockAddrIn>()`; a new caller must too, since the kernel reads the field.
+`sys_recvfrom` implements `MSG_PEEK`, `MSG_TRUNC` and `MSG_DONTWAIT` (`RECV_FLAGS`) and
+refuses other bits; `sys_sendto` accepts only `MSG_DONTWAIT`. `socktest` checks these
+against a real DNS reply, so it needs QEMU's resolver at 10.0.2.3:53. DHCP keeps its own
+`IP_ID` counter in `net/dhcp.rs` because it runs before the stack has an address.
+
+### `/proc/sockets`
+
+`/proc/sockets` lists every `NetStack.tcp_connections` entry, then every `PORT_TABLE`
+binding without a connection, as `PROTO RECVQ SENDQ LOCAL FOREIGN STATE` (`SENDQ` is
+`snd_nxt - snd_una`). It is not derivable from `/proc/<tid>/fd`, because a connection
+outlives its descriptor. A bound TCP socket that has a `tcp_conn` is skipped, or
+established connections appear twice. Both tables are snapshotted and released before
+any socket (260) or connection (270) lock; holding `NET_STACK` or `PORT_TABLE` across
+them is legal by rank but parks the stack behind one `cat`. There is no kernel routing
+table; `netstat -r` reconstructs routes from `/proc/net`.
+
+### TCP writes and half-close from userspace
+
+A TCP write returns 0 when the send window is full; use `edos_lib::net::send_all`,
+which retries, instead of treating 0 as failure. End of input half-closes with
+`edos_lib::net::shutdown` (`SYS_SHUTDOWN`), so a reply still arrives. `nc` has no UDP
+mode. `httpd` answers one request per connection (`Connection: close`), so an idle
+client holds a thread until it leaves. A background job that reads stdin (`nc -l 23 &`)
+still receives what is typed at the prompt; use `tcpecho -p 23 -q &` to keep typing.
+
+Listener post-mortem: `doc/bugs/2026-08-12-a-listener-unbound-by-its-own-connections.md`.
+
+## Window system and GUI
+
+### A window is invisible until its client paints
+
+A window is created unmapped (`visible: false` in `kernel/src/window/registry.rs`); the
+client maps it with `Window::show()`. No buffer is published until the first
+`swap_buffers`. A mapped window with no buffer composites as its themed ground, so
+mapping before painting costs one frame of empty window. `Window::resize` publishes an
+unpainted buffer on purpose: the old pair is freed immediately after, and the
+alternative leaves the compositor holding a freed shm id.
+
+### Keys arrive as keycodes, never as characters
+
+The kernel never sends a `Character` window event: `WindowEvent::character` exists in
+`libs/window-abi` and nothing in `kernel/src/window/` constructs it. Clients get
+`KeyPress`/`KeyRelease`; map with `edos_lib::keymap::{update_modifiers, map_keycode}`.
+A program written against `event.character()` runs, draws, and ignores every key.
+
+`Widget::on_key` receives a `pc_keyboard` `KeyCode` discriminant, the same space as
+`edos_render`'s `keycode::` constants, not an AT set-1 scancode. `grep -rn 'scancode
+==' programs/ | grep -v 'keycode::'` must return nothing.
+
+Every program that tracks `Modifiers` through `update_modifiers` needs a `KeyRelease`
+arm calling it with `pressed = false`, or the first modifier pressed stays set for the
+life of the process and an Alt guard disables its shortcuts. Audit by counting
+`update_modifiers(.., true)` against `(.., false)` per file.
+
+### Toolkit traps
+
+- `WidgetContainer::get`/`get_mut` return `&dyn Widget` with no downcast, so
+  `TextInput::text()` is unreachable once the field is in a container. Keep your own
+  copy, updated from `WidgetEvent::TextChanged`; a program that must call `set_text`
+  owns the `TextInput` directly.
+- `font::Weight` has `Regular`, `Medium` and `Semibold`, no `Bold`.
+- A function that borrows a `Surface` for part of a frame restores the clip: use
+  `Surface::clipped`, whose `ClipGuard` restores on drop. A leaked clip silently blanks
+  everything drawn after it.
+- `Surface::blit_region` copies whole rows with `copy_from_slice` and runs on every
+  damaged rectangle of every frame. Do not turn it into a per-pixel loop.
+- `edos_render::image` has `scaled_to_cover` (wallpaper: fill, crop about the centre)
+  and `scaled_to_fit` (viewer: whole picture, never enlarge past 100%) over one
+  bilinear `resample_at`.
+- `edos-grab` runs one network operation at a time on a worker thread reporting over
+  `mpsc`, because two concurrent installs would race over `/var/lib/grab/db`.
+
+### The USB HID driver parses report descriptors
+
+`kernel/src/drivers/usb/hid/report.rs` builds a field map from the report descriptor.
+Absolute versus relative is stated by the Input item, and it is the whole difference
+between a mouse and a tablet.
+
+- The boot-protocol decoder stays as the fallback, so a parser bug never loses a device
+  the fixed layout handles.
+- `SET_PROTOCOL` goes only to an interface declaring the boot subclass, and only when
+  the fixed layout is what will be decoded. A tablet stalls on it; a parsed mouse sent
+  it would switch away from the parsed layout.
+- Report length comes from the endpoint descriptor; a tablet reports six bytes.
+- `parse_pointer` reads only inside a collection declaring itself a pointer or mouse,
+  or a keyboard's vendor X/Y pair would make the keyboard the pointer.
+
+### virtio-gpu
+
+- A response code of `0x0` is not a device answer; real codes are `0x11xx` or
+  `0x12xx`. Zero means the response area was read before the device wrote it.
+  `VirtioGpu::execute_scratch` waits for the descriptor head its own `push` returned.
+  `begin_command()` drains the scratch buffer before every command.
+- The hardware cursor is resource 100, created once. `setup_cursor` runs on every
+  shape change, so it refills the pixel buffer and re-issues `UPDATE_CURSOR`; a second
+  `RESOURCE_CREATE_2D` for 100 answers `0x1203`.
+- `virtio-vga,blob=on` needs host `CONFIG_UDMABUF` plus a memfd backend, Linux only.
+  Elsewhere `create_resource_blob` fails and the driver silently sets `use_blob =
+  false`, so every frame pays a `TRANSFER_TO_HOST_2D` copy; check `use_blob` in the
+  driver's init log line.
+- MSI-X takes two steps: enabling it on the PCI function, then writing the vector into
+  each queue's config, since virtio starts every queue at `VIRTIO_MSI_NO_VECTOR`.
+  `set_queue_msix_vector` reads the value back, because a device out of vectors answers
+  `NO_VECTOR` instead of failing. `virtio_gpu_irqs` in `/proc/gpu_stats` climbs during a
+  window drag when the vector is live.
+- The interrupt handler cannot drain the control queue: it sits behind `DISPLAY`, a
+  preempt-disabling spinlock the flip holds. The handler publishes a count and wakes;
+  the flip path drains.
+
+### The flip sends regions, and the wait for it is separate
+
+`FB_IOCTL_FLIP_RECTS` takes `edos-wm`'s disjoint region list from
+`DirtyTracker::coalesced` and issues one `TRANSFER_TO_HOST_2D` per region, then one
+`RESOURCE_FLUSH` over their bounding box. That matters under `blob=off`, where each
+transfer is a real host copy. `Screen::publish` still copies the bounding box into VRAM
+(a guest-local memcpy of correct pixels), and a page-flipping display takes the
+bounding box because the other page misses the previous frame's region too.
+
+The wait is `FB_IOCTL_FLIP_WAIT`, called from `Screen::publish` rather than at the
+start of the next flip: `publish` writes the buffer the host may still be reading, so
+waiting in the flip would tear. It parks at most `FLIP_WAIT_ROUNDS` times
+`FLIP_WAIT_SLICE`, then lets the frame through. A display with no interrupt vector
+spins in the driver's bounded loop, since nothing would wake a park.
+
+## Userspace programs and the shell
+
+### Program argument traps
+
+A program that treats `args[1]` as "the path" breaks once one shell word expands to
+many, and one that indexes `args[1]` without parsing turns every flag into a plausible
+success (`mkdir -p` once created `-p`). Use `edos_lib::args`.
+
+There is no `printf` in the guest; build fixtures with `echo` and `>>`.
+
+### `edos_lib` wrappers answer `Result`
+
+- `execve` and `reboot` return only on failure, so they answer `Errno`. A kernel that
+  answered success without replacing the image reports `Errno::UNKNOWN`.
+- `fork` answers `Result<u64, Errno>` with `Ok(0)` in the child.
+- `Ok(0)` is not failure: from `read` it is end of file, from `poll` a timeout. Map `n
+  <= 0` to `.unwrap_or(0) == 0`, not `.is_err()`; backwards turns end of input into a
+  spin.
+- For count-returning calls (`readlink`, `getdents`), `rc != 0` meant "nonzero
+  count"; compare against `Ok(n)`. Only `Result<(), Errno>` calls map `!= 0` to
+  `.is_err()` mechanically.
+- `Errno` has no `Display`; format with `{e:?}`. Its discriminants are the kernel's
+  numbers, so `e as i32` feeds `std::io::Error::from_raw_os_error`.
+- Build new wrappers on `sys::sys_ok` and `sys::sys_count`
+  (`programs/edos_lib/src/sys.rs`).
+- `loop { let Ok(n) = f() else { break }; ... }` fails `clippy::while_let_loop`;
+  write `while let Ok(n) = f()`.
+- To list every call site an API change breaks: `cargo +edos check --all-targets
+  --keep-going --message-format=short` in `programs/`. Size a conversion by the lines
+  that name the function, not the lines that use its result. A regex rewrite must
+  skip std's `read_vectored`/`write_vectored`, which answer plain `usize`.
+
+### The session environment
+
+`SYS_SPAWN` (`edos_lib::process::spawn`) passes no envp at all.
+`process::spawn_with_env` goes over `SYS_SPAWN2` with the caller's environment;
+`edos-init` and `ChildProcess::spawn_shell` use it. If a session-wide setting does not
+reach a program, check which spawn it went through. `HOME`, `PATH` and `PWD` can look
+like they work under an empty environment because readers have hardcoded fallbacks.
+
+`TZ` is a fixed ISO 8601 offset signed east (`+02:00`, `-0530`, `+02`, `Z`),
+deliberately not POSIX `TZ`. A zone name parses as nothing and means UTC
+(`edos_lib::time::utc_offset_seconds`).
+
+### The session has a home directory, and a menu entry needs arguments
+
+`edos-init` sets `HOME` and `USER` and chdirs to `/home/edos` before spawning anything.
+The chdir is the load-bearing half: `spawn` copies the parent's cwd. A root with no
+`/home/edos` keeps its boot cwd.
+
+`Item::Launch` in `programs/edos-taskbar/src/menu.rs` carries an argument list.
+`imgview` and `play` print usage and exit with no file, so their rows pass
+`/share/wallpapers/dusk.bmp` and `/share/sounds/chime.wav`. `snake` has no terminal when
+the panel spawns it, so its row is `edos-terminal /bin/snake`; `edos-terminal PROG
+[ARGS...]` runs PROG on the pty and titles the window after it. `chime.wav` is
+generated by `scripts/mksounds.py`, so the repo holds no binaries. Check a program's
+behaviour with the launcher's arguments before adding a row.
+
+### Shell redirection, globbing and quoting
+
+- `Redirects` (`programs/edos-sh/src/command.rs`) is an ordered list; order is the
+  semantics (`>f 2>&1` versus `2>&1 >f`). `open_redirects` resolves it left to right.
+  `&>f` is `>f 2>&1`, never two opens. `split_chain` must not read the `&` in `>&`,
+  `<&` or `&>` as the background operator. Only descriptors 0 to 2 can be redirected,
+  because `SYS_SPAWN2` takes exactly three.
+- Globbing (`programs/edos-sh/src/glob.rs`) expands per path component over `readdir`.
+  Components after the last pattern are checked for existence. The quoted flag is per
+  word, so `a"b"*` is entirely literal, unlike POSIX.
+- Quoting follows POSIX 2.2.2/2.2.3 in `parse_command`: inside single quotes a
+  backslash is literal; inside double quotes it escapes only `$`, backtick, `"` and
+  `\`. The one open deviation, `"\$x"`, is under "Open items" above.
+- `prepare_segment` expands a segment and opens its redirections exactly once, because
+  expansion runs `$(...)`. A background external job is spawned directly so `fg` can
+  hand it the terminal; a background builtin forks and calls `setpgid(0, 0)`. Test job
+  control with `cat`, which stops at once.
+- `kill` is `kill [-SIGNAL] PID...`, reading the signal only from the `-SIG` position,
+  so `kill 27 20` signals pids 27 and 20. Use the name form.
+- `edos-sh` prints `\x1b[?25h` before every prompt, because a full-screen program
+  killed before restoring the cursor would leave it hidden and there is no `reset`.
+
+### `sed`
+
+`programs/sed/src/regex.rs` is a backtracking engine over `&[char]`, so capture offsets
+are character indices. `m_rep` refuses a repetition whose body matched empty (else
+`\(a*\)*` never terminates), and `substitute` skips an empty match starting where the
+last one ended (else `s/a*/-/g` on `baac` gives `-b--c-`, not `-b-c-`). A sed script
+whose output equals its input is more likely a quoting bug: check the argv with
+`strace -o /tmp/t.txt sed '...'`.
+
+### `tar` exists, and it reads and writes what GNU tar does
+
+The ustar details `programs/tar/src/main.rs` must keep:
+
+- The checksum is computed with the checksum field as eight spaces and written as six
+  octal digits, NUL, space. Other layouts are accepted by some readers and rejected by
+  others.
+- Numeric fields are `width - 1` zero-padded octal digits plus NUL. The parser accepts
+  leading spaces and stops at the first non-digit.
+- A path over 100 bytes splits into `prefix` and `name` at a `/`, taking the longest
+  prefix that fits.
+
+Check interop both directions against host GNU tar, not only a round trip.
+
+### Terminal output from full-screen and filter programs
+
+- `/proc/processes` publishes only a monotonic `CPUms` per thread, so a CPU share is
+  growth over a measured interval. `edos_lib::procinfo::read_table` is the one parser
+  and reads every column in order; skipping a field by position is how a reader
+  silently falls a column behind when one is added mid-table.
+- A line exactly `cols` wide wraps on its own; clip to `cols - 1`. A full-screen frame
+  ending in `\r\n` scrolls the screen; write the last row without a line feed.
+- Anything that clips, wraps or diffs another program's output parses ANSI escapes
+  through `edos_lib::term` (`cells()`, `window()`, `render()`), which also expands
+  tabs.
+- The terminal widget supports SGR 7/27 through a `reverse` pen flag. End a highlight
+  with SGR 27, not SGR 0. DECTCEM `\x1b[?25l`/`h` is `cursor_enabled`, separate from
+  the blink phase.
+- There is no `/dev/tty`, and devfs `tty0` is the kernel console. In a pipeline stderr
+  still points at the PTY, so `less` reads keys from fd 0 when it is a terminal and fd
+  2 otherwise. Any interactive program that can end a pipeline does the same.
+- `/proc/<tid>/cmdline` comes from `UserThread.cmdline`, captured at load by
+  `cmdline_of` because the process may overwrite its stack; `execve` replaces it,
+  `clone`/`fork` inherit it. `edos-init` supervises each child from its own thread, so
+  `pstree` shows `edos-init-thread-N---edos-wm`.
+
+## Browser (`edos-web`)
+
+`doc/design/browser.md` is the design. What it does not say:
+
+- `edos-web URL` opens a window and prints one summary line; text rendering is behind
+  `-d`. A headless assertion on page text is `edos-web -d URL > /dev/klog 2>&1`; a grep
+  of `run_log.txt` from a run without `-d` finds only the summary line. `-d -l` lists
+  every link target, which is where a dropped `href` shows up.
+- An `edos-web` that prints nothing and exits with status 11 died in `html5ever`'s
+  parse, not in the walk, since a walk crash emits earlier blocks first.
+- Edit the fixture at `assets/welcome.html`, never at
+  `filesystem/share/web/welcome.html`. The install is `cp -u`, so an edited installed
+  copy is newer than its source, invisible to git, and not restored by `make
+  filesystem`.
+- An `em` is `doc::ROOT_PX` = `font::size::BODY` = 14 px, not 16, and the window opens
+  at `ui::WIN_W` = 760 px, so a `50em` breakpoint is already crossed before a resize
+  starts. `welcome.html` writes breakpoints in px.
+- A fixture cannot show `font-style`: the theme has no italic face, and `view.rs`
+  substitutes `title_accent` only where the run has no colour, while every fixture
+  element inherits `body { color }`. Demonstrate selectors with weight, colour or a
+  box, and check the cascade with a host test.
+- A word-break fixture needs a word longer than the column; measure it against the
+  column before reading anything into a fixture that does not break.
+- Most of `css::Computed` inherits deliberately (including `shift`), so a new
+  non-inherited property must be reset in `Computed::inherit`
+  (`programs/edos-web/src/css.rs`), or it applies to every descendant.
+- Whether a word is glued to the previous one is carried across runs (`Word::glued` in
+  `view.rs`). Getting the carry wrong glues `<b>bold</b> <b>face</b>` while the
+  run-together nav case looks unchanged.
+- `Computed.decoration` inherits and records no author, so `doc.rs::ua_decoration`
+  compares the cascaded value with the parent's to decide whether the UA line for
+  `<del>`, `<s>`, `<u>` or `<ins>` applies. Author rules replace the inherited set,
+  deliberately unlike CSS, so a page can remove a link's underline inside a decorated
+  ancestor. A rule drawn per word fragment comes out dashed, so the draw loop extends it
+  to the next fragment with the same decoration.
+- `vertical-align`: `Line::natural` in `view.rs` is the tallest face on the line and is
+  the baseline; a fragment is drawn at `lead + (natural - own) - shift`. A super- or
+  subscript grows the line. `Script::shift` is computed from the block's base px
+  before `Script::px` shrinks the run. `vertical-align` inherits here, unlike CSS,
+  because the inline model is flat. `top`, `middle`, `bottom`, `text-top` and
+  `text-bottom` parse to zero shift.
+- `edos_http::Url` wraps the `url` crate for percent-encoding and IDNA. Measured cost
+  on a linked release binary: whole `url` +258 KB, of which UTS-46 (`idna`) is 93%;
+  against `edos-web` at 5.5 MB it is not worth trimming. `authority()` and the `Host`
+  header keep IPv6 brackets; `host()` drops them for the resolver and SNI.
+- The stale pooled-connection retry needs a server that closes on demand; `scripts/`
+  has none, and Cloudflare holds connections too long. A small Python server that
+  keeps a connection N seconds and drops it triggers the path; `run_log.txt` shows
+  `Established -> CloseWait` between the two requests.
+
+## Performance measurement
+
+### A ratio's baseline must be measured like its numerator
+
+`balancebench wake` once timed its solo right after writing its header to `/dev/klog`,
+without the 60 ms settle every burst got (`WAKE_SETTLE`); the solo grew from 4.16 to
+6.80 ms and the ratio read 1.31 instead of 2.00. A ratio flatters itself when its
+denominator grows. Derive an expected value from another measurement in the same run:
+`WAKE_ROUNDS` is 1/36.4 of `WORK_ROUNDS`, so the default mode's 152.3 ms predicts a
+4.19 ms solo, and a 62% disagreement is a harness bug found without a rerun. Both
+harness bugs in `balancebench` produced numbers better than reality.
+
+### Driving `switchbench` headless, and bisecting a regression
+
+`scripts/edos-vm start --smp 1`, wait for the `panel|` line in `run_log.txt`, then
+`scripts/edos-vm click 400 300` and nothing else. Clicking the taskbar button first
+minimises the visible terminal, after which every keystroke lands on the wallpaper.
+Then `scripts/edos-vm type 'switchbench 20000 -l' --enter` and wait for `switchbench
+sleep worst overshoot` once per run (`-l` mirrors the report to `/dev/klog`).
+
+Bisect a performance regression by checking out whole commits, kernel and userspace
+together: an old kernel under current userspace disagrees about the syscall error
+convention.
+
+### `poll` costs, and `pollbench` traps
+
+`poll` never reads the clock for a zero timeout and reads it once for a timed wait. One
+`PollSet` (`kernel/src/fs/handle.rs`) serves the whole call, so a call allocates 2 or 3
+times regardless of descriptor count. Measured marginal cost per descriptor 99 ns,
+fixed cost about 162 ns. In a terminal fd 1 is a PTY slave, which takes the PTY lock, so
+it is no allocation-free baseline. Single readings of the one-descriptor line swing
+between 150 and 256 ns; trust the n >= 2 rows and three-run medians.

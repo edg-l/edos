@@ -2,8 +2,8 @@
 
 What to do next to the switch and wake paths, in priority order, with the
 evidence for each. Measure with `programs/switchbench` and
-`/proc/sched_prof`; `doc/WORKING-NOTES.md` holds the record of what has already
-been done and what the numbers mean.
+`/proc/sched_prof`. This file also holds the record of what has already been
+done and what the numbers mean; `doc/WORKING-NOTES.md` holds the traps.
 
 **Take every number on a single-CPU boot.** `switchbench` needs the two
 threads it measures to be on one CPU — give the scheduler a second and it puts
@@ -266,8 +266,9 @@ ordering annotation. `has_waiters` opens with a `SeqCst` **fence**, because a
 publication sitting in the store buffer while the count is read. That is the
 store-buffer litmus with one side fenced, which is a lost wakeup. The lock this
 check replaced was the barrier before, and the fence stands in for it.
-`doc/WORKING-NOTES.md` has the codegen and the two producers it would otherwise
-have hung.
+`doc/WORKING-NOTES.md`, "A `SeqCst` load is not a barrier, and that is where a
+has-waiters check goes wrong", has the codegen and the two producers it would
+otherwise have hung.
 
 With the fence in place:
 
@@ -832,8 +833,8 @@ length inside `RunQueue` instead would buy nothing.
 
 Watched fail first: 32 threads pinned to one CPU and parked there took **0 of
 16** placements before the change. The gate is the `load-parked-is-not-load`
-sched-test case; `doc/WORKING-NOTES.md` has why its first form was flaky green
-and what replaced it.
+sched-test case; `doc/WORKING-NOTES.md`, "A parked thread is not load", has why
+its first form was flaky green and what replaced it.
 
 Still open in the same area: `REBALANCE_THRESHOLD = 2` and
 `REBALANCE_INTERVAL = 10` are picked numbers that nothing has measured against
@@ -1286,7 +1287,8 @@ bounded PTY) is now the standing suspect by elimination rather than the weaker
 of two. It added a `PipeReadWrite` variant that every match on `FileDescriptor`
 in the read and write paths carries. **That is a guess, not a measurement** —
 settling it needs the whole-commit bisect this thread has always wanted, and the
-harness is in `doc/WORKING-NOTES.md`.
+harness is in `doc/WORKING-NOTES.md`, "Driving `switchbench` headless, and
+bisecting a regression".
 
 `yield thread` also reads 1–3 ns over idle now against 55 ns then, on both
 builds. That one is probably not a regression but a correction: the idle case
@@ -1296,7 +1298,7 @@ taken when the APIC one-shot was re-armed on every switch.
 
 ## Recently closed
 
-The 2026-08-11 round, in `doc/WORKING-NOTES.md`: the APIC one-shot is re-armed
+The 2026-08-11 round: the APIC one-shot is re-armed
 only when what is armed would fire too late (that write alone was 1024 ns of a
 1270 ns switch), `FS.base` goes through `rdfsbase`/`wrfsbase`, and kernel
 mappings are `GLOBAL` with `CR4.PGE` on. `sched_yield` 1917 → 433 ns as
@@ -1346,10 +1348,10 @@ round trip     2184 ... 3007              <- baseline was 2184
 `switchbench` already takes the best of six batches *inside* a run, so
 cross-run spread that wide is always the host.
 
-**The harness samples the host now.** Percent of the machine busy over one
-second from `/proc/stat`, taken before the first run and around every run
-after it: it refuses to start above 40%, and flags any individual run that went
-busy. The one-minute load average is the wrong instrument — it lags a burst by
+**Sample the host before trusting a run.** Take percent of the machine busy
+over one second from the host's `/proc/stat` before the first run and around
+every run after it; don't start above 40%, and discard any run that went busy.
+No script in the tree does this, so it is done by hand around `switchbench`. The one-minute load average is the wrong instrument — it lags a burst by
 minutes in *both* directions, so it misses one starting and then refuses to
 measure for minutes after one ends.
 

@@ -93,7 +93,8 @@ One failure in ten still occurs, and it is **not** this shape:
 Nothing is outstanding, a CPU is busy, the busy CPU changes between samples,
 and the boot has reached devfs registration -- much further than this bug ever
 allowed. A guest under a controller resetting a thousand times a second is
-also legitimately slow, and `doc/WORKING-NOTES.md` already says no correctness
+also legitimately slow, and `doc/WORKING-NOTES.md` ("What a zero NVMe timeout
+can and cannot prove") already says no correctness
 fix changes that, so the next question is whether twelve seconds without a
 serial byte is a defect at all or the probe's silence threshold meeting a
 boot that is merely crawling. Measure before assuming a third bug.

@@ -42,12 +42,12 @@ fmt-check` is the reporting form of `make fmt`. Run them before pushing:
 they are cheap, and they are the two gates most likely to red CI on a change
 that otherwise works.
 
-`clippy::too_many_arguments` is allowed globally -- `kernel/src/main.rs` for the
-kernel, `programs/.cargo/config.toml` for the 135-member workspace. Splitting a
-driver's submit path or a widget's draw call into argument structs to satisfy a
-count is churn that makes the call sites harder to read; where a bundle
-genuinely clarifies, it is worth doing on its own merits. Everything else is
-meant to stay at zero.
+`clippy::too_many_arguments` is suppressed per item, with an
+`#[expect(..., reason = ...)]` on each function that carries a long list
+(`do_spawn` in `kernel/src/syscalls/mod.rs` is one). Splitting a driver's submit
+path or a widget's draw call into argument structs to satisfy a count is churn
+that makes the call sites harder to read; where a bundle genuinely clarifies, it
+is worth doing on its own merits. Everything else is meant to stay at zero.
 
 The two booting jobs need `/dev/kvm`. It exists on the hosted runners but is
 not writable by the runner user until a udev rule says so, which is the `Enable
@@ -111,7 +111,8 @@ they cut power on a disk mid-write, reboot between a write phase and a verify
 phase, boot a purpose-built ISO, or drive the host's own OpenSSH client at the
 guest. `profile-check` is the exception and the cheapest of the six — one boot
 plus a host-side `addr2line` pass. The
-table in `doc/WORKING-NOTES.md` says what each one costs and needs. The
+table in `doc/WORKING-NOTES.md`, "The gate set, and which of them build the disk
+they judge", says what each one costs and needs. The
 consequence is worth stating plainly: **a regression in the NVMe driver, in the journal's replay
 path, in orphan reclamation, in `sshd` or in the profiler is visible only in a
 local run.**

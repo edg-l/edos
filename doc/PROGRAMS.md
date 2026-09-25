@@ -37,7 +37,7 @@ and is the one part of Phase 5 item 3 nobody has done.
 | Program | What it exercises that nothing does today |
 |---|---|
 | System monitor with sparklines | The *rate* gap: every procfs counter is cumulative, so plotting forces differencing. Would pull on `/proc/ahci_stats`, `/proc/block_cache` and per-CPU load |
-| Paint | Damage rectangles and shm compositing harder than anything else: small, frequent, scattered dirty rects, the opposite of the window-drag case already measured in `WORKING-NOTES.md` |
+| Paint | Damage rectangles and shm compositing harder than anything else: small, frequent, scattered dirty rects, the opposite of the window-drag case already measured in `doc/vm-control.md` |
 | Minesweeper | Right-click. Nothing in the system uses a non-left mouse button, so that path is entirely untested |
 | Settings panel | A graphical home for the settings that exist but have only a CLI and a file: the keyboard layout `keymap` writes, the wallpaper the desktop menu cycles. Would also be the first thing to want a runtime theme, which is still a `const` |
 | Music player | HDA plus timing under a GUI. `play` proves the codec works; a seek bar proves the DMA ring survives being poked at |
@@ -64,7 +64,10 @@ pretend. Sketched in engram.
 
 `syscallfuzz` shipped and found two kernel panics, both since fixed: an `ioctl`
 that wedged its own CPU and a `#GP` on a non-canonical user pointer. The
-post-mortems are in [`WORKING-NOTES.md`](WORKING-NOTES.md).
+post-mortems are
+[`bugs/2026-08-12-a-bad-fd-ioctl-wedged-its-own-cpu.md`](bugs/2026-08-12-a-bad-fd-ioctl-wedged-its-own-cpu.md)
+and
+[`bugs/2026-08-12-user-pointers-were-never-bounds-checked.md`](bugs/2026-08-12-user-pointers-were-never-bounds-checked.md).
 
 ### Blocked, and on what
 

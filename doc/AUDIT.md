@@ -210,8 +210,8 @@ on real hardware the RTC is a genuinely slow device. It is also racy — nothing
 handles the update-in-progress flag — and the returned struct is
 `[hour, minute, second, 0, ...]`: no date, no epoch, no sub-second resolution.
 `std::time::SystemTime` cannot be built on it. (`clock_gettime` off the RTC,
-sampled once at boot and pinned to the HPET, shipped later; see
-`doc/WORKING-NOTES.md`.)
+sampled once at boot and pinned to the monotonic clock, shipped later; see
+`doc/WORKING-NOTES.md`, "The clock".)
 
 **Fixed** exactly that way: `timer::init_wall_clock` samples the RTC once after
 HPET init and pins it to the counter, and the syscall returns nanoseconds since

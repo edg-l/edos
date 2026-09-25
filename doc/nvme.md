@@ -135,7 +135,8 @@ carries its LBA, its length and its buffer. The bound is time rather than a
 count on purpose — a reset refuses every command issued while it runs, so a
 fixed handful of attempts can land entirely inside one. Without any of this, a
 reset under a live root is a failed mount and a panic. `nvme-check`'s fifth case is the gate;
-`doc/WORKING-NOTES.md` covers what a zero timeout can and cannot prove.
+`doc/WORKING-NOTES.md`, "What a zero NVMe timeout can and cannot prove", covers
+what that case can and cannot show.
 
 **6. PRP.** PRP1 plus, above 8 KiB, a PRP list page. The list page is allocated
 lazily with `allocate_sized_uninit` and is untouched entirely below 8 KiB,

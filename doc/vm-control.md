@@ -167,12 +167,13 @@ drives the guest changes.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--nvme-lbs BYTES`, `--nvme-mqes N`, `--no-sata`, `--iso IMAGE`, `--pointer tablet\|mouse` |
+| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--extra-disk [image]`, `--nvme-disk [image]`, `--nvme-lbs BYTES`, `--nvme-mqes N`, `--no-sata`, `--no-nvme`, `--iso IMAGE`, `--pointer tablet\|mouse`, `--vga virtio\|std` (`std` is the Bochs VBE adapter: the only way to exercise `Display::Vbe` and the compositor's software cursor), `--pcap FILE` (guest traffic, headless), `--ssh-fwd PORT` (host port forwarded to guest port 23, default 2323; the only port the host reaches) |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
 | `key <qcode>...` | e.g. `ret`, `ctrl+c`, `alt+f4` |
 | `click x y` / `move x y` | `--button left\|middle\|right` |
+| `drag x y to_x to_y` | press, step the pointer, release; how to resize a window (the WM resizes by the motion it sees while the button is down) |
 | `launch [row]` | applications menu by row name, instead of raw pixels |
 | `panel` | the panel's controls, by name |
 | `press <name>` | click a panel control found by name |

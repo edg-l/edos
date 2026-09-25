@@ -8,16 +8,15 @@ compiling a modified copy of it.
 Where a claim has a number behind it, the command that produced the number is
 named. Where it does not, the entry says so.
 
-**State as of 2026-08-29.** 27 of the 32 entries are struck: I6 landed with the
+**State as of 2026-09-25.** 28 of the 32 entries are struck, G3 the latest: I6 landed with the
 `[lints.clippy]` table across the kernel, `programs/`, `libs/` and `tools/`,
 G2's named `uaccess.rs` remainder is closed, and I5 is finished in both halves
 -- every `unsafe` block in `kernel/src` carries a `// SAFETY:` with
 `undocumented_unsafe_blocks` denied crate-wide in `kernel/Cargo.toml`, and every
-`unsafe fn` in the crate carries a `# Safety` section. Five are open, in the
+`unsafe fn` in the crate carries a `# Safety` section. Four are open, in the
 order the evidence suggests: C2 (the parser exists, 122 programs have not
 adopted it, and no hand-rolled short-flag loop is left), H1 and H3 (two long
-functions), G3 (split `WORKING-NOTES.md`), and
-the gate I2. The numbers each entry quotes were remeasured on the date it names,
+functions), and the gate I2. The numbers each entry quotes were remeasured on the date it names,
 and the count above is `grep '^### ' | grep -c '~~'` against `grep -c '^### '`,
 not a tally kept by hand.
 
@@ -507,17 +506,14 @@ house style is `kernel/src/syscalls/io.rs:71`, where the comment on
 `STREAM_STACK_BUF` carries a measurement table and says why the constant is
 small on purpose.
 
-### G3. `doc/WORKING-NOTES.md` is 11,509 lines and `CLAUDE.md` says read it first (S2, E2)
+### G3. ~~`doc/WORKING-NOTES.md` is 11,509 lines and `CLAUDE.md` says read it first~~ (S2, E2) -- done
 
-263 sections (`grep -c '^## '`). `doc/bugs/` holds 27 post-mortems
-(`ls doc/bugs/*.md | grep -vc README`, which is one less than the file count)
-and a `README.md` stating the format. The line count only ever grows while this
-is open, so remeasure it rather than quoting this one.
-
-A handoff document nobody can read is not a handoff. Split it: the current state
-and the open traps stay in `WORKING-NOTES.md` and it stays short; each closed
-investigation becomes a file in `doc/bugs/`, which is where the tree already
-says post-mortems go.
+`doc/WORKING-NOTES.md` is forward-looking: the current open bug, how to work,
+and the traps and facts a session acts on, grouped by subsystem, with no dated
+sections. It is 1,414 lines (`wc -l`) against 11,909 before. Closed
+investigations whose mechanism was not recorded elsewhere became files in
+`doc/bugs/`, which holds 36 post-mortems (`ls doc/bugs/*.md | grep -vc
+README`). Open work is in engram, not in the file.
 
 ### G4. ~~Five `TODO` comments that are decisions, not notes~~ (done)
 
@@ -664,7 +660,7 @@ is the gate, and it covers `unsafe impl` too. It reported 720 blocks across 84
 files when this entry opened and reports none now:
 `undocumented_unsafe_blocks = "deny"` sits in `kernel/Cargo.toml`'s
 `[lints.clippy]` beside the other three, the 43 per-module `#[deny]` ratchets
-are gone with it, and `make -C kernel clippy` is clean under all eleven feature
+are gone with it, and `make -C kernel clippy` is clean under all ten feature
 sets. The narrative below is the order the modules fell in and the arguments
 that recur; the current figure and where it is concentrated are at
 the end of this entry, with the command that measures them. ~~A bare `unsafe impl Send for T {}` is a hand-made
@@ -728,7 +724,8 @@ buffer userspace had chosen the size of. `arg_len` is now threaded from
 `sys_ioctl` through `fs::api`, `fs::vfs` and `FileSystem::ioctl` down to the
 device, the buffer is a `Vec<u64>` so the structs read out of it are aligned,
 and every framebuffer arm goes through a bounds-checking `IoctlBuf`.
-`doc/WORKING-NOTES.md` carries the mechanism.
+`doc/bugs/2026-08-28-the-framebuffer-ioctls-read-past-the-buffer.md` carries the
+mechanism.
 Then the thirteen small modules in one pass -- `boot`, `cmdline`, `debug`,
 `gdt`, `loader`, `logs`, `net`, `power`, `profile`, `serial`, `smp`, `timer`,
 `window` -- 48 blocks between them and nine of the thirteen under ten each, so

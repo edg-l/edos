@@ -91,7 +91,8 @@ pages were replaced, not that the writer wrote wrong data. Distinguish from
 the neighbouring bug classes:
 
 - **Contents wrong but not zero** — an aliasing bug: two live allocations
-  over the same range (see the concurrent-`mmap` case in `WORKING-NOTES.md`).
+  over the same range (see
+  `2026-08-08-concurrent-mmap-handed-out-one-range-twice.md`).
 - **Contents zero from an offset inside the buffer** — one page lost, so
   suspect a shared page at that boundary.
 - **Contents zero from offset 0** — the first page of the allocation was

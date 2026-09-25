@@ -61,8 +61,9 @@ ones every other implementation reads: `-c`, `-t`, `-x`, with `-v`, `-C`, and
 `tar -cf - dir | tar -xf - -C dest` a directory copy. Regular files,
 directories and symbolic links; a member whose name escapes the extraction
 directory is refused. Verified both directions against GNU tar rather than only
-against itself. See `doc/WORKING-NOTES.md` for the three header details that
-are easy to get subtly wrong.
+against itself. See `doc/WORKING-NOTES.md`, "`tar` exists, and it reads and
+writes what GNU tar does", for the three header details that are easy to get
+subtly wrong.
 
 **`top`** (Phase 3). The thread table on a timer, in raw mode. `/proc/processes`
 publishes a monotonic `CPUms` per thread, so a *share* of the CPU exists only
@@ -91,7 +92,7 @@ the stack at all, and it found two kernel bugs on its first run: `sys_listen`
 took the port table under the socket lock, inverting the order `handle_tcp`
 uses, and closing an accepted socket removed its *listener's* port-table entry,
 so a second connection was answered with RST. Both are written up in
-`doc/WORKING-NOTES.md`.
+`doc/bugs/2026-08-12-a-listener-unbound-by-its-own-connections.md`.
 
 **`nc`**. Both ends of a TCP connection over one relay loop: `nc host port`
 connects, `nc -l port` listens and accepts, and either way standard input and
@@ -100,7 +101,7 @@ than closing it, which is the first use of `SYS_SHUTDOWN` by anything, so
 `echo hi | nc host 7` gets its answer back. It found the poll layer refusing to
 report a hang-up nobody had asked for, which is why a pipe feeding it hung
 forever; both that and the pipe's own poll state are fixed and written up in
-`doc/WORKING-NOTES.md`.
+`doc/bugs/2026-08-11-poll-never-reported-a-writerless-pipe.md`.
 
 **`httpd`**. Serves a directory tree over HTTP with one thread per accepted
 connection: `GET` and `HEAD`, an index file or a generated listing for a
@@ -108,7 +109,8 @@ directory, content types by extension, `Content-Length` on everything, and 301
 for a directory reached without its trailing slash. A request path is percent
 decoded before it is checked, so `..` and `%2e%2e` are both 403. It is the
 first program to hold several connections open at once, which is how it found
-two more listen-path defects, both written up in `doc/WORKING-NOTES.md`.
+two more listen-path defects, both written up in
+`doc/bugs/2026-08-12-a-listener-unbound-by-its-own-connections.md`.
 
 **`ln`**. Symbolic links have resolved correctly for a long time and there was
 no way to make one outside a program. `ln -s` covers the three POSIX shapes:
@@ -378,7 +380,8 @@ and on a serial console.
 
 The menu now also reaches `edos-web`, `imgview`, `play` and `snake`. Getting
 there needed two things beyond four more rows, both recorded in
-`doc/WORKING-NOTES.md`: launch arguments on a menu entry, because a viewer or a
+`doc/WORKING-NOTES.md`, "The session has a home directory, and a menu entry
+needs arguments": launch arguments on a menu entry, because a viewer or a
 player with no file only prints its usage, and `edos-terminal PROG [ARGS...]`,
 because a program that draws with terminal escapes has no terminal when the
 panel spawns it.
@@ -565,8 +568,10 @@ the shell half has not been written yet.
    `spawn_pipeline` puts the first stage in a group of its own and the rest
    into it, so one Ctrl+C reaches a whole pipeline; the shell hands the
    terminal over with `tcsetpgrp` and takes it back after every job,
-   background ones included. Still open: `fg` resumes a job but leaves it
-   marked stopped in `/proc` (see WORKING-NOTES).
+   background ones included. `SIGCONT` clears the target's `stopped` flag at
+   delivery, so a job `fg` resumes is not left marked stopped in `/proc`
+   (`doc/WORKING-NOTES.md`, "Every default signal action goes through
+   `apply_default_action`").
 
 **Done:**
 
@@ -591,7 +596,7 @@ and `cal` use it, and `programs/date` prints it with `-u` for UTC and a
 overrides it. Making that reach anything meant giving the session an
 environment at all: init and the terminal spawned through `SYS_SPAWN`, which
 passes no envp, and both use `process::spawn_with_env` over `SYS_SPAWN2` now.
-See `doc/WORKING-NOTES.md`.
+See `doc/WORKING-NOTES.md`, "The session environment".
 
 Still missing: a zone database, DST, and any way to *set* the clock
 (`settimeofday`), so the RTC the firmware hands over is the only source.

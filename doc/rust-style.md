@@ -185,10 +185,11 @@ What comments must not contain is in `CLAUDE.md` and is not repeated here.
 
 ## The lint set
 
-There is no `[lints]` table in any manifest in the tree; the kernel and the
-programs workspace both run clippy at its default level under `-D warnings`.
-That is correctness, style, complexity, perf and suspicious, and it is genuinely
-clean across the kernel's default, `sched-test`, `trace` and `sched-prof` builds.
+The kernel, the `programs/` workspace (each member opts in with
+`[lints] workspace = true`) and the `libs/` and `tools/` packages carry the
+`[lints.clippy]` table below, on top of clippy's default level under
+`-D warnings`: correctness, style, complexity, perf and suspicious. `make
+clippy` is clean across every kernel feature set and the whole workspace.
 
 What is worth adding, and only this:
 

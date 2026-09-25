@@ -447,9 +447,9 @@ reference is read, an empty or query-only reference keeps the base's path, and
 a reference naming a scheme this client cannot fetch — `mailto:`,
 `javascript:` — is an error, so `doc.rs` drops the link instead of turning it
 into a nonsense HTTP request. Its 34 RFC §5.4 examples, and
-`css.rs`'s cascade tests, run on the host under `make host-tests` — see
-`doc/WORKING-NOTES.md` for the two mechanisms that takes and the stale-binary
-trap in the second one.
+`css.rs`'s cascade tests, run on the host under `make host-tests`; the header
+of `scripts/host-tests` states the mechanisms that takes and the stale-binary
+trap in the `rustc --test` one.
 
 `assets/welcome.html` is installed at `/share/web/welcome.html` and exercises
 exactly this subset, which makes it the page to open when a style stops being
